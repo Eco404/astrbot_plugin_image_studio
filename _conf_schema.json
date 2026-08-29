@@ -1,0 +1,80 @@
+{
+  "enabled": {
+    "type": "bool",
+    "default": true,
+    "description": "启用 Image Studio",
+    "hint": "关闭后指令、LLM 工具和 WebUI 生成接口均不可用。",
+    "obvious": true
+  },
+  "enable_llm_tool": {
+    "type": "bool",
+    "default": true,
+    "description": "启用 LLM 生图工具",
+    "hint": "允许 Agent 调用 image_gen_generate，并把生成图返回给 Agent 继续处理。",
+    "obvious": true
+  },
+  "max_concurrent_generations": {
+    "type": "int",
+    "default": 2,
+    "min": 1,
+    "max": 8,
+    "description": "全局并发上限",
+    "hint": "同时执行的生图请求上限。",
+    "obvious": true
+  },
+  "webui_managed": {
+    "type": "object",
+    "description": "WebUI 管理配置",
+    "condition": {
+      "__image_studio_show_native_settings": true
+    },
+    "items": {
+      "providers": {
+        "type": "list",
+        "default": [],
+        "items": {
+          "id": {"type": "string", "default": ""},
+          "name": {"type": "string", "default": ""},
+          "enabled": {"type": "bool", "default": true},
+          "kind": {"type": "string", "default": "openai_images"},
+          "base_url": {"type": "string", "default": ""},
+          "generate_path": {"type": "string", "default": "/v1/images/generations"},
+          "edit_path": {"type": "string", "default": "/v1/images/edits"},
+          "model": {"type": "string", "default": ""},
+          "api_key": {"type": "string", "default": ""},
+          "custom_headers": {"type": "text", "default": ""},
+          "timeout_seconds": {"type": "int", "default": 180},
+          "supports_text2img": {"type": "bool", "default": true},
+          "supports_img2img": {"type": "bool", "default": false},
+          "max_reference_images": {"type": "int", "default": 1},
+          "edit_request_format": {"type": "string", "default": "multipart"},
+          "request_template": {"type": "text", "default": ""},
+          "response_image_path": {"type": "string", "default": ""}
+        }
+      },
+      "history": {
+        "type": "object",
+        "items": {
+          "enabled": {"type": "bool", "default": true},
+          "max_records": {"type": "int", "default": 200},
+          "max_megabytes": {"type": "int", "default": 2048},
+          "retain_reference_images": {"type": "bool", "default": true}
+        }
+      },
+      "generation_defaults": {
+        "type": "object",
+        "items": {
+          "provider_id": {"type": "string", "default": ""},
+          "size": {"type": "string", "default": "1024x1024"},
+          "count": {"type": "int", "default": 1}
+        }
+      },
+      "ui": {
+        "type": "object",
+        "items": {
+          "settings_revision": {"type": "int", "default": 0}
+        }
+      }
+    }
+  }
+}

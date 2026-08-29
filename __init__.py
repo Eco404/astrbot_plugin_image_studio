@@ -1,0 +1,1 @@
+"""AstrBot Image Studio plugin."""

@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Image Studio</title>
+  <link rel="stylesheet" href="./app.css" />
+</head>
+<body>
+  <main class="app-shell quiet-glass-background">
+    <aside class="sidebar glass" aria-label="Image Studio 导航">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">IS</div>
+        <div><strong>Image Studio</strong><span>Image generation workspace</span></div>
+      </div>
+      <nav class="nav-list">
+        <button class="nav-item is-active" data-view="generate" type="button"><span aria-hidden="true">+</span> 生图</button>
+        <button class="nav-item" data-view="gallery" type="button"><span aria-hidden="true">□</span> 画廊</button>
+        <button class="nav-item" data-view="settings" type="button"><span aria-hidden="true">=</span> 设置</button>
+      </nav>
+      <div class="sidebar-footer" id="runtimeStatus">正在读取配置</div>
+    </aside>
+
+    <section class="workspace">
+      <header class="topbar glass">
+        <div><h1 id="pageTitle">生图</h1><p id="pageSubtitle">选择模式和 Provider 后开始创作</p></div>
+        <div class="topbar-status" id="providerStatus"></div>
+      </header>
+
+      <section class="view is-active" id="generateView">
+        <div class="mode-tabs" role="group" aria-label="生成模式">
+          <button class="segment is-active" data-mode="text2img" type="button">文生图</button>
+          <button class="segment" data-mode="img2img" type="button">图生图</button>
+        </div>
+        <div id="providerChoices" class="provider-choices" aria-label="Provider 选择"></div>
+        <div class="generator-layout">
+          <form class="generator-form glass" id="generationForm">
+            <div class="field field-wide"><label for="prompt">提示词</label><textarea id="prompt" rows="6" maxlength="6000" placeholder="描述希望生成的画面" required></textarea></div>
+            <div class="field field-wide"><label for="negativePrompt">反向提示词</label><textarea id="negativePrompt" rows="2" maxlength="4000" placeholder="可选"></textarea></div>
+            <div class="field"><label for="model">模型</label><input id="model" maxlength="160" placeholder="使用 Provider 默认模型" /></div>
+            <div class="field"><label for="size">尺寸</label><input id="size" value="1024x1024" maxlength="40" /></div>
+            <div class="field"><label for="count">数量</label><input id="count" type="number" value="1" min="1" max="4" /></div>
+            <div class="field field-wide is-hidden" id="referenceField">
+              <label for="referenceUpload">参考图</label>
+              <div class="upload-row"><input id="referenceUpload" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple /><span>最多使用当前 Provider 支持的数量</span></div>
+              <div class="reference-strip" id="referenceStrip"></div>
+            </div>
+            <details class="advanced field-wide">
+              <summary>高级参数</summary>
+              <label for="parameters">JSON 参数</label>
+              <textarea id="parameters" rows="4" spellcheck="false" placeholder='例如 {"seed": 42, "steps": 28}'></textarea>
+            </details>
+            <div class="form-actions field-wide"><span class="inline-error" id="generationError" role="alert"></span><button class="primary-button" id="generateButton" type="submit">生成图片</button></div>
+          </form>
+
+          <section class="generation-result glass" aria-live="polite">
+            <div class="section-heading"><div><h2>结果</h2><p id="resultMeta">尚未生成图片</p></div></div>
+            <div class="result-empty" id="resultEmpty">结果会在这里显示</div>
+            <div class="result-grid" id="resultGrid"></div>
+          </section>
+        </div>
+      </section>
+
+      <section class="view" id="galleryView">
+        <div class="gallery-toolbar">
+          <label class="search-field"><span>搜索</span><input id="gallerySearch" placeholder="提示词、模型或 Provider" /></label>
+          <select id="galleryProvider" aria-label="按 Provider 筛选"><option value="">全部 Provider</option></select>
+          <select id="galleryMode" aria-label="按模式筛选"><option value="">全部模式</option><option value="text2img">文生图</option><option value="img2img">图生图</option></select>
+          <button class="quiet-button" id="galleryRefresh" type="button">刷新</button>
+        </div>
+        <div class="selection-bar glass is-hidden" id="selectionBar"><span id="selectionCount">已选 0 项</span><button class="quiet-button" id="selectAllButton" type="button">全选当前页</button><button class="quiet-button" id="exportButton" type="button">导出</button><button class="danger-button" id="deleteButton" type="button">删除</button></div>
+        <div class="gallery-grid" id="galleryGrid"></div>
+        <div class="empty-state is-hidden" id="galleryEmpty">画廊中还没有保留的生成记录。</div>
+      </section>
+
+      <section class="view" id="settingsView">
+        <div class="settings-layout">
+          <section class="settings-panel glass">
+            <div class="section-heading"><div><h2>运行</h2><p>这些值与 AstrBot 原生插件设置共用同一配置文件。</p></div></div>
+            <div class="toggle-row"><label for="settingEnabled">启用 Image Studio</label><input id="settingEnabled" type="checkbox" /></div>
+            <div class="toggle-row"><label for="settingTool">启用 LLM 生图工具</label><input id="settingTool" type="checkbox" /></div>
+            <div class="field"><label for="settingConcurrent">最大并发</label><input id="settingConcurrent" type="number" min="1" max="8" /></div>
+          </section>
+          <section class="settings-panel glass">
+            <div class="section-heading"><div><h2>历史</h2><p>结果图进入画廊；参考图仅存在于记录详情。</p></div></div>
+            <div class="toggle-row"><label for="historyEnabled">保留生成历史</label><input id="historyEnabled" type="checkbox" /></div>
+            <div class="toggle-row"><label for="retainReferences">保留参考图</label><input id="retainReferences" type="checkbox" /></div>
+            <div class="field"><label for="historyRecords">最大记录数（-1 表示不限）</label><input id="historyRecords" type="number" min="-1" max="100000" /></div>
+            <div class="field"><label for="historyMegabytes">最大图片容量 MB（0 表示不限）</label><input id="historyMegabytes" type="number" min="0" max="10240" /></div>
+          </section>
+        </div>
+        <section class="provider-settings glass">
+          <div class="section-heading"><div><h2>Providers</h2><p>密钥和自定义请求头按当前单用户 WebUI 约定直接显示。</p></div><button class="primary-button" id="addProviderButton" type="button">新增 Provider</button></div>
+          <div class="provider-settings-layout"><div class="provider-list" id="settingsProviderList"></div><form id="providerForm" class="provider-editor"></form></div>
+        </section>
+        <div class="settings-savebar"><span class="inline-error" id="settingsError" role="alert"></span><button class="primary-button" id="saveSettingsButton" type="button">保存全部设置</button></div>
+      </section>
+    </section>
+  </main>
+
+  <aside class="detail-drawer" id="detailDrawer" aria-label="生成详情" aria-hidden="true">
+    <div class="drawer-head"><div><h2>生成详情</h2><p id="detailDate"></p></div><button class="icon-button" id="closeDrawer" type="button" aria-label="关闭详情">×</button></div>
+    <div class="drawer-body" id="drawerBody"></div>
+  </aside>
+  <div class="scrim is-hidden" id="scrim"></div>
+  <div class="confirm-dialog is-hidden" id="confirmDialog" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
+    <div class="confirm-dialog__icon" aria-hidden="true">!</div>
+    <div><h2 id="confirmTitle">确认操作</h2><p id="confirmMessage"></p></div>
+    <div class="confirm-dialog__actions"><button class="quiet-button" id="confirmCancel" type="button">取消</button><button class="danger-button" id="confirmAccept" type="button">确认删除</button></div>
+  </div>
+  <script src="./app.js"></script>
+</body>
+</html>
