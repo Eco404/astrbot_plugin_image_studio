@@ -1,6 +1,14 @@
 from __future__ import annotations
 
-from astrbot_plugin_image_studio.config import normalize_webui_settings, runtime_settings
+import asyncio
+import json
+
+from astrbot_plugin_image_studio.config import (
+    load_studio_settings,
+    normalize_webui_settings,
+    runtime_settings,
+    save_studio_settings,
+)
 from astrbot_plugin_image_studio.models import GenerationRequest, ImageProvider
 from astrbot_plugin_image_studio.providers import _nai_query, _openai_payload
 
@@ -30,25 +38,60 @@ def test_webui_settings_normalize_provider_and_history() -> None:
     assert normalized["providers"][0]["api_key"] == "visible-in-webui"
 
 
+def test_provider_without_models_is_a_valid_saved_draft() -> None:
+    normalized, errors = normalize_webui_settings(
+        {
+            "providers": [
+                {
+                    "id": "draft",
+                    "name": "Draft",
+                    "kind": "openai_images",
+                    "base_url": "https://example.test/v1",
+                    "models": [],
+                }
+            ]
+        }
+    )
+
+    assert errors == []
+    assert normalized["providers"][0]["models"] == []
+
+
+def test_plugin_owned_settings_round_trip_atomically(tmp_path) -> None:
+    settings = {
+        "providers": [],
+        "revision": 4,
+        "history": {"max_records": 12},
+    }
+
+    asyncio.run(save_studio_settings(tmp_path, settings))
+    loaded, errors = load_studio_settings(tmp_path)
+
+    assert errors == []
+    assert loaded["revision"] == 4
+    assert loaded["history"]["max_records"] == 12
+    assert json.loads((tmp_path / "studio_config.json").read_text())["revision"] == 4
+    assert (tmp_path / "studio_config.json").stat().st_mode & 0o777 == 0o600
+
+
 def test_runtime_settings_filters_disabled_provider() -> None:
     settings, errors = runtime_settings(
         {
             "enabled": False,
             "enable_llm_tool": True,
-            "max_concurrent_generations": 2,
-            "webui_managed": {
-                "providers": [
-                    {
-                        "id": "disabled",
-                        "name": "Disabled",
-                        "enabled": False,
-                        "kind": "openai_images",
-                        "base_url": "https://example.test",
-                        "model": "gpt-image-1",
-                    }
-                ]
-            },
-        }
+        },
+        {
+            "providers": [
+                {
+                    "id": "disabled",
+                    "name": "Disabled",
+                    "enabled": False,
+                    "kind": "openai_images",
+                    "base_url": "https://example.test",
+                    "model": "gpt-image-1",
+                }
+            ]
+        },
     )
 
     assert errors == []
@@ -118,33 +161,32 @@ def test_openai_payload_only_includes_negative_prompt_when_enabled() -> None:
 
 def test_models_are_configured_independently_and_filtered_by_mode() -> None:
     settings, errors = runtime_settings(
+        {},
         {
-            "webui_managed": {
-                "providers": [
-                    {
-                        "id": "domestic",
-                        "name": "国内服务商",
-                        "kind": "custom_json",
-                        "base_url": "https://example.test",
-                        "models": [
-                            {
-                                "id": "draw-text",
-                                "name": "文生图模型",
-                                "supports_text2img": True,
-                                "supports_img2img": False,
-                            },
-                            {
-                                "id": "draw-edit",
-                                "name": "图生图模型",
-                                "supports_text2img": False,
-                                "supports_img2img": True,
-                                "max_reference_images": 3,
-                            },
-                        ],
-                    }
-                ]
-            }
-        }
+            "providers": [
+                {
+                    "id": "domestic",
+                    "name": "国内服务商",
+                    "kind": "custom_json",
+                    "base_url": "https://example.test",
+                    "models": [
+                        {
+                            "id": "draw-text",
+                            "name": "文生图模型",
+                            "supports_text2img": True,
+                            "supports_img2img": False,
+                        },
+                        {
+                            "id": "draw-edit",
+                            "name": "图生图模型",
+                            "supports_text2img": False,
+                            "supports_img2img": True,
+                            "max_reference_images": 3,
+                        },
+                    ],
+                }
+            ]
+        },
     )
 
     assert errors == []

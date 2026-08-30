@@ -12,6 +12,7 @@ from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 
 from .config import RuntimeSettings
 from .models import (
+    GeneratedImage,
     GenerationRequest,
     GenerationResult,
     ImageModel,
@@ -35,13 +36,23 @@ class ImageGenerationService:
         self.settings = settings
         self.executor = executor
         self.store = store
-        self._semaphore = asyncio.Semaphore(settings.max_concurrent_generations)
+        self._semaphores = self._build_semaphores(settings)
 
     def update_settings(self, settings: RuntimeSettings) -> None:
         """Swap future-request settings after an atomic configuration save."""
 
         self.settings = settings
-        self._semaphore = asyncio.Semaphore(settings.max_concurrent_generations)
+        self._semaphores = self._build_semaphores(settings)
+
+    @staticmethod
+    def _build_semaphores(
+        settings: RuntimeSettings,
+    ) -> dict[str, asyncio.Semaphore]:
+        return {
+            provider.id: asyncio.Semaphore(provider.max_concurrent_generations)
+            for provider in settings.providers
+            if provider.id
+        }
 
     async def generate(
         self,
@@ -53,7 +64,7 @@ class ImageGenerationService:
         model_ref: str = "",
         model: str = "",
         size: str = "",
-        count: Any = 1,
+        count: Any = 0,
         parameters: Any = None,
         references: tuple[ReferenceImage, ...] = (),
         source: str = "webui",
@@ -83,14 +94,50 @@ class ImageGenerationService:
 
         settings = self.settings
         normalized_mode = _mode(mode)
+        mode_default_ref = (
+            settings.default_img2img_model_ref
+            if normalized_mode == "img2img"
+            else settings.default_text2img_model_ref
+        )
+        if (
+            source == "llm_tool"
+            and not str(model_ref or model or "").strip()
+            and not str(mode_default_ref or settings.default_model_ref or "").strip()
+        ):
+            raise ValueError(
+                "当前模式未设置默认 LLM 生图模型，请先查询模型能力并传入 model_ref"
+            )
         provider, selected_model = self._select_model(
             settings, provider_id, model_ref, model, normalized_mode
         )
+        selection_source = (
+            "explicit"
+            if str(model_ref or model or "").strip()
+            else "mode_default"
+            if mode_default_ref
+            else "legacy_default"
+            if settings.default_model_ref
+            else "fallback"
+        )
+        if source == "llm_tool" and not selected_model.llm_enabled:
+            raise ValueError("所选模型未向 LLM 工具开放")
         normalized_prompt = str(prompt or "").strip()[:6000]
         if not normalized_prompt:
             raise ValueError("提示词不能为空")
-        normalized_refs = references[: selected_model.max_reference_images]
+        reference_limit = 0
+        if normalized_mode == "img2img":
+            reference_limit = (
+                selected_model.llm_max_reference_images
+                if source == "llm_tool"
+                else max(
+                    selected_model.max_reference_images,
+                    selected_model.llm_max_reference_images,
+                )
+            )
+        normalized_refs = references[:reference_limit]
         if normalized_mode == "img2img" and not normalized_refs:
+            if source == "llm_tool" and selected_model.img2img:
+                raise ValueError("当前模型未向 LLM 工具开放可用的参考图数量")
             raise ValueError("图生图需要至少一张参考图")
         request = GenerationRequest(
             mode=normalized_mode,
@@ -102,15 +149,35 @@ class ImageGenerationService:
                 else ""
             ),
             model=selected_model.id,
-            size=_size(size or settings.default_size, provider.kind),
-            count=max(1, min(4, _as_int(count, settings.default_count))),
-            parameters=_parameters_for_model(parameters, selected_model),
+            size=_size(
+                size
+                or _control_parameter_value(
+                    parameters, selected_model, "size", source=source
+                )
+                or settings.default_size,
+                provider.kind,
+            ),
+            count=max(
+                1,
+                min(
+                    4,
+                    _as_int(
+                        count
+                        if count not in (None, "", 0)
+                        else _control_parameter_value(
+                            parameters, selected_model, "count", source=source
+                        ),
+                        settings.default_count,
+                    ),
+                ),
+            ),
+            parameters=_parameters_for_model(parameters, selected_model, source=source),
             references=normalized_refs,
             source=source if source in {"webui", "command", "llm_tool"} else "webui",
+            selection_source=selection_source,
         )
         started = time.perf_counter()
-        async with self._semaphore:
-            images = await self.executor.generate(provider, request)
+        images = await self.run_provider_request(provider, request)
         elapsed_ms = round((time.perf_counter() - started) * 1000)
         generation_id = await self.store.record_success(
             provider=provider,
@@ -127,6 +194,17 @@ class ImageGenerationService:
             elapsed_ms=elapsed_ms,
             generation_id=generation_id,
         )
+
+    async def run_provider_request(
+        self, provider: ImageProvider, request: GenerationRequest
+    ) -> tuple[GeneratedImage, ...]:
+        """Execute any generation-like request under its provider concurrency limit."""
+
+        semaphore = self._semaphores.setdefault(
+            provider.id, asyncio.Semaphore(provider.max_concurrent_generations)
+        )
+        async with semaphore:
+            return await self.executor.generate(provider, request)
 
     async def staged_references(self, reference_ids: Any) -> tuple[ReferenceImage, ...]:
         """Resolve an API request's opaque reference IDs."""
@@ -232,12 +310,18 @@ class ImageGenerationService:
     ) -> tuple[ImageProvider, ImageModel]:
         """Resolve the selected model and its owning provider."""
 
-        requested_ref = model_ref or model_id or settings.default_model_ref
+        explicit_ref = str(model_ref or model_id or "").strip()
+        mode_default = (
+            settings.default_img2img_model_ref
+            if mode == "img2img"
+            else settings.default_text2img_model_ref
+        )
+        requested_ref = explicit_ref or mode_default or settings.default_model_ref
         requested_provider = provider_id or settings.default_provider_id
         selected = settings.find_model(requested_ref, requested_provider, mode)
-        if selected is None and model_ref:
+        if selected is None and explicit_ref:
             raise ValueError("所选模型不存在、已禁用或不支持当前生图模式")
-        if selected is None and requested_provider:
+        if selected is None and requested_provider and not explicit_ref:
             selected = settings.find_model(requested_ref, "", mode)
         if selected is None:
             raise ValueError("当前模式没有可用模型，请先在设置页完成服务商和模型配置")
@@ -298,22 +382,142 @@ def _parameters(value: Any) -> dict[str, Any]:
     return clean
 
 
-def _parameters_for_model(value: Any, model: ImageModel) -> dict[str, Any]:
+def _parameters_for_model(
+    value: Any, model: ImageModel, *, source: str = "webui"
+) -> dict[str, Any]:
     """Map friendly schema names to provider request keys at the trust boundary."""
 
     raw = _parameters(value)
+    values: dict[str, Any] = {}
+    for name, descriptor in model.parameters.items():
+        if "default" not in descriptor:
+            continue
+        values[name] = descriptor["default"]
+    tool_parameters = model.tool.get("parameters")
+    if source == "llm_tool" and isinstance(tool_parameters, dict):
+        for name, descriptor in tool_parameters.items():
+            if (
+                name in model.parameters
+                and isinstance(descriptor, dict)
+                and "default_override" in descriptor
+            ):
+                values[name] = descriptor["default_override"]
+            elif (
+                name in model.parameters
+                and isinstance(descriptor, dict)
+                and "default" in descriptor
+            ):
+                values[name] = descriptor["default"]
+    _expand_parameter_presets(values, model)
+    allowed = set(model.parameters)
+    if source == "llm_tool" and isinstance(tool_parameters, dict) and tool_parameters:
+        allowed = {
+            name
+            for name, descriptor in tool_parameters.items()
+            if not isinstance(descriptor, dict) or descriptor.get("exposed", True)
+        }
     mapped: dict[str, Any] = {}
+    for key, item in values.items():
+        descriptor = model.parameters.get(key)
+        if not isinstance(descriptor, dict) or descriptor.get("ui_only"):
+            continue
+        if key in {"size", "count", "n"}:
+            continue
+        mapped[str(descriptor.get("request_key") or key)[:96]] = item
     for key, item in raw.items():
         descriptor = model.parameters.get(key)
+        if source == "llm_tool" and key not in allowed:
+            raise ValueError(f"参数 {key} 未向 LLM 工具开放")
         if isinstance(descriptor, dict) and descriptor.get("ui_only"):
+            target = str(descriptor.get("target") or "")
+            choice = next(
+                (
+                    choice
+                    for choice in descriptor.get("choices", [])
+                    if isinstance(choice, dict)
+                    and str(choice.get("value")) == str(item)
+                ),
+                None,
+            )
+            if (
+                target
+                and isinstance(choice, dict)
+                and isinstance(choice.get("fill"), str)
+            ):
+                target_descriptor = model.parameters.get(target, {})
+                mapped[str(target_descriptor.get("request_key") or target)[:96]] = (
+                    choice["fill"]
+                )
             continue
         request_key = (
             str(descriptor.get("request_key") or key)
             if isinstance(descriptor, dict)
             else key
         )
-        mapped[request_key[:96]] = item
+        _validate_parameter_value(key, item, descriptor)
+        if request_key not in {"size", "count", "n"}:
+            mapped[request_key[:96]] = item
     return mapped
+
+
+def _expand_parameter_presets(values: dict[str, Any], model: ImageModel) -> None:
+    for name, descriptor in model.parameters.items():
+        if str(descriptor.get("type") or "").lower() != "preset":
+            continue
+        target = str(descriptor.get("target") or "")
+        choice = next(
+            (
+                choice
+                for choice in descriptor.get("choices", [])
+                if isinstance(choice, dict)
+                and str(choice.get("value")) == str(values.get(name))
+            ),
+            None,
+        )
+        if target and isinstance(choice, dict) and isinstance(choice.get("fill"), str):
+            values[target] = choice["fill"]
+
+
+def _control_parameter_value(
+    value: Any, model: ImageModel, name: str, *, source: str
+) -> Any:
+    raw = _parameters(value)
+    if name in raw:
+        return raw[name]
+    descriptor = model.parameters.get(name)
+    if not isinstance(descriptor, dict):
+        return ""
+    tool_parameters = model.tool.get("parameters")
+    if source == "llm_tool" and isinstance(tool_parameters, dict):
+        policy = tool_parameters.get(name)
+        if isinstance(policy, dict) and "default_override" in policy:
+            return policy["default_override"]
+    return descriptor.get("default", "")
+
+
+def _validate_parameter_value(
+    name: str, value: Any, descriptor: dict[str, Any] | None
+) -> None:
+    if not isinstance(descriptor, dict):
+        return
+    choices = descriptor.get("choices")
+    if isinstance(choices, list):
+        values = {
+            str(choice.get("value")) if isinstance(choice, dict) else str(choice)
+            for choice in choices
+        }
+        if str(value) not in values:
+            raise ValueError(f"参数 {name} 的值不在可选范围内")
+    parameter_type = str(descriptor.get("type") or "").lower()
+    if parameter_type in {"number", "int", "integer", "float"}:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"参数 {name} 必须是数字") from exc
+        if descriptor.get("min") is not None and numeric < float(descriptor["min"]):
+            raise ValueError(f"参数 {name} 不能小于 {descriptor['min']}")
+        if descriptor.get("max") is not None and numeric > float(descriptor["max"]):
+            raise ValueError(f"参数 {name} 不能大于 {descriptor['max']}")
 
 
 def _as_int(value: Any, default: int) -> int:

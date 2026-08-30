@@ -2,12 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import time
 from types import SimpleNamespace
 
 import mcp
+from astrbot.api.message_components import Image, Reply
 from astrbot_plugin_image_studio.config import HistorySettings, RuntimeSettings
-from astrbot_plugin_image_studio.main import ImageStudioPlugin
+from astrbot_plugin_image_studio.main import (
+    ImageStudioPlugin,
+    _iter_event_images,
+    _parse_command,
+)
 from astrbot_plugin_image_studio.models import (
     GeneratedImage,
     GenerationRequest,
@@ -15,7 +21,12 @@ from astrbot_plugin_image_studio.models import (
     ImageProvider,
     ReferenceImage,
 )
-from astrbot_plugin_image_studio.service import ImageGenerationService, _size
+from astrbot_plugin_image_studio.providers import ProviderExecutor
+from astrbot_plugin_image_studio.service import (
+    ImageGenerationService,
+    _parameters_for_model,
+    _size,
+)
 from astrbot_plugin_image_studio.storage import GenerationStore
 from fastapi.responses import FileResponse
 
@@ -36,13 +47,13 @@ def settings() -> RuntimeSettings:
     )
     return RuntimeSettings(
         enable_llm_tool=True,
-        max_concurrent_generations=1,
         providers=(provider,),
         default_provider_id="test-provider",
         default_size="1024x1024",
         default_count=1,
         history=HistorySettings(False, 0, 0, False),
         revision=0,
+        default_text2img_model_ref="test-provider:test-image",
     )
 
 
@@ -89,6 +100,51 @@ def test_llm_tool_returns_mcp_image_content() -> None:
 
     assert isinstance(result, mcp.types.CallToolResult)
     assert any(isinstance(item, mcp.types.ImageContent) for item in result.content)
+
+
+def test_capabilities_only_lists_llm_enabled_models() -> None:
+    provider = ImageProvider.from_mapping(
+        {
+            "id": "provider",
+            "name": "Provider",
+            "kind": "openai_images",
+            "base_url": "https://example.test",
+            "models": [
+                {"id": "visible", "tool": {"enabled": True}},
+                {"id": "hidden", "tool": {"enabled": False}},
+            ],
+        }
+    )
+    plugin = object.__new__(ImageStudioPlugin)
+    plugin._settings = RuntimeSettings(
+        enable_llm_tool=True,
+        providers=(provider,),
+        default_provider_id="provider",
+        default_size="1024x1024",
+        default_count=1,
+        history=HistorySettings(False, 0, 0, False),
+        revision=0,
+    )
+
+    result = asyncio.run(
+        plugin.image_gen_get_capabilities(SimpleNamespace(), mode="text2img")
+    )
+    payload = json.loads(result.content[0].text)
+
+    assert [item["model_ref"] for item in payload["models"]] == ["provider:visible"]
+
+
+def test_llm_tool_guide_is_injected_once() -> None:
+    plugin = object.__new__(ImageStudioPlugin)
+    plugin._settings = settings()
+    request = SimpleNamespace(system_prompt="base")
+
+    asyncio.run(plugin.inject_image_tool_guide(SimpleNamespace(), request))
+    first = request.system_prompt
+    asyncio.run(plugin.inject_image_tool_guide(SimpleNamespace(), request))
+
+    assert "image_gen_get_capabilities" in first
+    assert request.system_prompt == first
 
 
 def test_reproduction_keeps_available_parameters_without_reference(tmp_path) -> None:
@@ -145,6 +201,72 @@ def test_service_drops_negative_prompt_for_unsupported_provider(tmp_path) -> Non
     asyncio.run(run())
 
 
+def test_service_limits_concurrency_per_provider(tmp_path) -> None:
+    async def run() -> None:
+        providers = tuple(
+            ImageProvider.from_mapping(
+                {
+                    "id": provider_id,
+                    "name": provider_id,
+                    "kind": "openai_images",
+                    "base_url": "https://example.test",
+                    "max_concurrent_generations": 1,
+                    "models": [{"id": "image-model"}],
+                }
+            )
+            for provider_id in ("one", "two")
+        )
+        active: dict[str, int] = {"one": 0, "two": 0}
+        maximum: dict[str, int] = {"one": 0, "two": 0}
+        total_active = 0
+        maximum_total = 0
+
+        class CapturingExecutor:
+            async def generate(self, provider, _request):
+                nonlocal total_active, maximum_total
+                active[provider.id] += 1
+                total_active += 1
+                maximum[provider.id] = max(maximum[provider.id], active[provider.id])
+                maximum_total = max(maximum_total, total_active)
+                await asyncio.sleep(0.02)
+                active[provider.id] -= 1
+                total_active -= 1
+                return (GeneratedImage(PNG, "image/png"),)
+
+        store = GenerationStore(tmp_path)
+        await store.initialize()
+        service = ImageGenerationService(
+            settings=RuntimeSettings(
+                enable_llm_tool=True,
+                providers=providers,
+                default_provider_id="",
+                default_size="1024x1024",
+                default_count=1,
+                history=HistorySettings(False, 0, 0, False),
+                revision=0,
+            ),
+            executor=CapturingExecutor(),
+            store=store,
+        )
+        await asyncio.gather(
+            *(
+                service.generate(
+                    mode="text2img",
+                    provider_id=provider_id,
+                    model_ref=f"{provider_id}:image-model",
+                    prompt=f"prompt {index}",
+                )
+                for provider_id in ("one", "one", "two", "two")
+                for index in (1,)
+            )
+        )
+
+        assert maximum == {"one": 1, "two": 1}
+        assert maximum_total == 2
+
+    asyncio.run(run())
+
+
 def test_service_maps_model_schema_parameter_names(tmp_path) -> None:
     async def run() -> None:
         store = GenerationStore(tmp_path)
@@ -183,7 +305,6 @@ def test_service_maps_model_schema_parameter_names(tmp_path) -> None:
         service = ImageGenerationService(
             settings=RuntimeSettings(
                 enable_llm_tool=True,
-                max_concurrent_generations=1,
                 providers=(provider,),
                 default_provider_id="custom",
                 default_size="1024x1024",
@@ -205,6 +326,103 @@ def test_service_maps_model_schema_parameter_names(tmp_path) -> None:
         assert "style" not in captured["request"].parameters
 
     asyncio.run(run())
+
+
+def test_llm_parameters_apply_defaults_expand_presets_and_reject_hidden() -> None:
+    model = ImageProvider.from_mapping(
+        {
+            "id": "nai",
+            "name": "NAI",
+            "kind": "nai_direct",
+            "models": [
+                {
+                    "id": "nai-diffusion-5-full",
+                    "parameters": {
+                        "style": {
+                            "type": "preset",
+                            "default": "anime",
+                            "target": "artist",
+                            "ui_only": True,
+                            "choices": [
+                                {"value": "anime", "fill": "artist:anime"},
+                                {"value": "custom", "fill": ""},
+                            ],
+                        },
+                        "artist": {
+                            "type": "textarea",
+                            "default": "",
+                            "request_key": "artist",
+                        },
+                        "steps": {
+                            "type": "number",
+                            "default": 24,
+                            "min": 1,
+                            "max": 28,
+                        },
+                    },
+                    "tool": {
+                        "parameters": {
+                            "style": {"exposed": True},
+                            "steps": {"exposed": False},
+                        }
+                    },
+                }
+            ],
+        }
+    ).models[0]
+
+    assert (
+        _parameters_for_model({}, model, source="llm_tool")["artist"] == "artist:anime"
+    )
+    assert (
+        _parameters_for_model({"style": "custom"}, model, source="llm_tool")["artist"]
+        == ""
+    )
+    try:
+        _parameters_for_model({"steps": 25}, model, source="llm_tool")
+    except ValueError as exc:
+        assert "未向 LLM 工具开放" in str(exc)
+    else:
+        raise AssertionError("hidden tool parameter should be rejected")
+
+
+def test_command_parser_accepts_multiple_references_and_tracks_explicit_mode() -> None:
+    parsed = _parse_command(
+        "/img repaint --ref /tmp/one.png --ref=/tmp/two.png --mode img2img"
+    )
+
+    assert parsed["reference_paths"] == ["/tmp/one.png", "/tmp/two.png"]
+    assert parsed["mode"] == "img2img"
+    assert parsed["mode_explicit"] is True
+
+
+def test_event_image_iterator_reads_current_and_quoted_images() -> None:
+    current = Image(file="current.png")
+    quoted = Image(file="quoted.png")
+
+    images = list(_iter_event_images([current, Reply(id="1", chain=[quoted])]))
+
+    assert images == [current, quoted]
+
+
+def test_nai_model_discovery_uses_builtin_capabilities() -> None:
+    provider = ImageProvider.from_mapping(
+        {
+            "id": "nai",
+            "name": "NAI",
+            "kind": "nai_direct",
+            "base_url": "https://nai.sta1n.cn",
+        }
+    )
+
+    models = asyncio.run(ProviderExecutor(None).discover_models(provider))
+
+    assert [item["id"] for item in models] == [
+        "nai-diffusion-4-5-full",
+        "nai-diffusion-5-full",
+    ]
+    assert all(item["capability_source"] == "builtin" for item in models)
+    assert all(item["supports_img2img"] is False for item in models)
 
 
 def test_provider_test_uses_configured_nai_model_defaults() -> None:

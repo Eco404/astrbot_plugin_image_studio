@@ -37,6 +37,10 @@ NAI_DEFAULT_NEGATIVE = (
     "awkward hand sign,weird hand gesture,contorted hand,unnatural finger pose,deformed hand gesture,"
     "{shaka},{hang loose},{{rock on}},{shaka sign}"
 )
+NAI_TOOL_PROMPT_INSTRUCTIONS = (
+    "使用英文逗号分隔标签。必须完整描述主体数量、全身或半身范围、姿态、镜头距离、"
+    "视角、背景、光照和画面边界，避免残图；不得改变用户明确指定的主体、数量、动作和服装。"
+)
 
 PROVIDER_TRANSPORT_DEFAULTS: dict[str, dict[str, str]] = {
     "openai_images": {
@@ -78,6 +82,8 @@ class ImageModel:
     max_reference_images: int
     negative_prompt_default: str = ""
     parameters: dict[str, dict[str, Any]] = field(default_factory=dict)
+    tool: dict[str, Any] = field(default_factory=dict)
+    capability_source: str = "manual"
 
     def supports(self, mode: GenerationMode) -> bool:
         """Return whether the model supports a requested generation mode."""
@@ -96,7 +102,29 @@ class ImageModel:
             "negative_prompt_default": self.negative_prompt_default,
             "max_reference_images": self.max_reference_images,
             "parameters": self.parameters,
+            "tool": self.tool,
+            "capability_source": self.capability_source,
         }
+
+    @property
+    def llm_enabled(self) -> bool:
+        """Whether this model is exposed to the LLM image tools."""
+
+        return _as_bool(self.tool.get("enabled"), True)
+
+    @property
+    def llm_max_reference_images(self) -> int:
+        """Return the LLM-specific reference limit within model capability."""
+
+        if not self.img2img:
+            return 0
+        configured = _as_int(
+            self.tool.get("max_reference_images"), self.max_reference_images
+        )
+        configured = max(0, min(8, configured))
+        if self.capability_source in {"remote", "builtin"}:
+            return max(0, min(self.max_reference_images, configured))
+        return configured
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +173,9 @@ class ImageProvider:
     edit_request_format: str = "multipart"
     request_template: str = ""
     response_image_path: str = ""
+    max_concurrent_generations: int = 2
+    models_path: str = ""
+    discovered_models: tuple[dict[str, Any], ...] = ()
 
     @classmethod
     def from_mapping(cls, value: dict[str, Any]) -> ImageProvider:
@@ -174,6 +205,10 @@ class ImageProvider:
             max_reference_images=max_refs if img2img else 0,
             negative_prompt_default=_model_negative_default(value, kind),
             parameters=_normalize_parameters(value.get("parameters")),
+            tool=_normalize_tool(
+                value.get("tool"), img2img, max_refs if img2img else 0, kind
+            ),
+            capability_source=_text(value.get("capability_source"), 32) or "manual",
         )
         raw_models = value.get("models")
         models = (
@@ -209,24 +244,28 @@ class ImageProvider:
                 15, min(600, _as_int(value.get("timeout_seconds"), 180))
             ),
             capabilities=ProviderCapabilities(
-                text2img=any(item.text2img for item in models)
-                if models
-                else primary_model.text2img,
-                img2img=any(item.img2img for item in models)
-                if models
-                else primary_model.img2img,
+                text2img=any(item.text2img for item in models),
+                img2img=any(item.img2img for item in models),
                 max_reference_images=max(
                     (item.max_reference_images for item in models), default=0
                 ),
-                negative_prompt=any(item.negative_prompt for item in models)
-                if models
-                else primary_model.negative_prompt,
+                negative_prompt=any(item.negative_prompt for item in models),
             ),
             models=models,
             edit_request_format=_text(value.get("edit_request_format"), 24)
             or transport_defaults["edit_request_format"],
             request_template=str(value.get("request_template") or ""),
             response_image_path=_text(value.get("response_image_path"), 240),
+            max_concurrent_generations=max(
+                1, min(16, _as_int(value.get("max_concurrent_generations"), 2))
+            ),
+            models_path=_normalized_path(
+                value.get("models_path"),
+                "/v1beta/models" if kind == "gemini" else "/models",
+            ),
+            discovered_models=_normalize_discovered_models(
+                value.get("discovered_models")
+            ),
         )
 
     def public_dict(self) -> dict[str, Any]:
@@ -251,6 +290,9 @@ class ImageProvider:
             "edit_request_format": self.edit_request_format,
             "request_template": self.request_template,
             "response_image_path": self.response_image_path,
+            "max_concurrent_generations": self.max_concurrent_generations,
+            "models_path": self.models_path,
+            "discovered_models": list(self.discovered_models),
             "models": [item.public_dict() for item in self.models],
         }
 
@@ -271,6 +313,7 @@ class ImageProvider:
                 img2img=self.capabilities.img2img,
                 negative_prompt=self.capabilities.negative_prompt,
                 max_reference_images=self.capabilities.max_reference_images,
+                tool={"enabled": True},
             )
         )
 
@@ -299,6 +342,7 @@ class GenerationRequest:
     parameters: dict[str, Any] = field(default_factory=dict)
     references: tuple[ReferenceImage, ...] = ()
     source: str = "webui"
+    selection_source: str = "fallback"
 
 
 @dataclass(frozen=True, slots=True)
@@ -352,6 +396,8 @@ def _normalized_path(value: Any, default: str) -> str:
     path = _text(value, 300) or default
     if not path:
         return ""
+    if path.startswith(("http://", "https://")):
+        return path
     return path if path.startswith("/") else f"/{path}"
 
 
@@ -385,6 +431,10 @@ def _model_from_mapping(value: dict[str, Any], kind: str) -> ImageModel:
 
     model_id = _text(value.get("id"), 160)
     img2img = kind != "nai_direct" and _as_bool(value.get("supports_img2img"), False)
+    capability_source = _text(value.get("capability_source"), 32) or "manual"
+    max_reference_images = (
+        max(0, min(8, _as_int(value.get("max_reference_images"), 0))) if img2img else 0
+    )
     return ImageModel(
         id=model_id,
         name=_text(value.get("name"), 160) or model_id,
@@ -395,14 +445,73 @@ def _model_from_mapping(value: dict[str, Any], kind: str) -> ImageModel:
             if kind == "gemini"
             else _as_bool(value.get("supports_negative_prompt"), kind == "nai_direct")
         ),
-        max_reference_images=max(
-            1, min(8, _as_int(value.get("max_reference_images"), 1))
+        max_reference_images=max_reference_images,
+        negative_prompt_default=_model_negative_default(value, kind),
+        parameters=_normalize_parameters(value.get("parameters")),
+        tool=_normalize_tool(value.get("tool"), img2img, max_reference_images, kind),
+        capability_source=capability_source,
+    )
+
+
+def _normalize_tool(
+    value: Any, img2img: bool, max_reference_images: int, kind: str
+) -> dict[str, Any]:
+    """Normalize the LLM-facing model policy without changing model schema."""
+
+    raw = value if isinstance(value, dict) else {}
+    parameters = raw.get("parameters")
+    normalized_parameters: dict[str, dict[str, Any]] = {}
+    if isinstance(parameters, dict):
+        for key, descriptor in parameters.items():
+            name = _text(key, 64)
+            if name and isinstance(descriptor, dict):
+                normalized_parameters[name] = dict(descriptor)
+    limit_default = max_reference_images if img2img else 0
+    nai = kind == "nai_direct"
+    return {
+        "enabled": _as_bool(raw.get("enabled", raw.get("available_to_llm")), True),
+        "selection_description": _text(raw.get("selection_description"), 1200)
+        or ("仅在用户明确要求 NAI 或 NovelAI 风格标签生图时使用。" if nai else ""),
+        "prompt_profile": _text(raw.get("prompt_profile"), 48)
+        or ("nai_tags" if nai else "natural_language"),
+        "prompt_instructions": _text(raw.get("prompt_instructions"), 4000)
+        or (NAI_TOOL_PROMPT_INSTRUCTIONS if nai else ""),
+        "max_reference_images": max(
+            0, min(8, _as_int(raw.get("max_reference_images"), limit_default))
         )
         if img2img
         else 0,
-        negative_prompt_default=_model_negative_default(value, kind),
-        parameters=_normalize_parameters(value.get("parameters")),
-    )
+        "parameters": normalized_parameters,
+    }
+
+
+def _normalize_discovered_models(value: Any) -> tuple[dict[str, Any], ...]:
+    if not isinstance(value, list):
+        return ()
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in value[:128]:
+        if not isinstance(item, dict):
+            continue
+        model_id = _text(item.get("id"), 160)
+        if not model_id or model_id in seen:
+            continue
+        seen.add(model_id)
+        result.append(
+            {
+                "id": model_id,
+                "name": _text(item.get("name"), 160) or model_id,
+                "supports_text2img": bool(item.get("supports_text2img")),
+                "supports_img2img": bool(item.get("supports_img2img")),
+                "supports_negative_prompt": bool(item.get("supports_negative_prompt")),
+                "max_reference_images": max(
+                    0, min(8, _as_int(item.get("max_reference_images"), 0))
+                ),
+                "capability_source": _text(item.get("capability_source"), 32)
+                or "unknown",
+            }
+        )
+    return tuple(result)
 
 
 def _model_negative_default(value: dict[str, Any], kind: str) -> str:

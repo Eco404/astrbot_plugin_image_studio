@@ -3,6 +3,8 @@
 import asyncio
 import base64
 import copy
+import hashlib
+import json
 import shlex
 import time
 import uuid
@@ -13,13 +15,18 @@ import aiohttp
 import mcp
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.message_components import Image, Plain
+from astrbot.api.message_components import Image, Plain, Reply
 from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.api.web import error_response, file_response, json_response
 from astrbot.api.web import request as web_request
 from starlette.background import BackgroundTask
 
-from .config import normalize_webui_settings, runtime_settings
+from .config import (
+    load_studio_settings,
+    normalize_webui_settings,
+    runtime_settings,
+    save_studio_settings,
+)
 from .models import ImageProvider
 from .providers import ProviderError, ProviderExecutor
 from .service import ImageGenerationService
@@ -28,13 +35,18 @@ from .storage import GenerationStore, detect_mime_type, image_data_url
 PLUGIN_NAME = "astrbot_plugin_image_studio"
 PAGE_PREFIX = f"/{PLUGIN_NAME}"
 LOG_TAG = "[ImageStudio]"
+LLM_TOOL_PROMPT_MARKER = "<ImageStudio-Tool-Guide>"
+LLM_TOOL_PROMPT = """当用户要求生成或修改图片时，可以使用 Image Studio 工具。
+一般生图直接调用 image_gen_generate，省略 model_ref 时使用对应模式的默认自然语言模型。
+当用户明确要求 NAI、指定模型、特殊参数，或你不确定模型能力时，先调用 image_gen_get_capabilities，再严格按返回的 prompt_profile、prompt_instructions 和参数说明调用生成工具。
+用户消息或引用消息含图片时可用于图生图；不要编造模型、参数或参考图路径。"""
 
 
 @register(
     PLUGIN_NAME,
     "local",
     "多 Provider 生图、画廊与 Agent 可读图片工具。",
-    "0.1.0",
+    "0.2.0",
 )
 class ImageStudioPlugin(Star):
     """Own Image Studio configuration, generation, gallery, and tool APIs."""
@@ -50,7 +62,9 @@ class ImageStudioPlugin(Star):
         self._service: ImageGenerationService | None = None
         self._settings_lock = asyncio.Lock()
         self._exports: dict[str, tuple[Path, float]] = {}
-        self._settings, self._settings_errors = runtime_settings(config)
+        self._studio_settings, studio_errors = load_studio_settings(Path(self.data_dir))
+        self._settings, runtime_errors = runtime_settings(config, self._studio_settings)
+        self._settings_errors = [*studio_errors, *runtime_errors]
 
     async def initialize(self) -> None:
         """Initialize storage, HTTP resources, and Page API routes."""
@@ -85,6 +99,26 @@ class ImageStudioPlugin(Star):
         self._session = None
         self._service = None
 
+    @filter.on_llm_request()
+    async def inject_image_tool_guide(self, event: AstrMessageEvent, req: Any) -> None:
+        """Inject a compact routing contract for the two image tools."""
+
+        if not self._settings.enable_llm_tool or req is None:
+            return
+        if not any(
+            model.llm_enabled
+            for provider in self._settings.providers
+            if provider.enabled
+            for model in provider.models
+        ):
+            return
+        current = str(getattr(req, "system_prompt", "") or "")
+        if LLM_TOOL_PROMPT_MARKER in current:
+            return
+        req.system_prompt = (
+            f"{current}\n\n{LLM_TOOL_PROMPT_MARKER}\n{LLM_TOOL_PROMPT}".strip()
+        )
+
     def _register_web_apis(self) -> None:
         routes = (
             (
@@ -117,6 +151,12 @@ class ImageStudioPlugin(Star):
                 self._api_test_model,
                 ["POST"],
                 "Image Studio: test model",
+            ),
+            (
+                "provider/models",
+                self._api_provider_models,
+                ["POST"],
+                "Image Studio: discover provider models",
             ),
             (
                 "gallery/list",
@@ -186,6 +226,8 @@ class ImageStudioPlugin(Star):
                     "model_ref": self._settings.default_model_ref,
                     "size": self._settings.default_size,
                     "count": self._settings.default_count,
+                    "text2img_model_ref": self._settings.default_text2img_model_ref,
+                    "img2img_model_ref": self._settings.default_img2img_model_ref,
                 },
                 "providers": [
                     provider.public_dict()
@@ -209,16 +251,14 @@ class ImageStudioPlugin(Star):
         )
 
     async def _api_get_settings(self) -> Any:
-        webui, errors = normalize_webui_settings(self.config.get("webui_managed"))
+        studio, errors = normalize_webui_settings(self._studio_settings)
         return json_response(
             {
                 "base": {
                     "enable_llm_tool": bool(self.config.get("enable_llm_tool", True)),
-                    "max_concurrent_generations": int(
-                        self.config.get("max_concurrent_generations", 2) or 2
-                    ),
                 },
-                "webui": webui,
+                "studio": studio,
+                "webui": studio,
                 "validation_errors": errors,
             }
         )
@@ -229,36 +269,50 @@ class ImageStudioPlugin(Star):
             return error_response("请求体必须是 JSON 对象", status_code=400)
         expected_revision = _as_int(body.get("settings_revision"), -1)
         async with self._settings_lock:
-            current_webui, _ = normalize_webui_settings(
-                self.config.get("webui_managed")
-            )
-            current_revision = _as_int(
-                current_webui.get("ui", {}).get("settings_revision"), 0
-            )
+            current_studio, _ = normalize_webui_settings(self._studio_settings)
+            current_revision = _as_int(current_studio.get("revision"), 0)
+            if expected_revision < 0:
+                expected_revision = _as_int(
+                    body.get("studio", body.get("webui", {}))
+                    .get("ui", {})
+                    .get("settings_revision"),
+                    -1,
+                )
             if expected_revision != current_revision:
                 return error_response(
                     "设置已被其他操作更新，请刷新后再保存", status_code=409
                 )
-            candidate, errors = normalize_webui_settings(body.get("webui"))
+            candidate, errors = normalize_webui_settings(
+                body.get("studio", body.get("webui"))
+            )
             if errors:
                 return error_response("；".join(errors), status_code=400)
-            candidate["ui"]["settings_revision"] = current_revision + 1
+            candidate["revision"] = current_revision + 1
+            candidate["ui"]["settings_revision"] = candidate["revision"]
             base = body.get("base") if isinstance(body.get("base"), dict) else {}
             previous = copy.deepcopy(dict(self.config))
-            self.config["webui_managed"] = candidate
-            for key in ("enable_llm_tool", "max_concurrent_generations"):
+            previous_studio = copy.deepcopy(self._studio_settings)
+            for key in ("enable_llm_tool",):
                 if key in base:
                     self.config[key] = base[key]
             try:
+                await save_studio_settings(Path(self.data_dir), candidate)
                 await _save_config_async(self.config)
             except Exception as exc:
                 self.config.clear()
                 self.config.update(previous)
+                try:
+                    await save_studio_settings(Path(self.data_dir), previous_studio)
+                except Exception:
+                    logger.warning("%s 恢复插件配置文件失败", LOG_TAG)
                 logger.warning(
                     "%s 保存 WebUI 配置失败: %s", LOG_TAG, type(exc).__name__
                 )
                 return error_response("配置保存失败", status_code=500)
-            self._settings, self._settings_errors = runtime_settings(self.config)
+            self._studio_settings = candidate
+            self._settings, self._settings_errors = runtime_settings(
+                self.config, self._studio_settings
+            )
             self._service_or_raise().update_settings(self._settings)
         return json_response({"settings_revision": self._settings.revision})
 
@@ -334,7 +388,7 @@ class ImageStudioPlugin(Star):
                 "当前模型仅支持图生图，无法进行无参考图测试", status_code=400
             )
         try:
-            result = await self._service_or_raise().executor.generate(
+            result = await self._service_or_raise().run_provider_request(
                 provider,
                 self._test_request(provider, test_model.id),
             )
@@ -347,6 +401,19 @@ class ImageStudioPlugin(Star):
                 "preview_data_url": image_data_url(result[0].data, result[0].mime_type),
             }
         )
+
+    async def _api_provider_models(self) -> Any:
+        body = await web_request.json(default={})
+        if not isinstance(body, dict) or not isinstance(body.get("provider"), dict):
+            return error_response("需要服务商配置", status_code=400)
+        try:
+            provider = ImageProvider.from_mapping(body["provider"])
+            if not provider.id or not provider.base_url:
+                return error_response("服务商需要 id 和 base_url", status_code=400)
+            models = await self._service_or_raise().executor.discover_models(provider)
+        except (ValueError, ProviderError) as exc:
+            return error_response(str(exc), status_code=400)
+        return json_response({"models": models, "provider_id": provider.id})
 
     def _test_request(self, provider: ImageProvider, model_id: str):
         from .models import GenerationRequest
@@ -481,14 +548,14 @@ class ImageStudioPlugin(Star):
 
         try:
             options = _parse_command(str(event.message_str or ""))
-            references = ()
-            if options["reference_path"]:
-                reference = await self._service_or_raise().reference_from_safe_path(
-                    options["reference_path"]
-                )
-                references = (reference,) if reference is not None else ()
+            references = await self._event_references(
+                event, options.get("reference_paths", [])
+            )
+            mode = options["mode"]
+            if not options["mode_explicit"] and references:
+                mode = "img2img"
             result = await self._service_or_raise().generate(
-                mode=options["mode"],
+                mode=mode,
                 provider_id=options["provider_id"],
                 prompt=options["prompt"],
                 negative_prompt=options["negative_prompt"],
@@ -506,28 +573,184 @@ class ImageStudioPlugin(Star):
         chain.extend(Image.fromBytes(image.data) for image in result.images)
         yield event.chain_result(chain)
 
+    async def _event_references(
+        self, event: AstrMessageEvent, explicit_paths: list[str] | None = None
+    ) -> tuple[Any, ...]:
+        service = self._service_or_raise()
+        references: list[Any] = []
+        seen: set[str] = set()
+        for raw_path in explicit_paths or []:
+            reference = await service.reference_from_safe_path(raw_path)
+            if reference is not None:
+                digest = hashlib.sha256(reference.data).hexdigest()
+                if digest not in seen:
+                    seen.add(digest)
+                    references.append(reference)
+        message_chain = event.get_messages() if hasattr(event, "get_messages") else []
+        for component in _iter_event_images(message_chain):
+            try:
+                path = await component.convert_to_file_path()
+                reference = await service.reference_from_safe_path(path)
+            except (OSError, ValueError):
+                continue
+            if reference is None:
+                continue
+            digest = hashlib.sha256(reference.data).hexdigest()
+            if digest not in seen:
+                seen.add(digest)
+                references.append(reference)
+        return tuple(references[:8])
+
+    @filter.llm_tool(name="image_gen_get_capabilities")
+    async def image_gen_get_capabilities(
+        self,
+        event: AstrMessageEvent,
+        mode: str = "",
+        model_ref: str = "",
+    ) -> mcp.types.CallToolResult:
+        """查询当前可供 LLM 使用的生图模型和参数。
+
+        Args:
+            mode(string): 可选的 text2img 或 img2img，用于筛选模式。
+            model_ref(string): 可选的 provider_id:model_id，用于查询单个模型详情。
+
+        一般生图可直接使用默认自然语言模型；用户明确要求 NAI、指定模型或高级参数
+        时先调用本工具，再调用 image_gen_generate。返回内容不包含密钥和请求头。
+        """
+
+        if not self._settings.enable_llm_tool:
+            return mcp.types.CallToolResult(
+                content=[
+                    mcp.types.TextContent(
+                        type="text", text="Image Studio 的 LLM 生图工具已关闭。"
+                    )
+                ],
+                isError=True,
+            )
+        normalized_mode = str(mode or "").strip().lower()
+        if normalized_mode not in {"", "text2img", "img2img"}:
+            return mcp.types.CallToolResult(
+                content=[
+                    mcp.types.TextContent(
+                        type="text", text="mode 仅支持 text2img 或 img2img。"
+                    )
+                ],
+                isError=True,
+            )
+        requested_ref = str(model_ref or "").strip()
+        entries: list[dict[str, Any]] = []
+        for provider in self._settings.providers:
+            if not provider.enabled:
+                continue
+            for model in provider.models:
+                if not model.llm_enabled:
+                    continue
+                ref = f"{provider.id}:{model.id}"
+                if requested_ref and requested_ref not in {ref, model.id}:
+                    continue
+                modes = [
+                    candidate
+                    for candidate, supported in (
+                        ("text2img", model.text2img),
+                        ("img2img", model.img2img),
+                    )
+                    if supported
+                ]
+                if normalized_mode and normalized_mode not in modes:
+                    continue
+                tool = model.tool
+                exposed_parameters: dict[str, Any] = {}
+                configured_parameters = tool.get("parameters")
+                for name, descriptor in model.parameters.items():
+                    if (
+                        descriptor.get("ui_only")
+                        and str(descriptor.get("type") or "").lower() != "preset"
+                    ):
+                        continue
+                    if (
+                        isinstance(configured_parameters, dict)
+                        and configured_parameters
+                    ):
+                        policy = configured_parameters.get(name)
+                        if not isinstance(policy, dict) or not policy.get(
+                            "exposed", True
+                        ):
+                            continue
+                        visible = _llm_parameter_descriptor(descriptor, policy)
+                        if "default_override" in policy:
+                            visible["default"] = policy["default_override"]
+                        exposed_parameters[name] = visible
+                    else:
+                        exposed_parameters[name] = _llm_parameter_descriptor(
+                            descriptor, {}
+                        )
+                entries.append(
+                    {
+                        "model_ref": ref,
+                        "provider_name": provider.name,
+                        "model_name": model.name,
+                        "modes": modes,
+                        "supports_negative_prompt": model.negative_prompt,
+                        "max_reference_images": model.llm_max_reference_images,
+                        "selection_description": tool.get("selection_description", ""),
+                        "prompt_profile": tool.get(
+                            "prompt_profile", "natural_language"
+                        ),
+                        "prompt_instructions": tool.get("prompt_instructions", ""),
+                        "parameters": exposed_parameters,
+                    }
+                )
+        if requested_ref and not entries:
+            return mcp.types.CallToolResult(
+                content=[
+                    mcp.types.TextContent(
+                        type="text", text="指定模型不存在、已停用或未向 LLM 工具开放。"
+                    )
+                ],
+                isError=True,
+            )
+        payload = {
+            "usage": "一般需求使用默认自然语言模型；明确要求 NAI 或特殊参数时选择对应 model_ref。",
+            "models": entries,
+        }
+        return mcp.types.CallToolResult(
+            content=[
+                mcp.types.TextContent(
+                    type="text", text=json.dumps(payload, ensure_ascii=False, indent=2)
+                )
+            ]
+        )
+
     @filter.llm_tool(name="image_gen_generate")
     async def image_gen_generate(
         self,
         event: AstrMessageEvent,
         prompt: str = "",
-        mode: str = "text2img",
+        mode: str = "",
         provider_id: str = "",
+        model_ref: str = "",
         model: str = "",
         size: str = "",
         negative_prompt: str = "",
         reference_image_path: str = "",
+        count: int = 0,
+        parameters: dict[str, Any] | None = None,
+        reference_image_paths: list[str] | None = None,
     ) -> mcp.types.CallToolResult:
         """Generate an image and return it to the Agent as visual tool content.
 
         Args:
             prompt(string): Image description.
-            mode(string): ``text2img`` or ``img2img``.
+            mode(string): ``text2img`` or ``img2img``，省略时根据参考图自动判断。
             provider_id(string): Optional configured provider ID.
+            model_ref(string): 稳定的 provider_id:model_id，可选。
             model(string): Optional configured-model override.
             size(string): Optional image size.
             negative_prompt(string): Optional negative prompt.
             reference_image_path(string): A prior Agent tool-image path for image-to-image.
+            count(number): 生成数量，受模型和服务商限制。
+            parameters(object): 当前模型向 LLM 暴露的动态参数。
+            reference_image_paths(array[string]): 多张参考图路径。
 
         Returns:
             Text and image MCP content. AstrBot caches image content for the next Agent step.
@@ -542,18 +765,24 @@ class ImageStudioPlugin(Star):
                 ]
             )
         try:
-            reference = await self._service_or_raise().reference_from_safe_path(
-                reference_image_path
+            paths = list(reference_image_paths or [])
+            if reference_image_path:
+                paths.insert(0, reference_image_path)
+            references = await self._event_references(event, paths)
+            normalized_mode = str(mode or "").strip() or (
+                "img2img" if references else "text2img"
             )
             result = await self._service_or_raise().generate(
-                mode=mode,
+                mode=normalized_mode,
                 provider_id=provider_id,
                 prompt=prompt,
                 negative_prompt=negative_prompt,
+                model_ref=model_ref,
                 model=model,
                 size=size,
-                count=1,
-                references=(reference,) if reference is not None else (),
+                count=count,
+                parameters=parameters,
+                references=references,
                 source="llm_tool",
             )
         except (ValueError, ProviderError) as exc:
@@ -614,6 +843,60 @@ def _result_payload(result) -> dict[str, Any]:
     }
 
 
+def _llm_parameter_descriptor(
+    descriptor: dict[str, Any], policy: dict[str, Any]
+) -> dict[str, Any]:
+    visible = {
+        key: descriptor[key]
+        for key in ("type", "default", "min", "max", "step")
+        if key in descriptor
+    }
+    visible["description"] = str(
+        policy.get("description")
+        or descriptor.get("description")
+        or descriptor.get("label")
+        or ""
+    )
+    choices = descriptor.get("choices")
+    choice_descriptions = policy.get("choice_descriptions")
+    if isinstance(choices, list):
+        visible["choices"] = [
+            {
+                "value": choice.get("value"),
+                "label": choice.get("label", choice.get("value")),
+                "description": (
+                    choice_descriptions.get(str(choice.get("value")), "")
+                    if isinstance(choice_descriptions, dict)
+                    else ""
+                ),
+            }
+            if isinstance(choice, dict)
+            else {
+                "value": choice,
+                "label": choice,
+                "description": (
+                    choice_descriptions.get(str(choice), "")
+                    if isinstance(choice_descriptions, dict)
+                    else ""
+                ),
+            }
+            for choice in choices
+        ]
+    return visible
+
+
+def _iter_event_images(value: Any):
+    if isinstance(value, Image):
+        yield value
+        return
+    if isinstance(value, Reply):
+        yield from _iter_event_images(getattr(value, "chain", None))
+        return
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _iter_event_images(item)
+
+
 def _parse_command(raw: str) -> dict[str, Any]:
     text = raw.strip()
     for prefix in ("/image_gen", "image_gen", "/img", "img"):
@@ -628,7 +911,8 @@ def _parse_command(raw: str) -> dict[str, Any]:
         "size": "",
         "negative_prompt": "",
         "count": 1,
-        "reference_path": "",
+        "reference_paths": [],
+        "mode_explicit": False,
         "parameters": {},
     }
     prompt_parts: list[str] = []
@@ -646,6 +930,7 @@ def _parse_command(raw: str) -> dict[str, Any]:
             continue
         if key == "mode":
             values["mode"] = value
+            values["mode_explicit"] = True
         elif key == "provider":
             values["provider_id"] = value
         elif key == "model":
@@ -657,7 +942,7 @@ def _parse_command(raw: str) -> dict[str, Any]:
         elif key == "n":
             values["count"] = _as_int(value, 1)
         elif key == "ref":
-            values["reference_path"] = value
+            values["reference_paths"].append(value)
         elif key.startswith("param-"):
             values["parameters"][key.removeprefix("param-")] = value
         else:

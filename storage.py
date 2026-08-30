@@ -270,6 +270,7 @@ class GenerationStore:
                     "size": request.size,
                     "count": request.count,
                     "parameters": request.parameters,
+                    "selection_source": request.selection_source,
                 }
             )
             with self._connect() as conn:

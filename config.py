@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import copy
+import json
+import os
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from .models import ImageModel, ImageProvider
@@ -12,6 +15,7 @@ from .models import ImageModel, ImageProvider
 SUPPORTED_PROVIDER_KINDS = frozenset(
     {"openai_images", "gemini", "nai_direct", "custom_json"}
 )
+STUDIO_CONFIG_FILENAME = "studio_config.json"
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,7 +33,6 @@ class RuntimeSettings:
     """Immutable runtime settings created from the plugin configuration."""
 
     enable_llm_tool: bool
-    max_concurrent_generations: int
     providers: tuple[ImageProvider, ...]
     default_provider_id: str
     default_size: str
@@ -37,6 +40,8 @@ class RuntimeSettings:
     history: HistorySettings
     revision: int
     default_model_ref: str = ""
+    default_text2img_model_ref: str = ""
+    default_img2img_model_ref: str = ""
 
     def provider(self, provider_id: str) -> ImageProvider | None:
         """Return an enabled provider by stable ID."""
@@ -89,6 +94,8 @@ def default_webui_settings() -> dict[str, Any]:
     """Return defaults for the WebUI-owned portion of plugin configuration."""
 
     return {
+        "schema_version": 1,
+        "revision": 0,
         "providers": [],
         "history": {
             "enabled": True,
@@ -99,18 +106,24 @@ def default_webui_settings() -> dict[str, Any]:
         "generation_defaults": {
             "provider_id": "",
             "model_ref": "",
+            "text2img_model_ref": "",
+            "img2img_model_ref": "",
             "size": "1024x1024",
             "count": 1,
+        },
+        "llm_policy": {
+            "natural_language_first": True,
+            "nai_auto_selection": "explicit_only",
         },
         "ui": {"settings_revision": 0},
     }
 
 
 def normalize_webui_settings(value: Any) -> tuple[dict[str, Any], list[str]]:
-    """Normalize and validate persisted WebUI configuration.
+    """Normalize and validate the plugin-owned Studio configuration.
 
     Args:
-        value: Raw ``webui_managed`` value from AstrBot configuration.
+        value: Raw value loaded from ``studio_config.json`` or a WebUI draft.
 
     Returns:
         The canonical configuration and human-readable validation errors.
@@ -145,8 +158,6 @@ def normalize_webui_settings(value: Any) -> tuple[dict[str, Any], list[str]]:
             errors.append(f"Provider {provider.id} 的 kind 不受支持")
         if not provider.base_url:
             errors.append(f"Provider {provider.id} 缺少 base_url")
-        if not provider.models:
-            errors.append(f"Provider {provider.id} 至少需要一个模型")
         model_ids: set[str] = set()
         for model in provider.models:
             if model.id in model_ids:
@@ -177,29 +188,104 @@ def normalize_webui_settings(value: Any) -> tuple[dict[str, Any], list[str]]:
     )
     defaults["provider_id"] = str(defaults.get("provider_id") or "").strip()[:64]
     defaults["model_ref"] = str(defaults.get("model_ref") or "").strip()[:240]
+    defaults["text2img_model_ref"] = str(
+        defaults.get("text2img_model_ref") or defaults.get("model_ref") or ""
+    ).strip()[:240]
+    defaults["img2img_model_ref"] = str(
+        defaults.get("img2img_model_ref") or ""
+    ).strip()[:240]
     defaults["size"] = str(defaults.get("size") or "1024x1024").strip()[:40]
     defaults["count"] = max(1, min(4, _as_int(defaults.get("count"), 1)))
     merged["generation_defaults"] = defaults
+    policy = (
+        merged.get("llm_policy") if isinstance(merged.get("llm_policy"), dict) else {}
+    )
+    policy["natural_language_first"] = _as_bool(
+        policy.get("natural_language_first"), True
+    )
+    selection = str(policy.get("nai_auto_selection") or "explicit_only")
+    policy["nai_auto_selection"] = (
+        selection if selection in {"explicit_only", "allowed"} else "explicit_only"
+    )
+    merged["llm_policy"] = policy
+    merged["schema_version"] = max(1, _as_int(merged.get("schema_version"), 1))
+    merged["revision"] = max(
+        0,
+        _as_int(merged.get("revision"), 0),
+    )
     ui = merged.get("ui") if isinstance(merged.get("ui"), dict) else {}
     ui["settings_revision"] = max(0, _as_int(ui.get("settings_revision"), 0))
     merged["ui"] = ui
     return merged, errors
 
 
-def runtime_settings(config: dict[str, Any]) -> tuple[RuntimeSettings, list[str]]:
+def load_studio_settings(data_dir: Path) -> tuple[dict[str, Any], list[str]]:
+    """Load the plugin-owned configuration file, falling back safely on errors."""
+
+    path = data_dir / STUDIO_CONFIG_FILENAME
+    if not path.is_file():
+        return default_webui_settings(), []
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        backup = path.with_suffix(path.suffix + ".bak")
+        try:
+            raw = json.loads(backup.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return default_webui_settings(), [
+                "studio_config.json 无法读取，已使用默认设置"
+            ]
+    normalized, errors = normalize_webui_settings(raw)
+    return normalized, errors
+
+
+async def save_studio_settings(data_dir: Path, value: dict[str, Any]) -> None:
+    """Atomically persist normalized plugin-owned settings with a backup."""
+
+    normalized, errors = normalize_webui_settings(value)
+    if errors:
+        raise ValueError("；".join(errors))
+    path = data_dir / STUDIO_CONFIG_FILENAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(normalized, ensure_ascii=False, indent=2) + "\n"
+    await _atomic_write_text(path, payload)
+
+
+async def _atomic_write_text(path: Path, value: str) -> None:
+    import asyncio
+
+    await asyncio.to_thread(_atomic_write_text_sync, path, value)
+
+
+def _atomic_write_text_sync(path: Path, value: str) -> None:
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    backup = path.with_suffix(path.suffix + ".bak")
+    try:
+        temporary.write_text(value, encoding="utf-8")
+        if path.is_file():
+            os.replace(path, backup)
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def runtime_settings(
+    config: dict[str, Any], studio_settings: dict[str, Any] | None = None
+) -> tuple[RuntimeSettings, list[str]]:
     """Build runtime settings from an AstrBot plugin config object."""
 
-    webui, errors = normalize_webui_settings(config.get("webui_managed"))
+    source = studio_settings if isinstance(studio_settings, dict) else {}
+    webui, errors = normalize_webui_settings(source)
     providers = tuple(ImageProvider.from_mapping(item) for item in webui["providers"])
     history_raw = webui["history"]
     return RuntimeSettings(
         enable_llm_tool=_as_bool(config.get("enable_llm_tool"), True),
-        max_concurrent_generations=max(
-            1, min(8, _as_int(config.get("max_concurrent_generations"), 2))
-        ),
         providers=providers,
         default_provider_id=webui["generation_defaults"]["provider_id"],
         default_model_ref=webui["generation_defaults"]["model_ref"],
+        default_text2img_model_ref=webui["generation_defaults"]["text2img_model_ref"],
+        default_img2img_model_ref=webui["generation_defaults"]["img2img_model_ref"],
         default_size=webui["generation_defaults"]["size"],
         default_count=webui["generation_defaults"]["count"],
         history=HistorySettings(
@@ -208,7 +294,7 @@ def runtime_settings(config: dict[str, Any]) -> tuple[RuntimeSettings, list[str]
             max_megabytes=history_raw["max_megabytes"],
             retain_reference_images=history_raw["retain_reference_images"],
         ),
-        revision=webui["ui"]["settings_revision"],
+        revision=webui.get("revision", webui["ui"]["settings_revision"]),
     ), errors
 
 

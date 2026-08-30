@@ -6,13 +6,13 @@
 
 - **生图**：先选择“文生图 / 图生图”，再从支持该模式的模型中选择一个，工作区会按模型参数 schema 动态生成。
 - **画廊**：搜索和筛选历史记录，查看完整参数，复现生成配置，导出或批量删除记录。
-- **设置**：管理插件开关、并发限制、历史保留策略和生图服务商。
+- **设置**：管理历史策略、Provider 并发、服务商、模型能力和 LLM 工具参数。
 
 ## 安装
 
 将本目录放到 `AstrBot/data/plugins/astrbot_plugin_image_studio`，启用插件后，从插件详情页打开 Image Studio 页面。
 
-WebUI 是插件的主要设置入口。AstrBot 原生插件设置页只显示基础开关和并发限制；WebUI 中的服务商与历史设置仍然读写同一份 AstrBot 插件配置文件，存放在隐藏的 `webui_managed` 配置组中。
+WebUI 是插件的主要设置入口。AstrBot 原生插件设置页只保留“启用 LLM 生图工具”；服务商、模型和历史设置由插件写入数据目录中的 `studio_config.json`。
 
 ## 支持的服务商类型
 
@@ -23,7 +23,7 @@ WebUI 是插件的主要设置入口。AstrBot 原生插件设置页只显示基
 - `nai_direct`：兼容 `astrbot_plugin_nai_image` 使用的第三方 `nai.sta1n.cn` 协议，默认请求 `GET https://nai.sta1n.cn/generate`。这里的 Token 是该站申请的 `toUserId`，并非 NovelAI 官方 API 凭据。
 - `custom_json`：可自定义请求体模板和图片响应提取路径的 JSON 接口。
 
-服务商只负责连接配置：类型、地址、路径、请求头、鉴权和超时。模型配置单独位于“模型配置”区域，同一服务商可以添加多个模型，并分别声明文生图、图生图、反向提示词和最大参考图数量。被停用、配置不完整或没有支持当前模式模型的服务商不会出现在生图页面的模型列表中。
+服务商只负责连接配置：类型、地址、路径、请求头、鉴权、超时和该 Provider 的并发上限。服务商允许在没有模型时保存；“获取模型”会尽力读取远程模型列表和能力，读取不到的能力使用保守预填并允许手动调整。模型配置单独位于“模型配置”区域，同一服务商可以添加多个模型，并分别声明文生图、图生图、反向提示词和最大参考图数量。
 
 模型参数是可扩展的 JSON schema，前端不需要为新模型增加代码。每个参数可以包含 `type`（`text`、`textarea`、`number`、`select`、`boolean`、`json`、`preset`）、`label`、`default`、`request_key`、`min`、`max`、`step` 和 `choices`。`preset` 可通过 `target` 和选项中的 `fill` 联动填写另一个参数；配合 `ui_only: true` 时只参与界面交互，不会发送给上游。例如：
 
@@ -34,7 +34,7 @@ WebUI 是插件的主要设置入口。AstrBot 原生插件设置页只显示基
 }
 ```
 
-OpenAI Images 会预填尺寸、数量、质量、背景和输出格式；Gemini 会预填画面比例和图片尺寸；NAI 第三方 GET 会按参考插件预填模型、绘画风格、画师串、中文尺寸、采样器、步数、Scale、CFG Rescale、噪声调度和默认反向提示词，并固定发送 `nocache=1`。NAI 的画师串默认留空，绘画风格默认显示“自定义”；选择其他风格会填入对应画师串，选择“自定义”会先清空画师串。画师串被修改且不再匹配任何预设时也会自动显示为“自定义”，但不会因此清空用户输入。其 CFG Rescale 默认值为 `0.3`，采样器默认为 `k_euler_ancestral`。`custom_json` 可用同一套控件描述任意新参数，未识别的参数会按 `request_key` 原样传给自定义接口。
+OpenAI Images 会预填尺寸、数量、质量、背景和输出格式；Gemini 会预填画面比例和图片尺寸；NAI 第三方 GET 会预填绘画风格、画师串、中文尺寸、采样器、步数、Scale、CFG Rescale、噪声调度和默认反向提示词，并固定发送 `nocache=1`。NAI 的画师串默认留空，绘画风格默认显示“自定义”。其 `scale` 是 Prompt Guidance，范围 `1–20`、默认 `6`；`cfg` 会映射为 `cfg_rescale`，范围 `0–1`、插件默认 `0.3`；当前第三方接口将 `steps` 限制为 `1–28`。采样器默认 `k_euler_ancestral`。
 
 ## 反向提示词支持
 
@@ -56,7 +56,7 @@ OpenAI Images 会预填尺寸、数量、质量、背景和输出格式；Gemini
 /image_gen 重新绘制这张图片 --mode img2img --ref /path/from/astrbot/temp/tool_images/file.png
 ```
 
-LLM 工具名为 `image_gen_generate`。工具成功后会返回 MCP `ImageContent`，而不只是文本路径。AstrBot 会缓存图片，并把它加入后续支持视觉输入的 Agent 步骤，因此 Agent 可以继续查看、判断和处理生成结果。
+LLM 工具包括 `image_gen_get_capabilities` 和 `image_gen_generate`。前者按需返回允许 LLM 使用的模型、提示词规范和参数；后者支持动态参数、多张参考图和严格 `model_ref`。生成成功后返回 MCP `ImageContent`，AstrBot 会缓存图片并把它加入后续支持视觉输入的 Agent 步骤。指令和 LLM 工具均能读取当前消息及引用消息中的图片；没有显式指定模式时，检测到图片会自动使用图生图。
 
 ## 历史与参考图
 
@@ -70,7 +70,8 @@ LLM 工具名为 `image_gen_generate`。工具成功后会返回 MCP `ImageConte
 
 ## 数据位置
 
-- 插件配置：AstrBot 的插件配置文件，其中包括 WebUI 可见的 API 密钥。
+- AstrBot 插件配置：只保存 `enable_llm_tool`。
+- Image Studio 配置：`data/plugin_data/astrbot_plugin_image_studio/studio_config.json`，包括 Provider 密钥、模型和历史策略。
 - 历史数据库：`data/plugin_data/astrbot_plugin_image_studio/history.sqlite3`。
 - 去重后的原图资源：`data/plugin_data/astrbot_plugin_image_studio/history/assets`。
 - 内容寻址缩略图：`data/plugin_data/astrbot_plugin_image_studio/history/thumbnails`。
