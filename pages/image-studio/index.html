@@ -14,9 +14,9 @@
         <div><strong>Image Studio</strong><span>Image generation workspace</span></div>
       </div>
       <nav class="nav-list">
-        <button class="nav-item is-active" data-view="generate" type="button"><span aria-hidden="true">+</span> 生图</button>
-        <button class="nav-item" data-view="gallery" type="button"><span aria-hidden="true">□</span> 画廊</button>
-        <button class="nav-item" data-view="settings" type="button"><span aria-hidden="true">=</span> 设置</button>
+        <button class="nav-item is-active" data-view="generate" type="button"><span class="nav-icon" aria-hidden="true">✦</span><span>生图</span></button>
+        <button class="nav-item" data-view="gallery" type="button"><span class="nav-icon" aria-hidden="true">▦</span><span>画廊</span></button>
+        <button class="nav-item" data-view="settings" type="button"><span class="nav-icon" aria-hidden="true">⚙</span><span>设置</span></button>
       </nav>
       <div class="sidebar-footer" id="runtimeStatus">正在读取配置</div>
     </aside>
@@ -77,14 +77,14 @@
         <div class="settings-layout">
           <section class="settings-panel glass">
             <div class="section-heading"><div><h2>运行</h2><p>这些值与 AstrBot 原生插件设置共用同一配置文件。</p></div></div>
-            <div class="toggle-row"><label for="settingEnabled">启用 Image Studio</label><input id="settingEnabled" type="checkbox" /></div>
-            <div class="toggle-row"><label for="settingTool">启用 LLM 生图工具</label><input id="settingTool" type="checkbox" /></div>
+            <div class="toggle-row"><label for="settingEnabled">启用 Image Studio</label><label class="toggle-control"><input id="settingEnabled" type="checkbox" /><span aria-hidden="true"></span></label></div>
+            <div class="toggle-row"><label for="settingTool">启用 LLM 生图工具</label><label class="toggle-control"><input id="settingTool" type="checkbox" /><span aria-hidden="true"></span></label></div>
             <div class="field"><label for="settingConcurrent">最大并发</label><input id="settingConcurrent" type="number" min="1" max="8" /></div>
           </section>
           <section class="settings-panel glass">
             <div class="section-heading"><div><h2>历史</h2><p>结果图进入画廊；参考图仅存在于记录详情。</p></div></div>
-            <div class="toggle-row"><label for="historyEnabled">保留生成历史</label><input id="historyEnabled" type="checkbox" /></div>
-            <div class="toggle-row"><label for="retainReferences">保留参考图</label><input id="retainReferences" type="checkbox" /></div>
+            <div class="toggle-row"><label for="historyEnabled">保留生成历史</label><label class="toggle-control"><input id="historyEnabled" type="checkbox" /><span aria-hidden="true"></span></label></div>
+            <div class="toggle-row"><label for="retainReferences">保留参考图</label><label class="toggle-control"><input id="retainReferences" type="checkbox" /><span aria-hidden="true"></span></label></div>
             <div class="field"><label for="historyRecords">最大记录数（-1 表示不限）</label><input id="historyRecords" type="number" min="-1" max="100000" /></div>
             <div class="field"><label for="historyMegabytes">最大图片容量 MB（0 表示不限）</label><input id="historyMegabytes" type="number" min="0" max="10240" /></div>
           </section>
@@ -108,6 +108,7 @@
     <div><h2 id="confirmTitle">确认操作</h2><p id="confirmMessage"></p></div>
     <div class="confirm-dialog__actions"><button class="quiet-button" id="confirmCancel" type="button">取消</button><button class="danger-button" id="confirmAccept" type="button">确认删除</button></div>
   </div>
+  <script src="/api/plugin/page/bridge-sdk.js"></script>
   <script src="./app.js"></script>
 </body>
 </html>
