@@ -8,12 +8,11 @@
     resultImages: [], galleryItems: [], selectedIds: new Set(), settings: null, selectedSettingsProviderId: "",
   };
   let activeConfirmation = null;
-  let noticeTimer = null;
   let settingsLoadPromise = null;
   let eventsBound = false;
   const $ = (id) => document.getElementById(id);
   const els = {
-    pageTitle: $("pageTitle"), pageSubtitle: $("pageSubtitle"), runtimeStatus: $("runtimeStatus"), providerStatus: $("providerStatus"), appNotice: $("appNotice"),
+    pageTitle: $("pageTitle"), pageSubtitle: $("pageSubtitle"), runtimeStatus: $("runtimeStatus"), providerStatus: $("providerStatus"),
     providerChoices: $("providerChoices"), referenceField: $("referenceField"), referenceUpload: $("referenceUpload"), referenceStrip: $("referenceStrip"),
     generationForm: $("generationForm"), prompt: $("prompt"), negativePrompt: $("negativePrompt"), model: $("model"), size: $("size"), count: $("count"), parameters: $("parameters"), generationError: $("generationError"), generateButton: $("generateButton"), resultEmpty: $("resultEmpty"), resultGrid: $("resultGrid"), resultMeta: $("resultMeta"),
     galleryGrid: $("galleryGrid"), galleryEmpty: $("galleryEmpty"), gallerySearch: $("gallerySearch"), galleryProvider: $("galleryProvider"), galleryMode: $("galleryMode"), selectionBar: $("selectionBar"), selectionCount: $("selectionCount"),
@@ -57,10 +56,7 @@
     return `${fallback}：${message}`;
   }
   function showNotice(message, tone = "info") {
-    window.clearTimeout(noticeTimer);
-    els.appNotice.textContent = message || "";
-    els.appNotice.className = `app-notice${tone === "error" ? " is-error" : tone === "success" ? " is-success" : ""}${message ? "" : " is-hidden"}`;
-    if (message && tone !== "error") noticeTimer = window.setTimeout(() => els.appNotice.classList.add("is-hidden"), 3600);
+    window.__showImageStudioNotice(message, tone);
   }
 
   function switchView(view) {

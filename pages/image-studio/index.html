@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Image Studio 生图工作台</title>
-  <link rel="stylesheet" href="./app.css" />
+  <link rel="stylesheet" href="./app.css?v=0.1.2" />
 </head>
 <body>
   <main class="app-shell quiet-glass-background">
@@ -26,7 +26,10 @@
         <div><h1 id="pageTitle">生图</h1><p id="pageSubtitle">选择模式和生图服务商后开始创作</p></div>
         <div class="topbar-status" id="providerStatus"></div>
       </header>
-      <div class="app-notice is-hidden" id="appNotice" role="status" aria-live="polite"></div>
+      <div class="app-notice is-hidden" id="appNotice" role="status" aria-live="polite">
+        <div class="app-notice__message" id="appNoticeMessage"></div>
+        <button class="app-notice__close" id="appNoticeClose" type="button" aria-label="关闭通知" title="关闭通知">×</button>
+      </div>
 
       <section class="view is-active" id="generateView">
         <div class="mode-tabs" role="group" aria-label="生成模式">
@@ -110,16 +113,36 @@
     <div class="confirm-dialog__actions"><button class="quiet-button" id="confirmCancel" type="button">取消</button><button class="danger-button" id="confirmAccept" type="button">确认删除</button></div>
   </div>
   <script>
+    window.__dismissImageStudioNotice = function () {
+      window.clearTimeout(window.__imageStudioNoticeTimer);
+      var notice = document.getElementById("appNotice");
+      var message = document.getElementById("appNoticeMessage");
+      if (notice) notice.classList.add("is-hidden");
+      if (message) message.textContent = "";
+    };
+    window.__showImageStudioNotice = function (message, tone) {
+      window.clearTimeout(window.__imageStudioNoticeTimer);
+      var notice = document.getElementById("appNotice");
+      var content = document.getElementById("appNoticeMessage");
+      if (!notice || !content) return;
+      content.textContent = message || "";
+      notice.className = "app-notice" + (tone === "error" ? " is-error" : tone === "success" ? " is-success" : "");
+      notice.setAttribute("role", tone === "error" ? "alert" : "status");
+      notice.setAttribute("aria-live", tone === "error" ? "assertive" : "polite");
+      if (!message) {
+        window.__dismissImageStudioNotice();
+        return;
+      }
+      var timeout = tone === "error" ? 10000 : tone === "success" ? 4000 : 6000;
+      window.__imageStudioNoticeTimer = window.setTimeout(window.__dismissImageStudioNotice, timeout);
+    };
+    document.getElementById("appNoticeClose").addEventListener("click", window.__dismissImageStudioNotice);
     window.__reportImageStudioPageError = function (loadFailed) {
       var message = loadFailed
         ? "页面脚本加载失败，请重新加载插件页面。"
         : "页面操作出现异常，请重试；如果问题持续，请重新加载插件页面。";
-      var notice = document.getElementById("appNotice");
       var status = document.getElementById("runtimeStatus");
-      if (notice) {
-        notice.textContent = message;
-        notice.className = "app-notice is-error";
-      }
+      window.__showImageStudioNotice(message, "error");
       if (status) status.textContent = "页面运行异常";
     };
     window.addEventListener("error", function (event) {
@@ -131,6 +154,6 @@
     });
   </script>
   <script src="/api/plugin/page/bridge-sdk.js"></script>
-  <script src="./app.js?v=0.1.1" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./app.js?v=0.1.2" onerror="window.__reportImageStudioPageError(true)"></script>
 </body>
 </html>
