@@ -4,8 +4,8 @@
   window.__imageStudioAppLoaded = true;
 
   const state = {
-    view: "generate", mode: "text2img", providers: [], selectedProviderId: "", references: [],
-    resultImages: [], galleryItems: [], selectedIds: new Set(), settings: null, selectedSettingsProviderId: "", detailId: "",
+    view: "generate", mode: "text2img", providers: [], models: [], selectedProviderId: "", selectedModelRef: "", parameterValues: {}, references: [],
+    resultImages: [], galleryItems: [], selectedIds: new Set(), settings: null, selectedSettingsProviderId: "", selectedSettingsModelId: "", detailId: "",
   };
   let activeConfirmation = null;
   let settingsLoadPromise = null;
@@ -13,11 +13,11 @@
   const $ = (id) => document.getElementById(id);
   const els = {
     pageTitle: $("pageTitle"), pageSubtitle: $("pageSubtitle"), runtimeStatus: $("runtimeStatus"), providerStatus: $("providerStatus"),
-    providerChoices: $("providerChoices"), referenceField: $("referenceField"), referenceUpload: $("referenceUpload"), referenceStrip: $("referenceStrip"),
-    generationForm: $("generationForm"), prompt: $("prompt"), negativePromptField: $("negativePromptField"), negativePrompt: $("negativePrompt"), negativePromptHint: $("negativePromptHint"), model: $("model"), size: $("size"), count: $("count"), parameters: $("parameters"), generationError: $("generationError"), generateButton: $("generateButton"), resultEmpty: $("resultEmpty"), resultGrid: $("resultGrid"), resultMeta: $("resultMeta"),
+    modelChoice: $("modelChoice"), modelProvider: $("modelProvider"), generatorWorkspace: $("generatorWorkspace"), modelParameters: $("modelParameters"), referenceField: $("referenceField"), referenceUpload: $("referenceUpload"), referenceStrip: $("referenceStrip"),
+    generationForm: $("generationForm"), prompt: $("prompt"), negativePromptField: $("negativePromptField"), negativePrompt: $("negativePrompt"), negativePromptHint: $("negativePromptHint"), parameters: $("parameters"), generationError: $("generationError"), generateButton: $("generateButton"), resultEmpty: $("resultEmpty"), resultGrid: $("resultGrid"), resultMeta: $("resultMeta"),
     galleryGrid: $("galleryGrid"), galleryEmpty: $("galleryEmpty"), gallerySearch: $("gallerySearch"), galleryProvider: $("galleryProvider"), galleryMode: $("galleryMode"), selectionBar: $("selectionBar"), selectionCount: $("selectionCount"),
     detailDrawer: $("detailDrawer"), drawerBody: $("drawerBody"), detailDate: $("detailDate"), scrim: $("scrim"), imagePreview: $("imagePreview"), previewImage: $("previewImage"), imagePreviewTitle: $("imagePreviewTitle"), downloadImageButton: $("downloadImageButton"),
-    settingEnabled: $("settingEnabled"), settingTool: $("settingTool"), settingConcurrent: $("settingConcurrent"), historyEnabled: $("historyEnabled"), retainReferences: $("retainReferences"), historyRecords: $("historyRecords"), historyMegabytes: $("historyMegabytes"), settingsProviderList: $("settingsProviderList"), providerForm: $("providerForm"), settingsError: $("settingsError"), addProviderButton: $("addProviderButton"), saveSettingsButton: $("saveSettingsButton"),
+    settingEnabled: $("settingEnabled"), settingTool: $("settingTool"), settingConcurrent: $("settingConcurrent"), settingDefaultModel: $("settingDefaultModel"), settingDefaultSize: $("settingDefaultSize"), settingDefaultCount: $("settingDefaultCount"), historyEnabled: $("historyEnabled"), retainReferences: $("retainReferences"), historyRecords: $("historyRecords"), historyMegabytes: $("historyMegabytes"), settingsProviderList: $("settingsProviderList"), providerForm: $("providerForm"), settingsModelList: $("settingsModelList"), modelForm: $("modelForm"), settingsError: $("settingsError"), addProviderButton: $("addProviderButton"), addModelButton: $("addModelButton"), saveSettingsButton: $("saveSettingsButton"),
   };
 
   async function bridge() {
@@ -39,9 +39,10 @@
   async function apiGet(path, params) { return (await bridge()).apiGet(path, params); }
   async function apiPost(path, body) { return (await bridge()).apiPost(path, body); }
 
-  function providerForMode() { return state.providers.filter((item) => state.mode === "text2img" ? item.supports_text2img : item.supports_img2img); }
-  function selectedProvider() { return state.providers.find((item) => item.id === state.selectedProviderId) || null; }
-  function text(value) { return String(value || ""); }
+  function modelsForMode() { return state.models.filter((item) => state.mode === "text2img" ? item.supports_text2img : item.supports_img2img); }
+  function selectedModel() { return state.models.find((item) => item.model_ref === state.selectedModelRef) || null; }
+  function selectedProvider() { const model = selectedModel(); return state.providers.find((item) => item.id === (model?.provider_id || state.selectedProviderId)) || null; }
+  function text(value) { return value === null || value === undefined ? "" : String(value); }
   function escape(value) { const div = document.createElement("div"); div.textContent = text(value); return div.innerHTML; }
   function formatDate(value) { return new Date(Number(value) * 1000).toLocaleString(); }
   function formatBytes(value) { const bytes = Number(value || 0); return bytes > 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.max(0, Math.round(bytes / 1024))} KB`; }
@@ -63,33 +64,89 @@
     state.view = view;
     document.querySelectorAll(".nav-item").forEach((button) => button.classList.toggle("is-active", button.dataset.view === view));
     document.querySelectorAll(".view").forEach((item) => item.classList.toggle("is-active", item.id === `${view}View`));
-    const labels = { generate: ["生图", "选择模式和生图服务商后开始创作"], gallery: ["画廊", "搜索、筛选、复现或导出历史生成记录"], settings: ["设置", "管理运行策略、历史和生图服务商"], };
+    const labels = { generate: ["生图", "选择模式和模型后开始创作"], gallery: ["画廊", "搜索、筛选、复现或导出历史生成记录"], settings: ["设置", "管理运行策略、历史、生图服务商和模型"], };
     els.pageTitle.textContent = labels[view][0]; els.pageSubtitle.textContent = labels[view][1];
     if (view === "gallery") void loadGallery();
     if (view === "settings") void loadSettings();
   }
 
-  function renderProviderChoices() {
-    const available = providerForMode();
-    if (!available.some((item) => item.id === state.selectedProviderId)) state.selectedProviderId = available[0]?.id || "";
-    els.providerChoices.innerHTML = available.length ? available.map((item) => `<button class="provider-chip ${item.id === state.selectedProviderId ? "is-active" : ""}" type="button" data-provider-id="${escape(item.id)}">${escape(item.name)}<small> ${escape(item.model)}</small></button>`).join("") : '<div class="provider-empty">当前模式没有可用的生图服务商，请先前往设置完成配置。</div>';
-    els.providerChoices.querySelectorAll("[data-provider-id]").forEach((button) => button.addEventListener("click", () => { state.selectedProviderId = button.dataset.providerId; renderProviderChoices(); renderGenerationForm(); }));
-    renderGenerationForm();
+  function collectModelParameters() {
+    const values = {};
+    els.modelParameters.querySelectorAll("[data-model-parameter]").forEach((input) => {
+      const key = input.dataset.modelParameter;
+      if (input.type === "checkbox") values[key] = input.checked;
+      else if (input.dataset.parameterType === "number") values[key] = input.value === "" ? "" : Number(input.value);
+      else if (input.dataset.parameterType === "json") { try { values[key] = input.value.trim() ? JSON.parse(input.value) : {}; } catch { values[key] = input.value; } }
+      else values[key] = input.value;
+    });
+    return values;
+  }
+
+  function renderModelParameter(name, descriptor) {
+    const type = String(descriptor.type || "text").toLowerCase();
+    const label = escape(descriptor.label || name);
+    const value = state.parameterValues[name] ?? descriptor.default ?? "";
+    const requestKey = escape(descriptor.request_key || name);
+    if (type === "select" && Array.isArray(descriptor.choices)) {
+      const options = descriptor.choices.map((choice) => { const option = typeof choice === "object" ? choice : { value: choice, label: choice }; return `<option value="${escape(option.value)}" ${String(option.value) === String(value) ? "selected" : ""}>${escape(option.label)}</option>`; }).join("");
+      return `<div class="field"><label>${label}</label><select data-model-parameter="${escape(name)}" data-parameter-type="select" data-request-key="${requestKey}">${options}</select></div>`;
+    }
+    if (type === "boolean" || type === "bool") return `<div class="toggle-row"><label>${label}</label><label class="toggle-control"><input data-model-parameter="${escape(name)}" data-request-key="${requestKey}" type="checkbox" ${value ? "checked" : ""} /><span aria-hidden="true"></span></label></div>`;
+    if (type === "json" || type === "object") return `<div class="field field-wide"><label>${label}</label><textarea data-model-parameter="${escape(name)}" data-parameter-type="json" data-request-key="${requestKey}" rows="3" spellcheck="false">${escape(typeof value === "string" ? value : JSON.stringify(value || {}, null, 2))}</textarea></div>`;
+    const inputType = type === "number" || type === "int" || type === "float" ? "number" : "text";
+    const min = descriptor.min !== undefined ? ` min="${escape(descriptor.min)}"` : "";
+    const max = descriptor.max !== undefined ? ` max="${escape(descriptor.max)}"` : "";
+    const step = descriptor.step !== undefined ? ` step="${escape(descriptor.step)}"` : inputType === "number" ? " step=\"any\"" : "";
+    return `<div class="field"><label>${label}</label><input data-model-parameter="${escape(name)}" data-parameter-type="${inputType === "number" ? "number" : "text"}" data-request-key="${requestKey}" type="${inputType}" value="${escape(value)}"${min}${max}${step} /></div>`;
+  }
+
+  function renderModelChoices() {
+    const available = modelsForMode();
+    if (!available.some((item) => item.model_ref === state.selectedModelRef)) state.selectedModelRef = "";
+    els.modelChoice.innerHTML = available.length ? `<option value="">请选择模型</option>${available.map((item) => `<option value="${escape(item.model_ref)}" ${item.model_ref === state.selectedModelRef ? "selected" : ""}>${escape(item.name)} · ${escape(item.provider_name)}</option>`).join("")}` : '<option value="">当前模式没有可用模型</option>';
+    els.modelChoice.disabled = available.length === 0;
+    els.modelChoice.value = state.selectedModelRef;
+    renderModelWorkspace();
   }
 
   function renderGenerationForm() {
+    const model = selectedModel();
     const provider = selectedProvider();
-    const supportsRefs = state.mode === "img2img";
-    const supportsNegative = !!provider?.supports_negative_prompt;
+    const supportsRefs = state.mode === "img2img" && !!model?.img2img && Number(model.max_reference_images || 0) > 0;
+    const supportsNegative = !!model?.supports_negative_prompt;
     els.referenceField.classList.toggle("is-hidden", !supportsRefs);
     els.negativePromptField.classList.toggle("is-disabled", !supportsNegative);
     els.negativePrompt.disabled = !supportsNegative;
     els.negativePrompt.placeholder = supportsNegative ? "可选" : "当前服务商不支持专用反向提示词";
     els.negativePromptHint.textContent = supportsNegative ? "当前服务商会将此字段作为专用反向提示词发送。" : "当前服务商没有专用反向提示词参数；可将限制写入正向提示词。";
-    els.generateButton.disabled = !provider;
-    els.providerStatus.textContent = provider ? `${provider.name} · ${provider.kind}` : "未配置生图服务商";
-    if (provider && !els.model.value) els.model.value = provider.model || "";
+    els.providerStatus.textContent = model && provider ? `${model.name} · ${provider.name}` : "未选择模型";
     renderReferences();
+  }
+
+  function renderModelWorkspace() {
+    const model = selectedModel();
+    els.generatorWorkspace.disabled = !model;
+    if (!model) {
+      els.modelParameters.innerHTML = '<div class="workspace-placeholder">请先在上方选择模型。</div>';
+      els.modelProvider.textContent = "";
+      renderGenerationForm();
+      return;
+    }
+    els.modelProvider.textContent = model.provider_name || "";
+    els.modelParameters.innerHTML = Object.entries(model.parameters || {}).map(([name, descriptor]) => renderModelParameter(name, descriptor)).join("") || '<div class="workspace-placeholder">该模型没有额外参数。</div>';
+    els.modelParameters.querySelectorAll("[data-model-parameter]").forEach((input) => input.addEventListener("input", () => { state.parameterValues[input.dataset.modelParameter] = input.type === "checkbox" ? input.checked : input.value; }));
+    els.modelParameters.querySelectorAll("[data-model-parameter]").forEach((input) => input.addEventListener("change", () => { state.parameterValues[input.dataset.modelParameter] = input.type === "checkbox" ? input.checked : input.value; }));
+    renderGenerationForm();
+  }
+
+  function parameterValuesForModel(model, values) {
+    const source = values && typeof values === "object" ? values : {};
+    const result = {};
+    Object.entries(model?.parameters || {}).forEach(([name, descriptor]) => {
+      if (Object.prototype.hasOwnProperty.call(source, name)) result[name] = source[name];
+      else if (descriptor?.request_key && Object.prototype.hasOwnProperty.call(source, descriptor.request_key)) result[name] = source[descriptor.request_key];
+    });
+    return result;
   }
 
   function renderReferences() {
@@ -100,17 +157,19 @@
   async function bootstrap() {
     const payload = await apiGet("studio/bootstrap");
     state.providers = Array.isArray(payload.providers) ? payload.providers : [];
-    els.size.value = payload.defaults?.size || "1024x1024";
-    els.count.value = payload.defaults?.count || 1;
+    state.models = Array.isArray(payload.models) ? payload.models : [];
+    state.parameterValues = { size: payload.defaults?.size || "1024x1024", count: payload.defaults?.count || 1 };
     state.selectedProviderId = payload.defaults?.provider_id || "";
+    state.selectedModelRef = payload.defaults?.model_ref || "";
     els.runtimeStatus.textContent = payload.enabled ? `已加载 ${state.providers.length} 个生图服务商` : "生图工作台已关闭";
-    renderProviderChoices();
+    renderModelChoices();
   }
 
   async function uploadReferences(files) {
-    const provider = selectedProvider();
-    const maximum = provider?.max_reference_images || 1;
+    const model = selectedModel();
+    const maximum = Number(model?.max_reference_images || 0);
     const available = Math.max(0, maximum - state.references.length);
+    if (available <= 0) { showNotice("当前模型没有可用的参考图名额。", "error"); return; }
     const client = await bridge();
     for (const file of Array.from(files).slice(0, available)) {
       const uploaded = await client.upload("studio/reference/upload", file);
@@ -125,12 +184,20 @@
     if (els.parameters.value.trim()) {
       try { parameters = JSON.parse(els.parameters.value); } catch { setError(els.generationError, "高级参数必须是合法 JSON"); return; }
     }
+    const model = selectedModel();
     const provider = selectedProvider();
-    if (!provider) { setError(els.generationError, "请先配置支持当前模式的生图服务商"); return; }
+    if (!model || !provider) { setError(els.generationError, "请先选择支持当前模式的模型"); return; }
     if (state.mode === "img2img" && !state.references.length) { setError(els.generationError, "图生图需要至少一张参考图"); return; }
+    const modelParameters = collectModelParameters();
+    const size = modelParameters.size || "";
+    const count = modelParameters.count || 1;
+    delete modelParameters.size;
+    delete modelParameters.count;
+    const schema = model.parameters || {};
+    const mappedParameters = Object.fromEntries(Object.entries(modelParameters).map(([name, value]) => [schema[name]?.request_key || name, value]));
     els.generateButton.disabled = true; els.generateButton.textContent = "生成中";
     try {
-      const result = await apiPost("studio/generate", { mode: state.mode, provider_id: provider.id, prompt: els.prompt.value, negative_prompt: els.negativePrompt.value, model: els.model.value, size: els.size.value, count: Number(els.count.value), parameters, reference_ids: state.references.map((item) => item.id) });
+      const result = await apiPost("studio/generate", { mode: state.mode, provider_id: provider.id, model_ref: model.model_ref, prompt: els.prompt.value, negative_prompt: els.negativePrompt.value, model: model.id, size, count: Number(count), parameters: { ...parameters, ...mappedParameters }, reference_ids: state.references.map((item) => item.id) });
       state.resultImages = result.images || []; state.references = []; renderReferences();
       els.resultEmpty.classList.toggle("is-hidden", state.resultImages.length > 0); els.resultGrid.innerHTML = state.resultImages.map((image, index) => `<div class="result-card"><div class="result-frame"><img src="${image.data_url}" alt="生成结果" data-result-preview="${index}" /></div><div class="result-card-actions"><button class="quiet-button" data-result-reference="${index}" type="button">用作参考图</button></div></div>`).join("");
       els.resultGrid.querySelectorAll("[data-result-reference]").forEach((button) => button.addEventListener("click", () => void useDataUrlAsReference(state.resultImages[Number(button.dataset.resultReference)].data_url, "generated-reference.png")));
@@ -234,15 +301,21 @@
   async function reproduce(id) {
     try {
       const draft = await apiPost(`gallery/reproduce/${id}`, {}); state.mode = draft.mode || "text2img"; state.selectedProviderId = draft.provider_id || ""; state.references = draft.references || [];
-      els.prompt.value = draft.prompt || ""; els.negativePrompt.value = draft.negative_prompt || ""; els.model.value = draft.model || ""; els.size.value = draft.size || ""; els.count.value = draft.count || 1; els.parameters.value = JSON.stringify(draft.parameters || {}, null, 2);
-      document.querySelectorAll(".segment").forEach((button) => button.classList.toggle("is-active", button.dataset.mode === state.mode)); renderProviderChoices(); closeDetail(); switchView("generate");
+      state.selectedModelRef = draft.model_ref || (draft.provider_id && draft.model ? `${draft.provider_id}:${draft.model}` : "");
+      const rawParameterValues = { ...(draft.parameters || {}), size: draft.size || "", count: draft.count || 1 };
+      state.parameterValues = rawParameterValues;
+      els.prompt.value = draft.prompt || ""; els.negativePrompt.value = draft.negative_prompt || "";
+      document.querySelectorAll(".segment").forEach((button) => button.classList.toggle("is-active", button.dataset.mode === state.mode)); renderModelChoices();
+      const model = selectedModel();
+      if (model) { state.parameterValues = parameterValuesForModel(model, rawParameterValues); renderModelWorkspace(); }
+      closeDetail(); switchView("generate");
       if (draft.notice) setError(els.generationError, draft.notice);
     } catch (error) { showNotice(errorMessage(error, "复现参数读取失败"), "error"); }
   }
 
   async function loadSettings() {
     if (settingsLoadPromise) return settingsLoadPromise;
-    els.addProviderButton.disabled = true; els.saveSettingsButton.disabled = true;
+    els.addProviderButton.disabled = true; els.addModelButton.disabled = true; els.saveSettingsButton.disabled = true;
     setError(els.settingsError, "正在读取设置…");
     settingsLoadPromise = (async () => {
       try {
@@ -251,7 +324,12 @@
         state.settings = payload;
         els.settingEnabled.checked = !!payload.base.enabled; els.settingTool.checked = !!payload.base.enable_llm_tool; els.settingConcurrent.value = payload.base.max_concurrent_generations;
         const history = payload.webui.history; els.historyEnabled.checked = !!history.enabled; els.retainReferences.checked = !!history.retain_reference_images; els.historyRecords.value = history.max_records; els.historyMegabytes.value = history.max_megabytes;
+        const defaults = payload.webui.generation_defaults || {};
+        const defaultModels = payload.webui.providers.flatMap((item) => (item.models || []).map((model) => ({ ...model, provider_name: item.name, model_ref: `${item.id}:${model.id}` })));
+        els.settingDefaultModel.innerHTML = `<option value="">自动选择第一个可用模型</option>${defaultModels.map((model) => `<option value="${escape(model.model_ref)}">${escape(model.name)} · ${escape(model.provider_name)}</option>`).join("")}`;
+        els.settingDefaultModel.value = defaults.model_ref || ""; els.settingDefaultSize.value = defaults.size || "1024x1024"; els.settingDefaultCount.value = defaults.count || 1;
         if (!payload.webui.providers.some((item) => item.id === state.selectedSettingsProviderId)) state.selectedSettingsProviderId = payload.webui.providers[0]?.id || "";
+        state.selectedSettingsModelId = "";
         renderSettingsProviders();
         const warnings = Array.isArray(payload.validation_errors) ? payload.validation_errors.filter(Boolean) : [];
         setError(els.settingsError, warnings.length ? `配置提示：${warnings.join("；")}` : "");
@@ -264,7 +342,7 @@
         setError(els.settingsError, message); showNotice(message, "error");
         return false;
       } finally {
-        els.addProviderButton.disabled = false; els.saveSettingsButton.disabled = false;
+        els.addProviderButton.disabled = false; els.addModelButton.disabled = false; els.saveSettingsButton.disabled = false;
       }
     })();
     const loaded = await settingsLoadPromise;
@@ -272,16 +350,34 @@
     return loaded;
   }
 
+  const PROVIDER_KINDS = [["openai_images", "OpenAI Images"], ["gemini", "Gemini 图片输出"], ["nai_direct", "NAI 直连"], ["custom_json", "自定义 JSON"]];
+  const PROVIDER_DEFAULTS = {
+    openai_images: { base_url: "https://api.openai.com/v1", generate_path: "/images/generations", edit_path: "/images/edits", edit_request_format: "multipart", request_template: "", response_image_path: "" },
+    gemini: { base_url: "https://generativelanguage.googleapis.com", generate_path: "/v1beta/models/{model}:generateContent", edit_path: "/v1beta/models/{model}:generateContent", edit_request_format: "json_data_url", request_template: "", response_image_path: "" },
+    nai_direct: { base_url: "https://image.novelai.net", generate_path: "/generate", edit_path: "", edit_request_format: "json_data_url", request_template: "", response_image_path: "" },
+    custom_json: { base_url: "", generate_path: "/v1/images/generations", edit_path: "/v1/images/edits", edit_request_format: "json_data_url", request_template: "", response_image_path: "" },
+  };
+  const MODEL_PRESETS = {
+    openai_images: { size: { type: "select", label: "尺寸", default: "1024x1024", choices: ["1024x1024", "1536x1024", "1024x1536"], request_key: "size" }, count: { type: "number", label: "数量", default: 1, min: 1, max: 4, step: 1, request_key: "count" }, quality: { type: "select", label: "质量", default: "auto", choices: ["auto", "low", "medium", "high"], request_key: "quality" }, background: { type: "select", label: "背景", default: "auto", choices: ["auto", "transparent", "opaque"], request_key: "background" }, output_format: { type: "select", label: "输出格式", default: "png", choices: ["png", "jpeg", "webp"], request_key: "output_format" } },
+    gemini: { aspect_ratio: { type: "select", label: "画面比例", default: "1:1", choices: ["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"], request_key: "aspect_ratio" }, image_size: { type: "select", label: "图片尺寸", default: "1K", choices: ["1K", "2K", "4K"], request_key: "image_size" } },
+    nai_direct: { size: { type: "select", label: "尺寸", default: "1024x1024", choices: ["512x512", "640x832", "832x640", "1024x1024"], request_key: "size" }, sampler: { type: "select", label: "采样器", default: "k_euler", choices: ["k_euler", "k_euler_ancestral", "k_dpmpp_2m", "k_dpmpp_sde", "ddim"], request_key: "sampler" }, steps: { type: "number", label: "步数", default: 28, min: 1, max: 100, step: 1, request_key: "steps" }, scale: { type: "number", label: "提示词引导强度", default: 5, min: 0, max: 20, step: 0.1, request_key: "scale" }, cfg: { type: "number", label: "CFG", default: 7, min: 0, max: 30, step: 0.1, request_key: "cfg" }, noise_schedule: { type: "select", label: "噪声调度", default: "karras", choices: ["karras", "native", "exponential", "polyexponential"], request_key: "noise_schedule" }, seed: { type: "number", label: "随机种子", default: -1, min: -1, max: 2147483647, step: 1, request_key: "seed" } },
+    custom_json: { size: { type: "text", label: "尺寸（可选）", default: "1024x1024", request_key: "size" }, count: { type: "number", label: "数量", default: 1, min: 1, max: 4, step: 1, request_key: "count" } },
+  };
+  function providerDefaults(kind) { return { ...(PROVIDER_DEFAULTS[kind] || PROVIDER_DEFAULTS.custom_json) }; }
+  function modelPreset(kind) { return JSON.parse(JSON.stringify(MODEL_PRESETS[kind] || MODEL_PRESETS.custom_json)); }
   function currentSettingsProvider() { return state.settings?.webui.providers.find((item) => item.id === state.selectedSettingsProviderId) || null; }
   function renderSettingsProviders() {
     const providers = state.settings?.webui.providers || []; els.settingsProviderList.innerHTML = providers.length ? providers.map((item) => `<button class="provider-row ${item.id === state.selectedSettingsProviderId ? "is-active" : ""}" type="button" data-settings-provider="${escape(item.id)}"><strong>${escape(item.name || item.id)}</strong><span>${item.enabled ? "启用" : "停用"}</span></button>`).join("") : '<div class="provider-empty">尚未添加生图服务商</div>';
-    els.settingsProviderList.querySelectorAll("[data-settings-provider]").forEach((button) => button.addEventListener("click", () => { state.selectedSettingsProviderId = button.dataset.settingsProvider; renderSettingsProviders(); }));
+    els.settingsProviderList.querySelectorAll("[data-settings-provider]").forEach((button) => button.addEventListener("click", () => { state.selectedSettingsProviderId = button.dataset.settingsProvider; state.selectedSettingsModelId = ""; renderSettingsProviders(); }));
     renderProviderEditor();
+    renderModelEditor();
   }
   function renderProviderEditor() {
     const provider = currentSettingsProvider(); if (!provider) { els.providerForm.innerHTML = '<div class="provider-empty">选择或新增生图服务商后编辑详细配置。</div>'; return; }
-    const kinds = [["openai_images", "OpenAI Images"], ["gemini", "Gemini"], ["nai_direct", "NAI 直连"], ["custom_json", "自定义 JSON"]];
-    els.providerForm.innerHTML = `<h3>${escape(provider.name || "生图服务商")}</h3>${field("id", "ID", provider.id)}${field("name", "名称", provider.name)}${selectField("kind", "类型", provider.kind, kinds)}${field("base_url", "接口地址（Base URL）", provider.base_url)}${field("model", "默认模型", provider.model)}${field("generate_path", "文生图路径", provider.generate_path)}${field("edit_path", "图生图路径", provider.edit_path)}${field("api_key", "接口密钥（API Key）", provider.api_key)}${field("timeout_seconds", "超时秒数", provider.timeout_seconds, "number")}${selectField("edit_request_format", "图生图格式", provider.edit_request_format, [["multipart", "multipart"], ["json_data_url", "JSON data URL"]])}${toggleField("enabled", "启用", provider.enabled)}${toggleField("supports_text2img", "支持文生图", provider.supports_text2img)}${toggleField("supports_img2img", "支持图生图", provider.supports_img2img)}${toggleField("supports_negative_prompt", "支持专用反向提示词", provider.supports_negative_prompt)}${field("max_reference_images", "最大参考图数", provider.max_reference_images, "number")}${textAreaField("custom_headers", "自定义请求头", provider.custom_headers)}${textAreaField("request_template", "自定义 JSON 请求模板", provider.request_template)}${field("response_image_path", "响应图片路径", provider.response_image_path)}<div class="provider-editor-actions"><button class="danger-button" id="removeProviderButton" type="button">删除服务商</button><button class="quiet-button" id="testProviderButton" type="button">测试服务商</button></div>`;
+    const kind = provider.kind || "custom_json";
+    const common = `${field("id", "ID", provider.id)}${field("name", "名称", provider.name)}${selectField("kind", "供应类型", kind, PROVIDER_KINDS)}${field("base_url", "接口地址（Base URL）", provider.base_url)}${field("api_key", "接口密钥（API Key）", provider.api_key)}${field("timeout_seconds", "超时秒数", provider.timeout_seconds, "number")}${toggleField("enabled", "启用", provider.enabled)}${textAreaField("custom_headers", "自定义请求头（JSON 或每行一个 Header）", provider.custom_headers)}`;
+    const typeFields = kind === "openai_images" ? `${field("generate_path", "文生图路径", provider.generate_path)}${field("edit_path", "图生图路径", provider.edit_path)}${selectField("edit_request_format", "图生图请求格式", provider.edit_request_format, [["multipart", "multipart"], ["json_data_url", "JSON data URL"]])}` : kind === "gemini" ? `${field("generate_path", "generateContent 路径（支持 {model}）", provider.generate_path)}` : kind === "nai_direct" ? `${field("generate_path", "生成路径", provider.generate_path)}<div class="field field-wide"><span class="field-hint">NAI 直连使用 GET 请求，密钥会作为 token 参数发送。</span></div>` : `${field("generate_path", "文生图路径", provider.generate_path)}${field("edit_path", "图生图路径", provider.edit_path)}${selectField("edit_request_format", "图生图请求格式", provider.edit_request_format, [["multipart", "multipart"], ["json_data_url", "JSON data URL"]])}${textAreaField("request_template", "请求 JSON 模板（可选）", provider.request_template)}${field("response_image_path", "响应图片路径（可选）", provider.response_image_path)}<div class="field field-wide"><span class="field-hint">模板可使用 {{prompt}}、{{model}}、{{size}}、{{count}} 和参数字段。</span></div>`;
+    els.providerForm.innerHTML = `<h3>${escape(provider.name || "生图服务商")}</h3>${common}${typeFields}<div class="provider-editor-actions"><button class="danger-button" id="removeProviderButton" type="button">删除服务商</button><button class="quiet-button" id="testProviderButton" type="button">测试服务商</button></div>`;
     els.providerForm.querySelectorAll("[data-provider-field]").forEach((input) => input.addEventListener("input", () => updateProviderField(input))); els.providerForm.querySelectorAll("[data-provider-field]").forEach((input) => input.addEventListener("change", () => updateProviderField(input)));
     $("removeProviderButton")?.addEventListener("click", async () => { if (!await confirmAction("删除此生图服务商？历史记录不会删除。")) return; state.settings.webui.providers = state.settings.webui.providers.filter((item) => item.id !== provider.id); state.selectedSettingsProviderId = state.settings.webui.providers[0]?.id || ""; renderSettingsProviders(); showNotice("已从设置草稿中删除，保存全部设置后生效。", "success"); });
     $("testProviderButton")?.addEventListener("click", () => void testProvider(provider));
@@ -290,7 +386,26 @@
   function textAreaField(key, label, value) { return `<div class="field field-wide"><label>${label}</label><textarea data-provider-field="${key}" rows="3">${escape(value)}</textarea></div>`; }
   function selectField(key, label, value, options) { return `<div class="field"><label>${label}</label><select data-provider-field="${key}">${options.map(([id, name]) => `<option value="${id}" ${id === value ? "selected" : ""}>${name}</option>`).join("")}</select></div>`; }
   function toggleField(key, label, value) { return `<div class="toggle-row"><label>${label}</label><label class="toggle-control"><input data-provider-field="${key}" type="checkbox" ${value ? "checked" : ""} /><span aria-hidden="true"></span></label></div>`; }
-  function updateProviderField(input) { const provider = currentSettingsProvider(); if (!provider) return; const key = input.dataset.providerField; provider[key] = input.type === "checkbox" ? input.checked : input.value; if (key === "id") state.selectedSettingsProviderId = input.value; if (key === "kind" && input.value === "nai_direct" && !provider.supports_negative_prompt) { provider.supports_negative_prompt = true; renderProviderEditor(); } }
+  function updateProviderField(input) { const provider = currentSettingsProvider(); if (!provider) return; const key = input.dataset.providerField; const value = input.type === "checkbox" ? input.checked : input.type === "number" ? Number(input.value) : input.value; if (key === "kind" && value !== provider.kind) { Object.assign(provider, providerDefaults(value)); provider.kind = value; state.selectedSettingsModelId = ""; renderProviderEditor(); renderModelEditor(); return; } provider[key] = value; if (key === "id") { state.selectedSettingsProviderId = input.value; renderSettingsProviders(); } }
+
+  function currentSettingsModel() { const provider = currentSettingsProvider(); return provider?.models?.find((item) => item.id === state.selectedSettingsModelId) || null; }
+  function renderModelEditor() {
+    const provider = currentSettingsProvider();
+    if (!provider) { els.settingsModelList.innerHTML = '<div class="provider-empty">请先选择服务商</div>'; els.modelForm.innerHTML = '<div class="provider-empty">选择服务商后配置模型能力。</div>'; return; }
+    provider.models = Array.isArray(provider.models) ? provider.models : [];
+    if (!provider.models.some((item) => item.id === state.selectedSettingsModelId)) state.selectedSettingsModelId = provider.models[0]?.id || "";
+    els.settingsModelList.innerHTML = provider.models.length ? provider.models.map((item) => `<button class="provider-row ${item.id === state.selectedSettingsModelId ? "is-active" : ""}" type="button" data-settings-model="${escape(item.id)}"><strong>${escape(item.name || item.id)}</strong><span>${item.supports_img2img ? "图生图" : "文生图"}</span></button>`).join("") : '<div class="provider-empty">该服务商尚未添加模型</div>';
+    els.settingsModelList.querySelectorAll("[data-settings-model]").forEach((button) => button.addEventListener("click", () => { state.selectedSettingsModelId = button.dataset.settingsModel; renderModelEditor(); }));
+    const model = currentSettingsModel();
+    if (!model) { els.modelForm.innerHTML = '<div class="provider-empty">点击“新增模型”开始配置。</div>'; return; }
+    const schemaText = JSON.stringify(model.parameters || modelPreset(provider.kind), null, 2);
+    els.modelForm.innerHTML = `<h3>${escape(model.name || model.id)}</h3>${modelField("id", "模型 ID", model.id)}${modelField("name", "显示名称", model.name)}${modelToggle("supports_text2img", "支持文生图", model.supports_text2img)}${modelToggle("supports_img2img", "支持图生图", model.supports_img2img, provider.kind === "nai_direct")}${modelToggle("supports_negative_prompt", "支持专用反向提示词", model.supports_negative_prompt, provider.kind === "gemini")}${modelField("max_reference_images", "最大参考图数", model.max_reference_images, "number")}<div class="field field-wide"><label for="modelParametersSchema">参数 schema（JSON）</label><textarea id="modelParametersSchema" data-model-field="parameters" rows="14" spellcheck="false">${escape(schemaText)}</textarea><span class="field-hint">每个字段支持 type、label、default、request_key、min、max、step、choices；未知字段会原样传递。</span></div><div class="provider-editor-actions"><button class="danger-button" id="removeModelButton" type="button">删除模型</button></div>`;
+    els.modelForm.querySelectorAll("[data-model-field]").forEach((input) => { input.addEventListener("input", () => updateModelField(input)); input.addEventListener("change", () => updateModelField(input)); });
+    $("removeModelButton")?.addEventListener("click", async () => { if (!await confirmAction("删除此模型？历史记录不会删除。")) return; provider.models = provider.models.filter((item) => item.id !== model.id); state.selectedSettingsModelId = provider.models[0]?.id || ""; renderModelEditor(); showNotice("已从设置草稿中删除模型，保存全部设置后生效。", "success"); });
+  }
+  function modelField(key, label, value, type = "text") { return `<div class="field"><label>${label}</label><input data-model-field="${key}" type="${type}" value="${escape(value)}" /></div>`; }
+  function modelToggle(key, label, value, disabled = false) { return `<div class="toggle-row"><label>${label}</label><label class="toggle-control"><input data-model-field="${key}" type="checkbox" ${value ? "checked" : ""}${disabled ? " disabled" : ""} /><span aria-hidden="true"></span></label></div>`; }
+  function updateModelField(input) { const model = currentSettingsModel(); if (!model) return; const key = input.dataset.modelField; if (key === "parameters") { try { model.parameters = input.value.trim() ? JSON.parse(input.value) : {}; input.setCustomValidity(""); } catch { input.setCustomValidity("参数 schema 必须是合法 JSON"); } return; } model[key] = input.type === "checkbox" ? input.checked : input.type === "number" ? Number(input.value) : input.value; if (key === "supports_img2img") { model.max_reference_images = model[key] ? Math.max(1, Number(model.max_reference_images) || 1) : 0; renderModelEditor(); } else if (key === "id") { state.selectedSettingsModelId = input.value; renderModelEditor(); } }
   async function testProvider(provider) {
     const button = $("testProviderButton");
     if (button) { button.disabled = true; button.textContent = "测试中…"; }
@@ -305,13 +420,24 @@
   async function addProvider() {
     if (!state.settings && !await loadSettings()) return;
     const id = `provider_${Date.now().toString(36)}`;
-    state.settings.webui.providers.push({ id, name: "新服务商", enabled: true, kind: "openai_images", base_url: "", generate_path: "/v1/images/generations", edit_path: "/v1/images/edits", model: "", api_key: "", custom_headers: "", timeout_seconds: 180, supports_text2img: true, supports_img2img: false, supports_negative_prompt: false, max_reference_images: 1, edit_request_format: "multipart", request_template: "", response_image_path: "" });
-    state.selectedSettingsProviderId = id; renderSettingsProviders(); showNotice("已新增生图服务商，请填写配置后保存。", "success");
+    state.settings.webui.providers.push({ id, name: "新服务商", enabled: true, kind: "openai_images", ...providerDefaults("openai_images"), api_key: "", custom_headers: "", timeout_seconds: 180, models: [] });
+    state.selectedSettingsProviderId = id; state.selectedSettingsModelId = ""; renderSettingsProviders(); showNotice("已新增生图服务商，请填写连接配置并添加模型。", "success");
+  }
+  async function addModel() {
+    if (!state.settings && !await loadSettings()) return;
+    const provider = currentSettingsProvider();
+    if (!provider) { showNotice("请先选择一个服务商，再新增模型。", "error"); return; }
+    provider.models = Array.isArray(provider.models) ? provider.models : [];
+    const base = `model_${Date.now().toString(36)}`;
+    let id = base; let suffix = 1; while (provider.models.some((item) => item.id === id)) id = `${base}_${suffix++}`;
+    provider.models.push({ id, name: "新模型", supports_text2img: true, supports_img2img: false, supports_negative_prompt: provider.kind === "nai_direct", max_reference_images: 0, parameters: modelPreset(provider.kind) });
+    state.selectedSettingsModelId = id; renderModelEditor(); showNotice("已新增模型，请填写能力和参数 schema。", "success");
   }
   async function saveSettings() {
     if (!state.settings && !await loadSettings()) return;
     setError(els.settingsError, "正在保存设置…"); els.saveSettingsButton.disabled = true; els.saveSettingsButton.textContent = "保存中…";
     const webui = state.settings.webui; webui.history = { enabled: els.historyEnabled.checked, retain_reference_images: els.retainReferences.checked, max_records: Number(els.historyRecords.value), max_megabytes: Number(els.historyMegabytes.value) };
+    webui.generation_defaults = { ...(webui.generation_defaults || {}), model_ref: els.settingDefaultModel.value, size: els.settingDefaultSize.value, count: Number(els.settingDefaultCount.value) };
     try {
       await apiPost("settings/save", { settings_revision: webui.ui.settings_revision, base: { enabled: els.settingEnabled.checked, enable_llm_tool: els.settingTool.checked, max_concurrent_generations: Number(els.settingConcurrent.value) }, webui });
       await bootstrap(); await loadSettings(); setError(els.settingsError, ""); showNotice("设置已保存并生效。", "success");
@@ -323,18 +449,19 @@
   function dataUrlToFile(dataUrl, name) { const [head, encoded] = dataUrl.split(",", 2); const type = (head.match(/data:([^;]+)/) || [])[1] || "image/png"; const bytes = Uint8Array.from(atob(encoded), (char) => char.charCodeAt(0)); return new File([bytes], name, { type }); }
   async function exportSelected() { try { const result = await apiPost("gallery/export", { ids: Array.from(state.selectedIds) }); const client = await bridge(); await client.download(result.download_endpoint, {}, result.filename); showNotice("导出文件已开始下载。", "success"); } catch (error) { showNotice(errorMessage(error, "画廊导出失败"), "error"); } }
   async function deleteSelected() { if (!await confirmAction(`永久删除 ${state.selectedIds.size} 条生成记录及其结果图？`)) return; try { await apiPost("gallery/delete", { ids: Array.from(state.selectedIds) }); await loadGallery(); showNotice("所选生成记录已删除。", "success"); } catch (error) { showNotice(errorMessage(error, "生成记录删除失败"), "error"); } }
-  async function useDataUrlAsReference(dataUrl, name) { try { const client = await bridge(); const uploaded = await client.upload("studio/reference/upload", dataUrlToFile(dataUrl, name)); state.references = [uploaded]; state.mode = "img2img"; document.querySelectorAll(".segment").forEach((button) => button.classList.toggle("is-active", button.dataset.mode === "img2img")); renderProviderChoices(); renderReferences(); closeDetail(); switchView("generate"); setError(els.generationError, "已将当前成图作为新的图生图参考图。它不会被当作历史原始参考图。"); } catch (error) { setError(els.generationError, errorMessage(error, "添加参考图失败")); } }
+  async function useDataUrlAsReference(dataUrl, name) { try { const client = await bridge(); const uploaded = await client.upload("studio/reference/upload", dataUrlToFile(dataUrl, name)); state.references = [uploaded]; state.mode = "img2img"; document.querySelectorAll(".segment").forEach((button) => button.classList.toggle("is-active", button.dataset.mode === "img2img")); renderModelChoices(); renderReferences(); closeDetail(); switchView("generate"); setError(els.generationError, "已将当前成图作为新的图生图参考图。它不会被当作历史原始参考图。"); } catch (error) { setError(els.generationError, errorMessage(error, "添加参考图失败")); } }
   function confirmAction(message) { return new Promise((resolve) => { const dialog = $("confirmDialog"); const cancel = $("confirmCancel"); const accept = $("confirmAccept"); $("confirmMessage").textContent = message; dialog.classList.remove("is-hidden"); els.scrim.classList.remove("is-hidden"); accept.focus(); const onKeydown = (event) => { if (event.key === "Escape") finish(false); }; const finish = (value) => { dialog.classList.add("is-hidden"); if (!els.detailDrawer.classList.contains("is-open")) els.scrim.classList.add("is-hidden"); cancel.removeEventListener("click", onCancel); accept.removeEventListener("click", onAccept); document.removeEventListener("keydown", onKeydown); activeConfirmation = null; resolve(value); }; const onCancel = () => finish(false); const onAccept = () => finish(true); activeConfirmation = finish; cancel.addEventListener("click", onCancel); accept.addEventListener("click", onAccept); document.addEventListener("keydown", onKeydown); }); }
 
   function bindEvents() {
     if (eventsBound) return;
     eventsBound = true;
     document.querySelectorAll(".nav-item").forEach((button) => button.addEventListener("click", () => switchView(button.dataset.view)));
-    document.querySelectorAll(".segment").forEach((button) => button.addEventListener("click", () => { state.mode = button.dataset.mode; document.querySelectorAll(".segment").forEach((item) => item.classList.toggle("is-active", item === button)); renderProviderChoices(); }));
+    document.querySelectorAll(".segment").forEach((button) => button.addEventListener("click", () => { state.mode = button.dataset.mode; state.selectedModelRef = ""; state.parameterValues = {}; document.querySelectorAll(".segment").forEach((item) => item.classList.toggle("is-active", item === button)); renderModelChoices(); }));
+    els.modelChoice.addEventListener("change", () => { state.selectedModelRef = els.modelChoice.value; state.parameterValues = {}; renderModelWorkspace(); });
     els.referenceUpload.addEventListener("change", async () => { try { await uploadReferences(els.referenceUpload.files); } catch (error) { setError(els.generationError, errorMessage(error, "上传参考图失败")); } finally { els.referenceUpload.value = ""; } });
     els.generationForm.addEventListener("submit", generate); $("galleryRefresh").addEventListener("click", () => void loadGallery()); els.gallerySearch.addEventListener("change", () => void loadGallery()); els.galleryProvider.addEventListener("change", () => void loadGallery()); els.galleryMode.addEventListener("change", () => void loadGallery());
     $("selectAllButton").addEventListener("click", () => { state.galleryItems.forEach((item) => state.selectedIds.add(item.id)); els.galleryGrid.querySelectorAll("[data-select-id]").forEach((input) => { input.checked = true; }); updateSelection(); }); $("exportButton").addEventListener("click", () => void exportSelected()); $("deleteButton").addEventListener("click", () => void deleteSelected());
-    $("closeDrawer").addEventListener("click", closeDetail); $("closeImagePreview").addEventListener("click", closeImagePreview); els.imagePreview.querySelector("[data-close-image-preview]").addEventListener("click", closeImagePreview); els.previewImage.addEventListener("click", closeImagePreview); els.scrim.addEventListener("click", () => { if (activeConfirmation) activeConfirmation(false); else closeDetail(); }); els.addProviderButton.addEventListener("click", () => void addProvider()); els.saveSettingsButton.addEventListener("click", () => void saveSettings());
+    $("closeDrawer").addEventListener("click", closeDetail); $("closeImagePreview").addEventListener("click", closeImagePreview); els.imagePreview.querySelector("[data-close-image-preview]").addEventListener("click", closeImagePreview); els.previewImage.addEventListener("click", closeImagePreview); els.scrim.addEventListener("click", () => { if (activeConfirmation) activeConfirmation(false); else closeDetail(); }); els.addProviderButton.addEventListener("click", () => void addProvider()); els.addModelButton.addEventListener("click", () => void addModel()); els.saveSettingsButton.addEventListener("click", () => void saveSettings());
     document.addEventListener("keydown", (event) => { if (event.key !== "Escape") return; if (!els.imagePreview.classList.contains("is-hidden")) closeImagePreview(); else if (els.detailDrawer.classList.contains("is-open") && !activeConfirmation) closeDetail(); });
   }
 

@@ -113,3 +113,60 @@ def test_openai_payload_only_includes_negative_prompt_when_enabled() -> None:
     )
     assert "negative_prompt" not in _openai_payload(standard_provider, request)
     assert _openai_payload(custom_provider, request)["negative_prompt"] == "fog"
+
+
+def test_models_are_configured_independently_and_filtered_by_mode() -> None:
+    settings, errors = runtime_settings(
+        {
+            "webui_managed": {
+                "providers": [
+                    {
+                        "id": "domestic",
+                        "name": "国内服务商",
+                        "kind": "custom_json",
+                        "base_url": "https://example.test",
+                        "models": [
+                            {
+                                "id": "draw-text",
+                                "name": "文生图模型",
+                                "supports_text2img": True,
+                                "supports_img2img": False,
+                            },
+                            {
+                                "id": "draw-edit",
+                                "name": "图生图模型",
+                                "supports_text2img": False,
+                                "supports_img2img": True,
+                                "max_reference_images": 3,
+                            },
+                        ],
+                    }
+                ]
+            }
+        }
+    )
+
+    assert errors == []
+    assert [model.id for _, model in settings.models_for_mode("text2img")] == [
+        "draw-text"
+    ]
+    assert [model.id for _, model in settings.models_for_mode("img2img")] == [
+        "draw-edit"
+    ]
+    assert settings.providers[0].get_model("draw-edit").max_reference_images == 3
+
+
+def test_provider_transport_defaults_follow_provider_kind() -> None:
+    provider = ImageProvider.from_mapping(
+        {
+            "id": "gemini",
+            "name": "Gemini",
+            "kind": "gemini",
+            "base_url": "https://example.test",
+            "model": "gemini-image",
+        }
+    )
+
+    assert provider.generate_path == "/v1beta/models/{model}:generateContent"
+    assert provider.edit_path == "/v1beta/models/{model}:generateContent"
+    assert provider.edit_request_format == "json_data_url"

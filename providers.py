@@ -55,6 +55,7 @@ class ProviderExecutor:
         )
         headers = _headers(provider, bearer=True)
         timeout = aiohttp.ClientTimeout(total=provider.timeout_seconds)
+        model = provider.get_model(request.model)
         if request.mode == "img2img" and provider.edit_request_format == "multipart":
             form = aiohttp.FormData()
             form.add_field("model", request.model or provider.model)
@@ -62,7 +63,7 @@ class ProviderExecutor:
             if request.size:
                 form.add_field("size", request.size)
             form.add_field("n", str(request.count))
-            if provider.capabilities.negative_prompt and request.negative_prompt:
+            if model.negative_prompt and request.negative_prompt:
                 form.add_field("negative_prompt", request.negative_prompt)
             for key, value in _safe_parameters(request.parameters).items():
                 form.add_field(key, _form_value(value))
@@ -117,11 +118,30 @@ class ProviderExecutor:
                     }
                 }
             )
+        generation_config: dict[str, Any] = {"responseModalities": ["TEXT", "IMAGE"]}
+        raw_generation_config = request.parameters.get(
+            "generationConfig"
+        ) or request.parameters.get("generation_config")
+        if isinstance(raw_generation_config, dict):
+            generation_config.update(raw_generation_config)
+        image_config: dict[str, Any] = {}
+        aspect_ratio = request.parameters.get(
+            "aspectRatio", request.parameters.get("aspect_ratio")
+        )
+        image_size = request.parameters.get(
+            "imageSize", request.parameters.get("image_size")
+        )
+        if aspect_ratio:
+            image_config["aspectRatio"] = str(aspect_ratio)
+        if image_size:
+            image_config["imageSize"] = str(image_size)
+        if image_config:
+            generation_config["imageConfig"] = image_config
         payload: dict[str, Any] = {
             "contents": [{"role": "user", "parts": parts}],
-            "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
+            "generationConfig": generation_config,
         }
-        if request.size:
+        if request.size and not image_config:
             payload["contents"][0]["parts"][0]["text"] += (
                 f"\n\nTarget image size: {request.size}."
             )
@@ -147,7 +167,10 @@ class ProviderExecutor:
             "model": request.model or provider.model,
             "size": request.size or "1024x1024",
         }
-        if provider.capabilities.negative_prompt and request.negative_prompt:
+        if (
+            provider.get_model(request.model).negative_prompt
+            and request.negative_prompt
+        ):
             query["negative"] = request.negative_prompt
         for key, value in _safe_parameters(request.parameters).items():
             query[str(key)] = str(value)
@@ -271,7 +294,7 @@ def _openai_payload(
     }
     if request.size:
         payload["size"] = request.size
-    if provider.capabilities.negative_prompt and request.negative_prompt:
+    if provider.get_model(request.model).negative_prompt and request.negative_prompt:
         payload["negative_prompt"] = request.negative_prompt
     payload.update(_safe_parameters(request.parameters))
     return payload

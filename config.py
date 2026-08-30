@@ -7,8 +7,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from .models import ImageProvider
-
+from .models import ImageModel, ImageProvider
 
 SUPPORTED_PROVIDER_KINDS = frozenset(
     {"openai_images", "gemini", "nai_direct", "custom_json"}
@@ -38,6 +37,7 @@ class RuntimeSettings:
     default_count: int
     history: HistorySettings
     revision: int
+    default_model_ref: str = ""
 
     def provider(self, provider_id: str) -> ImageProvider | None:
         """Return an enabled provider by stable ID."""
@@ -56,6 +56,35 @@ class RuntimeSettings:
             if provider.enabled and provider.capabilities.supports(mode)
         ]
 
+    def models_for_mode(self, mode: str) -> list[tuple[ImageProvider, ImageModel]]:
+        """Return enabled model entries that support the requested mode."""
+
+        return [
+            (provider, model)
+            for provider in self.providers
+            if provider.enabled
+            for model in provider.models
+            if model.supports(mode)
+        ]
+
+    def find_model(
+        self, model_ref: str, provider_id: str, mode: str
+    ) -> tuple[ImageProvider, ImageModel] | None:
+        """Resolve a model reference, preferring an explicitly selected provider."""
+
+        requested_ref = str(model_ref or "").strip()
+        requested_provider = str(provider_id or "").strip()
+        candidates = self.models_for_mode(mode)
+        if requested_provider:
+            candidates = [
+                item for item in candidates if item[0].id == requested_provider
+            ]
+        if requested_ref:
+            for provider, model in candidates:
+                if requested_ref in {model.id, f"{provider.id}:{model.id}"}:
+                    return provider, model
+        return candidates[0] if candidates else None
+
 
 def default_webui_settings() -> dict[str, Any]:
     """Return defaults for the WebUI-owned portion of plugin configuration."""
@@ -70,6 +99,7 @@ def default_webui_settings() -> dict[str, Any]:
         },
         "generation_defaults": {
             "provider_id": "",
+            "model_ref": "",
             "size": "1024x1024",
             "count": 1,
         },
@@ -116,8 +146,13 @@ def normalize_webui_settings(value: Any) -> tuple[dict[str, Any], list[str]]:
             errors.append(f"Provider {provider.id} 的 kind 不受支持")
         if not provider.base_url:
             errors.append(f"Provider {provider.id} 缺少 base_url")
-        if not provider.model:
-            errors.append(f"Provider {provider.id} 缺少 model")
+        if not provider.models:
+            errors.append(f"Provider {provider.id} 至少需要一个模型")
+        model_ids: set[str] = set()
+        for model in provider.models:
+            if model.id in model_ids:
+                errors.append(f"Provider {provider.id} 的模型 id 重复: {model.id}")
+            model_ids.add(model.id)
         if provider.edit_request_format not in {"multipart", "json_data_url"}:
             errors.append(f"Provider {provider.id} 的 edit_request_format 无效")
         normalized_providers.append(provider.public_dict())
@@ -142,6 +177,7 @@ def normalize_webui_settings(value: Any) -> tuple[dict[str, Any], list[str]]:
         else {}
     )
     defaults["provider_id"] = str(defaults.get("provider_id") or "").strip()[:64]
+    defaults["model_ref"] = str(defaults.get("model_ref") or "").strip()[:240]
     defaults["size"] = str(defaults.get("size") or "1024x1024").strip()[:40]
     defaults["count"] = max(1, min(4, _as_int(defaults.get("count"), 1)))
     merged["generation_defaults"] = defaults
@@ -165,6 +201,7 @@ def runtime_settings(config: dict[str, Any]) -> tuple[RuntimeSettings, list[str]
         ),
         providers=providers,
         default_provider_id=webui["generation_defaults"]["provider_id"],
+        default_model_ref=webui["generation_defaults"]["model_ref"],
         default_size=webui["generation_defaults"]["size"],
         default_count=webui["generation_defaults"]["count"],
         history=HistorySettings(

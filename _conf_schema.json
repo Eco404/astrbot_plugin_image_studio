@@ -40,17 +40,25 @@
           "base_url": {"type": "string", "default": ""},
           "generate_path": {"type": "string", "default": "/v1/images/generations"},
           "edit_path": {"type": "string", "default": "/v1/images/edits"},
-          "model": {"type": "string", "default": ""},
           "api_key": {"type": "string", "default": ""},
           "custom_headers": {"type": "text", "default": ""},
           "timeout_seconds": {"type": "int", "default": 180},
-          "supports_text2img": {"type": "bool", "default": true},
-          "supports_img2img": {"type": "bool", "default": false},
-          "max_reference_images": {"type": "int", "default": 1},
-          "supports_negative_prompt": {"type": "bool", "default": false},
           "edit_request_format": {"type": "string", "default": "multipart"},
           "request_template": {"type": "text", "default": ""},
-          "response_image_path": {"type": "string", "default": ""}
+          "response_image_path": {"type": "string", "default": ""},
+          "models": {
+            "type": "list",
+            "default": [],
+            "items": {
+              "id": {"type": "string", "default": ""},
+              "name": {"type": "string", "default": ""},
+              "supports_text2img": {"type": "bool", "default": true},
+              "supports_img2img": {"type": "bool", "default": false},
+              "supports_negative_prompt": {"type": "bool", "default": false},
+              "max_reference_images": {"type": "int", "default": 1},
+              "parameters": {"type": "object", "default": {}}
+            }
+          }
         }
       },
       "history": {
@@ -66,6 +74,7 @@
         "type": "object",
         "items": {
           "provider_id": {"type": "string", "default": ""},
+          "model_ref": {"type": "string", "default": ""},
           "size": {"type": "string", "default": "1024x1024"},
           "count": {"type": "int", "default": 1}
         }

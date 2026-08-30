@@ -11,7 +11,13 @@ from typing import Any
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 
 from .config import RuntimeSettings
-from .models import GenerationRequest, GenerationResult, ReferenceImage
+from .models import (
+    GenerationRequest,
+    GenerationResult,
+    ImageModel,
+    ImageProvider,
+    ReferenceImage,
+)
 from .providers import ProviderExecutor
 from .storage import GenerationStore, detect_mime_type
 
@@ -44,6 +50,7 @@ class ImageGenerationService:
         provider_id: str,
         prompt: str,
         negative_prompt: str = "",
+        model_ref: str = "",
         model: str = "",
         size: str = "",
         count: Any = 1,
@@ -58,7 +65,8 @@ class ImageGenerationService:
             provider_id: Requested provider ID, or an empty string for default.
             prompt: Original image prompt.
             negative_prompt: Optional negative prompt.
-            model: Optional one-request model override.
+            model_ref: Stable provider/model reference selected by the WebUI.
+            model: Backward-compatible model ID override.
             size: Optional one-request size override.
             count: Requested image count.
             parameters: Provider-safe advanced request parameters.
@@ -77,11 +85,13 @@ class ImageGenerationService:
         if not settings.enabled:
             raise ValueError("Image Studio 已关闭")
         normalized_mode = _mode(mode)
-        provider = self._select_provider(settings, provider_id, normalized_mode)
+        provider, selected_model = self._select_model(
+            settings, provider_id, model_ref, model, normalized_mode
+        )
         normalized_prompt = str(prompt or "").strip()[:6000]
         if not normalized_prompt:
             raise ValueError("提示词不能为空")
-        normalized_refs = references[: provider.capabilities.max_reference_images]
+        normalized_refs = references[: selected_model.max_reference_images]
         if normalized_mode == "img2img" and not normalized_refs:
             raise ValueError("图生图需要至少一张参考图")
         request = GenerationRequest(
@@ -90,13 +100,13 @@ class ImageGenerationService:
             prompt=normalized_prompt,
             negative_prompt=(
                 str(negative_prompt or "").strip()[:4000]
-                if provider.capabilities.negative_prompt
+                if selected_model.negative_prompt
                 else ""
             ),
-            model=str(model or provider.model).strip()[:160],
+            model=selected_model.id,
             size=_size(size or settings.default_size),
             count=max(1, min(4, _as_int(count, settings.default_count))),
-            parameters=_parameters(parameters),
+            parameters=_parameters_for_model(parameters, selected_model),
             references=normalized_refs,
             source=source if source in {"webui", "command", "llm_tool"} else "webui",
         )
@@ -168,12 +178,18 @@ class ImageGenerationService:
         )
         staged = await self.store.stage_generation_references(generation_id)
         provider = self.settings.provider(str(detail.get("provider_id") or ""))
-        compatible = self.settings.providers_for_mode(
+        compatible = self.settings.models_for_mode(
             str(detail.get("mode") or "text2img")
+        )
+        model_ref = (
+            f"{detail.get('provider_id')}:{detail.get('model')}"
+            if provider and detail.get("model")
+            else ""
         )
         draft = {
             "mode": detail.get("mode"),
             "provider_id": detail.get("provider_id") if provider else "",
+            "model_ref": model_ref if provider else "",
             "model": detail.get("model"),
             "prompt": detail.get("original_prompt"),
             "negative_prompt": parameters.get("negative_prompt", ""),
@@ -183,13 +199,24 @@ class ImageGenerationService:
             "references": staged,
             "provider_available": provider is not None,
             "reference_available": bool(staged),
-            "candidates": [item.public_dict() for item in compatible],
+            "candidates": [
+                {
+                    **model.public_dict(),
+                    "provider_id": provider_item.id,
+                    "provider_name": provider_item.name,
+                    "provider_kind": provider_item.kind,
+                    "model_ref": f"{provider_item.id}:{model.id}",
+                }
+                for provider_item, model in compatible
+            ],
         }
         if detail.get("mode") == "img2img" and not staged:
             draft["notice"] = (
                 "历史参考图未保留，已填入全部可恢复参数。请上传新参考图，或在生图页明确选择当前成图作为参考图。"
             )
-        elif provider is None:
+        elif provider is None or not any(
+            item.id == detail.get("model") for item in provider.models
+        ):
             draft["notice"] = (
                 "历史 Provider 已不可用。请选择下方支持相同模式的 Provider 后再生成。"
             )
@@ -197,19 +224,26 @@ class ImageGenerationService:
             draft["notice"] = "已填入历史生成参数。"
         return draft
 
-    def _select_provider(self, settings: RuntimeSettings, provider_id: str, mode: str):
-        requested_id = str(provider_id or settings.default_provider_id or "").strip()
-        if requested_id:
-            provider = settings.provider(requested_id)
-            if provider is None:
-                raise ValueError("所选 Provider 不存在、已禁用或配置不完整")
-            if not provider.capabilities.supports(mode):
-                raise ValueError("所选 Provider 不支持当前生图模式")
-            return provider
-        candidates = settings.providers_for_mode(mode)
-        if not candidates:
-            raise ValueError("当前模式没有可用 Provider，请先在设置页完成配置")
-        return candidates[0]
+    def _select_model(
+        self,
+        settings: RuntimeSettings,
+        provider_id: str,
+        model_ref: str,
+        model_id: str,
+        mode: str,
+    ) -> tuple[ImageProvider, ImageModel]:
+        """Resolve the selected model and its owning provider."""
+
+        requested_ref = model_ref or model_id or settings.default_model_ref
+        requested_provider = provider_id or settings.default_provider_id
+        selected = settings.find_model(requested_ref, requested_provider, mode)
+        if selected is None and model_ref:
+            raise ValueError("所选模型不存在、已禁用或不支持当前生图模式")
+        if selected is None and requested_provider:
+            selected = settings.find_model(requested_ref, "", mode)
+        if selected is None:
+            raise ValueError("当前模式没有可用模型，请先在设置页完成服务商和模型配置")
+        return selected
 
 
 def _mode(value: str) -> str:
@@ -251,6 +285,22 @@ def _parameters(value: Any) -> dict[str, Any]:
             continue
         clean[name] = item
     return clean
+
+
+def _parameters_for_model(value: Any, model: ImageModel) -> dict[str, Any]:
+    """Map friendly schema names to provider request keys at the trust boundary."""
+
+    raw = _parameters(value)
+    mapped: dict[str, Any] = {}
+    for key, item in raw.items():
+        descriptor = model.parameters.get(key)
+        request_key = (
+            str(descriptor.get("request_key") or key)
+            if isinstance(descriptor, dict)
+            else key
+        )
+        mapped[request_key[:96]] = item
+    return mapped
 
 
 def _as_int(value: Any, default: int) -> int:

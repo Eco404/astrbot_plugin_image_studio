@@ -2,11 +2,83 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-
 GenerationMode = Literal["text2img", "img2img"]
+
+
+COMMON_MODEL_PARAMETERS: dict[str, dict[str, Any]] = {
+    "size": {
+        "type": "text",
+        "label": "尺寸",
+        "default": "1024x1024",
+        "request_key": "size",
+    },
+    "count": {
+        "type": "number",
+        "label": "数量",
+        "default": 1,
+        "min": 1,
+        "max": 4,
+        "request_key": "count",
+    },
+}
+
+PROVIDER_TRANSPORT_DEFAULTS: dict[str, dict[str, str]] = {
+    "openai_images": {
+        "generate_path": "/images/generations",
+        "edit_path": "/images/edits",
+        "edit_request_format": "multipart",
+    },
+    "gemini": {
+        "generate_path": "/v1beta/models/{model}:generateContent",
+        "edit_path": "/v1beta/models/{model}:generateContent",
+        "edit_request_format": "json_data_url",
+    },
+    "nai_direct": {
+        "generate_path": "/generate",
+        "edit_path": "",
+        "edit_request_format": "json_data_url",
+    },
+    "custom_json": {
+        "generate_path": "/v1/images/generations",
+        "edit_path": "/v1/images/edits",
+        "edit_request_format": "json_data_url",
+    },
+}
+
+
+@dataclass(frozen=True, slots=True)
+class ImageModel:
+    """A model entry with model-specific capabilities and parameter schema."""
+
+    id: str
+    name: str
+    text2img: bool
+    img2img: bool
+    negative_prompt: bool
+    max_reference_images: int
+    parameters: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    def supports(self, mode: GenerationMode) -> bool:
+        """Return whether the model supports a requested generation mode."""
+
+        return self.text2img if mode == "text2img" else self.img2img
+
+    def public_dict(self) -> dict[str, Any]:
+        """Return the model descriptor consumed by the WebUI."""
+
+        return {
+            "id": self.id,
+            "name": self.name,
+            "supports_text2img": self.text2img,
+            "supports_img2img": self.img2img,
+            "supports_negative_prompt": self.negative_prompt,
+            "max_reference_images": self.max_reference_images,
+            "parameters": self.parameters,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,17 +123,52 @@ class ImageProvider:
     custom_headers: str
     timeout_seconds: int
     capabilities: ProviderCapabilities
+    models: tuple[ImageModel, ...] = ()
     edit_request_format: str = "multipart"
     request_template: str = ""
     response_image_path: str = ""
 
     @classmethod
-    def from_mapping(cls, value: dict[str, Any]) -> "ImageProvider":
+    def from_mapping(cls, value: dict[str, Any]) -> ImageProvider:
         """Create a bounded provider value from persisted configuration."""
 
         kind = _text(value.get("kind"), 32) or "openai_images"
-        max_refs = max(0, min(8, _as_int(value.get("max_reference_images"), 1)))
-        img2img = _as_bool(value.get("supports_img2img"), False)
+        transport_defaults = PROVIDER_TRANSPORT_DEFAULTS.get(
+            kind, PROVIDER_TRANSPORT_DEFAULTS["custom_json"]
+        )
+        legacy_model_id = _text(value.get("model"), 160)
+        max_refs = max(1, min(8, _as_int(value.get("max_reference_images"), 1)))
+        img2img = kind != "nai_direct" and _as_bool(
+            value.get("supports_img2img"), False
+        )
+        legacy_model = ImageModel(
+            id=legacy_model_id,
+            name=legacy_model_id,
+            text2img=_as_bool(value.get("supports_text2img"), True),
+            img2img=img2img,
+            negative_prompt=(
+                False
+                if kind == "gemini"
+                else _as_bool(
+                    value.get("supports_negative_prompt"), kind == "nai_direct"
+                )
+            ),
+            max_reference_images=max_refs if img2img else 0,
+            parameters=_normalize_parameters(value.get("parameters")),
+        )
+        raw_models = value.get("models")
+        models = (
+            tuple(
+                _model_from_mapping(item, kind)
+                for item in raw_models[:32]
+                if isinstance(item, dict) and _text(item.get("id"), 160)
+            )
+            if isinstance(raw_models, list)
+            else ()
+        )
+        if not models and legacy_model_id:
+            models = (legacy_model,)
+        primary_model = models[0] if models else legacy_model
         return cls(
             id=_text(value.get("id"), 64),
             name=_text(value.get("name"), 96),
@@ -69,25 +176,34 @@ class ImageProvider:
             kind=kind,
             base_url=_text(value.get("base_url"), 500).rstrip("/"),
             generate_path=_normalized_path(
-                value.get("generate_path"), "/v1/images/generations"
+                value.get("generate_path"), transport_defaults["generate_path"]
             ),
-            edit_path=_normalized_path(value.get("edit_path"), "/v1/images/edits"),
-            model=_text(value.get("model"), 160),
+            edit_path=_normalized_path(
+                value.get("edit_path"), transport_defaults["edit_path"]
+            ),
+            model=primary_model.id,
             api_key=str(value.get("api_key") or ""),
             custom_headers=str(value.get("custom_headers") or ""),
             timeout_seconds=max(
                 15, min(600, _as_int(value.get("timeout_seconds"), 180))
             ),
             capabilities=ProviderCapabilities(
-                text2img=_as_bool(value.get("supports_text2img"), True),
-                img2img=img2img,
-                max_reference_images=max_refs if img2img else 0,
-                negative_prompt=_as_bool(
-                    value.get("supports_negative_prompt"), kind == "nai_direct"
+                text2img=any(item.text2img for item in models)
+                if models
+                else primary_model.text2img,
+                img2img=any(item.img2img for item in models)
+                if models
+                else primary_model.img2img,
+                max_reference_images=max(
+                    (item.max_reference_images for item in models), default=0
                 ),
+                negative_prompt=any(item.negative_prompt for item in models)
+                if models
+                else primary_model.negative_prompt,
             ),
+            models=models,
             edit_request_format=_text(value.get("edit_request_format"), 24)
-            or "multipart",
+            or transport_defaults["edit_request_format"],
             request_template=str(value.get("request_template") or ""),
             response_image_path=_text(value.get("response_image_path"), 240),
         )
@@ -114,7 +230,28 @@ class ImageProvider:
             "edit_request_format": self.edit_request_format,
             "request_template": self.request_template,
             "response_image_path": self.response_image_path,
+            "models": [item.public_dict() for item in self.models],
         }
+
+    def get_model(self, model_id: str = "") -> ImageModel:
+        """Return a configured model, falling back to the provider's first model."""
+
+        requested = str(model_id or "").strip()
+        for model in self.models:
+            if model.id == requested:
+                return model
+        return (
+            self.models[0]
+            if self.models
+            else ImageModel(
+                id=self.model,
+                name=self.model,
+                text2img=self.capabilities.text2img,
+                img2img=self.capabilities.img2img,
+                negative_prompt=self.capabilities.negative_prompt,
+                max_reference_images=self.capabilities.max_reference_images,
+            )
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,4 +329,55 @@ def _text(value: Any, limit: int) -> str:
 
 def _normalized_path(value: Any, default: str) -> str:
     path = _text(value, 300) or default
+    if not path:
+        return ""
     return path if path.startswith("/") else f"/{path}"
+
+
+def _normalize_parameters(value: Any) -> dict[str, dict[str, Any]]:
+    """Normalize model parameter descriptors while preserving unknown fields."""
+
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            value = None
+    if not isinstance(value, dict):
+        return dict(COMMON_MODEL_PARAMETERS)
+    result: dict[str, dict[str, Any]] = {}
+    for key, descriptor in value.items():
+        name = _text(key, 64)
+        if not name or not isinstance(descriptor, dict):
+            continue
+        item = dict(descriptor)
+        item["type"] = _text(item.get("type"), 16) or "text"
+        item["label"] = _text(item.get("label"), 96) or name
+        item["request_key"] = _text(item.get("request_key"), 96) or name
+        result[name] = item
+    if not result:
+        return dict(COMMON_MODEL_PARAMETERS)
+    return result
+
+
+def _model_from_mapping(value: dict[str, Any], kind: str) -> ImageModel:
+    """Create a model descriptor from a provider-owned model mapping."""
+
+    model_id = _text(value.get("id"), 160)
+    img2img = kind != "nai_direct" and _as_bool(value.get("supports_img2img"), False)
+    return ImageModel(
+        id=model_id,
+        name=_text(value.get("name"), 160) or model_id,
+        text2img=_as_bool(value.get("supports_text2img"), True),
+        img2img=img2img,
+        negative_prompt=(
+            False
+            if kind == "gemini"
+            else _as_bool(value.get("supports_negative_prompt"), kind == "nai_direct")
+        ),
+        max_reference_images=max(
+            1, min(8, _as_int(value.get("max_reference_images"), 1))
+        )
+        if img2img
+        else 0,
+        parameters=_normalize_parameters(value.get("parameters")),
+    )

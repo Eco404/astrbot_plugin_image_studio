@@ -23,7 +23,7 @@
 
     <section class="workspace">
       <header class="topbar glass">
-        <div><h1 id="pageTitle">生图</h1><p id="pageSubtitle">选择模式和生图服务商后开始创作</p></div>
+        <div><h1 id="pageTitle">生图</h1><p id="pageSubtitle">选择模式和模型后开始创作</p></div>
         <div class="topbar-status" id="providerStatus"></div>
       </header>
       <div class="app-notice is-hidden" id="appNotice" role="status" aria-live="polite">
@@ -36,14 +36,13 @@
           <button class="segment is-active" data-mode="text2img" type="button">文生图</button>
           <button class="segment" data-mode="img2img" type="button">图生图</button>
         </div>
-        <div id="providerChoices" class="provider-choices" aria-label="生图服务商选择"></div>
+        <div class="model-select-row"><label for="modelChoice">模型</label><select id="modelChoice" aria-label="选择生图模型" disabled><option value="">请先选择模式</option></select><span class="model-provider" id="modelProvider"></span></div>
+        <fieldset id="generatorWorkspace" class="generator-workspace" disabled>
         <div class="generator-layout">
           <form class="generator-form glass" id="generationForm">
             <div class="field field-wide"><label for="prompt">提示词</label><textarea id="prompt" rows="6" maxlength="6000" placeholder="描述希望生成的画面" required></textarea></div>
             <div class="field field-wide" id="negativePromptField"><label for="negativePrompt">反向提示词</label><textarea id="negativePrompt" rows="2" maxlength="4000" placeholder="可选"></textarea><span class="field-hint" id="negativePromptHint"></span></div>
-            <div class="field"><label for="model">模型</label><input id="model" maxlength="160" placeholder="使用服务商默认模型" /></div>
-            <div class="field"><label for="size">尺寸</label><input id="size" value="1024x1024" maxlength="40" /></div>
-            <div class="field"><label for="count">数量</label><input id="count" type="number" value="1" min="1" max="4" /></div>
+            <div class="model-parameters field-wide" id="modelParameters"></div>
             <div class="field field-wide is-hidden" id="referenceField">
               <label for="referenceUpload">参考图</label>
               <div class="upload-row"><input id="referenceUpload" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple /><span>最多使用当前服务商支持的数量</span></div>
@@ -63,6 +62,7 @@
             <div class="result-grid" id="resultGrid"></div>
           </section>
         </div>
+        </fieldset>
       </section>
 
       <section class="view" id="galleryView">
@@ -92,10 +92,20 @@
             <div class="field"><label for="historyRecords">最大记录数（-1 表示不限）</label><input id="historyRecords" type="number" min="-1" max="100000" /></div>
             <div class="field"><label for="historyMegabytes">最大图片容量 MB（0 表示不限）</label><input id="historyMegabytes" type="number" min="0" max="10240" /></div>
           </section>
+          <section class="settings-panel glass">
+            <div class="section-heading"><div><h2>默认值</h2><p>生图页面打开时使用的默认模型和基础参数。</p></div></div>
+            <div class="field"><label for="settingDefaultModel">默认模型</label><select id="settingDefaultModel"><option value="">自动选择第一个可用模型</option></select></div>
+            <div class="field"><label for="settingDefaultSize">默认尺寸</label><input id="settingDefaultSize" value="1024x1024" maxlength="40" /></div>
+            <div class="field"><label for="settingDefaultCount">默认数量</label><input id="settingDefaultCount" type="number" min="1" max="4" value="1" /></div>
+          </section>
         </div>
         <section class="provider-settings glass">
-          <div class="section-heading"><div><h2>生图服务商</h2><p>密钥和自定义请求头按当前单用户 WebUI 约定直接显示。</p></div><button class="primary-button" id="addProviderButton" type="button">新增服务商</button></div>
+          <div class="section-heading"><div><h2>生图服务商</h2><p>这里只配置连接方式、地址和鉴权；模型能力在下方单独配置。</p></div><button class="primary-button" id="addProviderButton" type="button">新增服务商</button></div>
           <div class="provider-settings-layout"><div class="provider-list" id="settingsProviderList"></div><form id="providerForm" class="provider-editor"></form></div>
+        </section>
+        <section class="model-settings glass">
+          <div class="section-heading"><div><h2>模型配置</h2><p>同一服务商可以配置多个模型，每个模型独立声明模式、参考图和参数。</p></div><button class="primary-button" id="addModelButton" type="button">新增模型</button></div>
+          <div class="model-settings-layout"><div class="model-list" id="settingsModelList"></div><form id="modelForm" class="model-editor"></form></div>
         </section>
         <div class="settings-savebar"><span class="inline-error" id="settingsError" role="alert"></span><button class="primary-button" id="saveSettingsButton" type="button">保存全部设置</button></div>
       </section>

@@ -148,6 +148,63 @@ def test_service_drops_negative_prompt_for_unsupported_provider(tmp_path) -> Non
     asyncio.run(run())
 
 
+def test_service_maps_model_schema_parameter_names(tmp_path) -> None:
+    async def run() -> None:
+        store = GenerationStore(tmp_path)
+        await store.initialize()
+        provider = ImageProvider.from_mapping(
+            {
+                "id": "custom",
+                "name": "Custom",
+                "kind": "custom_json",
+                "base_url": "https://example.test",
+                "models": [
+                    {
+                        "id": "draw-v2",
+                        "parameters": {
+                            "guidance": {
+                                "type": "number",
+                                "request_key": "cfg_scale",
+                            }
+                        },
+                    }
+                ],
+            }
+        )
+        captured = {}
+
+        class CapturingExecutor:
+            async def generate(self, _provider, request):
+                captured["request"] = request
+                return (GeneratedImage(PNG, "image/png"),)
+
+        service = ImageGenerationService(
+            settings=RuntimeSettings(
+                True,
+                True,
+                1,
+                (provider,),
+                "custom",
+                "1024x1024",
+                1,
+                HistorySettings(False, 0, 0, False),
+                0,
+            ),
+            executor=CapturingExecutor(),
+            store=store,
+        )
+        await service.generate(
+            mode="text2img",
+            provider_id="custom",
+            model_ref="custom:draw-v2",
+            prompt="a lake",
+            parameters={"guidance": 6},
+        )
+        assert captured["request"].parameters["cfg_scale"] == 6
+
+    asyncio.run(run())
+
+
 def test_export_download_uses_standard_file_response(tmp_path) -> None:
     archive_path = tmp_path / "image-studio.zip"
     archive_path.write_bytes(b"PK\x03\x04test")

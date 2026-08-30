@@ -11,7 +11,6 @@ from typing import Any
 
 import aiohttp
 import mcp
-
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Image, Plain
@@ -24,7 +23,6 @@ from .models import ImageProvider
 from .providers import ProviderError, ProviderExecutor
 from .service import ImageGenerationService
 from .storage import GenerationStore, detect_mime_type, image_data_url
-
 
 PLUGIN_NAME = "astrbot_plugin_image_gen"
 PAGE_PREFIX = f"/{PLUGIN_NAME}"
@@ -185,6 +183,7 @@ class ImageStudioPlugin(Star):
                 "enabled": self._settings.enabled,
                 "defaults": {
                     "provider_id": self._settings.default_provider_id,
+                    "model_ref": self._settings.default_model_ref,
                     "size": self._settings.default_size,
                     "count": self._settings.default_count,
                 },
@@ -192,6 +191,18 @@ class ImageStudioPlugin(Star):
                     provider.public_dict()
                     for provider in self._settings.providers
                     if provider.enabled
+                ],
+                "models": [
+                    {
+                        **model.public_dict(),
+                        "provider_id": provider.id,
+                        "provider_name": provider.name,
+                        "provider_kind": provider.kind,
+                        "model_ref": f"{provider.id}:{model.id}",
+                    }
+                    for provider in self._settings.providers
+                    if provider.enabled
+                    for model in provider.models
                 ],
                 "modes": ["text2img", "img2img"],
             }
@@ -294,6 +305,7 @@ class ImageStudioPlugin(Star):
                 provider_id=str(body.get("provider_id") or ""),
                 prompt=str(body.get("prompt") or ""),
                 negative_prompt=str(body.get("negative_prompt") or ""),
+                model_ref=str(body.get("model_ref") or ""),
                 model=str(body.get("model") or ""),
                 size=str(body.get("size") or ""),
                 count=body.get("count", 1),
@@ -310,14 +322,15 @@ class ImageStudioPlugin(Star):
         if not isinstance(body, dict) or not isinstance(body.get("provider"), dict):
             return error_response("需要 provider 配置", status_code=400)
         provider = ImageProvider.from_mapping(body["provider"])
-        if not provider.id or not provider.base_url or not provider.model:
+        test_model = next((item for item in provider.models if item.text2img), None)
+        if not provider.id or not provider.base_url or test_model is None:
             return error_response(
-                "Provider 需要 id、base_url 和 model", status_code=400
+                "Provider 需要 id、base_url 和至少一个支持文生图的模型", status_code=400
             )
         try:
             result = await self._service_or_raise().executor.generate(
                 provider,
-                self._test_request(provider.id, provider.model),
+                self._test_request(provider.id, test_model.id),
             )
         except (ValueError, ProviderError) as exc:
             return error_response(str(exc), status_code=400)
@@ -556,6 +569,7 @@ def _result_payload(result) -> dict[str, Any]:
         "generation_id": result.generation_id,
         "provider_id": result.provider.id,
         "provider_name": result.provider.name,
+        "model_ref": f"{result.provider.id}:{result.request.model}",
         "model": result.request.model,
         "mode": result.request.mode,
         "elapsed_ms": result.elapsed_ms,
