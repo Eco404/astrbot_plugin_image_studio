@@ -8,7 +8,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import sqlite3
 import time
 import uuid
@@ -18,7 +17,6 @@ from typing import Any
 from .config import HistorySettings
 from .models import GeneratedImage, GenerationRequest, ImageProvider, ReferenceImage
 
-
 _IMAGE_SUFFIXES = {
     "image/png": ".png",
     "image/jpeg": ".jpg",
@@ -26,6 +24,7 @@ _IMAGE_SUFFIXES = {
     "image/gif": ".gif",
 }
 _SAFE_ID_RE = re.compile(r"^[a-f0-9]{32}$")
+_SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 
 
 class GenerationStore:
@@ -34,9 +33,8 @@ class GenerationStore:
     def __init__(self, data_dir: Path) -> None:
         self.data_dir = data_dir.resolve()
         self.history_dir = self.data_dir / "history"
-        self.images_dir = self.history_dir / "images"
+        self.assets_dir = self.history_dir / "assets"
         self.thumbnails_dir = self.history_dir / "thumbnails"
-        self.references_dir = self.history_dir / "references"
         self.staging_dir = self.data_dir / "staging_references"
         self.exports_dir = self.data_dir / "exports"
         self.db_path = self.data_dir / "history.sqlite3"
@@ -50,9 +48,8 @@ class GenerationStore:
     def _initialize_sync(self) -> None:
         for directory in (
             self.data_dir,
-            self.images_dir,
+            self.assets_dir,
             self.thumbnails_dir,
-            self.references_dir,
             self.staging_dir,
             self.exports_dir,
         ):
@@ -76,31 +73,42 @@ class GenerationStore:
                     elapsed_ms INTEGER NOT NULL,
                     error_message TEXT NOT NULL DEFAULT ''
                 );
+                CREATE TABLE IF NOT EXISTS image_assets (
+                    id TEXT PRIMARY KEY,
+                    path TEXT NOT NULL UNIQUE,
+                    mime_type TEXT NOT NULL,
+                    size_bytes INTEGER NOT NULL,
+                    created_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS image_thumbnails (
+                    asset_id TEXT PRIMARY KEY REFERENCES image_assets(id) ON DELETE CASCADE,
+                    path TEXT NOT NULL UNIQUE,
+                    mime_type TEXT NOT NULL,
+                    size_bytes INTEGER NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS generation_images (
                     id TEXT PRIMARY KEY,
                     generation_id TEXT NOT NULL REFERENCES generations(id) ON DELETE CASCADE,
                     ordinal INTEGER NOT NULL,
-                    path TEXT NOT NULL,
-                    thumbnail_path TEXT NOT NULL,
-                    mime_type TEXT NOT NULL,
-                    size_bytes INTEGER NOT NULL,
-                    sha256 TEXT NOT NULL
+                    asset_id TEXT NOT NULL REFERENCES image_assets(id)
                 );
                 CREATE TABLE IF NOT EXISTS generation_references (
                     id TEXT PRIMARY KEY,
                     generation_id TEXT NOT NULL REFERENCES generations(id) ON DELETE CASCADE,
                     ordinal INTEGER NOT NULL,
                     filename TEXT NOT NULL,
-                    path TEXT NOT NULL,
                     mime_type TEXT NOT NULL,
                     size_bytes INTEGER NOT NULL,
                     available INTEGER NOT NULL DEFAULT 1,
-                    deleted_at REAL
+                    deleted_at REAL,
+                    asset_id TEXT REFERENCES image_assets(id)
                 );
                 CREATE INDEX IF NOT EXISTS idx_generations_created_at ON generations(created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_generations_provider ON generations(provider_id);
                 CREATE INDEX IF NOT EXISTS idx_generation_images_generation ON generation_images(generation_id);
                 CREATE INDEX IF NOT EXISTS idx_generation_references_generation ON generation_references(generation_id);
+                CREATE INDEX IF NOT EXISTS idx_generation_images_asset ON generation_images(asset_id);
+                CREATE INDEX IF NOT EXISTS idx_generation_references_asset ON generation_references(asset_id);
                 """
             )
             try:
@@ -110,6 +118,9 @@ class GenerationStore:
                 )
             except sqlite3.OperationalError:
                 pass
+        self._purge_unreferenced_assets_sync()
+        self._cleanup_orphaned_asset_files_sync()
+        self._cleanup_orphaned_thumbnails_sync()
 
     async def stage_reference(
         self,
@@ -223,54 +234,34 @@ class GenerationStore:
     ) -> str:
         generation_id = uuid.uuid4().hex
         created_at = time.time()
-        image_rows: list[tuple[str, int, str, str, str, int, str]] = []
-        reference_rows: list[tuple[str, int, str, str, str, int, int]] = []
-        generation_root = self.images_dir / generation_id
-        reference_root = self.references_dir / generation_id
+        assets: dict[str, dict[str, Any]] = {}
+        thumbnails: dict[str, dict[str, Any]] = {}
+        image_rows: list[tuple[str, int, str]] = []
+        reference_rows: list[tuple[str, int, str, str, int, int, str]] = []
         try:
             for ordinal, image in enumerate(images):
                 image_id = uuid.uuid4().hex
-                mime_type = detect_mime_type(image.data, image.mime_type)
-                suffix = _image_suffix(mime_type, image.data)
-                relative_path = (
-                    Path("history") / "images" / generation_id / f"{image_id}{suffix}"
-                )
-                target = self.data_dir / relative_path
-                _atomic_write(target, image.data)
-                thumbnail_relative = Path("history") / "thumbnails" / f"{image_id}.webp"
-                _create_thumbnail(target, self.data_dir / thumbnail_relative)
-                image_rows.append(
-                    (
-                        image_id,
-                        ordinal,
-                        str(relative_path),
-                        str(thumbnail_relative),
-                        mime_type,
-                        len(image.data),
-                        hashlib.sha256(image.data).hexdigest(),
-                    )
-                )
+                asset = self._prepare_asset_sync(image.data, image.mime_type)
+                assets[asset["id"]] = asset
+                thumbnails[asset["id"]] = self._prepare_thumbnail_sync(asset)
+                image_rows.append((image_id, ordinal, asset["id"]))
             if retain_references:
                 for ordinal, reference in enumerate(request.references):
                     reference_id = uuid.uuid4().hex
-                    mime_type = detect_mime_type(reference.data, reference.mime_type)
-                    suffix = _image_suffix(mime_type, reference.data)
-                    relative_path = (
-                        Path("history")
-                        / "references"
-                        / generation_id
-                        / f"{reference_id}{suffix}"
+                    asset = self._prepare_asset_sync(
+                        reference.data, reference.mime_type
                     )
-                    _atomic_write(self.data_dir / relative_path, reference.data)
+                    assets[asset["id"]] = asset
+                    suffix = _image_suffix(asset["mime_type"], reference.data)
                     reference_rows.append(
                         (
                             reference_id,
                             ordinal,
                             _safe_filename(reference.filename) or f"reference{suffix}",
-                            str(relative_path),
-                            mime_type,
-                            len(reference.data),
+                            asset["mime_type"],
+                            asset["size_bytes"],
                             1,
+                            asset["id"],
                         )
                     )
             parameters = _redact_sensitive(
@@ -282,6 +273,33 @@ class GenerationStore:
                 }
             )
             with self._connect() as conn:
+                conn.executemany(
+                    "INSERT INTO image_assets (id, path, mime_type, size_bytes, created_at) "
+                    "VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING",
+                    [
+                        (
+                            asset["id"],
+                            asset["path"],
+                            asset["mime_type"],
+                            asset["size_bytes"],
+                            created_at,
+                        )
+                        for asset in assets.values()
+                    ],
+                )
+                conn.executemany(
+                    "INSERT INTO image_thumbnails (asset_id, path, mime_type, size_bytes) "
+                    "VALUES (?, ?, ?, ?) ON CONFLICT(asset_id) DO NOTHING",
+                    [
+                        (
+                            thumbnail["asset_id"],
+                            thumbnail["path"],
+                            thumbnail["mime_type"],
+                            thumbnail["size_bytes"],
+                        )
+                        for thumbnail in thumbnails.values()
+                    ],
+                )
                 conn.execute(
                     "INSERT INTO generations (id, created_at, source, status, mode, provider_id, provider_name, "
                     "provider_kind, model, original_prompt, final_prompt, parameters_json, elapsed_ms) "
@@ -304,13 +322,16 @@ class GenerationStore:
                     ),
                 )
                 conn.executemany(
-                    "INSERT INTO generation_images (id, generation_id, ordinal, path, thumbnail_path, mime_type, size_bytes, sha256) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    [(image_id, generation_id, *row) for image_id, *row in image_rows],
+                    "INSERT INTO generation_images (id, generation_id, ordinal, asset_id) "
+                    "VALUES (?, ?, ?, ?)",
+                    [
+                        (image_id, generation_id, ordinal, asset_id)
+                        for image_id, ordinal, asset_id in image_rows
+                    ],
                 )
                 if reference_rows:
                     conn.executemany(
-                        "INSERT INTO generation_references (id, generation_id, ordinal, filename, path, mime_type, size_bytes, available) "
+                        "INSERT INTO generation_references (id, generation_id, ordinal, filename, mime_type, size_bytes, available, asset_id) "
                         "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                         [
                             (reference_id, generation_id, *row)
@@ -332,10 +353,8 @@ class GenerationStore:
                     pass
             return generation_id
         except Exception:
-            shutil.rmtree(generation_root, ignore_errors=True)
-            shutil.rmtree(reference_root, ignore_errors=True)
-            for row in image_rows:
-                _unlink_if_owned(self.data_dir / row[3], self.thumbnails_dir)
+            self._cleanup_orphaned_asset_files_sync()
+            self._cleanup_orphaned_thumbnails_sync()
             raise
 
     async def list_generations(self, filters: dict[str, Any]) -> dict[str, Any]:
@@ -375,9 +394,12 @@ class GenerationStore:
                 ).fetchone()[0]
             )
             rows = conn.execute(
-                f"SELECT g.*, i.id AS image_id, i.thumbnail_path, i.size_bytes, i.mime_type "
+                f"SELECT g.*, i.id AS image_id, t.path AS thumbnail_path, "
+                f"t.mime_type AS thumbnail_mime_type, a.size_bytes, a.mime_type "
                 f"FROM generations g JOIN generation_images i ON i.generation_id = g.id "
-                f"AND i.ordinal = 0 {clause} ORDER BY g.created_at DESC LIMIT ? OFFSET ?",
+                f"AND i.ordinal = 0 JOIN image_assets a ON a.id = i.asset_id "
+                f"JOIN image_thumbnails t ON t.asset_id = a.id "
+                f"{clause} ORDER BY g.created_at DESC LIMIT ? OFFSET ?",
                 [*args, limit, offset],
             ).fetchall()
             provider_options = [
@@ -424,14 +446,15 @@ class GenerationStore:
     ) -> list[dict[str, str]]:
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT id, filename, path, mime_type FROM generation_references "
-                "WHERE generation_id = ? AND available = 1 ORDER BY ordinal",
+                "SELECT r.id, r.filename, a.path, a.mime_type "
+                "FROM generation_references r JOIN image_assets a ON a.id = r.asset_id "
+                "WHERE r.generation_id = ? AND r.available = 1 ORDER BY r.ordinal",
                 (generation_id,),
             ).fetchall()
         staged: list[dict[str, str]] = []
         for row in rows:
             source = self.data_dir / str(row["path"])
-            if not source.is_file() or not _is_within(source, self.references_dir):
+            if not source.is_file() or not _is_within(source, self.assets_dir):
                 continue
             raw = source.read_bytes()
             staging_id = uuid.uuid4().hex
@@ -460,11 +483,17 @@ class GenerationStore:
             if row is None:
                 return None
             image_rows = conn.execute(
-                "SELECT * FROM generation_images WHERE generation_id = ? ORDER BY ordinal",
+                "SELECT i.*, a.path, a.mime_type, a.size_bytes, a.id AS sha256, "
+                "t.path AS thumbnail_path FROM generation_images i "
+                "JOIN image_assets a ON a.id = i.asset_id "
+                "JOIN image_thumbnails t ON t.asset_id = a.id "
+                "WHERE i.generation_id = ? ORDER BY i.ordinal",
                 (generation_id,),
             ).fetchall()
             reference_rows = conn.execute(
-                "SELECT * FROM generation_references WHERE generation_id = ? ORDER BY ordinal",
+                "SELECT r.*, a.path FROM generation_references r "
+                "LEFT JOIN image_assets a ON a.id = r.asset_id "
+                "WHERE r.generation_id = ? ORDER BY r.ordinal",
                 (generation_id,),
             ).fetchall()
         result = dict(row)
@@ -494,6 +523,12 @@ class GenerationStore:
             ).fetchone()[0]
             if not count:
                 return False
+            asset_rows = conn.execute(
+                "SELECT asset_id FROM generation_images WHERE generation_id = ? "
+                "UNION SELECT asset_id FROM generation_references "
+                "WHERE generation_id = ? AND asset_id IS NOT NULL",
+                (generation_id, generation_id),
+            ).fetchall()
             conn.execute("DELETE FROM generations WHERE id = ?", (generation_id,))
             try:
                 conn.execute(
@@ -502,8 +537,9 @@ class GenerationStore:
                 )
             except sqlite3.OperationalError:
                 pass
-        shutil.rmtree(self.images_dir / generation_id, ignore_errors=True)
-        shutil.rmtree(self.references_dir / generation_id, ignore_errors=True)
+        self._purge_unreferenced_assets_sync(
+            [str(row["asset_id"]) for row in asset_rows if row["asset_id"]]
+        )
         return True
 
     async def delete_reference(self, reference_id: str) -> bool:
@@ -517,16 +553,17 @@ class GenerationStore:
     def _delete_reference_sync(self, reference_id: str) -> bool:
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT path, available FROM generation_references WHERE id = ?",
+                "SELECT asset_id, available FROM generation_references WHERE id = ?",
                 (reference_id,),
             ).fetchone()
             if row is None:
                 return False
             conn.execute(
-                "UPDATE generation_references SET available = 0, deleted_at = ? WHERE id = ?",
+                "UPDATE generation_references SET available = 0, deleted_at = ?, asset_id = NULL WHERE id = ?",
                 (time.time(), reference_id),
             )
-        _unlink_if_owned(self.data_dir / str(row["path"]), self.references_dir)
+        if row["asset_id"]:
+            self._purge_unreferenced_assets_sync([str(row["asset_id"])])
         return True
 
     async def export_generations(self, generation_ids: list[str]) -> Path:
@@ -555,7 +592,7 @@ class GenerationStore:
                 images = detail["images"]
                 for image_index, image in enumerate(images, start=1):
                     path = self.data_dir / image["path"]
-                    if path.is_file() and _is_within(path, self.images_dir):
+                    if path.is_file() and _is_within(path, self.assets_dir):
                         stem = _export_stem(
                             detail,
                             image_index=image_index,
@@ -611,7 +648,9 @@ class GenerationStore:
             "image_id": row["image_id"],
             "mime_type": row["mime_type"],
             "size_bytes": row["size_bytes"],
-            "thumbnail_data_url": _path_data_url(thumbnail, "image/webp"),
+            "thumbnail_data_url": _path_data_url(
+                thumbnail, str(row.get("thumbnail_mime_type") or "image/webp")
+            ),
         }
 
     def _asset_item(self, row: dict[str, Any], *, preview_full: bool) -> dict[str, Any]:
@@ -629,11 +668,11 @@ class GenerationStore:
     def _reference_item(
         self, row: dict[str, Any], *, include_data: bool = True
     ) -> dict[str, Any]:
-        path = self.data_dir / str(row["path"])
+        path = self.data_dir / str(row.get("path") or "")
         available = (
             bool(row["available"])
             and path.is_file()
-            and _is_within(path, self.references_dir)
+            and _is_within(path, self.assets_dir)
         )
         return {
             "id": row["id"],
@@ -657,20 +696,124 @@ class GenerationStore:
         remove_ids: list[str] = []
         if settings.max_records >= 0:
             remove_ids.extend(str(row["id"]) for row in rows[settings.max_records :])
-        if settings.max_megabytes > 0:
-            with self._connect() as conn:
-                size_rows = conn.execute(
-                    "SELECT g.id, g.created_at, COALESCE(SUM(i.size_bytes), 0) AS bytes "
-                    "FROM generations g LEFT JOIN generation_images i ON i.generation_id = g.id "
-                    "GROUP BY g.id ORDER BY g.created_at DESC"
-                ).fetchall()
-            total = 0
-            for row in size_rows:
-                total += int(row["bytes"])
-                if total > settings.max_megabytes * 1024 * 1024:
-                    remove_ids.append(str(row["id"]))
         for generation_id in dict.fromkeys(remove_ids):
             self._delete_generation_sync(generation_id)
+
+        if settings.max_megabytes > 0:
+            capacity = settings.max_megabytes * 1024 * 1024
+            while self._stored_asset_bytes_sync() > capacity:
+                with self._connect() as conn:
+                    oldest = conn.execute(
+                        "SELECT id FROM generations ORDER BY created_at ASC LIMIT 1"
+                    ).fetchone()
+                if oldest is None or not self._delete_generation_sync(
+                    str(oldest["id"])
+                ):
+                    break
+
+    def _prepare_asset_sync(self, data: bytes, mime_hint: str) -> dict[str, Any]:
+        digest = hashlib.sha256(data).hexdigest()
+        mime_type = detect_mime_type(data, mime_hint)
+        suffix = _image_suffix(mime_type, data)
+        relative_path = Path("history") / "assets" / digest[:2] / f"{digest}{suffix}"
+        target = self.data_dir / relative_path
+        try:
+            current_size = target.stat().st_size
+        except OSError:
+            current_size = -1
+        if current_size != len(data):
+            _atomic_write(target, data)
+        return {
+            "id": digest,
+            "path": str(relative_path),
+            "mime_type": mime_type,
+            "size_bytes": len(data),
+        }
+
+    def _prepare_thumbnail_sync(self, asset: dict[str, Any]) -> dict[str, Any]:
+        relative_path = Path("history") / "thumbnails" / f"{asset['id']}.webp"
+        target = self.data_dir / relative_path
+        if not target.is_file():
+            _create_thumbnail(self.data_dir / asset["path"], target)
+        raw = target.read_bytes()
+        return {
+            "asset_id": asset["id"],
+            "path": str(relative_path),
+            "mime_type": detect_mime_type(raw, "image/webp"),
+            "size_bytes": len(raw),
+        }
+
+    def _stored_asset_bytes_sync(self) -> int:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT "
+                "COALESCE((SELECT SUM(size_bytes) FROM image_assets), 0) + "
+                "COALESCE((SELECT SUM(size_bytes) FROM image_thumbnails), 0)"
+            ).fetchone()
+        return int(row[0])
+
+    def _purge_unreferenced_assets_sync(
+        self, asset_ids: list[str] | None = None
+    ) -> None:
+        candidates = list(
+            dict.fromkeys(
+                asset_id
+                for asset_id in (asset_ids or [])
+                if _SHA256_RE.fullmatch(asset_id)
+            )
+        )
+        restriction = ""
+        args: list[str] = []
+        if asset_ids is not None:
+            if not candidates:
+                return
+            restriction = f"AND a.id IN ({','.join('?' for _ in candidates)})"
+            args = candidates
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT a.id, a.path, t.path AS thumbnail_path FROM image_assets a "
+                "LEFT JOIN image_thumbnails t ON t.asset_id = a.id "
+                "WHERE NOT EXISTS (SELECT 1 FROM generation_images i WHERE i.asset_id = a.id) "
+                "AND NOT EXISTS (SELECT 1 FROM generation_references r WHERE r.asset_id = a.id) "
+                f"{restriction}",
+                args,
+            ).fetchall()
+            conn.executemany(
+                "DELETE FROM image_assets WHERE id = ?",
+                [(str(row["id"]),) for row in rows],
+            )
+        for row in rows:
+            _unlink_if_owned(self.data_dir / str(row["path"]), self.assets_dir)
+            if row["thumbnail_path"]:
+                _unlink_if_owned(
+                    self.data_dir / str(row["thumbnail_path"]), self.thumbnails_dir
+                )
+        _remove_empty_directories(self.assets_dir)
+
+    def _cleanup_orphaned_asset_files_sync(self) -> None:
+        """Delete content-addressed files that have no database asset row."""
+
+        with self._connect() as conn:
+            rows = conn.execute("SELECT path FROM image_assets").fetchall()
+        referenced = {
+            (self.data_dir / str(row["path"])).resolve()
+            for row in rows
+            if _is_within(self.data_dir / str(row["path"]), self.assets_dir)
+        }
+        _delete_unreferenced_files(self.assets_dir, referenced)
+        _remove_empty_directories(self.assets_dir)
+
+    def _cleanup_orphaned_thumbnails_sync(self) -> None:
+        """Delete thumbnail files no longer registered to a shared asset."""
+
+        with self._connect() as conn:
+            rows = conn.execute("SELECT path FROM image_thumbnails").fetchall()
+        referenced = {
+            (self.data_dir / str(row["path"])).resolve()
+            for row in rows
+            if _is_within(self.data_dir / str(row["path"]), self.thumbnails_dir)
+        }
+        _delete_unreferenced_files(self.thumbnails_dir, referenced)
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
@@ -783,6 +926,32 @@ def _unlink_if_owned(path: Path, root: Path) -> None:
             path.unlink(missing_ok=True)
     except OSError:
         pass
+
+
+def _delete_unreferenced_files(root: Path, referenced: set[Path]) -> None:
+    for path in root.rglob("*"):
+        try:
+            if (
+                path.is_file()
+                and _is_within(path, root)
+                and path.resolve() not in referenced
+            ):
+                path.unlink()
+        except OSError:
+            continue
+
+
+def _remove_empty_directories(root: Path) -> None:
+    directories = sorted(
+        (path for path in root.rglob("*") if path.is_dir()),
+        key=lambda path: len(path.parts),
+        reverse=True,
+    )
+    for path in directories:
+        try:
+            path.rmdir()
+        except OSError:
+            continue
 
 
 def _load_json(value: str) -> dict[str, Any]:

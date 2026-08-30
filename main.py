@@ -181,7 +181,6 @@ class ImageStudioPlugin(Star):
         return json_response(
             {
                 "settings_revision": self._settings.revision,
-                "enabled": self._settings.enabled,
                 "defaults": {
                     "provider_id": self._settings.default_provider_id,
                     "model_ref": self._settings.default_model_ref,
@@ -214,7 +213,6 @@ class ImageStudioPlugin(Star):
         return json_response(
             {
                 "base": {
-                    "enabled": bool(self.config.get("enabled", True)),
                     "enable_llm_tool": bool(self.config.get("enable_llm_tool", True)),
                     "max_concurrent_generations": int(
                         self.config.get("max_concurrent_generations", 2) or 2
@@ -248,7 +246,7 @@ class ImageStudioPlugin(Star):
             base = body.get("base") if isinstance(body.get("base"), dict) else {}
             previous = copy.deepcopy(dict(self.config))
             self.config["webui_managed"] = candidate
-            for key in ("enabled", "enable_llm_tool", "max_concurrent_generations"):
+            for key in ("enable_llm_tool", "max_concurrent_generations"):
                 if key in base:
                     self.config[key] = base[key]
             try:

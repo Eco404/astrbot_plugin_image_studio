@@ -61,6 +61,7 @@ LLM 工具名为 `image_gen_generate`。工具成功后会返回 MCP `ImageConte
 ## 历史与参考图
 
 - 是否保留历史、最大记录数和最大图片容量均可在 WebUI 设置。
+- 生成图和保留的参考图按内容 SHA-256 共享同一份文件；相同图片被多次使用不会重复占用历史空间。
 - 结果图会作为画廊记录保存；参考图只显示在对应生成记录的详情中，不会单独成为画廊卡片。
 - 参考图可以在详情中单独删除，删除后不会影响结果图和请求参数。
 - 即使历史参考图没有保留，仍可恢复已有参数并进入生图页面；界面会明确提示需要重新补充参考图。
@@ -71,7 +72,8 @@ LLM 工具名为 `image_gen_generate`。工具成功后会返回 MCP `ImageConte
 
 - 插件配置：AstrBot 的插件配置文件，其中包括 WebUI 可见的 API 密钥。
 - 历史数据库：`data/plugin_data/astrbot_plugin_image_gen/history.sqlite3`。
-- 结果图、缩略图和保留的参考图：同一插件数据目录下的对应子目录。
+- 去重后的原图资源：`data/plugin_data/astrbot_plugin_image_gen/history/assets`。
+- 内容寻址缩略图：`data/plugin_data/astrbot_plugin_image_gen/history/thumbnails`。
 
 ## 开发验证
 

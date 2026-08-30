@@ -17,7 +17,7 @@
     generationForm: $("generationForm"), prompt: $("prompt"), negativePromptField: $("negativePromptField"), negativePrompt: $("negativePrompt"), negativePromptHint: $("negativePromptHint"), advancedParameters: $("advancedParameters"), parameters: $("parameters"), generationError: $("generationError"), generateButton: $("generateButton"), resultEmpty: $("resultEmpty"), resultGrid: $("resultGrid"), resultMeta: $("resultMeta"),
     galleryGrid: $("galleryGrid"), galleryEmpty: $("galleryEmpty"), gallerySearch: $("gallerySearch"), galleryProvider: $("galleryProvider"), galleryMode: $("galleryMode"), selectionBar: $("selectionBar"), selectionCount: $("selectionCount"),
     detailDrawer: $("detailDrawer"), drawerBody: $("drawerBody"), detailDate: $("detailDate"), scrim: $("scrim"), imagePreview: $("imagePreview"), previewImage: $("previewImage"), imagePreviewTitle: $("imagePreviewTitle"), downloadImageButton: $("downloadImageButton"),
-    settingEnabled: $("settingEnabled"), settingTool: $("settingTool"), settingConcurrent: $("settingConcurrent"), settingDefaultModel: $("settingDefaultModel"), settingDefaultSize: $("settingDefaultSize"), settingDefaultCount: $("settingDefaultCount"), historyEnabled: $("historyEnabled"), retainReferences: $("retainReferences"), historyRecords: $("historyRecords"), historyMegabytes: $("historyMegabytes"), settingsProviderList: $("settingsProviderList"), providerForm: $("providerForm"), settingsModelList: $("settingsModelList"), modelForm: $("modelForm"), settingsError: $("settingsError"), addProviderButton: $("addProviderButton"), addModelButton: $("addModelButton"), saveSettingsButton: $("saveSettingsButton"),
+    settingTool: $("settingTool"), settingConcurrent: $("settingConcurrent"), settingDefaultModel: $("settingDefaultModel"), settingDefaultSize: $("settingDefaultSize"), settingDefaultCount: $("settingDefaultCount"), historyEnabled: $("historyEnabled"), retainReferences: $("retainReferences"), historyRecords: $("historyRecords"), historyMegabytes: $("historyMegabytes"), settingsProviderList: $("settingsProviderList"), providerForm: $("providerForm"), settingsModelList: $("settingsModelList"), modelForm: $("modelForm"), settingsError: $("settingsError"), addProviderButton: $("addProviderButton"), addModelButton: $("addModelButton"), saveSettingsButton: $("saveSettingsButton"),
   };
 
   async function bridge() {
@@ -199,7 +199,7 @@
     state.selectedProviderId = payload.defaults?.provider_id || "";
     state.selectedModelRef = payload.defaults?.model_ref || "";
     els.negativePrompt.value = selectedModel()?.negative_prompt_default || "";
-    els.runtimeStatus.textContent = payload.enabled ? `已加载 ${state.providers.length} 个生图服务商` : "生图工作台已关闭";
+    els.runtimeStatus.textContent = `已加载 ${state.providers.length} 个生图服务商`;
     renderModelChoices();
   }
 
@@ -360,7 +360,7 @@
         const payload = await apiGet("settings/get");
         if (!payload?.base || !payload?.webui || !Array.isArray(payload.webui.providers)) throw new Error("设置接口返回的数据格式无效");
         state.settings = payload;
-        els.settingEnabled.checked = !!payload.base.enabled; els.settingTool.checked = !!payload.base.enable_llm_tool; els.settingConcurrent.value = payload.base.max_concurrent_generations;
+        els.settingTool.checked = !!payload.base.enable_llm_tool; els.settingConcurrent.value = payload.base.max_concurrent_generations;
         const history = payload.webui.history; els.historyEnabled.checked = !!history.enabled; els.retainReferences.checked = !!history.retain_reference_images; els.historyRecords.value = history.max_records; els.historyMegabytes.value = history.max_megabytes;
         const defaults = payload.webui.generation_defaults || {};
         const defaultModels = payload.webui.providers.flatMap((item) => (item.models || []).map((model) => ({ ...model, provider_name: item.name, model_ref: `${item.id}:${model.id}` })));
@@ -514,7 +514,7 @@
     const webui = state.settings.webui; webui.history = { enabled: els.historyEnabled.checked, retain_reference_images: els.retainReferences.checked, max_records: Number(els.historyRecords.value), max_megabytes: Number(els.historyMegabytes.value) };
     webui.generation_defaults = { ...(webui.generation_defaults || {}), model_ref: els.settingDefaultModel.value, size: els.settingDefaultSize.value, count: Number(els.settingDefaultCount.value) };
     try {
-      await apiPost("settings/save", { settings_revision: webui.ui.settings_revision, base: { enabled: els.settingEnabled.checked, enable_llm_tool: els.settingTool.checked, max_concurrent_generations: Number(els.settingConcurrent.value) }, webui });
+      await apiPost("settings/save", { settings_revision: webui.ui.settings_revision, base: { enable_llm_tool: els.settingTool.checked, max_concurrent_generations: Number(els.settingConcurrent.value) }, webui });
       await bootstrap(); await loadSettings(); setError(els.settingsError, ""); showNotice("设置已保存并生效。", "success");
     } catch (error) {
       const message = errorMessage(error, "设置保存失败"); setError(els.settingsError, message); showNotice(message, "error");

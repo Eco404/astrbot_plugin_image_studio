@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import re
+import sqlite3
 import zipfile
 
 from astrbot_plugin_image_gen.config import HistorySettings
@@ -14,7 +15,6 @@ from astrbot_plugin_image_gen.models import (
     ReferenceImage,
 )
 from astrbot_plugin_image_gen.storage import GenerationStore
-
 
 PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9JZq4AAAAASUVORK5CYII="
@@ -54,6 +54,8 @@ def test_gallery_keeps_references_out_of_collection_and_deletes_them(tmp_path) -
             elapsed_ms=42,
             history=HistorySettings(True, 10, 50, True),
         )
+        thumbnail_paths = list(store.thumbnails_dir.glob("*.webp"))
+        assert len(thumbnail_paths) == 1
 
         listing = await store.list_generations({})
         assert [item["id"] for item in listing["items"]] == [generation_id]
@@ -69,6 +71,94 @@ def test_gallery_keeps_references_out_of_collection_and_deletes_them(tmp_path) -
         assert detail is not None
         assert detail["references"][0]["available"] is False
         assert detail["images"][0]["data_url"].startswith("data:image/png;base64,")
+        assert await store.delete_generation(generation_id) is True
+        assert not thumbnail_paths[0].exists()
+
+    asyncio.run(run())
+
+
+def test_initialize_removes_only_orphaned_asset_files(tmp_path) -> None:
+    async def run() -> None:
+        store = GenerationStore(tmp_path)
+        await store.initialize()
+        await store.record_success(
+            provider=provider(),
+            request=GenerationRequest(
+                mode="text2img",
+                provider_id="test-provider",
+                prompt="keep thumbnail",
+            ),
+            images=(GeneratedImage(PNG, "image/png"),),
+            elapsed_ms=12,
+            history=HistorySettings(True, 10, 50, False),
+        )
+        referenced = next(store.thumbnails_dir.glob("*.webp"))
+        referenced_asset = next(
+            path for path in store.assets_dir.rglob("*") if path.is_file()
+        )
+        orphan_thumbnail = store.thumbnails_dir / "orphan.webp"
+        orphan_thumbnail.write_bytes(PNG)
+        orphan_asset = store.assets_dir / "orphan.png"
+        orphan_asset.write_bytes(PNG)
+
+        await store.initialize()
+
+        assert referenced.is_file()
+        assert referenced_asset.is_file()
+        assert not orphan_thumbnail.exists()
+        assert not orphan_asset.exists()
+
+    asyncio.run(run())
+
+
+def test_identical_images_share_one_content_addressed_asset(tmp_path) -> None:
+    async def run() -> None:
+        store = GenerationStore(tmp_path)
+        await store.initialize()
+        reference = ReferenceImage("same-ref", "same.png", PNG, "image/png")
+        generation_ids = []
+        for prompt in ("first", "second"):
+            generation_ids.append(
+                await store.record_success(
+                    provider=provider(),
+                    request=GenerationRequest(
+                        mode="img2img",
+                        provider_id="test-provider",
+                        prompt=prompt,
+                        references=(reference,),
+                    ),
+                    images=(GeneratedImage(PNG, "image/png"),),
+                    elapsed_ms=12,
+                    history=HistorySettings(True, 10, 50, True),
+                )
+            )
+
+        asset_files = [path for path in store.assets_dir.rglob("*") if path.is_file()]
+        thumbnail_files = list(store.thumbnails_dir.glob("*.webp"))
+        assert len(asset_files) == 1
+        assert len(thumbnail_files) == 1
+        with sqlite3.connect(store.db_path) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM image_assets").fetchone()[0] == 1
+            asset_ids = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT asset_id FROM generation_images "
+                    "UNION SELECT asset_id FROM generation_references"
+                )
+            }
+        assert len(asset_ids) == 1
+
+        assert await store.delete_generation(generation_ids[0]) is True
+        assert asset_files[0].is_file()
+        assert thumbnail_files[0].is_file()
+
+        second_detail = await store.generation_detail(generation_ids[1])
+        assert second_detail is not None
+        assert await store.delete_reference(second_detail["references"][0]["id"])
+        assert asset_files[0].is_file()
+        assert await store.delete_generation(generation_ids[1]) is True
+        assert not asset_files[0].exists()
+        assert not thumbnail_files[0].exists()
 
     asyncio.run(run())
 

@@ -35,15 +35,14 @@ def settings() -> RuntimeSettings:
         }
     )
     return RuntimeSettings(
-        True,
-        True,
-        1,
-        (provider,),
-        "test-provider",
-        "1024x1024",
-        1,
-        HistorySettings(False, 0, 0, False),
-        0,
+        enable_llm_tool=True,
+        max_concurrent_generations=1,
+        providers=(provider,),
+        default_provider_id="test-provider",
+        default_size="1024x1024",
+        default_count=1,
+        history=HistorySettings(False, 0, 0, False),
+        revision=0,
     )
 
 
@@ -183,15 +182,14 @@ def test_service_maps_model_schema_parameter_names(tmp_path) -> None:
 
         service = ImageGenerationService(
             settings=RuntimeSettings(
-                True,
-                True,
-                1,
-                (provider,),
-                "custom",
-                "1024x1024",
-                1,
-                HistorySettings(False, 0, 0, False),
-                0,
+                enable_llm_tool=True,
+                max_concurrent_generations=1,
+                providers=(provider,),
+                default_provider_id="custom",
+                default_size="1024x1024",
+                default_count=1,
+                history=HistorySettings(False, 0, 0, False),
+                revision=0,
             ),
             executor=CapturingExecutor(),
             store=store,

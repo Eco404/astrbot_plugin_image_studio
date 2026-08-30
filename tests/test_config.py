@@ -33,7 +33,7 @@ def test_webui_settings_normalize_provider_and_history() -> None:
 def test_runtime_settings_filters_disabled_provider() -> None:
     settings, errors = runtime_settings(
         {
-            "enabled": True,
+            "enabled": False,
             "enable_llm_tool": True,
             "max_concurrent_generations": 2,
             "webui_managed": {
@@ -52,6 +52,7 @@ def test_runtime_settings_filters_disabled_provider() -> None:
     )
 
     assert errors == []
+    assert not hasattr(settings, "enabled")
     assert settings.provider("disabled") is None
     assert settings.providers_for_mode("text2img") == []
 

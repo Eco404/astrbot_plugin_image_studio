@@ -28,7 +28,6 @@ class HistorySettings:
 class RuntimeSettings:
     """Immutable runtime settings created from the plugin configuration."""
 
-    enabled: bool
     enable_llm_tool: bool
     max_concurrent_generations: int
     providers: tuple[ImageProvider, ...]
@@ -194,7 +193,6 @@ def runtime_settings(config: dict[str, Any]) -> tuple[RuntimeSettings, list[str]
     providers = tuple(ImageProvider.from_mapping(item) for item in webui["providers"])
     history_raw = webui["history"]
     return RuntimeSettings(
-        enabled=_as_bool(config.get("enabled"), True),
         enable_llm_tool=_as_bool(config.get("enable_llm_tool"), True),
         max_concurrent_generations=max(
             1, min(8, _as_int(config.get("max_concurrent_generations"), 2))

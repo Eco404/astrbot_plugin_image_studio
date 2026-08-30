@@ -1,11 +1,4 @@
 {
-  "enabled": {
-    "type": "bool",
-    "default": true,
-    "description": "启用 Image Studio",
-    "hint": "关闭后指令、LLM 工具和 WebUI 生成接口均不可用。",
-    "obvious": true
-  },
   "enable_llm_tool": {
     "type": "bool",
     "default": true,

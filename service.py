@@ -82,8 +82,6 @@ class ImageGenerationService:
         """
 
         settings = self.settings
-        if not settings.enabled:
-            raise ValueError("Image Studio 已关闭")
         normalized_mode = _mode(mode)
         provider, selected_model = self._select_model(
             settings, provider_id, model_ref, model, normalized_mode
