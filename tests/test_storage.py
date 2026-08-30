@@ -7,14 +7,14 @@ import re
 import sqlite3
 import zipfile
 
-from astrbot_plugin_image_gen.config import HistorySettings
-from astrbot_plugin_image_gen.models import (
+from astrbot_plugin_image_studio.config import HistorySettings
+from astrbot_plugin_image_studio.models import (
     GeneratedImage,
     GenerationRequest,
     ImageProvider,
     ReferenceImage,
 )
-from astrbot_plugin_image_gen.storage import GenerationStore
+from astrbot_plugin_image_studio.storage import GenerationStore
 
 PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9JZq4AAAAASUVORK5CYII="

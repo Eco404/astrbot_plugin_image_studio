@@ -1,6 +1,6 @@
 # Image Studio 生图插件
 
-`astrbot_plugin_image_gen` 为 AstrBot 提供统一的多服务商生图能力，支持指令调用、LLM 工具调用和 WebUI 测试。
+`astrbot_plugin_image_studio` 为 AstrBot 提供统一的多服务商生图能力，支持指令调用、LLM 工具调用和 WebUI 测试。
 
 插件内置三个 WebUI 板块：
 
@@ -10,7 +10,7 @@
 
 ## 安装
 
-将本目录放到 `AstrBot/data/plugins/astrbot_plugin_image_gen`，启用插件后，从插件详情页打开 Image Studio 页面。
+将本目录放到 `AstrBot/data/plugins/astrbot_plugin_image_studio`，启用插件后，从插件详情页打开 Image Studio 页面。
 
 WebUI 是插件的主要设置入口。AstrBot 原生插件设置页只显示基础开关和并发限制；WebUI 中的服务商与历史设置仍然读写同一份 AstrBot 插件配置文件，存放在隐藏的 `webui_managed` 配置组中。
 
@@ -71,9 +71,9 @@ LLM 工具名为 `image_gen_generate`。工具成功后会返回 MCP `ImageConte
 ## 数据位置
 
 - 插件配置：AstrBot 的插件配置文件，其中包括 WebUI 可见的 API 密钥。
-- 历史数据库：`data/plugin_data/astrbot_plugin_image_gen/history.sqlite3`。
-- 去重后的原图资源：`data/plugin_data/astrbot_plugin_image_gen/history/assets`。
-- 内容寻址缩略图：`data/plugin_data/astrbot_plugin_image_gen/history/thumbnails`。
+- 历史数据库：`data/plugin_data/astrbot_plugin_image_studio/history.sqlite3`。
+- 去重后的原图资源：`data/plugin_data/astrbot_plugin_image_studio/history/assets`。
+- 内容寻址缩略图：`data/plugin_data/astrbot_plugin_image_studio/history/thumbnails`。
 
 ## 开发验证
 

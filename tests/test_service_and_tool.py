@@ -6,17 +6,17 @@ import time
 from types import SimpleNamespace
 
 import mcp
-from astrbot_plugin_image_gen.config import HistorySettings, RuntimeSettings
-from astrbot_plugin_image_gen.main import ImageStudioPlugin
-from astrbot_plugin_image_gen.models import (
+from astrbot_plugin_image_studio.config import HistorySettings, RuntimeSettings
+from astrbot_plugin_image_studio.main import ImageStudioPlugin
+from astrbot_plugin_image_studio.models import (
     GeneratedImage,
     GenerationRequest,
     GenerationResult,
     ImageProvider,
     ReferenceImage,
 )
-from astrbot_plugin_image_gen.service import ImageGenerationService, _size
-from astrbot_plugin_image_gen.storage import GenerationStore
+from astrbot_plugin_image_studio.service import ImageGenerationService, _size
+from astrbot_plugin_image_studio.storage import GenerationStore
 from fastapi.responses import FileResponse
 
 PNG = base64.b64decode(

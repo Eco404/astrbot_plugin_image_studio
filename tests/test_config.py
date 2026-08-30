@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from astrbot_plugin_image_gen.config import normalize_webui_settings, runtime_settings
-from astrbot_plugin_image_gen.models import GenerationRequest, ImageProvider
-from astrbot_plugin_image_gen.providers import _nai_query, _openai_payload
+from astrbot_plugin_image_studio.config import normalize_webui_settings, runtime_settings
+from astrbot_plugin_image_studio.models import GenerationRequest, ImageProvider
+from astrbot_plugin_image_studio.providers import _nai_query, _openai_payload
 
 
 def test_webui_settings_normalize_provider_and_history() -> None:

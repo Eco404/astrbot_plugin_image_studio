@@ -25,7 +25,7 @@ from .providers import ProviderError, ProviderExecutor
 from .service import ImageGenerationService
 from .storage import GenerationStore, detect_mime_type, image_data_url
 
-PLUGIN_NAME = "astrbot_plugin_image_gen"
+PLUGIN_NAME = "astrbot_plugin_image_studio"
 PAGE_PREFIX = f"/{PLUGIN_NAME}"
 LOG_TAG = "[ImageStudio]"
 
