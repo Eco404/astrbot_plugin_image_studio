@@ -29,21 +29,7 @@ class ProviderExecutor:
         """Best-effort model discovery for the provider settings page."""
 
         if provider.kind == "nai_direct":
-            return [
-                {
-                    "id": model_id,
-                    "name": model_name,
-                    "supports_text2img": True,
-                    "supports_img2img": False,
-                    "supports_negative_prompt": True,
-                    "max_reference_images": 0,
-                    "capability_source": "builtin",
-                }
-                for model_id, model_name in (
-                    ("nai-diffusion-4-5-full", "NAI V4.5 完整版"),
-                    ("nai-diffusion-5-full", "NAI V5 完整版"),
-                )
-            ]
+            raise ProviderError("NAI 第三方接口不支持获取模型列表")
         endpoint = _join_url(
             provider.base_url,
             provider.models_path

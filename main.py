@@ -651,8 +651,8 @@ class ImageStudioPlugin(Star):
                 modes = [
                     candidate
                     for candidate, supported in (
-                        ("text2img", model.text2img),
-                        ("img2img", model.img2img),
+                        ("text2img", model.supports("text2img")),
+                        ("img2img", model.supports("img2img")),
                     )
                     if supported
                 ]

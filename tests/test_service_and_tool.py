@@ -7,6 +7,7 @@ import time
 from types import SimpleNamespace
 
 import mcp
+import pytest
 from astrbot.api.message_components import Image, Reply
 from astrbot_plugin_image_studio.config import HistorySettings, RuntimeSettings
 from astrbot_plugin_image_studio.main import (
@@ -21,7 +22,7 @@ from astrbot_plugin_image_studio.models import (
     ImageProvider,
     ReferenceImage,
 )
-from astrbot_plugin_image_studio.providers import ProviderExecutor
+from astrbot_plugin_image_studio.providers import ProviderError, ProviderExecutor
 from astrbot_plugin_image_studio.service import (
     ImageGenerationService,
     _parameters_for_model,
@@ -132,6 +133,48 @@ def test_capabilities_only_lists_llm_enabled_models() -> None:
     payload = json.loads(result.content[0].text)
 
     assert [item["model_ref"] for item in payload["models"]] == ["provider:visible"]
+
+
+def test_capabilities_excludes_zero_limit_model_from_img2img() -> None:
+    provider = ImageProvider.from_mapping(
+        {
+            "id": "provider",
+            "name": "Provider",
+            "kind": "custom_json",
+            "base_url": "https://example.test",
+            "models": [
+                {
+                    "id": "zero-limit",
+                    "supports_img2img": True,
+                    "max_reference_images": 0,
+                },
+                {
+                    "id": "positive-limit",
+                    "supports_img2img": True,
+                    "max_reference_images": 2,
+                },
+            ],
+        }
+    )
+    plugin = object.__new__(ImageStudioPlugin)
+    plugin._settings = RuntimeSettings(
+        enable_llm_tool=True,
+        providers=(provider,),
+        default_provider_id="provider",
+        default_size="1024x1024",
+        default_count=1,
+        history=HistorySettings(False, 0, 0, False),
+        revision=0,
+    )
+
+    result = asyncio.run(
+        plugin.image_gen_get_capabilities(SimpleNamespace(), mode="img2img")
+    )
+    payload = json.loads(result.content[0].text)
+
+    assert [item["model_ref"] for item in payload["models"]] == [
+        "provider:positive-limit"
+    ]
 
 
 def test_llm_tool_guide_is_injected_once() -> None:
@@ -405,7 +448,7 @@ def test_event_image_iterator_reads_current_and_quoted_images() -> None:
     assert images == [current, quoted]
 
 
-def test_nai_model_discovery_uses_builtin_capabilities() -> None:
+def test_nai_model_discovery_is_not_supported() -> None:
     provider = ImageProvider.from_mapping(
         {
             "id": "nai",
@@ -415,14 +458,8 @@ def test_nai_model_discovery_uses_builtin_capabilities() -> None:
         }
     )
 
-    models = asyncio.run(ProviderExecutor(None).discover_models(provider))
-
-    assert [item["id"] for item in models] == [
-        "nai-diffusion-4-5-full",
-        "nai-diffusion-5-full",
-    ]
-    assert all(item["capability_source"] == "builtin" for item in models)
-    assert all(item["supports_img2img"] is False for item in models)
+    with pytest.raises(ProviderError, match="不支持获取模型列表"):
+        asyncio.run(ProviderExecutor(None).discover_models(provider))
 
 
 def test_provider_test_uses_configured_nai_model_defaults() -> None:

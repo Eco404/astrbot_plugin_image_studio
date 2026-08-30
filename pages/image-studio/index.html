@@ -42,7 +42,7 @@
         <div class="generator-layout">
           <form class="generator-form glass" id="generationForm">
             <div class="field field-wide"><label for="prompt">提示词</label><textarea id="prompt" rows="6" maxlength="6000" placeholder="描述希望生成的画面" required></textarea></div>
-            <div class="field field-wide" id="negativePromptField"><label for="negativePrompt">反向提示词</label><textarea id="negativePrompt" rows="2" maxlength="4000" placeholder="可选"></textarea><span class="field-hint" id="negativePromptHint"></span></div>
+            <div class="field field-wide" id="negativePromptField"><div class="field-label-row"><label for="negativePrompt">反向提示词</label><button class="field-reset-button" id="resetNegativePromptButton" type="button">恢复默认</button></div><textarea id="negativePrompt" rows="2" maxlength="4000" placeholder="可选"></textarea><span class="field-hint" id="negativePromptHint"></span></div>
             <div class="model-parameters field-wide" id="modelParameters"></div>
             <div class="field field-wide is-hidden" id="referenceField">
               <label for="referenceUpload">参考图</label>
@@ -73,7 +73,7 @@
           <select id="galleryMode" aria-label="按模式筛选"><option value="">全部模式</option><option value="text2img">文生图</option><option value="img2img">图生图</option></select>
           <button class="quiet-button" id="galleryRefresh" type="button">刷新</button>
         </div>
-        <div class="selection-bar glass is-hidden" id="selectionBar"><span id="selectionCount">已选 0 项</span><button class="quiet-button" id="selectAllButton" type="button">全选当前页</button><button class="quiet-button" id="exportButton" type="button">导出</button><button class="danger-button" id="deleteButton" type="button">删除</button></div>
+        <div class="selection-bar glass is-hidden" id="selectionBar"><span id="selectionCount">已选 0 项</span><button class="quiet-button" id="cancelSelectionButton" type="button">取消</button><button class="quiet-button" id="selectAllButton" type="button">全选当前页</button><button class="quiet-button" id="exportButton" type="button">导出</button><button class="danger-button" id="deleteButton" type="button">删除</button></div>
         <div class="gallery-grid" id="galleryGrid"></div>
         <div class="empty-state is-hidden" id="galleryEmpty">画廊中还没有保留的生成记录。</div>
       </section>
@@ -104,7 +104,7 @@
           <div class="provider-settings-layout"><div class="provider-list" id="settingsProviderList"></div><form id="providerForm" class="provider-editor"></form></div>
         </section>
         <section class="model-settings glass">
-          <div class="section-heading"><div><h2>模型配置</h2><p>同一服务商可以配置多个模型，每个模型独立声明模式、参考图和参数。</p></div><div class="section-actions"><select id="newModelChoice" aria-label="选择预填模型"><option value="">手动新增模型</option></select><button class="primary-button" id="addModelButton" type="button">新增模型</button></div></div>
+          <div class="section-heading"><div><h2>模型配置</h2><p>同一服务商可以配置多个模型，每个模型独立声明模式、参考图和参数。</p></div><div class="section-actions"><input id="newModelChoice" list="newModelChoices" aria-label="选择或输入模型 ID" placeholder="选择或输入模型 ID" autocomplete="off" /><datalist id="newModelChoices"></datalist><button class="primary-button" id="addModelButton" type="button">新增模型</button></div></div>
           <div class="model-settings-layout"><div class="model-list" id="settingsModelList"></div><form id="modelForm" class="model-editor"></form></div>
         </section>
         <div class="settings-savebar"><span class="inline-error" id="settingsError" role="alert"></span><button class="primary-button" id="saveSettingsButton" type="button">保存全部设置</button></div>
@@ -135,7 +135,7 @@
     <div class="parameter-dialog__body">
       <div class="toggle-row"><label for="toolParameterExposed">向 LLM 暴露</label><label class="toggle-control"><input id="toolParameterExposed" type="checkbox" /><span aria-hidden="true"></span></label></div>
       <div class="field"><label for="toolParameterDescription">参数说明</label><textarea id="toolParameterDescription" rows="3" placeholder="告诉 LLM 这个参数如何使用"></textarea></div>
-      <div class="field"><label for="toolParameterDefault">工具默认值（可选）</label><input id="toolParameterDefault" /></div>
+      <div class="field"><label id="toolParameterDefaultLabel" for="toolParameterDefault">工具默认值</label><input id="toolParameterDefault" /><select class="is-hidden" id="toolParameterDefaultChoice" aria-label="工具默认值"></select><span class="field-hint" id="toolParameterDefaultHint"></span></div>
       <div class="field field-wide"><label for="toolParameterChoices">选项说明（JSON，可选）</label><textarea id="toolParameterChoices" rows="4" spellcheck="false" placeholder='{"value":"中文说明"}'></textarea></div>
     </div>
     <div class="parameter-dialog__actions"><button class="quiet-button" id="parameterDialogCancel" type="button">取消</button><button class="primary-button" id="parameterDialogApply" type="button">应用</button></div>

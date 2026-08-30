@@ -88,7 +88,11 @@ class ImageModel:
     def supports(self, mode: GenerationMode) -> bool:
         """Return whether the model supports a requested generation mode."""
 
-        return self.text2img if mode == "text2img" else self.img2img
+        return (
+            self.text2img
+            if mode == "text2img"
+            else self.img2img and self.max_reference_images > 0
+        )
 
     def public_dict(self) -> dict[str, Any]:
         """Return the model descriptor consumed by the WebUI."""
@@ -122,9 +126,7 @@ class ImageModel:
             self.tool.get("max_reference_images"), self.max_reference_images
         )
         configured = max(0, min(8, configured))
-        if self.capability_source in {"remote", "builtin"}:
-            return max(0, min(self.max_reference_images, configured))
-        return configured
+        return max(0, min(self.max_reference_images, configured))
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,7 +247,7 @@ class ImageProvider:
             ),
             capabilities=ProviderCapabilities(
                 text2img=any(item.text2img for item in models),
-                img2img=any(item.img2img for item in models),
+                img2img=any(item.supports("img2img") for item in models),
                 max_reference_images=max(
                     (item.max_reference_images for item in models), default=0
                 ),

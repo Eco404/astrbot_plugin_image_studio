@@ -199,6 +199,49 @@ def test_models_are_configured_independently_and_filtered_by_mode() -> None:
     assert settings.providers[0].get_model("draw-edit").max_reference_images == 3
 
 
+def test_img2img_requires_a_positive_reference_limit() -> None:
+    settings, errors = runtime_settings(
+        {},
+        {
+            "providers": [
+                {
+                    "id": "manual",
+                    "name": "Manual",
+                    "kind": "custom_json",
+                    "base_url": "https://example.test",
+                    "models": [
+                        {
+                            "id": "zero-limit",
+                            "supports_text2img": True,
+                            "supports_img2img": True,
+                            "max_reference_images": 0,
+                            "capability_source": "manual",
+                            "tool": {"max_reference_images": 4},
+                        },
+                        {
+                            "id": "manual-limit",
+                            "supports_text2img": True,
+                            "supports_img2img": True,
+                            "max_reference_images": 2,
+                            "capability_source": "manual",
+                            "tool": {"max_reference_images": 4},
+                        },
+                    ],
+                }
+            ]
+        },
+    )
+
+    assert errors == []
+    assert [model.id for _, model in settings.models_for_mode("img2img")] == [
+        "manual-limit"
+    ]
+    zero_limit = settings.providers[0].get_model("zero-limit")
+    manual_limit = settings.providers[0].get_model("manual-limit")
+    assert zero_limit.llm_max_reference_images == 0
+    assert manual_limit.llm_max_reference_images == 2
+
+
 def test_provider_transport_defaults_follow_provider_kind() -> None:
     provider = ImageProvider.from_mapping(
         {

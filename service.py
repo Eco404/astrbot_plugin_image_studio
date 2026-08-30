@@ -129,10 +129,7 @@ class ImageGenerationService:
             reference_limit = (
                 selected_model.llm_max_reference_images
                 if source == "llm_tool"
-                else max(
-                    selected_model.max_reference_images,
-                    selected_model.llm_max_reference_images,
-                )
+                else selected_model.max_reference_images
             )
         normalized_refs = references[:reference_limit]
         if normalized_mode == "img2img" and not normalized_refs:
