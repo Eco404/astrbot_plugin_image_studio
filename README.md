@@ -1,43 +1,64 @@
-# Image Studio
+# Image Studio 生图插件
 
-`astrbot_plugin_image_gen` provides image generation for AstrBot commands, LLM tools, and a three-area WebUI:
+`astrbot_plugin_image_gen` 为 AstrBot 提供统一的多服务商生图能力，支持指令调用、LLM 工具调用和 WebUI 测试。
 
-- Generate: text-to-image and image-to-image with capability-filtered Providers.
-- Gallery: searchable history, parameter review, reproduction drafts, export, and batch deletion.
-- Settings: Provider, history, and runtime settings stored in AstrBot's plugin configuration.
+插件内置三个 WebUI 板块：
 
-## Install
+- **生图**：按“文生图 / 图生图”模式筛选可用服务商，并根据当前服务商能力填写请求参数。
+- **画廊**：搜索和筛选历史记录，查看完整参数，复现生成配置，导出或批量删除记录。
+- **设置**：管理插件开关、并发限制、历史保留策略和生图服务商。
 
-Place this directory at `AstrBot/data/plugins/astrbot_plugin_image_gen`, enable the plugin, then open the Image Studio Page from the plugin detail view.
+## 安装
 
-The AstrBot native plugin settings page intentionally exposes only the bootstrap controls. The WebUI writes all Provider and history settings to the same AstrBot plugin configuration file under the hidden `webui_managed` group.
+将本目录放到 `AstrBot/data/plugins/astrbot_plugin_image_gen`，启用插件后，从插件详情页打开 Image Studio 页面。
 
-## Provider kinds
+WebUI 是插件的主要设置入口。AstrBot 原生插件设置页只显示基础开关和并发限制；WebUI 中的服务商与历史设置仍然读写同一份 AstrBot 插件配置文件，存放在隐藏的 `webui_managed` 配置组中。
 
-The settings page supports these initial adapters:
+## 支持的服务商类型
 
-- `openai_images`: OpenAI Images API and compatible `/images/generations` and `/images/edits` services.
-- `gemini`: Gemini `generateContent` image output with inline reference images.
-- `nai_direct`: NAI-compatible `GET /generate` services for text-to-image.
-- `custom_json`: Custom JSON request body and response extraction for compatible gateways.
+当前提供以下适配器：
 
-Each Provider declares text-to-image and image-to-image capabilities. A disabled, incomplete, or unsupported Provider is not selectable for the active generation mode.
+- `openai_images`：OpenAI Images API，以及兼容 `/images/generations` 和 `/images/edits` 的服务。
+- `gemini`：Gemini `generateContent` 图片输出，支持内联参考图。
+- `nai_direct`：兼容 NAI `GET /generate` 的文生图服务。
+- `custom_json`：可自定义请求体模板和图片响应提取路径的 JSON 接口。
 
-## Commands and Agent tool
+每个服务商分别声明是否支持文生图和图生图。被停用、配置不完整或不支持当前模式的服务商不会出现在生图页面的可选列表中。
 
-Use the fixed commands:
+## 指令与 Agent 工具
+
+指令示例：
 
 ```text
-/image_gen a studio photograph of a mountain lake --provider my-openai --size 1024x1024
-/image_gen repaint this image --mode img2img --ref /path/from/astrbot/temp/tool_images/file.png
+/image_gen 一张山间湖泊的影棚风格摄影 --provider my-openai --size 1024x1024
+/image_gen 重新绘制这张图片 --mode img2img --ref /path/from/astrbot/temp/tool_images/file.png
 ```
 
-`image_gen_generate` returns MCP `ImageContent`, not only a text path. AstrBot caches that image and sends it into the next visual-capable Agent step, allowing the Agent to inspect or process it before deciding whether to send it to the user.
+LLM 工具名为 `image_gen_generate`。工具成功后会返回 MCP `ImageContent`，而不只是文本路径。AstrBot 会缓存图片，并把它加入后续支持视觉输入的 Agent 步骤，因此 Agent 可以继续查看、判断和处理生成结果。
 
-## Data boundaries
+## 历史与参考图
 
-- Plugin configuration, including visible WebUI API keys, remains in AstrBot's plugin configuration file.
-- Gallery records are stored in `data/plugin_data/astrbot_plugin_image_gen/history.sqlite3`.
-- Result images and retained reference images are plugin-owned files below the same data directory.
-- Reference images are displayed only inside a generation's detail view. Deleting one reference does not delete its generated result or parameter record.
-- API keys, authorization headers, and credential-like parameter names are removed from gallery history and export manifests.
+- 是否保留历史、最大记录数和最大图片容量均可在 WebUI 设置。
+- 结果图会作为画廊记录保存；参考图只显示在对应生成记录的详情中，不会单独成为画廊卡片。
+- 参考图可以在详情中单独删除，删除后不会影响结果图和请求参数。
+- 即使历史参考图没有保留，仍可恢复已有参数并进入生图页面；界面会明确提示需要重新补充参考图。
+- 画廊导出文件不会包含 API 密钥、鉴权请求头或其他疑似凭据字段。
+
+## 数据位置
+
+- 插件配置：AstrBot 的插件配置文件，其中包括 WebUI 可见的 API 密钥。
+- 历史数据库：`data/plugin_data/astrbot_plugin_image_gen/history.sqlite3`。
+- 结果图、缩略图和保留的参考图：同一插件数据目录下的对应子目录。
+
+## 开发验证
+
+在仓库目录中使用 AstrBot 虚拟环境运行：
+
+```bash
+conda run -n astrbot python -m pytest -q tests
+conda run -n astrbot ruff check .
+conda run -n astrbot ruff format --check .
+node --check pages/image-studio/app.js
+```
+
+真实生图还需要在 WebUI 中配置可用端点、模型和凭据，并对目标服务商进行连接测试。

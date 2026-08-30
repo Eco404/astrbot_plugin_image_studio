@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Image Studio</title>
+  <title>Image Studio 生图工作台</title>
   <link rel="stylesheet" href="./app.css" />
 </head>
 <body>
@@ -11,38 +11,39 @@
     <aside class="sidebar glass" aria-label="Image Studio 导航">
       <div class="brand">
         <div class="brand-mark" aria-hidden="true">IS</div>
-        <div><strong>Image Studio</strong><span>Image generation workspace</span></div>
+        <div><strong>Image Studio</strong><span>生图工作台</span></div>
       </div>
       <nav class="nav-list">
-        <button class="nav-item is-active" data-view="generate" type="button"><span class="nav-icon" aria-hidden="true">✦</span><span>生图</span></button>
-        <button class="nav-item" data-view="gallery" type="button"><span class="nav-icon" aria-hidden="true">▦</span><span>画廊</span></button>
-        <button class="nav-item" data-view="settings" type="button"><span class="nav-icon" aria-hidden="true">⚙</span><span>设置</span></button>
+        <button class="nav-item is-active" data-view="generate" type="button" aria-label="生图" title="生图"><span class="nav-icon" aria-hidden="true">✦</span><span>生图</span></button>
+        <button class="nav-item" data-view="gallery" type="button" aria-label="画廊" title="画廊"><span class="nav-icon" aria-hidden="true">▦</span><span>画廊</span></button>
+        <button class="nav-item" data-view="settings" type="button" aria-label="设置" title="设置"><span class="nav-icon" aria-hidden="true">⚙</span><span>设置</span></button>
       </nav>
       <div class="sidebar-footer" id="runtimeStatus">正在读取配置</div>
     </aside>
 
     <section class="workspace">
       <header class="topbar glass">
-        <div><h1 id="pageTitle">生图</h1><p id="pageSubtitle">选择模式和 Provider 后开始创作</p></div>
+        <div><h1 id="pageTitle">生图</h1><p id="pageSubtitle">选择模式和生图服务商后开始创作</p></div>
         <div class="topbar-status" id="providerStatus"></div>
       </header>
+      <div class="app-notice is-hidden" id="appNotice" role="status" aria-live="polite"></div>
 
       <section class="view is-active" id="generateView">
         <div class="mode-tabs" role="group" aria-label="生成模式">
           <button class="segment is-active" data-mode="text2img" type="button">文生图</button>
           <button class="segment" data-mode="img2img" type="button">图生图</button>
         </div>
-        <div id="providerChoices" class="provider-choices" aria-label="Provider 选择"></div>
+        <div id="providerChoices" class="provider-choices" aria-label="生图服务商选择"></div>
         <div class="generator-layout">
           <form class="generator-form glass" id="generationForm">
             <div class="field field-wide"><label for="prompt">提示词</label><textarea id="prompt" rows="6" maxlength="6000" placeholder="描述希望生成的画面" required></textarea></div>
             <div class="field field-wide"><label for="negativePrompt">反向提示词</label><textarea id="negativePrompt" rows="2" maxlength="4000" placeholder="可选"></textarea></div>
-            <div class="field"><label for="model">模型</label><input id="model" maxlength="160" placeholder="使用 Provider 默认模型" /></div>
+            <div class="field"><label for="model">模型</label><input id="model" maxlength="160" placeholder="使用服务商默认模型" /></div>
             <div class="field"><label for="size">尺寸</label><input id="size" value="1024x1024" maxlength="40" /></div>
             <div class="field"><label for="count">数量</label><input id="count" type="number" value="1" min="1" max="4" /></div>
             <div class="field field-wide is-hidden" id="referenceField">
               <label for="referenceUpload">参考图</label>
-              <div class="upload-row"><input id="referenceUpload" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple /><span>最多使用当前 Provider 支持的数量</span></div>
+              <div class="upload-row"><input id="referenceUpload" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple /><span>最多使用当前服务商支持的数量</span></div>
               <div class="reference-strip" id="referenceStrip"></div>
             </div>
             <details class="advanced field-wide">
@@ -63,8 +64,8 @@
 
       <section class="view" id="galleryView">
         <div class="gallery-toolbar">
-          <label class="search-field"><span>搜索</span><input id="gallerySearch" placeholder="提示词、模型或 Provider" /></label>
-          <select id="galleryProvider" aria-label="按 Provider 筛选"><option value="">全部 Provider</option></select>
+          <label class="search-field"><span>搜索</span><input id="gallerySearch" placeholder="提示词、模型或生图服务商" /></label>
+          <select id="galleryProvider" aria-label="按生图服务商筛选"><option value="">全部服务商</option></select>
           <select id="galleryMode" aria-label="按模式筛选"><option value="">全部模式</option><option value="text2img">文生图</option><option value="img2img">图生图</option></select>
           <button class="quiet-button" id="galleryRefresh" type="button">刷新</button>
         </div>
@@ -90,7 +91,7 @@
           </section>
         </div>
         <section class="provider-settings glass">
-          <div class="section-heading"><div><h2>Providers</h2><p>密钥和自定义请求头按当前单用户 WebUI 约定直接显示。</p></div><button class="primary-button" id="addProviderButton" type="button">新增 Provider</button></div>
+          <div class="section-heading"><div><h2>生图服务商</h2><p>密钥和自定义请求头按当前单用户 WebUI 约定直接显示。</p></div><button class="primary-button" id="addProviderButton" type="button">新增服务商</button></div>
           <div class="provider-settings-layout"><div class="provider-list" id="settingsProviderList"></div><form id="providerForm" class="provider-editor"></form></div>
         </section>
         <div class="settings-savebar"><span class="inline-error" id="settingsError" role="alert"></span><button class="primary-button" id="saveSettingsButton" type="button">保存全部设置</button></div>
@@ -108,7 +109,28 @@
     <div><h2 id="confirmTitle">确认操作</h2><p id="confirmMessage"></p></div>
     <div class="confirm-dialog__actions"><button class="quiet-button" id="confirmCancel" type="button">取消</button><button class="danger-button" id="confirmAccept" type="button">确认删除</button></div>
   </div>
+  <script>
+    window.__reportImageStudioPageError = function (loadFailed) {
+      var message = loadFailed
+        ? "页面脚本加载失败，请重新加载插件页面。"
+        : "页面操作出现异常，请重试；如果问题持续，请重新加载插件页面。";
+      var notice = document.getElementById("appNotice");
+      var status = document.getElementById("runtimeStatus");
+      if (notice) {
+        notice.textContent = message;
+        notice.className = "app-notice is-error";
+      }
+      if (status) status.textContent = "页面运行异常";
+    };
+    window.addEventListener("error", function (event) {
+      if (event.filename && !event.filename.includes("app.js")) return;
+      window.__reportImageStudioPageError(!window.__imageStudioAppLoaded);
+    });
+    window.addEventListener("unhandledrejection", function () {
+      window.__reportImageStudioPageError(false);
+    });
+  </script>
   <script src="/api/plugin/page/bridge-sdk.js"></script>
-  <script src="./app.js"></script>
+  <script src="./app.js?v=0.1.1" onerror="window.__reportImageStudioPageError(true)"></script>
 </body>
 </html>
