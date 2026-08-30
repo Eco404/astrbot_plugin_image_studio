@@ -62,7 +62,7 @@ class ProviderExecutor:
             if request.size:
                 form.add_field("size", request.size)
             form.add_field("n", str(request.count))
-            if request.negative_prompt:
+            if provider.capabilities.negative_prompt and request.negative_prompt:
                 form.add_field("negative_prompt", request.negative_prompt)
             for key, value in _safe_parameters(request.parameters).items():
                 form.add_field(key, _form_value(value))
@@ -147,7 +147,7 @@ class ProviderExecutor:
             "model": request.model or provider.model,
             "size": request.size or "1024x1024",
         }
-        if request.negative_prompt:
+        if provider.capabilities.negative_prompt and request.negative_prompt:
             query["negative"] = request.negative_prompt
         for key, value in _safe_parameters(request.parameters).items():
             query[str(key)] = str(value)
@@ -271,7 +271,7 @@ def _openai_payload(
     }
     if request.size:
         payload["size"] = request.size
-    if request.negative_prompt:
+    if provider.capabilities.negative_prompt and request.negative_prompt:
         payload["negative_prompt"] = request.negative_prompt
     payload.update(_safe_parameters(request.parameters))
     return payload

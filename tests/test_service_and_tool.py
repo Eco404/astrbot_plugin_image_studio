@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import time
 from types import SimpleNamespace
 
 import mcp
+from fastapi.responses import FileResponse
 
 from astrbot_plugin_image_gen.config import HistorySettings, RuntimeSettings
 from astrbot_plugin_image_gen.main import ImageStudioPlugin
@@ -122,3 +124,37 @@ def test_reproduction_keeps_available_parameters_without_reference(tmp_path) -> 
         assert "历史参考图未保留" in plan["notice"]
 
     asyncio.run(run())
+
+
+def test_service_drops_negative_prompt_for_unsupported_provider(tmp_path) -> None:
+    async def run() -> None:
+        store = GenerationStore(tmp_path)
+        await store.initialize()
+        captured = {}
+
+        class CapturingExecutor:
+            async def generate(self, _provider, request):
+                captured["request"] = request
+                return (GeneratedImage(PNG, "image/png"),)
+
+        service = ImageGenerationService(
+            settings=settings(), executor=CapturingExecutor(), store=store
+        )
+        await service.generate(
+            mode="text2img", provider_id="", prompt="one tree", negative_prompt="no fog"
+        )
+        assert captured["request"].negative_prompt == ""
+
+    asyncio.run(run())
+
+
+def test_export_download_uses_standard_file_response(tmp_path) -> None:
+    archive_path = tmp_path / "image-studio.zip"
+    archive_path.write_bytes(b"PK\x03\x04test")
+    plugin = object.__new__(ImageStudioPlugin)
+    plugin._exports = {"export-1": (archive_path, time.time())}
+
+    response = asyncio.run(plugin._api_download_export("export-1"))
+
+    assert isinstance(response, FileResponse)
+    assert response.media_type == "application/zip"

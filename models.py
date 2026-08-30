@@ -17,11 +17,13 @@ class ProviderCapabilities:
         text2img: Whether text-to-image requests are accepted.
         img2img: Whether image-to-image requests are accepted.
         max_reference_images: Maximum images accepted by image-to-image.
+        negative_prompt: Whether the provider accepts a dedicated negative prompt.
     """
 
     text2img: bool = True
     img2img: bool = False
     max_reference_images: int = 0
+    negative_prompt: bool = False
 
     def supports(self, mode: GenerationMode) -> bool:
         """Return whether the provider supports a requested mode."""
@@ -57,13 +59,14 @@ class ImageProvider:
     def from_mapping(cls, value: dict[str, Any]) -> "ImageProvider":
         """Create a bounded provider value from persisted configuration."""
 
+        kind = _text(value.get("kind"), 32) or "openai_images"
         max_refs = max(0, min(8, _as_int(value.get("max_reference_images"), 1)))
         img2img = _as_bool(value.get("supports_img2img"), False)
         return cls(
             id=_text(value.get("id"), 64),
             name=_text(value.get("name"), 96),
             enabled=_as_bool(value.get("enabled"), True),
-            kind=_text(value.get("kind"), 32) or "openai_images",
+            kind=kind,
             base_url=_text(value.get("base_url"), 500).rstrip("/"),
             generate_path=_normalized_path(
                 value.get("generate_path"), "/v1/images/generations"
@@ -79,6 +82,9 @@ class ImageProvider:
                 text2img=_as_bool(value.get("supports_text2img"), True),
                 img2img=img2img,
                 max_reference_images=max_refs if img2img else 0,
+                negative_prompt=_as_bool(
+                    value.get("supports_negative_prompt"), kind == "nai_direct"
+                ),
             ),
             edit_request_format=_text(value.get("edit_request_format"), 24)
             or "multipart",
@@ -104,6 +110,7 @@ class ImageProvider:
             "supports_text2img": self.capabilities.text2img,
             "supports_img2img": self.capabilities.img2img,
             "max_reference_images": self.capabilities.max_reference_images,
+            "supports_negative_prompt": self.capabilities.negative_prompt,
             "edit_request_format": self.edit_request_format,
             "request_template": self.request_template,
             "response_image_path": self.response_image_path,

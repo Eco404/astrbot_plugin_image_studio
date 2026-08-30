@@ -40,7 +40,7 @@
         <div class="generator-layout">
           <form class="generator-form glass" id="generationForm">
             <div class="field field-wide"><label for="prompt">提示词</label><textarea id="prompt" rows="6" maxlength="6000" placeholder="描述希望生成的画面" required></textarea></div>
-            <div class="field field-wide"><label for="negativePrompt">反向提示词</label><textarea id="negativePrompt" rows="2" maxlength="4000" placeholder="可选"></textarea></div>
+            <div class="field field-wide" id="negativePromptField"><label for="negativePrompt">反向提示词</label><textarea id="negativePrompt" rows="2" maxlength="4000" placeholder="可选"></textarea><span class="field-hint" id="negativePromptHint"></span></div>
             <div class="field"><label for="model">模型</label><input id="model" maxlength="160" placeholder="使用服务商默认模型" /></div>
             <div class="field"><label for="size">尺寸</label><input id="size" value="1024x1024" maxlength="40" /></div>
             <div class="field"><label for="count">数量</label><input id="count" type="number" value="1" min="1" max="4" /></div>
@@ -102,11 +102,19 @@
     </section>
   </main>
 
-  <aside class="detail-drawer" id="detailDrawer" aria-label="生成详情" aria-hidden="true">
+  <aside class="detail-drawer" id="detailDrawer" role="dialog" aria-modal="true" aria-label="生成详情" aria-hidden="true" tabindex="-1">
     <div class="drawer-head"><div><h2>生成详情</h2><p id="detailDate"></p></div><button class="icon-button" id="closeDrawer" type="button" aria-label="关闭详情">×</button></div>
     <div class="drawer-body" id="drawerBody"></div>
   </aside>
   <div class="scrim is-hidden" id="scrim"></div>
+  <div class="image-preview is-hidden" id="imagePreview" role="dialog" aria-modal="true" aria-labelledby="imagePreviewTitle">
+    <div class="image-preview__backdrop" data-close-image-preview></div>
+    <section class="image-preview__panel">
+      <div class="image-preview__head"><h2 id="imagePreviewTitle">图片预览</h2><button class="icon-button" id="closeImagePreview" type="button" aria-label="关闭图片预览" title="关闭图片预览">×</button></div>
+      <div class="image-preview__body"><img id="previewImage" alt="图片预览" /></div>
+      <div class="image-preview__actions"><a class="quiet-button" id="downloadImageButton" href="#" download>下载图片</a></div>
+    </section>
+  </div>
   <div class="confirm-dialog is-hidden" id="confirmDialog" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
     <div class="confirm-dialog__icon" aria-hidden="true">!</div>
     <div><h2 id="confirmTitle">确认操作</h2><p id="confirmMessage"></p></div>

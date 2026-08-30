@@ -16,7 +16,7 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import Context, Star, StarTools, register
-from astrbot.api.web import error_response, json_response
+from astrbot.api.web import error_response, file_response, json_response
 from astrbot.api.web import request as web_request
 
 from .config import normalize_webui_settings, runtime_settings
@@ -130,6 +130,12 @@ class ImageStudioPlugin(Star):
                 self._api_gallery_detail,
                 ["GET"],
                 "Image Studio: gallery detail",
+            ),
+            (
+                "gallery/assets/<generation_id>",
+                self._api_gallery_assets,
+                ["GET"],
+                "Image Studio: gallery assets",
             ),
             (
                 "gallery/reproduce/<generation_id>",
@@ -347,10 +353,25 @@ class ImageStudioPlugin(Star):
         return json_response(await self.store.list_generations(filters))
 
     async def _api_gallery_detail(self, generation_id: str) -> Any:
-        detail = await self.store.generation_detail(generation_id)
+        include_assets = str(web_request.query.get("assets", "1")).lower() not in {
+            "0",
+            "false",
+            "no",
+        }
+        detail = await self.store.generation_detail(
+            generation_id, include_assets=include_assets
+        )
         if detail is None:
             return error_response("生成记录不存在", status_code=404)
         return json_response(detail)
+
+    async def _api_gallery_assets(self, generation_id: str) -> Any:
+        detail = await self.store.generation_detail(generation_id, include_assets=True)
+        if detail is None:
+            return error_response("生成记录不存在", status_code=404)
+        return json_response(
+            {"images": detail["images"], "references": detail["references"]}
+        )
 
     async def _api_gallery_reproduce(self, generation_id: str) -> Any:
         try:
@@ -401,14 +422,13 @@ class ImageStudioPlugin(Star):
         )
 
     async def _api_download_export(self, export_id: str) -> Any:
-        from aiohttp import web
-
         item = self._exports.get(export_id)
         if item is None or time.time() - item[1] > 3600 or not item[0].is_file():
             return error_response("导出文件已过期，请重新导出", status_code=404)
-        return web.FileResponse(
+        return file_response(
             item[0],
-            headers={"Content-Disposition": f'attachment; filename="{item[0].name}"'},
+            filename=item[0].name,
+            content_type="application/zip",
         )
 
     @filter.command("image_gen", alias={"img"})

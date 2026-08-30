@@ -88,7 +88,11 @@ class ImageGenerationService:
             mode=normalized_mode,
             provider_id=provider.id,
             prompt=normalized_prompt,
-            negative_prompt=str(negative_prompt or "").strip()[:4000],
+            negative_prompt=(
+                str(negative_prompt or "").strip()[:4000]
+                if provider.capabilities.negative_prompt
+                else ""
+            ),
             model=str(model or provider.model).strip()[:160],
             size=_size(size or settings.default_size),
             count=max(1, min(4, _as_int(count, settings.default_count))),
@@ -154,7 +158,7 @@ class ImageGenerationService:
     async def reproduction_plan(self, generation_id: str) -> dict[str, Any]:
         """Return a reproducible draft and stage retained references when available."""
 
-        detail = await self.store.generation_detail(generation_id)
+        detail = await self.store.generation_detail(generation_id, include_assets=False)
         if detail is None:
             raise ValueError("历史生成记录不存在")
         parameters = (

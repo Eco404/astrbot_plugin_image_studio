@@ -47,6 +47,7 @@
           "supports_text2img": {"type": "bool", "default": true},
           "supports_img2img": {"type": "bool", "default": false},
           "max_reference_images": {"type": "int", "default": 1},
+          "supports_negative_prompt": {"type": "bool", "default": false},
           "edit_request_format": {"type": "string", "default": "multipart"},
           "request_template": {"type": "text", "default": ""},
           "response_image_path": {"type": "string", "default": ""}

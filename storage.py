@@ -399,10 +399,14 @@ class GenerationStore:
             },
         }
 
-    async def generation_detail(self, generation_id: str) -> dict[str, Any] | None:
+    async def generation_detail(
+        self, generation_id: str, *, include_assets: bool = True
+    ) -> dict[str, Any] | None:
         """Return a generation plus its result and reference assets."""
 
-        return await asyncio.to_thread(self._generation_detail_sync, generation_id)
+        return await asyncio.to_thread(
+            self._generation_detail_sync, generation_id, include_assets
+        )
 
     async def stage_generation_references(
         self, generation_id: str
@@ -444,7 +448,9 @@ class GenerationStore:
             )
         return staged
 
-    def _generation_detail_sync(self, generation_id: str) -> dict[str, Any] | None:
+    def _generation_detail_sync(
+        self, generation_id: str, include_assets: bool = True
+    ) -> dict[str, Any] | None:
         if not _SAFE_ID_RE.fullmatch(generation_id):
             return None
         with self._connect() as conn:
@@ -464,10 +470,12 @@ class GenerationStore:
         result = dict(row)
         result["parameters"] = _load_json(result.pop("parameters_json", "{}"))
         result["images"] = [
-            self._asset_item(dict(item), preview_full=True) for item in image_rows
+            self._asset_item(dict(item), preview_full=include_assets)
+            for item in image_rows
         ]
         result["references"] = [
-            self._reference_item(dict(item)) for item in reference_rows
+            self._reference_item(dict(item), include_data=include_assets)
+            for item in reference_rows
         ]
         return result
 
@@ -539,7 +547,9 @@ class GenerationStore:
         manifest: list[dict[str, Any]] = []
         with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             for generation_id in generation_ids:
-                detail = self._generation_detail_sync(generation_id)
+                detail = self._generation_detail_sync(
+                    generation_id, include_assets=False
+                )
                 if not detail:
                     continue
                 for image in detail["images"]:
@@ -600,7 +610,9 @@ class GenerationStore:
             "data_url": preview,
         }
 
-    def _reference_item(self, row: dict[str, Any]) -> dict[str, Any]:
+    def _reference_item(
+        self, row: dict[str, Any], *, include_data: bool = True
+    ) -> dict[str, Any]:
         path = self.data_dir / str(row["path"])
         available = (
             bool(row["available"])
@@ -614,7 +626,11 @@ class GenerationStore:
             "size_bytes": row["size_bytes"],
             "available": available,
             "deleted_at": row["deleted_at"],
-            "data_url": _path_data_url(path, row["mime_type"]) if available else "",
+            "data_url": (
+                _path_data_url(path, row["mime_type"])
+                if available and include_data
+                else ""
+            ),
         }
 
     def _cleanup_sync(self, settings: HistorySettings) -> None:
