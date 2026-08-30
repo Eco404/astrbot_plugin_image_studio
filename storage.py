@@ -530,7 +530,7 @@ class GenerationStore:
         return True
 
     async def export_generations(self, generation_ids: list[str]) -> Path:
-        """Build a ZIP archive containing selected results and a redacted manifest."""
+        """Build a flat ZIP containing one redacted JSON beside every result."""
 
         valid_ids = [
             item for item in generation_ids if _SAFE_ID_RE.fullmatch(str(item or ""))
@@ -544,7 +544,7 @@ class GenerationStore:
 
         stamp = time.strftime("%Y%m%d_%H%M%S")
         target = self.exports_dir / f"image_studio_{stamp}_{uuid.uuid4().hex[:8]}.zip"
-        manifest: list[dict[str, Any]] = []
+        used_stems: set[str] = set()
         with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             for generation_id in generation_ids:
                 detail = self._generation_detail_sync(
@@ -552,18 +552,34 @@ class GenerationStore:
                 )
                 if not detail:
                     continue
-                for image in detail["images"]:
+                images = detail["images"]
+                for image_index, image in enumerate(images, start=1):
                     path = self.data_dir / image["path"]
                     if path.is_file() and _is_within(path, self.images_dir):
-                        archive.write(
-                            path, arcname=f"images/{generation_id}/{path.name}"
+                        stem = _export_stem(
+                            detail,
+                            image_index=image_index,
+                            image_count=len(images),
+                            used_stems=used_stems,
                         )
-                detail.pop("images", None)
-                detail.pop("references", None)
-                manifest.append(detail)
-            archive.writestr(
-                "manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2)
-            )
+                        image_filename = f"{stem}{path.suffix.lower()}"
+                        archive.write(path, arcname=image_filename)
+                        metadata = {
+                            key: value
+                            for key, value in detail.items()
+                            if key not in {"images", "references"}
+                        }
+                        metadata["image"] = {
+                            "id": image["id"],
+                            "filename": image_filename,
+                            "mime_type": image["mime_type"],
+                            "size_bytes": image["size_bytes"],
+                            "sha256": image["sha256"],
+                        }
+                        archive.writestr(
+                            f"{stem}.json",
+                            json.dumps(metadata, ensure_ascii=False, indent=2),
+                        )
         return target
 
     async def cleanup_exports(self) -> None:
@@ -722,6 +738,35 @@ def _image_suffix(mime_type: str, data: bytes) -> str:
 
 def _safe_filename(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", str(value or "")).strip("._")[:120]
+
+
+def _export_stem(
+    detail: dict[str, Any],
+    *,
+    image_index: int,
+    image_count: int,
+    used_stems: set[str],
+) -> str:
+    timestamp = time.strftime(
+        "%Y%m%d%H%M%S", time.localtime(float(detail.get("created_at") or 0))
+    )
+    mode = "i2i" if detail.get("mode") == "img2img" else "t2i"
+    model = (
+        _safe_filename(
+            str(detail.get("model") or detail.get("provider_id") or "unknown")
+        )
+        or "unknown"
+    )
+    base = f"{timestamp}_{mode}_{model}"
+    if image_count > 1:
+        base = f"{base}_{image_index:02d}"
+    stem = base
+    collision = 2
+    while stem in used_stems:
+        stem = f"{base}_{collision:02d}"
+        collision += 1
+    used_stems.add(stem)
+    return stem
 
 
 def _is_within(path: Path, root: Path) -> bool:

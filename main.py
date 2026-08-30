@@ -17,6 +17,7 @@ from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.api.web import error_response, file_response, json_response
 from astrbot.api.web import request as web_request
+from starlette.background import BackgroundTask
 
 from .config import normalize_webui_settings, runtime_settings
 from .models import ImageProvider
@@ -112,10 +113,10 @@ class ImageStudioPlugin(Star):
                 "Image Studio: save settings",
             ),
             (
-                "provider/test",
-                self._api_test_provider,
+                "model/test",
+                self._api_test_model,
                 ["POST"],
-                "Image Studio: test provider",
+                "Image Studio: test model",
             ),
             (
                 "gallery/list",
@@ -317,20 +318,27 @@ class ImageStudioPlugin(Star):
             return error_response(str(exc), status_code=400)
         return json_response(_result_payload(result))
 
-    async def _api_test_provider(self) -> Any:
+    async def _api_test_model(self) -> Any:
         body = await web_request.json(default={})
         if not isinstance(body, dict) or not isinstance(body.get("provider"), dict):
-            return error_response("需要 provider 配置", status_code=400)
+            return error_response("需要服务商配置", status_code=400)
         provider = ImageProvider.from_mapping(body["provider"])
-        test_model = next((item for item in provider.models if item.text2img), None)
+        model_id = str(body.get("model_id") or "").strip()
+        test_model = next(
+            (item for item in provider.models if item.id == model_id), None
+        )
         if not provider.id or not provider.base_url or test_model is None:
             return error_response(
-                "Provider 需要 id、base_url 和至少一个支持文生图的模型", status_code=400
+                "服务商需要 id、base_url 和有效的测试模型", status_code=400
+            )
+        if not test_model.text2img:
+            return error_response(
+                "当前模型仅支持图生图，无法进行无参考图测试", status_code=400
             )
         try:
             result = await self._service_or_raise().executor.generate(
                 provider,
-                self._test_request(provider.id, test_model.id),
+                self._test_request(provider, test_model.id),
             )
         except (ValueError, ProviderError) as exc:
             return error_response(str(exc), status_code=400)
@@ -342,15 +350,32 @@ class ImageStudioPlugin(Star):
             }
         )
 
-    def _test_request(self, provider_id: str, model: str):
+    def _test_request(self, provider: ImageProvider, model_id: str):
         from .models import GenerationRequest
 
+        model = provider.get_model(model_id)
+        size = "竖图" if provider.kind == "nai_direct" else "1024x1024"
+        count = 1
+        parameters: dict[str, Any] = {}
+        for name, descriptor in model.parameters.items():
+            if descriptor.get("ui_only") or "default" not in descriptor:
+                continue
+            request_key = str(descriptor.get("request_key") or name)
+            if request_key == "size":
+                size = str(descriptor["default"])
+            elif request_key in {"count", "n"}:
+                count = _as_int(descriptor["default"], 1)
+            else:
+                parameters[request_key] = descriptor["default"]
         return GenerationRequest(
             mode="text2img",
-            provider_id=provider_id,
+            provider_id=provider.id,
             prompt="A simple landscape photograph with one tree and clear daylight.",
-            model=model,
-            size="1024x1024",
+            negative_prompt=model.negative_prompt_default,
+            model=model.id,
+            size=size,
+            count=count,
+            parameters=parameters,
             source="webui",
         )
 
@@ -436,13 +461,21 @@ class ImageStudioPlugin(Star):
 
     async def _api_download_export(self, export_id: str) -> Any:
         item = self._exports.get(export_id)
-        if item is None or time.time() - item[1] > 3600 or not item[0].is_file():
+        if item is None:
             return error_response("导出文件已过期，请重新导出", status_code=404)
-        return file_response(
-            item[0],
-            filename=item[0].name,
+        path, created_at = item
+        if time.time() - created_at > 3600 or not path.is_file():
+            self._exports.pop(export_id, None)
+            await asyncio.to_thread(_remove_export_file, path)
+            return error_response("导出文件已过期，请重新导出", status_code=404)
+        response = file_response(
+            path,
+            filename=path.name,
             content_type="application/zip",
         )
+        self._exports.pop(export_id, None)
+        response.background = BackgroundTask(_remove_export_file, path)
+        return response
 
     @filter.command("image_gen", alias={"img"})
     async def image_gen(self, event: AstrMessageEvent):
@@ -638,6 +671,13 @@ def _parse_command(raw: str) -> dict[str, Any]:
             "用法：/image_gen <提示词> [--provider id] [--mode text2img|img2img] [--size 1024x1024] [--ref 路径]"
         )
     return values
+
+
+def _remove_export_file(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _as_int(value: Any, default: int) -> int:

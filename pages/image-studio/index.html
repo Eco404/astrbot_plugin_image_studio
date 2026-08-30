@@ -37,7 +37,8 @@
           <button class="segment" data-mode="img2img" type="button">图生图</button>
         </div>
         <div class="model-select-row"><label for="modelChoice">模型</label><select id="modelChoice" aria-label="选择生图模型" disabled><option value="">请先选择模式</option></select><span class="model-provider" id="modelProvider"></span></div>
-        <fieldset id="generatorWorkspace" class="generator-workspace" disabled>
+        <div class="workspace-empty glass" id="workspaceEmpty">请选择模型</div>
+        <fieldset id="generatorWorkspace" class="generator-workspace is-hidden" disabled>
         <div class="generator-layout">
           <form class="generator-form glass" id="generationForm">
             <div class="field field-wide"><label for="prompt">提示词</label><textarea id="prompt" rows="6" maxlength="6000" placeholder="描述希望生成的画面" required></textarea></div>
@@ -45,10 +46,10 @@
             <div class="model-parameters field-wide" id="modelParameters"></div>
             <div class="field field-wide is-hidden" id="referenceField">
               <label for="referenceUpload">参考图</label>
-              <div class="upload-row"><input id="referenceUpload" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple /><span>最多使用当前服务商支持的数量</span></div>
+              <div class="upload-row"><input id="referenceUpload" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple /><span>最多使用当前模型支持的数量</span></div>
               <div class="reference-strip" id="referenceStrip"></div>
             </div>
-            <details class="advanced field-wide">
+            <details class="advanced field-wide is-hidden" id="advancedParameters">
               <summary>高级参数</summary>
               <label for="parameters">JSON 参数</label>
               <textarea id="parameters" rows="4" spellcheck="false" placeholder='例如 {"seed": 42, "steps": 28}'></textarea>

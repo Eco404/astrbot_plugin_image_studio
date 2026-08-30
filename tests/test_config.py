@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from astrbot_plugin_image_gen.config import normalize_webui_settings, runtime_settings
 from astrbot_plugin_image_gen.models import GenerationRequest, ImageProvider
-from astrbot_plugin_image_gen.providers import _openai_payload
+from astrbot_plugin_image_gen.providers import _nai_query, _openai_payload
 
 
 def test_webui_settings_normalize_provider_and_history() -> None:
@@ -170,3 +170,56 @@ def test_provider_transport_defaults_follow_provider_kind() -> None:
     assert provider.generate_path == "/v1beta/models/{model}:generateContent"
     assert provider.edit_path == "/v1beta/models/{model}:generateContent"
     assert provider.edit_request_format == "json_data_url"
+
+
+def test_nai_transport_matches_third_party_get_protocol() -> None:
+    provider = ImageProvider.from_mapping(
+        {
+            "id": "nai",
+            "name": "NAI third party",
+            "kind": "nai_direct",
+            "api_key": "to-user-id",
+            "models": [
+                {
+                    "id": "nai-diffusion-4-5-full",
+                    "supports_negative_prompt": True,
+                }
+            ],
+        }
+    )
+    request = GenerationRequest(
+        mode="text2img",
+        provider_id="nai",
+        prompt="1girl, outdoors",
+        negative_prompt="bad anatomy",
+        model="nai-diffusion-4-5-full",
+        size="竖图",
+        parameters={
+            "artist": "artist:test",
+            "steps": 24,
+            "scale": 6,
+            "cfg": 7,
+            "sampler": "k_dpmpp_2m_sde",
+            "noise_schedule": "karras",
+            "nocache": 0,
+        },
+    )
+
+    query = _nai_query(provider, request)
+
+    assert provider.base_url == "https://nai.sta1n.cn"
+    assert provider.generate_path == "/generate"
+    assert query == {
+        "artist": "artist:test",
+        "steps": "24",
+        "scale": "6",
+        "cfg": "7",
+        "sampler": "k_dpmpp_2m_sde",
+        "noise_schedule": "karras",
+        "nocache": "1",
+        "tag": "1girl, outdoors",
+        "token": "to-user-id",
+        "model": "nai-diffusion-4-5-full",
+        "size": "竖图",
+        "negative": "bad anatomy",
+    }

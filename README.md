@@ -20,12 +20,12 @@ WebUI 是插件的主要设置入口。AstrBot 原生插件设置页只显示基
 
 - `openai_images`：OpenAI Images API，以及兼容 `/images/generations` 和 `/images/edits` 的服务。
 - `gemini`：Gemini `generateContent` 图片输出，支持内联参考图。
-- `nai_direct`：兼容 NAI `GET /generate` 的文生图服务。
+- `nai_direct`：兼容 `astrbot_plugin_nai_image` 使用的第三方 `nai.sta1n.cn` 协议，默认请求 `GET https://nai.sta1n.cn/generate`。这里的 Token 是该站申请的 `toUserId`，并非 NovelAI 官方 API 凭据。
 - `custom_json`：可自定义请求体模板和图片响应提取路径的 JSON 接口。
 
 服务商只负责连接配置：类型、地址、路径、请求头、鉴权和超时。模型配置单独位于“模型配置”区域，同一服务商可以添加多个模型，并分别声明文生图、图生图、反向提示词和最大参考图数量。被停用、配置不完整或没有支持当前模式模型的服务商不会出现在生图页面的模型列表中。
 
-模型参数是可扩展的 JSON schema，前端不需要为新模型增加代码。每个参数可以包含 `type`（`text`、`number`、`select`、`boolean`、`json`）、`label`、`default`、`request_key`、`min`、`max`、`step` 和 `choices`。例如：
+模型参数是可扩展的 JSON schema，前端不需要为新模型增加代码。每个参数可以包含 `type`（`text`、`textarea`、`number`、`select`、`boolean`、`json`、`preset`）、`label`、`default`、`request_key`、`min`、`max`、`step` 和 `choices`。`preset` 可通过 `target` 和选项中的 `fill` 联动填写另一个参数；配合 `ui_only: true` 时只参与界面交互，不会发送给上游。例如：
 
 ```json
 {
@@ -34,13 +34,13 @@ WebUI 是插件的主要设置入口。AstrBot 原生插件设置页只显示基
 }
 ```
 
-OpenAI Images 会预填尺寸、数量、质量、背景和输出格式；Gemini 会预填画面比例和图片尺寸；NAI 会预填尺寸、采样器、步数、Scale、CFG、噪声调度和种子。`custom_json` 可用同一套控件描述任意新参数，未识别的参数会按 `request_key` 原样传给自定义接口。
+OpenAI Images 会预填尺寸、数量、质量、背景和输出格式；Gemini 会预填画面比例和图片尺寸；NAI 第三方 GET 会按参考插件预填模型、绘画风格、画师串、中文尺寸、采样器、步数、Scale、CFG Rescale、噪声调度和默认反向提示词，并固定发送 `nocache=1`。NAI 的画师串默认留空，绘画风格默认显示“自定义”；选择其他风格会填入对应画师串，选择“自定义”会先清空画师串。画师串被修改且不再匹配任何预设时也会自动显示为“自定义”，但不会因此清空用户输入。其 CFG Rescale 默认值为 `0.3`，采样器默认为 `k_euler_ancestral`。`custom_json` 可用同一套控件描述任意新参数，未识别的参数会按 `request_key` 原样传给自定义接口。
 
 ## 反向提示词支持
 
 反向提示词不是所有生图接口的通用参数：
 
-- NAI 直连使用 `negative` 参数，默认支持。
+- NAI 第三方 GET 使用 `negative` 查询参数，默认支持。
 - OpenAI Images 标准接口没有专用反向提示词参数，插件不会向该接口发送 `negative_prompt`。
 - Gemini `generateContent` 图片输出没有专用反向提示词字段，限制内容应写入正向提示词。
 - 自定义 JSON 服务商默认关闭该字段；确认目标模型对应接口明确支持后，可在模型配置中开启，插件才会注入 `negative_prompt`。
@@ -64,7 +64,8 @@ LLM 工具名为 `image_gen_generate`。工具成功后会返回 MCP `ImageConte
 - 结果图会作为画廊记录保存；参考图只显示在对应生成记录的详情中，不会单独成为画廊卡片。
 - 参考图可以在详情中单独删除，删除后不会影响结果图和请求参数。
 - 即使历史参考图没有保留，仍可恢复已有参数并进入生图页面；界面会明确提示需要重新补充参考图。
-- 画廊导出文件不会包含 API 密钥、鉴权请求头或其他疑似凭据字段。
+- 画廊导出采用平铺 ZIP：每张图片与一个同名 JSON 成对保存，基础名称为 `YYYYMMDDHHMMSS_t2i|i2i_模型`；多图或重名时追加序号。
+- 导出 JSON 不会包含 API 密钥、鉴权请求头或其他疑似凭据字段；ZIP 下载响应完成后会立即从插件数据目录删除。
 
 ## 数据位置
 

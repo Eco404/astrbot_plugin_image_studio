@@ -104,7 +104,7 @@ class ImageGenerationService:
                 else ""
             ),
             model=selected_model.id,
-            size=_size(size or settings.default_size),
+            size=_size(size or settings.default_size, provider.kind),
             count=max(1, min(4, _as_int(count, settings.default_count))),
             parameters=_parameters_for_model(parameters, selected_model),
             references=normalized_refs,
@@ -260,8 +260,21 @@ def _mode(value: str) -> str:
     return normalized
 
 
-def _size(value: str) -> str:
-    text = str(value or "").strip().lower()
+def _size(value: str, provider_kind: str = "") -> str:
+    raw = str(value or "").strip()
+    if provider_kind == "nai_direct" and raw in {
+        "竖图",
+        "横图",
+        "方图",
+        "2K竖图",
+        "2K横图",
+        "2K方图",
+        "4K竖图",
+        "4K横图",
+        "4K方图",
+    }:
+        return raw
+    text = raw.lower()
     if not text:
         return ""
     if not re.fullmatch(r"\d{2,5}x\d{2,5}|[1-4]k", text):
@@ -294,6 +307,8 @@ def _parameters_for_model(value: Any, model: ImageModel) -> dict[str, Any]:
     mapped: dict[str, Any] = {}
     for key, item in raw.items():
         descriptor = model.parameters.get(key)
+        if isinstance(descriptor, dict) and descriptor.get("ui_only"):
+            continue
         request_key = (
             str(descriptor.get("request_key") or key)
             if isinstance(descriptor, dict)

@@ -55,6 +55,7 @@
               "supports_text2img": {"type": "bool", "default": true},
               "supports_img2img": {"type": "bool", "default": false},
               "supports_negative_prompt": {"type": "bool", "default": false},
+              "negative_prompt_default": {"type": "text", "default": ""},
               "max_reference_images": {"type": "int", "default": 1},
               "parameters": {"type": "object", "default": {}}
             }

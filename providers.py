@@ -159,21 +159,9 @@ class ProviderExecutor:
         request: GenerationRequest,
     ) -> tuple[GeneratedImage, ...]:
         if request.mode != "text2img":
-            raise ProviderError("NAI 直连 Provider 仅支持文生图")
+            raise ProviderError("NAI 第三方 GET 服务仅支持文生图")
         endpoint = _join_url(provider.base_url, provider.generate_path or "/generate")
-        query = {
-            "tag": request.prompt,
-            "token": provider.api_key,
-            "model": request.model or provider.model,
-            "size": request.size or "1024x1024",
-        }
-        if (
-            provider.get_model(request.model).negative_prompt
-            and request.negative_prompt
-        ):
-            query["negative"] = request.negative_prompt
-        for key, value in _safe_parameters(request.parameters).items():
-            query[str(key)] = str(value)
+        query = _nai_query(provider, request)
         async with self.session.get(
             endpoint,
             params=query,
@@ -298,6 +286,27 @@ def _openai_payload(
         payload["negative_prompt"] = request.negative_prompt
     payload.update(_safe_parameters(request.parameters))
     return payload
+
+
+def _nai_query(provider: ImageProvider, request: GenerationRequest) -> dict[str, str]:
+    """Build the third-party nai.sta1n.cn GET query used by nai_image."""
+
+    query = {
+        str(key): str(value)
+        for key, value in _safe_parameters(request.parameters).items()
+    }
+    query.update(
+        {
+            "tag": request.prompt,
+            "token": provider.api_key,
+            "model": request.model or provider.model,
+            "size": request.size or "竖图",
+            "nocache": "1",
+        }
+    )
+    if provider.get_model(request.model).negative_prompt and request.negative_prompt:
+        query["negative"] = request.negative_prompt
+    return query
 
 
 def _headers(provider: ImageProvider, *, bearer: bool) -> dict[str, str]:

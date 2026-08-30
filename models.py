@@ -26,23 +26,39 @@ COMMON_MODEL_PARAMETERS: dict[str, dict[str, Any]] = {
     },
 }
 
+NAI_DEFAULT_NEGATIVE = (
+    "{{bad anatomy}},{bad feet},bad hands,{{{bad proportions}}},{blurry},cloned face,cropped,"
+    "{{{deformed}}},{{{disfigured}}},error,{{{extra arms}}},{extra digit},{{{extra legs}}},extra limbs,"
+    "{{extra limbs}},{fewer digits},{{{fused fingers}}},gross proportions,ink eyes,ink hair,"
+    "jpeg artifacts,{{{{long neck}}}},low quality,{malformed limbs},{{missing arms}},{missing fingers},"
+    "{{missing legs}},{{{more than 2 nipples}}},mutated hands,{{{mutation}}},normal quality,owres,"
+    "{{poorly drawn face}},{{poorly drawn hands}},reen eyes,signature,text,{{too many fingers}},"
+    "{{{ugly}}},username,uta,watermark,worst quality,{{{more than 2 legs}}},"
+    "awkward hand sign,weird hand gesture,contorted hand,unnatural finger pose,deformed hand gesture,"
+    "{shaka},{hang loose},{{rock on}},{shaka sign}"
+)
+
 PROVIDER_TRANSPORT_DEFAULTS: dict[str, dict[str, str]] = {
     "openai_images": {
+        "base_url": "https://api.openai.com/v1",
         "generate_path": "/images/generations",
         "edit_path": "/images/edits",
         "edit_request_format": "multipart",
     },
     "gemini": {
+        "base_url": "https://generativelanguage.googleapis.com",
         "generate_path": "/v1beta/models/{model}:generateContent",
         "edit_path": "/v1beta/models/{model}:generateContent",
         "edit_request_format": "json_data_url",
     },
     "nai_direct": {
+        "base_url": "https://nai.sta1n.cn",
         "generate_path": "/generate",
         "edit_path": "",
         "edit_request_format": "json_data_url",
     },
     "custom_json": {
+        "base_url": "",
         "generate_path": "/v1/images/generations",
         "edit_path": "/v1/images/edits",
         "edit_request_format": "json_data_url",
@@ -60,6 +76,7 @@ class ImageModel:
     img2img: bool
     negative_prompt: bool
     max_reference_images: int
+    negative_prompt_default: str = ""
     parameters: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def supports(self, mode: GenerationMode) -> bool:
@@ -76,6 +93,7 @@ class ImageModel:
             "supports_text2img": self.text2img,
             "supports_img2img": self.img2img,
             "supports_negative_prompt": self.negative_prompt,
+            "negative_prompt_default": self.negative_prompt_default,
             "max_reference_images": self.max_reference_images,
             "parameters": self.parameters,
         }
@@ -154,6 +172,7 @@ class ImageProvider:
                 )
             ),
             max_reference_images=max_refs if img2img else 0,
+            negative_prompt_default=_model_negative_default(value, kind),
             parameters=_normalize_parameters(value.get("parameters")),
         )
         raw_models = value.get("models")
@@ -174,7 +193,9 @@ class ImageProvider:
             name=_text(value.get("name"), 96),
             enabled=_as_bool(value.get("enabled"), True),
             kind=kind,
-            base_url=_text(value.get("base_url"), 500).rstrip("/"),
+            base_url=_text(
+                value.get("base_url") or transport_defaults["base_url"], 500
+            ).rstrip("/"),
             generate_path=_normalized_path(
                 value.get("generate_path"), transport_defaults["generate_path"]
             ),
@@ -379,5 +400,17 @@ def _model_from_mapping(value: dict[str, Any], kind: str) -> ImageModel:
         )
         if img2img
         else 0,
+        negative_prompt_default=_model_negative_default(value, kind),
         parameters=_normalize_parameters(value.get("parameters")),
     )
+
+
+def _model_negative_default(value: dict[str, Any], kind: str) -> str:
+    configured = (
+        value.get("negative_prompt_default")
+        if "negative_prompt_default" in value
+        else NAI_DEFAULT_NEGATIVE
+        if kind == "nai_direct"
+        else ""
+    )
+    return _text(configured, 4000)

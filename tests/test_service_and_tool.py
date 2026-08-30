@@ -6,8 +6,6 @@ import time
 from types import SimpleNamespace
 
 import mcp
-from fastapi.responses import FileResponse
-
 from astrbot_plugin_image_gen.config import HistorySettings, RuntimeSettings
 from astrbot_plugin_image_gen.main import ImageStudioPlugin
 from astrbot_plugin_image_gen.models import (
@@ -17,9 +15,9 @@ from astrbot_plugin_image_gen.models import (
     ImageProvider,
     ReferenceImage,
 )
-from astrbot_plugin_image_gen.service import ImageGenerationService
+from astrbot_plugin_image_gen.service import ImageGenerationService, _size
 from astrbot_plugin_image_gen.storage import GenerationStore
-
+from fastapi.responses import FileResponse
 
 PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9JZq4AAAAASUVORK5CYII="
@@ -162,10 +160,15 @@ def test_service_maps_model_schema_parameter_names(tmp_path) -> None:
                     {
                         "id": "draw-v2",
                         "parameters": {
+                            "style": {
+                                "type": "preset",
+                                "default": "custom",
+                                "ui_only": True,
+                            },
                             "guidance": {
                                 "type": "number",
                                 "request_key": "cfg_scale",
-                            }
+                            },
                         },
                     }
                 ],
@@ -198,11 +201,58 @@ def test_service_maps_model_schema_parameter_names(tmp_path) -> None:
             provider_id="custom",
             model_ref="custom:draw-v2",
             prompt="a lake",
-            parameters={"guidance": 6},
+            parameters={"style": "custom", "guidance": 6},
         )
         assert captured["request"].parameters["cfg_scale"] == 6
+        assert "style" not in captured["request"].parameters
 
     asyncio.run(run())
+
+
+def test_provider_test_uses_configured_nai_model_defaults() -> None:
+    provider = ImageProvider.from_mapping(
+        {
+            "id": "nai",
+            "name": "NAI third party",
+            "kind": "nai_direct",
+            "api_key": "to-user-id",
+            "models": [
+                {
+                    "id": "nai-diffusion-4-5-full",
+                    "parameters": {
+                        "style": {
+                            "type": "preset",
+                            "default": "vertical",
+                            "ui_only": True,
+                        },
+                        "artist": {
+                            "type": "text",
+                            "default": "artist:test",
+                            "request_key": "artist",
+                        },
+                        "size": {
+                            "type": "select",
+                            "default": "竖图",
+                            "request_key": "size",
+                        },
+                        "steps": {
+                            "type": "number",
+                            "default": 24,
+                            "request_key": "steps",
+                        },
+                    },
+                }
+            ],
+        }
+    )
+    plugin = object.__new__(ImageStudioPlugin)
+
+    request = plugin._test_request(provider, "nai-diffusion-4-5-full")
+
+    assert request.size == "竖图"
+    assert "bad anatomy" in request.negative_prompt
+    assert request.parameters == {"artist": "artist:test", "steps": 24}
+    assert _size("4K横图", "nai_direct") == "4K横图"
 
 
 def test_export_download_uses_standard_file_response(tmp_path) -> None:
@@ -215,3 +265,8 @@ def test_export_download_uses_standard_file_response(tmp_path) -> None:
 
     assert isinstance(response, FileResponse)
     assert response.media_type == "application/zip"
+    assert "export-1" not in plugin._exports
+    assert archive_path.is_file()
+    assert response.background is not None
+    asyncio.run(response.background())
+    assert not archive_path.exists()

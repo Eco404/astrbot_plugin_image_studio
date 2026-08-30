@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
+import re
 import zipfile
 
 from astrbot_plugin_image_gen.config import HistorySettings
@@ -91,15 +93,57 @@ def test_gallery_export_is_a_valid_zip_archive(tmp_path) -> None:
         assert archive_path.stat().st_size > 100
         with zipfile.ZipFile(archive_path) as archive:
             assert archive.testzip() is None
-            assert "manifest.json" in archive.namelist()
-            assert any(
-                name.startswith(f"images/{generation_id}/")
-                for name in archive.namelist()
-            )
+            names = archive.namelist()
+            assert len(names) == 2
+            assert all("/" not in name for name in names)
+            image_name = next(name for name in names if not name.endswith(".json"))
+            assert re.fullmatch(r"\d{14}_t2i_test-image\.png", image_name)
+            json_name = image_name.removesuffix(".png") + ".json"
+            assert json_name in names
+            metadata = json.loads(archive.read(json_name))
+            assert metadata["id"] == generation_id
+            assert metadata["model"] == "test-image"
+            assert metadata["image"]["filename"] == image_name
+            assert "path" not in metadata["image"]
 
         summary = await store.generation_detail(generation_id, include_assets=False)
         assert summary is not None
         assert summary["images"][0]["data_url"] == ""
         assert summary["images"][0]["path"]
+
+    asyncio.run(run())
+
+
+def test_gallery_export_pairs_each_image_in_flat_archive(tmp_path) -> None:
+    async def run() -> None:
+        store = GenerationStore(tmp_path)
+        await store.initialize()
+        generation_id = await store.record_success(
+            provider=provider(),
+            request=GenerationRequest(
+                mode="img2img",
+                provider_id="test-provider",
+                prompt="export two images",
+            ),
+            images=(
+                GeneratedImage(PNG, "image/png"),
+                GeneratedImage(PNG, "image/png"),
+            ),
+            elapsed_ms=12,
+            history=HistorySettings(True, 10, 50, False),
+        )
+
+        archive_path = await store.export_generations([generation_id])
+        with zipfile.ZipFile(archive_path) as archive:
+            names = archive.namelist()
+            assert len(names) == 4
+            assert all("/" not in name for name in names)
+            image_names = sorted(name for name in names if name.endswith(".png"))
+            assert all(
+                re.fullmatch(r"\d{14}_i2i_test-image_0[12]\.png", name)
+                for name in image_names
+            )
+            for image_name in image_names:
+                assert image_name.removesuffix(".png") + ".json" in names
 
     asyncio.run(run())
