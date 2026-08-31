@@ -467,7 +467,22 @@ def _normalize_tool(
         for key, descriptor in parameters.items():
             name = _text(key, 64)
             if name and isinstance(descriptor, dict):
-                normalized_parameters[name] = dict(descriptor)
+                item = dict(descriptor)
+                choice_descriptions = item.get("choice_descriptions")
+                if isinstance(choice_descriptions, dict):
+                    normalized_choices = {
+                        choice: description
+                        for key, value in choice_descriptions.items()
+                        if (choice := _text(key, 160))
+                        and (description := _text(value, 1000))
+                    }
+                    if normalized_choices:
+                        item["choice_descriptions"] = normalized_choices
+                    else:
+                        item.pop("choice_descriptions", None)
+                else:
+                    item.pop("choice_descriptions", None)
+                normalized_parameters[name] = item
     limit_default = max_reference_images if img2img else 0
     nai = kind == "nai_direct"
     return {

@@ -56,7 +56,7 @@ OpenAI Images 会预填尺寸、数量、质量、背景和输出格式；Gemini
 /image_gen 重新绘制这张图片 --mode img2img --ref /path/from/astrbot/temp/tool_images/file.png
 ```
 
-LLM 工具包括 `image_gen_get_capabilities` 和 `image_gen_generate`。前者按需返回允许 LLM 使用的模型、提示词规范和参数；后者支持动态参数、多张参考图和严格 `model_ref`。生成成功后返回 MCP `ImageContent`，AstrBot 会缓存图片并把它加入后续支持视觉输入的 Agent 步骤。指令和 LLM 工具均能读取当前消息及引用消息中的图片；没有显式指定模式时，检测到图片会自动使用图生图。
+LLM 工具包括 `image_studio_get_capabilities` 和 `image_studio_generate`。前者按需返回允许 LLM 使用的模型、提示词规范和参数；后者支持动态参数、多张参考图和严格 `model_ref`。生成成功后返回 MCP `ImageContent`，AstrBot 会缓存图片并把它加入后续支持视觉输入的 Agent 步骤。指令和 LLM 工具均能读取当前消息及引用消息中的图片；没有显式指定模式时，检测到图片会自动使用图生图。
 
 ## 历史与参考图
 

@@ -97,7 +97,7 @@ def test_llm_tool_returns_mcp_image_content() -> None:
     plugin._service = FakeService()
 
     result = asyncio.run(
-        plugin.image_gen_generate(SimpleNamespace(), prompt="one tree")
+        plugin.image_studio_generate(SimpleNamespace(), prompt="one tree")
     )
 
     assert isinstance(result, mcp.types.CallToolResult)
@@ -129,7 +129,7 @@ def test_capabilities_only_lists_llm_enabled_models() -> None:
     )
 
     result = asyncio.run(
-        plugin.image_gen_get_capabilities(SimpleNamespace(), mode="text2img")
+        plugin.image_studio_get_capabilities(SimpleNamespace(), mode="text2img")
     )
     payload = json.loads(result.content[0].text)
 
@@ -169,7 +169,7 @@ def test_capabilities_excludes_zero_limit_model_from_img2img() -> None:
     )
 
     result = asyncio.run(
-        plugin.image_gen_get_capabilities(SimpleNamespace(), mode="img2img")
+        plugin.image_studio_get_capabilities(SimpleNamespace(), mode="img2img")
     )
     payload = json.loads(result.content[0].text)
 
@@ -179,23 +179,26 @@ def test_capabilities_excludes_zero_limit_model_from_img2img() -> None:
 
 
 def test_registered_image_tool_descriptions_contain_routing_contract() -> None:
-    capabilities = llm_tools.get_func("image_gen_get_capabilities")
-    generate = llm_tools.get_func("image_gen_generate")
+    capabilities = llm_tools.get_func("image_studio_get_capabilities")
+    generate = llm_tools.get_func("image_studio_generate")
     light_tools = llm_tools.get_full_tool_set().get_light_tool_set()
 
+    assert llm_tools.get_func("image_gen_get_capabilities") is None
+    assert llm_tools.get_func("image_gen_generate") is None
     assert capabilities is not None
     assert generate is not None
     assert "用户明确要求 NAI" in capabilities.description
-    assert "image_gen_generate" in capabilities.description
+    assert "image_studio_generate" in capabilities.description
     assert "一般自然语言生图可直接调用" in generate.description
-    assert "image_gen_get_capabilities" in generate.description
+    assert "image_studio_get_capabilities" in generate.description
     assert "不要编造" in generate.description
     assert (
-        light_tools.get_tool("image_gen_get_capabilities").description
+        light_tools.get_tool("image_studio_get_capabilities").description
         == capabilities.description
     )
     assert (
-        light_tools.get_tool("image_gen_generate").description == generate.description
+        light_tools.get_tool("image_studio_generate").description
+        == generate.description
     )
 
 

@@ -559,14 +559,17 @@
       els.toolParameterDefault.value = policy.default_override ?? ""; els.toolParameterDefaultChoice.innerHTML = "";
       els.toolParameterDefaultHint.textContent = "留空时使用模型配置中的默认值";
     }
-    els.toolParameterChoices.value = policy.choice_descriptions ? JSON.stringify(policy.choice_descriptions, null, 2) : "";
+    const choiceDescriptions = policy.choice_descriptions;
+    els.toolParameterChoices.value = choiceDescriptions && typeof choiceDescriptions === "object" && !Array.isArray(choiceDescriptions) && Object.keys(choiceDescriptions).length ? JSON.stringify(choiceDescriptions, null, 2) : "";
     els.parameterDialog.classList.remove("is-hidden"); els.scrim.classList.remove("is-hidden");
   }
   function closeToolParameterDialog() { state.editingToolParameter = ""; state.editingToolDefaultChoices = []; els.parameterDialog.classList.add("is-hidden"); if (!els.detailDrawer.classList.contains("is-open")) els.scrim.classList.add("is-hidden"); }
   function applyToolParameterDialog() {
     const model = currentSettingsModel(); const name = state.editingToolParameter; if (!model || !name) return;
     let choiceDescriptions = {}; try { choiceDescriptions = els.toolParameterChoices.value.trim() ? JSON.parse(els.toolParameterChoices.value) : {}; } catch { showNotice("选项说明必须是合法 JSON。", "error"); return; }
-    const descriptor = model.parameters[name] || {}; const policy = { exposed: els.toolParameterExposed.checked, description: els.toolParameterDescription.value, choice_descriptions: choiceDescriptions };
+    if (!choiceDescriptions || typeof choiceDescriptions !== "object" || Array.isArray(choiceDescriptions)) { showNotice("选项说明必须是 JSON 对象。", "error"); return; }
+    const descriptor = model.parameters[name] || {}; const policy = { exposed: els.toolParameterExposed.checked, description: els.toolParameterDescription.value };
+    if (Object.keys(choiceDescriptions).length) policy.choice_descriptions = choiceDescriptions;
     if (state.editingToolDefaultChoices.length) {
       if (els.toolParameterDefaultChoice.value !== MODEL_DEFAULT_CHOICE) {
         const selected = state.editingToolDefaultChoices[Number(els.toolParameterDefaultChoice.value)];

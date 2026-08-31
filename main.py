@@ -576,8 +576,8 @@ class ImageStudioPlugin(Star):
                 references.append(reference)
         return tuple(references[:8])
 
-    @filter.llm_tool(name="image_gen_get_capabilities")
-    async def image_gen_get_capabilities(
+    @filter.llm_tool(name="image_studio_get_capabilities")
+    async def image_studio_get_capabilities(
         self,
         event: AstrMessageEvent,
         mode: str = "",
@@ -587,7 +587,7 @@ class ImageStudioPlugin(Star):
 
         用户明确要求 NAI、指定模型或特殊参数，或者不能确定模型能力时，先调用本工具，
         再严格按照返回的 model_ref、prompt_profile、prompt_instructions 和参数说明调用
-        image_gen_generate。一般自然语言生图无需预先查询。不要编造模型或参数。
+        image_studio_generate。一般自然语言生图无需预先查询。不要编造模型或参数。
 
         Args:
             mode(string): 可选的 text2img 或 img2img，用于筛选模式。
@@ -697,8 +697,8 @@ class ImageStudioPlugin(Star):
             ]
         )
 
-    @filter.llm_tool(name="image_gen_generate")
-    async def image_gen_generate(
+    @filter.llm_tool(name="image_studio_generate")
+    async def image_studio_generate(
         self,
         event: AstrMessageEvent,
         prompt: str = "",
@@ -717,7 +717,7 @@ class ImageStudioPlugin(Star):
 
         一般自然语言生图可直接调用，省略 model_ref 时使用对应模式的默认模型。用户明确
         要求 NAI、指定模型或特殊参数，或者不能确定模型能力时，先调用
-        image_gen_get_capabilities。用户消息或引用消息中的图片可直接用于图生图；不要编造
+        image_studio_get_capabilities。用户消息或引用消息中的图片可直接用于图生图；不要编造
         模型、参数或参考图路径。
 
         Args:

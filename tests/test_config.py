@@ -57,6 +57,46 @@ def test_provider_without_models_is_a_valid_saved_draft() -> None:
     assert normalized["providers"][0]["models"] == []
 
 
+def test_empty_tool_choice_descriptions_are_removed() -> None:
+    normalized, errors = normalize_webui_settings(
+        {
+            "providers": [
+                {
+                    "id": "custom",
+                    "name": "Custom",
+                    "kind": "custom_json",
+                    "base_url": "https://example.test",
+                    "models": [
+                        {
+                            "id": "image-model",
+                            "tool": {
+                                "parameters": {
+                                    "quality": {
+                                        "exposed": True,
+                                        "choice_descriptions": {},
+                                    },
+                                    "format": {
+                                        "exposed": True,
+                                        "choice_descriptions": {
+                                            "png": "无损格式",
+                                            "empty": "",
+                                        },
+                                    },
+                                }
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+
+    assert errors == []
+    parameters = normalized["providers"][0]["models"][0]["tool"]["parameters"]
+    assert "choice_descriptions" not in parameters["quality"]
+    assert parameters["format"]["choice_descriptions"] == {"png": "无损格式"}
+
+
 def test_plugin_owned_settings_round_trip_atomically(tmp_path) -> None:
     settings = {
         "providers": [],
