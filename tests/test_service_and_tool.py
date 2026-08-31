@@ -18,6 +18,7 @@ from astrbot_plugin_image_studio.main import (
     ImageStudioPlugin,
     _invocation_source,
     _iter_event_images,
+    _llm_parameter_descriptor,
     _parse_command,
     _provider_request_image_refs,
 )
@@ -230,7 +231,7 @@ def test_llm_tool_returns_mcp_image_content() -> None:
     )
     assert "generation_id=gallery-123" in text
     assert "不会结束本轮 Agent" in text
-    assert "最终回复不得复述" in text
+    assert "后续回复不得复述已发送内容" in text
 
 
 def test_llm_tool_image_return_modes_preserve_original_asset_path() -> None:
@@ -425,8 +426,8 @@ def test_capability_query_supports_all_default_and_model() -> None:
     assert [item["model_ref"] for item in model_payload["models"]] == [
         "provider:edit-model"
     ]
-    assert "不得查询 all" in default_payload["routing_contract"]["next_action"]
-    assert "无需再使用 model 查询" in all_payload["routing_contract"]["next_action"]
+    assert "普通画面描述不是能力缺口" in default_payload["next_action"]
+    assert "无需再次 model 查询" in all_payload["next_action"]
 
 
 def test_default_query_merges_shared_text_and_image_model() -> None:
@@ -532,7 +533,6 @@ def test_negative_prompt_requires_model_tool_exposure() -> None:
     )
 
     assert "negative_prompt" not in capability["parameters"]
-    assert capability["negative_prompt_exposed"] is False
     assert (
         "不要传入 negative_prompt" in capability["prompt_contract"]["negative_prompt"]
     )
@@ -603,7 +603,7 @@ def test_exposed_negative_prompt_is_disclosed_and_forwarded() -> None:
     )
 
     assert capability["parameters"]["negative_prompt"]["type"] == "string"
-    assert capability["negative_prompt_exposed"] is True
+    assert "negative_prompt_exposed" not in capability
     assert not result.isError
     assert captured["negative_prompt"] == "fog"
     assert "negative_prompt" not in captured["parameters"]
@@ -666,19 +666,18 @@ def test_capabilities_only_lists_llm_enabled_models() -> None:
     )
     payload = json.loads(result.content[0].text)
 
+    assert "\n" not in result.content[0].text
     assert payload["query_type"] == "default"
     assert [item["model_ref"] for item in payload["models"]] == ["provider:visible"]
+    assert "prompt_profile" not in payload["models"][0]
+    assert "prompt_instructions" not in payload["models"][0]
+    assert "supports_negative_prompt" not in payload["models"][0]
     assert payload["default_model_refs"] == {
         "text2img": "provider:visible",
         "img2img": "",
     }
-    assert "不会结束本轮 Agent" in payload["workflow_contract"]["delivery_tool"]
-    assert "最终回复不得复述" in payload["workflow_contract"]["delivery_tool"]
-    assert payload["workflow_contract"]["image_assets"]["return_mode"] == "preview"
-    assert (
-        "original_path"
-        in payload["workflow_contract"]["image_assets"]["original_usage"]
-    )
+    assert payload["asset_policy"]["return_mode"] == "preview"
+    assert payload["asset_policy"]["use_original_path_for_file_operations"] is True
 
 
 def test_capabilities_excludes_zero_limit_model_from_img2img() -> None:
@@ -733,22 +732,26 @@ def test_registered_image_tool_descriptions_contain_routing_contract() -> None:
     assert capabilities is not None
     assert generate is not None
     assert view_asset is not None
-    assert "每次调用 image_studio_generate 前" in capabilities.description
-    assert "常规生图必须首先使用" in capabilities.description
+    assert "生成前必调" in capabilities.description
+    assert "常规请求用 default" in capabilities.description
     assert "mode 可省略" in capabilities.description
-    assert "不得继续查询 all" in capabilities.description
     assert "query_type" in capabilities.parameters["properties"]
-    assert "image_studio_generate" in capabilities.description
-    assert "每次生成前都必须先调用" in generate.description
-    assert "常规" in generate.description
-    assert "不得查询" in generate.description
-    assert "image_studio_get_capabilities" in generate.description
-    assert "不要编造" in generate.description
+    assert "最近一次能力查询" in generate.description
+    assert "不得编造参数" in generate.description
     assert "不会结束本轮 Agent" in generate.description
-    assert "最终回复不得复述" in generate.description
+    assert "不得复述已发送内容" in generate.description
     assert "negative_prompt" not in generate.parameters["properties"]
-    assert "不用于普通发送" in view_asset.description
+    assert set(generate.parameters["properties"]) == {
+        "prompt",
+        "mode",
+        "model_ref",
+        "parameters",
+        "reference_image_paths",
+    }
+    assert "required" not in generate.parameters
+    assert "普通发送和文件处理" in view_asset.description
     assert "preview" in view_asset.parameters["properties"]["detail"]["description"]
+    assert "required" not in view_asset.parameters
     assert (
         light_tools.get_tool("image_studio_get_capabilities").description
         == capabilities.description
@@ -761,6 +764,25 @@ def test_registered_image_tool_descriptions_contain_routing_contract() -> None:
         light_tools.get_tool("image_studio_view_asset").description
         == view_asset.description
     )
+
+
+def test_llm_parameter_descriptor_omits_redundant_choice_fields() -> None:
+    descriptor = _llm_parameter_descriptor(
+        {
+            "type": "select",
+            "choices": [
+                "auto",
+                {"value": "hd", "label": "高清"},
+            ],
+        },
+        {"choice_descriptions": {"hd": "更精细"}},
+    )
+
+    assert "description" not in descriptor
+    assert descriptor["choices"] == [
+        {"value": "auto"},
+        {"value": "hd", "label": "高清", "description": "更精细"},
+    ]
 
 
 def test_reproduction_keeps_available_parameters_without_reference(tmp_path) -> None:

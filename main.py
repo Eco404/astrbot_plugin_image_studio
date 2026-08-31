@@ -637,19 +637,16 @@ class ImageStudioPlugin(Star):
         mode: str = "",
         model_ref: str = "",
     ) -> mcp.types.CallToolResult:
-        """查询当前可供 LLM 使用的生图模型、选择规则和参数。
+        """生成前必调的模型能力查询。
 
-        每次调用 image_studio_generate 前都必须先调用本工具。常规生图必须首先使用
-        default；mode 可省略，省略时同时返回文生图和图生图默认模型，也可指定 text2img 或
-        img2img 只查询对应默认模型。默认模型没有明确能力缺口时直接生成，不得继续查询 all。
-        只有默认模型缺少用户明确要求的模式、参考图数量或参数，默认模型不可用，用户要求比较
-        模型，或指定了模型类型却不知道 model_ref 时，才使用 all。用户明确指定 model_ref 时
-        直接查询 model。
+        常规请求用 default；mode 可省略以返回文生图和图生图默认。普通画面描述不是能力
+        缺口，默认模型满足明确能力时直接生成。仅在默认不可用、缺少明确能力、需要比较模型，
+        或只知道模型类型时用 all；明确 model_ref 时用 model。
 
         Args:
-            query_type(string): default、all 或 model。常规请求默认使用 default。
-            mode(string): 可选的 text2img 或 img2img；default 省略时返回两个模式的默认模型。
-            model_ref(string): query_type=model 时必填的 provider_id:model_id。
+            query_type(string): default、all 或 model；默认 default。
+            mode(string): text2img 或 img2img；default 时可省略。
+            model_ref(string): model 查询所需的 provider_id:model_id。
         """
 
         if not self._settings.enable_llm_tool:
@@ -784,32 +781,28 @@ class ImageStudioPlugin(Star):
                     }
                 prompt_profile = tool.get("prompt_profile", "natural_language")
                 prompt_instructions = tool.get("prompt_instructions", "")
-                entries.append(
-                    {
-                        "model_ref": ref,
-                        "provider_name": provider.name,
-                        "model_name": model.name,
-                        "modes": modes,
-                        "query_modes": query_modes,
-                        "default_for_modes": default_for_modes,
-                        "supports_negative_prompt": model.negative_prompt,
-                        "negative_prompt_exposed": (model.llm_negative_prompt_enabled),
-                        "max_reference_images": model.llm_max_reference_images,
-                        "selection_description": tool.get("selection_description", ""),
-                        "prompt_profile": prompt_profile,
-                        "prompt_instructions": prompt_instructions,
-                        "prompt_contract": {
-                            "format": prompt_profile,
-                            "instruction": prompt_instructions,
-                            "negative_prompt": (
-                                "需要时仅通过 parameters.negative_prompt 传入。"
-                                if model.llm_negative_prompt_enabled
-                                else "不要传入 negative_prompt。"
-                            ),
-                        },
-                        "parameters": exposed_parameters,
-                    }
-                )
+                entry = {
+                    "model_ref": ref,
+                    "provider_name": provider.name,
+                    "model_name": model.name,
+                    "modes": modes,
+                    "query_modes": query_modes,
+                    "max_reference_images": model.llm_max_reference_images,
+                    "selection_description": tool.get("selection_description", ""),
+                    "prompt_contract": {
+                        "format": prompt_profile,
+                        "instruction": prompt_instructions,
+                        "negative_prompt": (
+                            "仅在 parameters 返回该字段时使用。"
+                            if model.llm_negative_prompt_enabled
+                            else "不要传入 negative_prompt。"
+                        ),
+                    },
+                    "parameters": exposed_parameters,
+                }
+                if default_for_modes:
+                    entry["default_for_modes"] = default_for_modes
+                entries.append(entry)
         for candidate in requested_refs:
             if ":" in candidate:
                 continue
@@ -827,64 +820,24 @@ class ImageStudioPlugin(Star):
         _remember_capability_query(event, self._settings.revision, entries)
         if normalized_query_type == "default":
             next_action = (
-                "根据用户实际请求模式选择 default_for_modes 对应的默认模型。普通主体、画风、构图和"
-                "文字描述可由提示词表达，不属于能力缺口。若默认模型满足明确要求，立即调用 "
-                "image_studio_generate，不得查询 all；仅在存在可指出的能力缺口时查询相同 mode 的 all。"
+                "按请求模式选择 default_for_modes；普通画面描述不是能力缺口。满足明确能力则直接生成，"
+                "否则查询相同 mode 的 all。"
                 if not normalized_mode
-                else "普通主体、画风、构图和文字描述可由提示词表达，不属于能力缺口。若返回模型满足用户"
-                "明确要求的模式、参考图数量和参数，立即调用 image_studio_generate，不得查询 all；"
-                "仅在存在可指出的能力缺口时，使用相同 mode 查询 all。"
+                else "普通画面描述不是能力缺口；满足明确能力则直接生成，否则查询相同 mode 的 all。"
             )
         elif normalized_query_type == "all":
-            next_action = (
-                "从返回结果中选择满足明确要求的模型并直接调用 image_studio_generate，"
-                "无需再使用 model 查询。"
-            )
+            next_action = "选择满足要求的模型直接生成，无需再次 model 查询。"
         else:
-            next_action = "按照返回模型的 prompt_contract 和 parameters 直接调用 image_studio_generate。"
+            next_action = "按 prompt_contract 和 parameters 直接生成。"
         payload = {
             "query_type": normalized_query_type,
-            "usage": (
-                "本次查询结果只授权当前轮次中列出的模型和模式。生成时必须遵守每个模型的 "
-                "prompt_contract，且只能传入 parameters 中列出的动态参数。"
-            ),
-            "routing_contract": {
-                "default_first": (
-                    "未指定模型或模型类型的常规请求必须先查询默认模型；mode 可省略以同时获取"
-                    "文生图和图生图默认，也可指定 mode 只查询对应默认。"
-                ),
-                "capability_gap_only": (
-                    "只有缺少用户明确要求的模式、参考图数量或暴露参数，才算默认模型不符合；"
-                    "普通画面内容和审美描述不算能力缺口。"
-                ),
-                "query_all_only_when": (
-                    "默认模型存在明确能力缺口或不可用，用户要求比较模型，或指定了模型类型但不知道 model_ref。"
-                ),
-                "next_action": next_action,
-            },
-            "workflow_contract": {
-                "generation_result": (
-                    "image_studio_generate 返回可继续处理的图片资产；生成成功不等于整个用户任务已经完成。"
-                ),
-                "delivery_tool": (
-                    "send_message_to_user 只执行即时发送，不会结束本轮 Agent。可用于发送阶段产物或必要的"
-                    "中途文字；凡通过它发送的内容都已对目标可见，后续步骤和最终回复不得复述。"
-                ),
-                "final_response": (
-                    "完成剩余处理后仍需正常结束本轮；最终回复只补充尚未发送的用户可见内容。"
-                ),
-                "image_assets": {
-                    "return_mode": self._settings.llm_image_return_mode,
-                    "preview_max_edge": self._settings.llm_preview_max_edge,
-                    "asset_retention_hours": self._settings.llm_asset_retention_hours,
-                    "original_usage": (
-                        "发送、图生图、拼接、GIF 和其他文件操作使用生成结果 assets 中的 original_path。"
-                    ),
-                    "visual_review": (
-                        "只有需要观察画面内容时才使用自动预览或调用 image_studio_view_asset；"
-                        "普通文件处理不需要重复加载视觉图片。"
-                    ),
-                },
+            "next_action": next_action,
+            "asset_policy": {
+                "return_mode": self._settings.llm_image_return_mode,
+                "preview_max_edge": self._settings.llm_preview_max_edge,
+                "retention_hours": self._settings.llm_asset_retention_hours,
+                "use_original_path_for_file_operations": True,
+                "view_tool": "image_studio_view_asset",
             },
             "default_model_refs": {
                 "text2img": self._settings.default_model_ref("text2img", "llm_tool"),
@@ -895,7 +848,8 @@ class ImageStudioPlugin(Star):
         return mcp.types.CallToolResult(
             content=[
                 mcp.types.TextContent(
-                    type="text", text=json.dumps(payload, ensure_ascii=False, indent=2)
+                    type="text",
+                    text=json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
                 )
             ]
         )
@@ -906,43 +860,23 @@ class ImageStudioPlugin(Star):
         event: AstrMessageEvent,
         prompt: str = "",
         mode: str = "",
-        provider_id: str = "",
         model_ref: str = "",
-        model: str = "",
-        size: str = "",
-        reference_image_path: str = "",
-        count: int = 0,
         parameters: dict[str, Any] | None = None,
         reference_image_paths: list[str] | None = None,
     ) -> mcp.types.CallToolResult:
-        """使用 Image Studio 生成或修改图片，并返回 Agent 可继续处理的工作流资产。
+        """按最近一次能力查询生成图片，并返回可继续处理的原图资产。
 
-        每次生成前都必须先调用 image_studio_get_capabilities。未指定模型或模型类型的常规
-        请求必须先查询 default；可省略 mode 同时获取文生图和图生图默认，也可指定 mode 只查询
-        对应默认。默认模型满足明确能力要求时直接生成，不得查询 all。只有默认模型存在明确能力
-        缺口或不可用、用户要求比较模型，或指定了模型类型却不知道 model_ref 时才查询 all。明确
-        model_ref 时查询 model。严格使用查询结果指定的提示词格式，不要把自然语言模型的提示词
-        写成 NAI tag 串，也不要传入未列出的参数。
-        用户消息或引用消息中的图片可直接用于图生图；不要编造模型、参数或参考图路径。
-        生成结果中的 assets.original_path 是原图，发送、再次图生图、拼接或 GIF 等操作必须使用
-        该路径。自动返回的 ImageContent 可能只是轻量预览；只有需要观察画面时才调用
-        image_studio_view_asset，不要为了普通发送重复加载视觉图片。
-        生成成功不代表整个用户任务已经完成：如果还需要多次生图、
-        改图、拼接、制作 GIF 或其他处理，继续使用返回的原图资产，除非用户需要查看阶段结果，
-        否则不要发送中间产物。send_message_to_user 只执行即时发送，不会结束本轮 Agent；它可用于
-        发送产物或必要的中途文字。凡通过它发送的内容都已对目标可见，后续步骤和最终回复不得复述。
+        严格使用查询返回的 model_ref、prompt_contract 和 parameters；不得编造参数或把自然语言
+        模型写成 NAI tag。消息及引用图片会自动读取。文件操作与发送使用 assets.original_path；
+        ImageContent 可能只是预览，只有需要看图时才调用 image_studio_view_asset。继续完成多步任务；
+        send_message_to_user 不会结束本轮 Agent，后续回复不得复述已发送内容。
 
         Args:
-            prompt(string): 希望生成或修改的图片描述。
-            mode(string): ``text2img`` or ``img2img``，省略时根据参考图自动判断。
-            provider_id(string): 可选的已配置服务商 ID。
-            model_ref(string): 稳定的 provider_id:model_id，可选。
-            model(string): 可选的兼容模型 ID；优先使用 model_ref。
-            size(string): 可选的图片尺寸。
-            reference_image_path(string): Agent 已有工具图片的可选路径；相对路径按当前 Agent 工作区解析。
-            count(number): 生成数量，受模型和服务商限制。
-            parameters(object): 能力查询返回并向 LLM 暴露的动态参数；只有查询结果列出时才可包含 negative_prompt。
-            reference_image_paths(array[string]): 多张 Agent 已有工具图片的路径；当前或引用消息图片通常无需填写。
+            prompt(string): 生成或修改要求，格式遵循能力查询结果。
+            mode(string): text2img 或 img2img；省略时按参考图判断。
+            model_ref(string): 能力查询返回的 provider_id:model_id；省略时使用模式默认。
+            parameters(object): 仅填写能力查询为该模型返回的参数。
+            reference_image_paths(array[string]): 可选图片路径列表；消息和引用图片会自动读取。
 
         Returns:
             Original asset metadata and optional MCP preview content for Agent workflows.
@@ -958,8 +892,6 @@ class ImageStudioPlugin(Star):
             )
         try:
             paths = list(reference_image_paths or [])
-            if reference_image_path:
-                paths.insert(0, reference_image_path)
             references = await self._event_references(event, paths)
             normalized_mode = str(mode or "").strip() or (
                 "img2img" if references else "text2img"
@@ -968,9 +900,7 @@ class ImageStudioPlugin(Star):
             provider, selected_model, canonical_ref = _select_llm_tool_model(
                 self._settings,
                 normalized_mode,
-                provider_id=provider_id,
                 model_ref=model_ref,
-                model=model,
             )
             if not _consume_capability_query(
                 event, self._settings.revision, canonical_ref, normalized_mode
@@ -1003,8 +933,8 @@ class ImageStudioPlugin(Star):
                 negative_prompt=effective_negative_prompt,
                 model_ref=canonical_ref,
                 model="",
-                size=size,
-                count=count,
+                size="",
+                count=0,
                 parameters=dynamic_parameters,
                 references=references,
                 source="llm_tool",
@@ -1071,19 +1001,15 @@ class ImageStudioPlugin(Star):
         ]
         if actual_return_mode == "preview":
             visual_notice = (
-                "本次 ImageContent 是供视觉判断的轻量预览；Core 生成的 tool_images 缓存路径也是预览。"
-                "发送、图生图、拼接、GIF 或其他文件处理必须使用 assets 中的 original_path。"
+                "ImageContent 和 tool_images 路径均为预览；文件操作使用 original_path。"
             )
         elif actual_return_mode == "asset":
-            visual_notice = (
-                "本次未自动注入视觉图片。普通发送和基于文件的后续处理直接使用 original_path；"
-                "只有确实需要观察画面内容时才调用 image_studio_view_asset。"
-            )
+            visual_notice = "未附视觉图；文件操作使用 original_path，需要看图时调用 image_studio_view_asset。"
         else:
             visual_notice = (
-                "本次 ImageContent 为完整原图；发送和后续处理仍优先使用 assets 中的 original_path。"
+                "ImageContent 为原图；文件操作使用 original_path。"
                 if assets
-                else "临时资产暂存失败，本次仅返回完整 ImageContent。"
+                else "资产暂存失败，仅返回完整 ImageContent。"
             )
         content.append(
             mcp.types.TextContent(
@@ -1093,9 +1019,8 @@ class ImageStudioPlugin(Star):
                     f"generation_id={result.generation_id or '未保存'}；"
                     f"return_mode={actual_return_mode}；"
                     f"assets={json.dumps(manifest, ensure_ascii=False, separators=(',', ':'))}。"
-                    f"{visual_notice} 若任务还需多次生图、改图、拼接或制作 GIF，请继续处理。"
-                    "send_message_to_user 只执行即时发送，不会结束本轮 Agent；已发送内容已经对目标可见，"
-                    "后续步骤和最终回复不得复述。完成剩余任务后仍需正常结束本轮。"
+                    f"{visual_notice} 继续未完成任务；send_message_to_user 不会结束本轮 Agent；"
+                    "后续回复不得复述已发送内容。"
                 ),
             )
         )
@@ -1108,15 +1033,13 @@ class ImageStudioPlugin(Star):
         asset_id: str = "",
         detail: str = "preview",
     ) -> mcp.types.CallToolResult:
-        """按需查看 Image Studio 原图资产，不用于普通发送或文件处理。
+        """按需查看图片资产；普通发送和文件处理直接使用 original_path。
 
-        image_studio_generate 返回的 original_path 可以直接用于发送、图生图、拼接和其他文件
-        操作，不需要调用本工具。只有必须观察画面内容时才调用；默认 preview 可减少后续多模态
-        请求负担，只有像素级检查确有必要时才使用 original。
+        仅需观察画面时调用。默认 preview；像素级检查才使用 original。
 
         Args:
-            asset_id(string): image_studio_generate 返回的 64 位资产 ID。
-            detail(string): preview 或 original，默认 preview。
+            asset_id(string): generate 返回的资产 ID。
+            detail(string): preview 或 original；默认 preview。
         """
 
         if not self._settings.enable_llm_tool:
@@ -1144,8 +1067,8 @@ class ImageStudioPlugin(Star):
                 mcp.types.TextContent(
                     type="text",
                     text=(
-                        f"已加载 {normalized_detail} 视觉内容。该 ImageContent 只用于观察；"
-                        f"发送和后续文件处理必须使用原图路径 original_path={original_path}。"
+                        f"已加载 {normalized_detail}；仅供观察。"
+                        f"文件操作使用 original_path={original_path}。"
                     ),
                 ),
             ]
@@ -1239,14 +1162,11 @@ def _select_llm_tool_model(
     settings: Any,
     mode: str,
     *,
-    provider_id: str,
     model_ref: str,
-    model: str,
 ) -> tuple[Any, Any, str]:
     """Resolve an exact LLM-enabled model after capability discovery."""
 
-    requested_provider = str(provider_id or "").strip()
-    explicit_ref = str(model_ref or model or "").strip()
+    explicit_ref = str(model_ref or "").strip()
     requested_ref = explicit_ref or settings.default_model_ref(mode, "llm_tool")
     if not requested_ref:
         raise ValueError(
@@ -1256,7 +1176,6 @@ def _select_llm_tool_model(
         (provider, candidate, f"{provider.id}:{candidate.id}")
         for provider in settings.providers
         if provider.enabled
-        and (not requested_provider or provider.id == requested_provider)
         for candidate in provider.models
         if candidate.llm_enabled and candidate.supports(mode)
     ]
@@ -1309,37 +1228,33 @@ def _llm_parameter_descriptor(
         for key in ("type", "default", "min", "max", "step")
         if key in descriptor
     }
-    visible["description"] = str(
+    description = str(
         policy.get("description")
         or descriptor.get("description")
         or descriptor.get("label")
         or ""
     )
+    if description:
+        visible["description"] = description
     choices = descriptor.get("choices")
     choice_descriptions = policy.get("choice_descriptions")
     if isinstance(choices, list):
-        visible["choices"] = [
-            {
-                "value": choice.get("value"),
-                "label": choice.get("label", choice.get("value")),
-                "description": (
-                    choice_descriptions.get(str(choice.get("value")), "")
-                    if isinstance(choice_descriptions, dict)
-                    else ""
-                ),
-            }
-            if isinstance(choice, dict)
-            else {
-                "value": choice,
-                "label": choice,
-                "description": (
-                    choice_descriptions.get(str(choice), "")
-                    if isinstance(choice_descriptions, dict)
-                    else ""
-                ),
-            }
-            for choice in choices
-        ]
+        visible_choices: list[dict[str, Any]] = []
+        for choice in choices:
+            value = choice.get("value") if isinstance(choice, dict) else choice
+            label = choice.get("label", value) if isinstance(choice, dict) else value
+            choice_description = (
+                choice_descriptions.get(str(value), "")
+                if isinstance(choice_descriptions, dict)
+                else ""
+            )
+            visible_choice = {"value": value}
+            if label != value:
+                visible_choice["label"] = label
+            if choice_description:
+                visible_choice["description"] = choice_description
+            visible_choices.append(visible_choice)
+        visible["choices"] = visible_choices
     return visible
 
 
