@@ -632,18 +632,20 @@ class ImageStudioPlugin(Star):
     async def image_studio_get_capabilities(
         self,
         event: AstrMessageEvent,
-        query_type: str = "all",
+        query_type: str = "default",
         mode: str = "",
         model_ref: str = "",
     ) -> mcp.types.CallToolResult:
         """查询当前可供 LLM 使用的生图模型、选择规则和参数。
 
-        每次调用 image_studio_generate 前都必须先调用本工具。不能确定模型时使用 all；
-        使用默认模型时选择 default 并指定 mode；已有明确模型时选择 model 并传入
-        model_ref。随后严格按照返回的提示词格式和 parameters 调用生图工具。
+        每次调用 image_studio_generate 前都必须先调用本工具。常规生图必须首先使用
+        default，并根据是否有参考图指定 text2img 或 img2img；默认模型没有明确能力缺口时，
+        直接生成，不得继续查询 all。只有默认模型缺少用户明确要求的模式、参考图数量或参数，
+        默认模型不可用，用户要求比较模型，或指定了模型类型却不知道 model_ref 时，才使用
+        all 并尽量携带 mode。用户明确指定 model_ref 时直接查询 model。
 
         Args:
-            query_type(string): all、default 或 model。默认 all 返回全部可用模型。
+            query_type(string): default、all 或 model。常规请求默认使用 default。
             mode(string): 可选的 text2img 或 img2img，用于筛选模式。
             model_ref(string): query_type=model 时必填的 provider_id:model_id。
         """
@@ -667,9 +669,9 @@ class ImageStudioPlugin(Star):
                 ],
                 isError=True,
             )
-        normalized_query_type = str(query_type or "all").strip().lower()
+        normalized_query_type = str(query_type or "default").strip().lower()
         requested_ref = str(model_ref or "").strip()
-        if normalized_query_type == "all" and requested_ref:
+        if normalized_query_type != "model" and requested_ref:
             normalized_query_type = "model"
         if normalized_query_type not in {"all", "default", "model"}:
             return _tool_error("query_type 仅支持 all、default 或 model。")
@@ -775,12 +777,38 @@ class ImageStudioPlugin(Star):
                 "没有符合条件的模型；模型可能不存在、已停用、不支持该模式或未向 LLM 工具开放。"
             )
         _remember_capability_query(event, self._settings.revision, entries)
+        if normalized_query_type == "default":
+            next_action = (
+                "普通主体、画风、构图和文字描述可由提示词表达，不属于能力缺口。若返回模型满足用户明确"
+                "要求的模式、参考图数量和参数，立即调用 image_studio_generate，不得查询 all；仅在存在"
+                "可指出的能力缺口时，使用相同 mode 查询 all。"
+            )
+        elif normalized_query_type == "all":
+            next_action = (
+                "从返回结果中选择满足明确要求的模型并直接调用 image_studio_generate，"
+                "无需再使用 model 查询。"
+            )
+        else:
+            next_action = "按照返回模型的 prompt_contract 和 parameters 直接调用 image_studio_generate。"
         payload = {
             "query_type": normalized_query_type,
             "usage": (
                 "本次查询结果只授权当前轮次中列出的模型和模式。生成时必须遵守每个模型的 "
                 "prompt_contract，且只能传入 parameters 中列出的动态参数。"
             ),
+            "routing_contract": {
+                "default_first": (
+                    "未指定模型或模型类型的常规请求，必须先查询对应 mode 的默认模型。"
+                ),
+                "capability_gap_only": (
+                    "只有缺少用户明确要求的模式、参考图数量或暴露参数，才算默认模型不符合；"
+                    "普通画面内容和审美描述不算能力缺口。"
+                ),
+                "query_all_only_when": (
+                    "默认模型存在明确能力缺口或不可用，用户要求比较模型，或指定了模型类型但不知道 model_ref。"
+                ),
+                "next_action": next_action,
+            },
             "workflow_contract": {
                 "generation_result": (
                     "image_studio_generate 返回可继续处理的图片资产；生成成功不等于整个用户任务已经完成。"
@@ -824,9 +852,11 @@ class ImageStudioPlugin(Star):
     ) -> mcp.types.CallToolResult:
         """使用 Image Studio 生成或修改图片，并返回 Agent 可继续处理的工作流资产。
 
-        每次生成前都必须先调用 image_studio_get_capabilities：不确定模型时查询 all，使用
-        默认模型时查询 default，明确模型时查询 model。严格使用查询结果指定的提示词格式，
-        不要把自然语言模型的提示词写成 NAI tag 串，也不要传入查询结果未列出的参数。
+        每次生成前都必须先调用 image_studio_get_capabilities。未指定模型或模型类型的常规
+        请求必须先查询对应 mode 的默认模型；默认模型满足明确能力要求时直接生成，不得查询
+        all。只有默认模型存在明确能力缺口或不可用、用户要求比较模型，或指定了模型类型却不知
+        道 model_ref 时才查询 all。明确 model_ref 时查询 model。严格使用查询结果指定的提示词
+        格式，不要把自然语言模型的提示词写成 NAI tag 串，也不要传入未列出的参数。
         用户消息或引用消息中的图片可直接用于图生图；不要编造模型、参数或参考图路径。
         生成成功不代表整个用户任务已经完成：如果还需要多次生图、
         改图、拼接、制作 GIF 或其他处理，继续使用返回的缓存图片，除非用户需要查看阶段结果，

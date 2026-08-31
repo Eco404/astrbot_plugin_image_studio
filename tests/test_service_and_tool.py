@@ -291,16 +291,22 @@ def test_capability_query_supports_all_default_and_model() -> None:
         )
     )
 
-    assert [
-        item["model_ref"] for item in json.loads(all_result.content[0].text)["models"]
-    ] == ["provider:text-model", "provider:edit-model"]
-    assert [
-        item["model_ref"]
-        for item in json.loads(default_result.content[0].text)["models"]
-    ] == ["provider:text-model"]
-    assert [
-        item["model_ref"] for item in json.loads(model_result.content[0].text)["models"]
-    ] == ["provider:edit-model"]
+    all_payload = json.loads(all_result.content[0].text)
+    default_payload = json.loads(default_result.content[0].text)
+    model_payload = json.loads(model_result.content[0].text)
+
+    assert [item["model_ref"] for item in all_payload["models"]] == [
+        "provider:text-model",
+        "provider:edit-model",
+    ]
+    assert [item["model_ref"] for item in default_payload["models"]] == [
+        "provider:text-model"
+    ]
+    assert [item["model_ref"] for item in model_payload["models"]] == [
+        "provider:edit-model"
+    ]
+    assert "不得查询 all" in default_payload["routing_contract"]["next_action"]
+    assert "无需再使用 model 查询" in all_payload["routing_contract"]["next_action"]
 
 
 def test_negative_prompt_requires_model_tool_exposure() -> None:
@@ -498,6 +504,7 @@ def test_capabilities_only_lists_llm_enabled_models() -> None:
     )
     payload = json.loads(result.content[0].text)
 
+    assert payload["query_type"] == "default"
     assert [item["model_ref"] for item in payload["models"]] == ["provider:visible"]
     assert payload["default_model_refs"] == {
         "text2img": "provider:visible",
@@ -537,7 +544,9 @@ def test_capabilities_excludes_zero_limit_model_from_img2img() -> None:
     )
 
     result = asyncio.run(
-        plugin.image_studio_get_capabilities(SimpleNamespace(), mode="img2img")
+        plugin.image_studio_get_capabilities(
+            SimpleNamespace(), query_type="all", mode="img2img"
+        )
     )
     payload = json.loads(result.content[0].text)
 
@@ -556,9 +565,13 @@ def test_registered_image_tool_descriptions_contain_routing_contract() -> None:
     assert capabilities is not None
     assert generate is not None
     assert "每次调用 image_studio_generate 前" in capabilities.description
+    assert "常规生图必须首先使用" in capabilities.description
+    assert "不得继续查询 all" in capabilities.description
     assert "query_type" in capabilities.parameters["properties"]
     assert "image_studio_generate" in capabilities.description
     assert "每次生成前都必须先调用" in generate.description
+    assert "常规" in generate.description
+    assert "不得查询" in generate.description
     assert "image_studio_get_capabilities" in generate.description
     assert "不要编造" in generate.description
     assert "不会结束本轮 Agent" in generate.description

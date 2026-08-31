@@ -58,7 +58,9 @@ OpenAI Images 会预填尺寸、数量、质量、背景和输出格式；Gemini
 /image_gen 重新绘制这张图片 --mode img2img --ref /path/from/astrbot/temp/tool_images/file.png
 ```
 
-LLM 工具包括 `image_studio_get_capabilities` 和 `image_studio_generate`。每次生成前都必须先查询能力：不确定模型时使用 `query_type=all`；使用默认模型时使用 `query_type=default` 并指定 `mode`；明确模型时使用 `query_type=model` 并传入完整 `model_ref`。查询结果会明确自然语言或 NAI tag 提示词格式，并只列出当前模型允许 LLM 使用的动态参数；一次查询授权只供对应模型和模式生成一次。
+LLM 工具包括 `image_studio_get_capabilities` 和 `image_studio_generate`。每次生成前都必须先查询能力。未指定模型或模型类型的常规请求首先使用 `query_type=default`，并根据是否有参考图指定 `text2img` 或 `img2img`；如果默认模型支持用户明确要求的模式、参考图数量和参数，就直接生成，不再查询全部模型。普通主体、画风、构图和文字描述可以通过提示词表达，不属于模型能力缺口。只有默认模型存在明确能力缺口或不可用、用户要求比较模型，或者指定了模型类型但不知道具体 `model_ref` 时，才使用 `query_type=all`，并尽量携带相同的 `mode`。明确指定模型时使用 `query_type=model` 和完整 `model_ref`。
+
+查询结果会明确自然语言或 NAI tag 提示词格式，并只列出当前模型允许 LLM 使用的动态参数；一次查询授权只供对应模型和模式生成一次。查询 `all` 后可以直接使用选中的模型，不需要再次查询 `model`。
 
 `image_studio_generate` 支持动态参数、多张参考图和严格 `model_ref`。`negative_prompt` 不再是所有模型都能看到的固定工具参数，只有能力查询明确返回时才能通过 `parameters.negative_prompt` 传入。生成成功后返回 MCP `ImageContent`，AstrBot 会缓存图片并把它加入后续支持视觉输入的 Agent 步骤。指令和 LLM 工具均能读取当前消息及引用消息中的图片；没有显式指定模式时，检测到图片会自动使用图生图。
 
