@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import io
 import json
 import os
 import re
@@ -15,7 +16,13 @@ from pathlib import Path
 from typing import Any
 
 from .config import HistorySettings
-from .models import GeneratedImage, GenerationRequest, ImageProvider, ReferenceImage
+from .models import (
+    AgentImageAsset,
+    GeneratedImage,
+    GenerationRequest,
+    ImageProvider,
+    ReferenceImage,
+)
 
 _IMAGE_SUFFIXES = {
     "image/png": ".png",
@@ -37,6 +44,9 @@ class GenerationStore:
         self.thumbnails_dir = self.history_dir / "thumbnails"
         self.staging_dir = self.data_dir / "staging_references"
         self.exports_dir = self.data_dir / "exports"
+        self.agent_assets_dir = self.data_dir / "agent_assets"
+        self.agent_originals_dir = self.agent_assets_dir / "originals"
+        self.agent_previews_dir = self.agent_assets_dir / "previews"
         self.db_path = self.data_dir / "history.sqlite3"
         self._lock = asyncio.Lock()
 
@@ -52,6 +62,8 @@ class GenerationStore:
             self.thumbnails_dir,
             self.staging_dir,
             self.exports_dir,
+            self.agent_originals_dir,
+            self.agent_previews_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
@@ -218,6 +230,182 @@ class GenerationStore:
                 continue
             for path in self.staging_dir.glob(f"{ref_id}.*"):
                 _unlink_if_owned(path, self.staging_dir)
+
+    async def stage_agent_images(
+        self,
+        images: tuple[GeneratedImage, ...],
+        *,
+        create_preview: bool,
+        preview_max_edge: int,
+        preview_quality: int,
+        retention_hours: int,
+    ) -> tuple[AgentImageAsset, ...]:
+        """Persist generated originals independently from optional gallery history."""
+
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._stage_agent_images_sync,
+                images,
+                create_preview,
+                preview_max_edge,
+                preview_quality,
+                retention_hours,
+            )
+
+    def _stage_agent_images_sync(
+        self,
+        images: tuple[GeneratedImage, ...],
+        create_preview: bool,
+        preview_max_edge: int,
+        preview_quality: int,
+        retention_hours: int,
+    ) -> tuple[AgentImageAsset, ...]:
+        self._cleanup_agent_assets_sync(retention_hours)
+        max_edge = max(256, min(2048, int(preview_max_edge)))
+        quality = max(40, min(95, int(preview_quality)))
+        assets: list[AgentImageAsset] = []
+        for image in images:
+            digest = hashlib.sha256(image.data).hexdigest()
+            mime_type = detect_mime_type(image.data, image.mime_type)
+            suffix = _image_suffix(mime_type, image.data)
+            original = self.agent_originals_dir / digest[:2] / f"{digest}{suffix}"
+            try:
+                current_size = original.stat().st_size
+            except OSError:
+                current_size = -1
+            if current_size != len(image.data):
+                history_source = self.assets_dir / digest[:2] / f"{digest}{suffix}"
+                _link_or_write(original, history_source, image.data)
+            else:
+                os.utime(original, None)
+
+            preview: GeneratedImage | None = None
+            if create_preview:
+                preview_path = (
+                    self.agent_previews_dir
+                    / digest[:2]
+                    / f"{digest}_{max_edge}_{quality}.webp"
+                )
+                if not preview_path.is_file():
+                    _create_agent_preview(
+                        image.data,
+                        preview_path,
+                        max_edge=max_edge,
+                        quality=quality,
+                    )
+                else:
+                    os.utime(preview_path, None)
+                preview_data = preview_path.read_bytes()
+                preview = GeneratedImage(
+                    data=preview_data,
+                    mime_type=detect_mime_type(preview_data, "image/webp"),
+                )
+
+            assets.append(
+                AgentImageAsset(
+                    id=digest,
+                    path=str(original.resolve(strict=False)),
+                    mime_type=mime_type,
+                    size_bytes=len(image.data),
+                    preview=preview,
+                )
+            )
+        return tuple(assets)
+
+    async def load_agent_image(
+        self,
+        asset_id: str,
+        *,
+        detail: str,
+        preview_max_edge: int,
+        preview_quality: int,
+        retention_hours: int,
+    ) -> tuple[GeneratedImage, str] | None:
+        """Load an original or lightweight preview from the temporary asset layer."""
+
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._load_agent_image_sync,
+                asset_id,
+                detail,
+                preview_max_edge,
+                preview_quality,
+                retention_hours,
+            )
+
+    def _load_agent_image_sync(
+        self,
+        asset_id: str,
+        detail: str,
+        preview_max_edge: int,
+        preview_quality: int,
+        retention_hours: int,
+    ) -> tuple[GeneratedImage, str] | None:
+        clean_id = str(asset_id or "").strip().lower()
+        if not _SHA256_RE.fullmatch(clean_id):
+            return None
+        self._cleanup_agent_assets_sync(retention_hours)
+        originals = list(
+            (self.agent_originals_dir / clean_id[:2]).glob(f"{clean_id}.*")
+        )
+        if len(originals) != 1 or not originals[0].is_file():
+            return None
+        original = originals[0]
+        os.utime(original, None)
+        raw = original.read_bytes()
+        mime_type = detect_mime_type(raw, "")
+        if detail == "original":
+            return GeneratedImage(data=raw, mime_type=mime_type), str(
+                original.resolve(strict=False)
+            )
+
+        max_edge = max(256, min(2048, int(preview_max_edge)))
+        quality = max(40, min(95, int(preview_quality)))
+        preview_path = (
+            self.agent_previews_dir
+            / clean_id[:2]
+            / f"{clean_id}_{max_edge}_{quality}.webp"
+        )
+        if not preview_path.is_file():
+            _create_agent_preview(
+                raw,
+                preview_path,
+                max_edge=max_edge,
+                quality=quality,
+            )
+        else:
+            os.utime(preview_path, None)
+        preview_data = preview_path.read_bytes()
+        return (
+            GeneratedImage(
+                data=preview_data,
+                mime_type=detect_mime_type(preview_data, "image/webp"),
+            ),
+            str(original.resolve(strict=False)),
+        )
+
+    async def cleanup_agent_assets(self, retention_hours: int) -> None:
+        """Delete expired temporary originals and previews."""
+
+        async with self._lock:
+            await asyncio.to_thread(self._cleanup_agent_assets_sync, retention_hours)
+
+    def _cleanup_agent_assets_sync(self, retention_hours: int) -> None:
+        cutoff = time.time() - max(1, min(168, int(retention_hours))) * 3600
+        for root in (self.agent_originals_dir, self.agent_previews_dir):
+            if not root.is_dir():
+                continue
+            for path in root.rglob("*"):
+                try:
+                    if (
+                        path.is_file()
+                        and _is_within(path, root)
+                        and path.stat().st_mtime < cutoff
+                    ):
+                        path.unlink()
+                except OSError:
+                    continue
+            _remove_empty_directories(root)
 
     async def record_success(
         self,
@@ -936,6 +1124,18 @@ def _atomic_write(path: Path, data: bytes) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _link_or_write(target: Path, source: Path, data: bytes) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.unlink(missing_ok=True)
+    try:
+        if source.is_file() and source.stat().st_size == len(data):
+            os.link(source, target)
+            return
+    except OSError:
+        pass
+    _atomic_write(target, data)
+
+
 def _create_thumbnail(source: Path, target: Path) -> None:
     try:
         from PIL import Image, ImageOps
@@ -948,6 +1148,28 @@ def _create_thumbnail(source: Path, target: Path) -> None:
     except Exception:
         # Gallery stays functional when an upstream returns an unsupported image.
         _atomic_write(target, source.read_bytes())
+
+
+def _create_agent_preview(
+    data: bytes, target: Path, *, max_edge: int, quality: int
+) -> None:
+    try:
+        from PIL import Image, ImageOps
+
+        with Image.open(io.BytesIO(data)) as source:
+            image = ImageOps.exif_transpose(source)
+            has_alpha = image.mode in {"RGBA", "LA"} or (
+                image.mode == "P" and "transparency" in image.info
+            )
+            preview = image.convert("RGBA" if has_alpha else "RGB")
+            preview.thumbnail((max_edge, max_edge), Image.Resampling.LANCZOS)
+            output = io.BytesIO()
+            preview.save(output, "WEBP", quality=quality, method=4)
+            encoded = output.getvalue()
+        _atomic_write(target, encoded if len(encoded) < len(data) else data)
+    except Exception:
+        # Keep the tool usable for uncommon formats even when previewing fails.
+        _atomic_write(target, data)
 
 
 def _image_suffix(mime_type: str, data: bytes) -> str:

@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import time
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,6 +14,7 @@ from astrbot.api.message_components import Image, Reply
 from astrbot.core.provider.register import llm_tools
 from astrbot_plugin_image_studio.config import HistorySettings, RuntimeSettings
 from astrbot_plugin_image_studio.main import (
+    CAPABILITY_QUERY_EXTRA_KEY,
     ImageStudioPlugin,
     _invocation_source,
     _iter_event_images,
@@ -20,6 +22,7 @@ from astrbot_plugin_image_studio.main import (
     _provider_request_image_refs,
 )
 from astrbot_plugin_image_studio.models import (
+    AgentImageAsset,
     GeneratedImage,
     GenerationRequest,
     GenerationResult,
@@ -63,6 +66,28 @@ def settings() -> RuntimeSettings:
 class FakeExecutor:
     async def generate(self, provider, request):
         return (GeneratedImage(PNG, "image/png"),)
+
+
+class FakeAgentAssetStore:
+    async def stage_agent_images(self, images, **_kwargs):
+        return tuple(
+            AgentImageAsset(
+                id=f"{index + 1:064x}",
+                path=f"/AstrBot/data/temp/image-studio-original-{index + 1}.png",
+                mime_type=image.mime_type,
+                size_bytes=len(image.data),
+                preview=GeneratedImage(b"preview", "image/webp"),
+            )
+            for index, image in enumerate(images)
+        )
+
+    async def load_agent_image(self, asset_id, **_kwargs):
+        if asset_id != f"{1:064x}":
+            return None
+        return (
+            GeneratedImage(PNG, "image/png"),
+            "/AstrBot/data/temp/image-studio-original-1.png",
+        )
 
 
 class ToolEvent:
@@ -186,6 +211,7 @@ def test_llm_tool_returns_mcp_image_content() -> None:
     plugin = object.__new__(ImageStudioPlugin)
     plugin._settings = settings()
     plugin._service = FakeService()
+    plugin.store = FakeAgentAssetStore()
     event = ToolEvent()
 
     capability_result = asyncio.run(
@@ -205,6 +231,84 @@ def test_llm_tool_returns_mcp_image_content() -> None:
     assert "generation_id=gallery-123" in text
     assert "不会结束本轮 Agent" in text
     assert "最终回复不得复述" in text
+
+
+def test_llm_tool_image_return_modes_preserve_original_asset_path() -> None:
+    class FakeService:
+        async def generate(self, **_kwargs):
+            provider = settings().providers[0]
+            return GenerationResult(
+                provider,
+                SimpleNamespace(model=provider.model, mode="text2img"),
+                (GeneratedImage(PNG, "image/png"),),
+                5,
+            )
+
+    async def generate_with_mode(mode: str):
+        plugin = object.__new__(ImageStudioPlugin)
+        plugin._settings = replace(settings(), llm_image_return_mode=mode)
+        plugin._service = FakeService()
+        plugin.store = FakeAgentAssetStore()
+        event = ToolEvent()
+        await plugin.image_studio_get_capabilities(
+            event, query_type="default", mode="text2img"
+        )
+        return await plugin.image_studio_generate(event, prompt="one tree")
+
+    preview_result = asyncio.run(generate_with_mode("preview"))
+    asset_result = asyncio.run(generate_with_mode("asset"))
+    original_result = asyncio.run(generate_with_mode("original"))
+
+    preview_image = next(
+        item
+        for item in preview_result.content
+        if isinstance(item, mcp.types.ImageContent)
+    )
+    original_image = next(
+        item
+        for item in original_result.content
+        if isinstance(item, mcp.types.ImageContent)
+    )
+    assert base64.b64decode(preview_image.data) == b"preview"
+    assert base64.b64decode(original_image.data) == PNG
+    assert not any(
+        isinstance(item, mcp.types.ImageContent) for item in asset_result.content
+    )
+    for result, mode in (
+        (preview_result, "preview"),
+        (asset_result, "asset"),
+        (original_result, "original"),
+    ):
+        text = next(
+            item.text
+            for item in result.content
+            if isinstance(item, mcp.types.TextContent)
+        )
+        assert f"return_mode={mode}" in text
+        assert (
+            '"original_path":"/AstrBot/data/temp/image-studio-original-1.png"' in text
+        )
+
+
+def test_llm_can_view_agent_asset_on_demand() -> None:
+    plugin = object.__new__(ImageStudioPlugin)
+    plugin._settings = settings()
+    plugin.store = FakeAgentAssetStore()
+
+    result = asyncio.run(
+        plugin.image_studio_view_asset(ToolEvent(), asset_id=f"{1:064x}")
+    )
+    missing = asyncio.run(
+        plugin.image_studio_view_asset(ToolEvent(), asset_id=f"{2:064x}")
+    )
+
+    assert isinstance(result.content[0], mcp.types.ImageContent)
+    assert (
+        "original_path=/AstrBot/data/temp/image-studio-original-1.png"
+        in result.content[1].text
+    )
+    assert missing.isError
+    assert "不存在或已超过" in missing.content[0].text
 
 
 def test_llm_tool_rejects_generation_before_capability_query() -> None:
@@ -233,6 +337,7 @@ def test_capability_query_is_consumed_by_one_generation() -> None:
             )
 
     plugin._service = FakeService()
+    plugin.store = FakeAgentAssetStore()
     event = ToolEvent()
     asyncio.run(
         plugin.image_studio_get_capabilities(
@@ -277,6 +382,21 @@ def test_capability_query_supports_all_default_and_model() -> None:
     )
     event = ToolEvent()
 
+    combined_default_result = asyncio.run(
+        plugin.image_studio_get_capabilities(event, query_type="default")
+    )
+    combined_default_payload = json.loads(combined_default_result.content[0].text)
+    assert [item["model_ref"] for item in combined_default_payload["models"]] == [
+        "provider:text-model",
+        "provider:edit-model",
+    ]
+    assert combined_default_payload["models"][0]["default_for_modes"] == ["text2img"]
+    assert combined_default_payload["models"][1]["default_for_modes"] == ["img2img"]
+    assert event.get_extra(CAPABILITY_QUERY_EXTRA_KEY)["models"] == {
+        "provider:text-model": ["text2img"],
+        "provider:edit-model": ["img2img"],
+    }
+
     all_result = asyncio.run(
         plugin.image_studio_get_capabilities(event, query_type="all")
     )
@@ -307,6 +427,46 @@ def test_capability_query_supports_all_default_and_model() -> None:
     ]
     assert "不得查询 all" in default_payload["routing_contract"]["next_action"]
     assert "无需再使用 model 查询" in all_payload["routing_contract"]["next_action"]
+
+
+def test_default_query_merges_shared_text_and_image_model() -> None:
+    provider = ImageProvider.from_mapping(
+        {
+            "id": "provider",
+            "name": "Provider",
+            "kind": "custom_json",
+            "base_url": "https://example.test",
+            "models": [
+                {
+                    "id": "shared",
+                    "supports_text2img": True,
+                    "supports_img2img": True,
+                    "max_reference_images": 2,
+                }
+            ],
+        }
+    )
+    plugin = object.__new__(ImageStudioPlugin)
+    plugin._settings = RuntimeSettings(
+        enable_llm_tool=True,
+        providers=(provider,),
+        history=HistorySettings(False, 0, 0, False),
+        revision=8,
+        default_tool_text2img_model_ref="provider:shared",
+        default_tool_img2img_model_ref="provider:shared",
+    )
+    event = ToolEvent()
+
+    result = asyncio.run(plugin.image_studio_get_capabilities(event))
+    payload = json.loads(result.content[0].text)
+
+    assert not result.isError
+    assert len(payload["models"]) == 1
+    assert payload["models"][0]["default_for_modes"] == ["text2img", "img2img"]
+    assert payload["models"][0]["query_modes"] == ["text2img", "img2img"]
+    assert event.get_extra(CAPABILITY_QUERY_EXTRA_KEY)["models"] == {
+        "provider:shared": ["img2img", "text2img"]
+    }
 
 
 def test_negative_prompt_requires_model_tool_exposure() -> None:
@@ -348,6 +508,7 @@ def test_negative_prompt_requires_model_tool_exposure() -> None:
     plugin = object.__new__(ImageStudioPlugin)
     plugin._settings = configured
     plugin._service = CapturingService()
+    plugin.store = FakeAgentAssetStore()
     event = ToolEvent()
     capability_result = asyncio.run(
         plugin.image_studio_get_capabilities(
@@ -425,6 +586,7 @@ def test_exposed_negative_prompt_is_disclosed_and_forwarded() -> None:
     plugin = object.__new__(ImageStudioPlugin)
     plugin._settings = configured
     plugin._service = CapturingService()
+    plugin.store = FakeAgentAssetStore()
     event = ToolEvent()
     capability_result = asyncio.run(
         plugin.image_studio_get_capabilities(
@@ -512,6 +674,11 @@ def test_capabilities_only_lists_llm_enabled_models() -> None:
     }
     assert "不会结束本轮 Agent" in payload["workflow_contract"]["delivery_tool"]
     assert "最终回复不得复述" in payload["workflow_contract"]["delivery_tool"]
+    assert payload["workflow_contract"]["image_assets"]["return_mode"] == "preview"
+    assert (
+        "original_path"
+        in payload["workflow_contract"]["image_assets"]["original_usage"]
+    )
 
 
 def test_capabilities_excludes_zero_limit_model_from_img2img() -> None:
@@ -558,14 +725,17 @@ def test_capabilities_excludes_zero_limit_model_from_img2img() -> None:
 def test_registered_image_tool_descriptions_contain_routing_contract() -> None:
     capabilities = llm_tools.get_func("image_studio_get_capabilities")
     generate = llm_tools.get_func("image_studio_generate")
+    view_asset = llm_tools.get_func("image_studio_view_asset")
     light_tools = llm_tools.get_full_tool_set().get_light_tool_set()
 
     assert llm_tools.get_func("image_gen_get_capabilities") is None
     assert llm_tools.get_func("image_gen_generate") is None
     assert capabilities is not None
     assert generate is not None
+    assert view_asset is not None
     assert "每次调用 image_studio_generate 前" in capabilities.description
     assert "常规生图必须首先使用" in capabilities.description
+    assert "mode 可省略" in capabilities.description
     assert "不得继续查询 all" in capabilities.description
     assert "query_type" in capabilities.parameters["properties"]
     assert "image_studio_generate" in capabilities.description
@@ -577,6 +747,8 @@ def test_registered_image_tool_descriptions_contain_routing_contract() -> None:
     assert "不会结束本轮 Agent" in generate.description
     assert "最终回复不得复述" in generate.description
     assert "negative_prompt" not in generate.parameters["properties"]
+    assert "不用于普通发送" in view_asset.description
+    assert "preview" in view_asset.parameters["properties"]["detail"]["description"]
     assert (
         light_tools.get_tool("image_studio_get_capabilities").description
         == capabilities.description
@@ -584,6 +756,10 @@ def test_registered_image_tool_descriptions_contain_routing_contract() -> None:
     assert (
         light_tools.get_tool("image_studio_generate").description
         == generate.description
+    )
+    assert (
+        light_tools.get_tool("image_studio_view_asset").description
+        == view_asset.description
     )
 
 
@@ -901,6 +1077,30 @@ def test_safe_reference_path_resolves_relative_agent_workspace(tmp_path) -> None
         assert reference is not None
         assert reference.filename == "img1.png"
         assert reference.data == PNG
+
+    asyncio.run(run())
+
+
+def test_agent_original_path_can_be_reused_as_image_reference(tmp_path) -> None:
+    async def run() -> None:
+        store = GenerationStore(tmp_path / "plugin-data")
+        await store.initialize()
+        service = ImageGenerationService(
+            settings=settings(), executor=FakeExecutor(), store=store
+        )
+        assets = await store.stage_agent_images(
+            (GeneratedImage(PNG, "image/png"),),
+            create_preview=True,
+            preview_max_edge=768,
+            preview_quality=80,
+            retention_hours=24,
+        )
+
+        reference = await service.reference_from_safe_path(assets[0].path)
+
+        assert reference is not None
+        assert reference.data == PNG
+        assert reference.mime_type == "image/png"
 
     asyncio.run(run())
 

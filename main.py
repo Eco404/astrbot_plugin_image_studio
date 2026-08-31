@@ -48,7 +48,7 @@ CAPABILITY_QUERY_EXTRA_KEY = "_image_studio_capability_queries"
     PLUGIN_NAME,
     "local",
     "多 Provider 生图、画廊与 Agent 可读图片工具。",
-    "0.3.2",
+    "0.4.0",
 )
 class ImageStudioPlugin(Star):
     """Own Image Studio configuration, generation, gallery, and tool APIs."""
@@ -72,6 +72,7 @@ class ImageStudioPlugin(Star):
         """Initialize storage, HTTP resources, and Page API routes."""
 
         await self.store.initialize()
+        await self.store.cleanup_agent_assets(self._settings.llm_asset_retention_hours)
         self._session = aiohttp.ClientSession(
             connector=aiohttp.TCPConnector(limit=12, limit_per_host=6),
             timeout=aiohttp.ClientTimeout(total=180),
@@ -639,14 +640,15 @@ class ImageStudioPlugin(Star):
         """查询当前可供 LLM 使用的生图模型、选择规则和参数。
 
         每次调用 image_studio_generate 前都必须先调用本工具。常规生图必须首先使用
-        default，并根据是否有参考图指定 text2img 或 img2img；默认模型没有明确能力缺口时，
-        直接生成，不得继续查询 all。只有默认模型缺少用户明确要求的模式、参考图数量或参数，
-        默认模型不可用，用户要求比较模型，或指定了模型类型却不知道 model_ref 时，才使用
-        all 并尽量携带 mode。用户明确指定 model_ref 时直接查询 model。
+        default；mode 可省略，省略时同时返回文生图和图生图默认模型，也可指定 text2img 或
+        img2img 只查询对应默认模型。默认模型没有明确能力缺口时直接生成，不得继续查询 all。
+        只有默认模型缺少用户明确要求的模式、参考图数量或参数，默认模型不可用，用户要求比较
+        模型，或指定了模型类型却不知道 model_ref 时，才使用 all。用户明确指定 model_ref 时
+        直接查询 model。
 
         Args:
             query_type(string): default、all 或 model。常规请求默认使用 default。
-            mode(string): 可选的 text2img 或 img2img，用于筛选模式。
+            mode(string): 可选的 text2img 或 img2img；default 省略时返回两个模式的默认模型。
             model_ref(string): query_type=model 时必填的 provider_id:model_id。
         """
 
@@ -675,16 +677,28 @@ class ImageStudioPlugin(Star):
             normalized_query_type = "model"
         if normalized_query_type not in {"all", "default", "model"}:
             return _tool_error("query_type 仅支持 all、default 或 model。")
+        requested_refs: set[str] = set()
+        default_modes_by_ref: dict[str, list[str]] = {}
         if normalized_query_type == "default":
-            if not normalized_mode:
-                return _tool_error("查询默认模型时必须指定 mode。")
-            requested_ref = self._settings.default_model_ref(
-                normalized_mode, "llm_tool"
+            target_modes = (
+                (normalized_mode,) if normalized_mode else ("text2img", "img2img")
             )
-            if not requested_ref:
-                return _tool_error("当前模式尚未设置默认 LLM 生图模型。")
+            for target_mode in target_modes:
+                default_ref = self._settings.default_model_ref(target_mode, "llm_tool")
+                if not default_ref:
+                    continue
+                requested_refs.add(default_ref)
+                default_modes_by_ref.setdefault(default_ref, []).append(target_mode)
+            if not requested_refs:
+                return _tool_error(
+                    "当前模式尚未设置默认 LLM 生图模型。"
+                    if normalized_mode
+                    else "尚未设置可用的文生图或图生图默认 LLM 模型。"
+                )
         elif normalized_query_type == "model" and not requested_ref:
             return _tool_error("查询指定模型时必须传入 model_ref。")
+        elif normalized_query_type == "model":
+            requested_refs.add(requested_ref)
         entries: list[dict[str, Any]] = []
         for provider in self._settings.providers:
             if not provider.enabled:
@@ -693,7 +707,15 @@ class ImageStudioPlugin(Star):
                 if not model.llm_enabled:
                     continue
                 ref = f"{provider.id}:{model.id}"
-                if requested_ref and requested_ref not in {ref, model.id}:
+                matched_requested_ref = next(
+                    (
+                        candidate
+                        for candidate in requested_refs
+                        if candidate in {ref, model.id}
+                    ),
+                    "",
+                )
+                if requested_refs and not matched_requested_ref:
                     continue
                 modes = [
                     candidate
@@ -705,6 +727,22 @@ class ImageStudioPlugin(Star):
                 ]
                 if normalized_mode and normalized_mode not in modes:
                     continue
+                default_for_modes = [
+                    candidate
+                    for candidate in default_modes_by_ref.get(
+                        matched_requested_ref or ref, ()
+                    )
+                    if candidate in modes
+                ]
+                if normalized_query_type == "default" and not default_for_modes:
+                    continue
+                query_modes = (
+                    default_for_modes
+                    if normalized_query_type == "default"
+                    else [normalized_mode]
+                    if normalized_mode
+                    else modes
+                )
                 tool = model.tool
                 exposed_parameters: dict[str, Any] = {}
                 configured_parameters = tool.get("parameters")
@@ -752,6 +790,8 @@ class ImageStudioPlugin(Star):
                         "provider_name": provider.name,
                         "model_name": model.name,
                         "modes": modes,
+                        "query_modes": query_modes,
+                        "default_for_modes": default_for_modes,
                         "supports_negative_prompt": model.negative_prompt,
                         "negative_prompt_exposed": (model.llm_negative_prompt_enabled),
                         "max_reference_images": model.llm_max_reference_images,
@@ -770,8 +810,16 @@ class ImageStudioPlugin(Star):
                         "parameters": exposed_parameters,
                     }
                 )
-        if requested_ref and len(entries) > 1 and ":" not in requested_ref:
-            return _tool_error("模型 ID 不唯一，请使用 provider_id:model_id 查询。")
+        for candidate in requested_refs:
+            if ":" in candidate:
+                continue
+            matching_entries = [
+                entry
+                for entry in entries
+                if str(entry.get("model_ref") or "").endswith(f":{candidate}")
+            ]
+            if len(matching_entries) > 1:
+                return _tool_error("模型 ID 不唯一，请使用 provider_id:model_id 查询。")
         if not entries:
             return _tool_error(
                 "没有符合条件的模型；模型可能不存在、已停用、不支持该模式或未向 LLM 工具开放。"
@@ -779,9 +827,13 @@ class ImageStudioPlugin(Star):
         _remember_capability_query(event, self._settings.revision, entries)
         if normalized_query_type == "default":
             next_action = (
-                "普通主体、画风、构图和文字描述可由提示词表达，不属于能力缺口。若返回模型满足用户明确"
-                "要求的模式、参考图数量和参数，立即调用 image_studio_generate，不得查询 all；仅在存在"
-                "可指出的能力缺口时，使用相同 mode 查询 all。"
+                "根据用户实际请求模式选择 default_for_modes 对应的默认模型。普通主体、画风、构图和"
+                "文字描述可由提示词表达，不属于能力缺口。若默认模型满足明确要求，立即调用 "
+                "image_studio_generate，不得查询 all；仅在存在可指出的能力缺口时查询相同 mode 的 all。"
+                if not normalized_mode
+                else "普通主体、画风、构图和文字描述可由提示词表达，不属于能力缺口。若返回模型满足用户"
+                "明确要求的模式、参考图数量和参数，立即调用 image_studio_generate，不得查询 all；"
+                "仅在存在可指出的能力缺口时，使用相同 mode 查询 all。"
             )
         elif normalized_query_type == "all":
             next_action = (
@@ -798,7 +850,8 @@ class ImageStudioPlugin(Star):
             ),
             "routing_contract": {
                 "default_first": (
-                    "未指定模型或模型类型的常规请求，必须先查询对应 mode 的默认模型。"
+                    "未指定模型或模型类型的常规请求必须先查询默认模型；mode 可省略以同时获取"
+                    "文生图和图生图默认，也可指定 mode 只查询对应默认。"
                 ),
                 "capability_gap_only": (
                     "只有缺少用户明确要求的模式、参考图数量或暴露参数，才算默认模型不符合；"
@@ -820,6 +873,18 @@ class ImageStudioPlugin(Star):
                 "final_response": (
                     "完成剩余处理后仍需正常结束本轮；最终回复只补充尚未发送的用户可见内容。"
                 ),
+                "image_assets": {
+                    "return_mode": self._settings.llm_image_return_mode,
+                    "preview_max_edge": self._settings.llm_preview_max_edge,
+                    "asset_retention_hours": self._settings.llm_asset_retention_hours,
+                    "original_usage": (
+                        "发送、图生图、拼接、GIF 和其他文件操作使用生成结果 assets 中的 original_path。"
+                    ),
+                    "visual_review": (
+                        "只有需要观察画面内容时才使用自动预览或调用 image_studio_view_asset；"
+                        "普通文件处理不需要重复加载视觉图片。"
+                    ),
+                },
             },
             "default_model_refs": {
                 "text2img": self._settings.default_model_ref("text2img", "llm_tool"),
@@ -853,13 +918,17 @@ class ImageStudioPlugin(Star):
         """使用 Image Studio 生成或修改图片，并返回 Agent 可继续处理的工作流资产。
 
         每次生成前都必须先调用 image_studio_get_capabilities。未指定模型或模型类型的常规
-        请求必须先查询对应 mode 的默认模型；默认模型满足明确能力要求时直接生成，不得查询
-        all。只有默认模型存在明确能力缺口或不可用、用户要求比较模型，或指定了模型类型却不知
-        道 model_ref 时才查询 all。明确 model_ref 时查询 model。严格使用查询结果指定的提示词
-        格式，不要把自然语言模型的提示词写成 NAI tag 串，也不要传入未列出的参数。
+        请求必须先查询 default；可省略 mode 同时获取文生图和图生图默认，也可指定 mode 只查询
+        对应默认。默认模型满足明确能力要求时直接生成，不得查询 all。只有默认模型存在明确能力
+        缺口或不可用、用户要求比较模型，或指定了模型类型却不知道 model_ref 时才查询 all。明确
+        model_ref 时查询 model。严格使用查询结果指定的提示词格式，不要把自然语言模型的提示词
+        写成 NAI tag 串，也不要传入未列出的参数。
         用户消息或引用消息中的图片可直接用于图生图；不要编造模型、参数或参考图路径。
+        生成结果中的 assets.original_path 是原图，发送、再次图生图、拼接或 GIF 等操作必须使用
+        该路径。自动返回的 ImageContent 可能只是轻量预览；只有需要观察画面时才调用
+        image_studio_view_asset，不要为了普通发送重复加载视觉图片。
         生成成功不代表整个用户任务已经完成：如果还需要多次生图、
-        改图、拼接、制作 GIF 或其他处理，继续使用返回的缓存图片，除非用户需要查看阶段结果，
+        改图、拼接、制作 GIF 或其他处理，继续使用返回的原图资产，除非用户需要查看阶段结果，
         否则不要发送中间产物。send_message_to_user 只执行即时发送，不会结束本轮 Agent；它可用于
         发送产物或必要的中途文字。凡通过它发送的内容都已对目标可见，后续步骤和最终回复不得复述。
 
@@ -876,7 +945,7 @@ class ImageStudioPlugin(Star):
             reference_image_paths(array[string]): 多张 Agent 已有工具图片的路径；当前或引用消息图片通常无需填写。
 
         Returns:
-            Workflow metadata and image MCP content. AstrBot caches images for later Agent steps.
+            Original asset metadata and optional MCP preview content for Agent workflows.
         """
 
         if not self._settings.enable_llm_tool:
@@ -950,20 +1019,37 @@ class ImageStudioPlugin(Star):
                 content=[mcp.types.TextContent(type="text", text=f"生成失败：{exc}")],
                 isError=True,
             )
-        content: list[Any] = [
-            mcp.types.TextContent(
-                type="text",
-                text=(
-                    f"工作流资产已生成：{len(result.images)} 张图片；"
-                    f"generation_id={result.generation_id or '未保存'}。"
-                    "图片会作为可继续处理的缓存资产返回。若任务还需多次生图、改图、拼接或制作 GIF，"
-                    "继续处理，除非用户需要查看阶段结果，否则不要发送中间产物。send_message_to_user "
-                    "只执行即时发送，不会结束本轮 Agent；可用它发送产物或必要的中途文字，但已发送内容"
-                    "已经对目标可见，后续步骤和最终回复不得复述。完成剩余任务后仍需正常结束本轮。"
-                ),
+        configured_return_mode = self._settings.llm_image_return_mode
+        actual_return_mode = configured_return_mode
+        try:
+            assets = await self.store.stage_agent_images(
+                result.images,
+                create_preview=configured_return_mode == "preview",
+                preview_max_edge=self._settings.llm_preview_max_edge,
+                preview_quality=self._settings.llm_preview_quality,
+                retention_hours=self._settings.llm_asset_retention_hours,
             )
-        ]
-        for image in result.images:
+        except Exception as exc:
+            logger.warning(
+                "%s 暂存 Agent 原图失败，回退为完整图片返回: %s",
+                LOG_TAG,
+                type(exc).__name__,
+            )
+            assets = ()
+            actual_return_mode = "original_fallback"
+
+        if actual_return_mode in {"original", "original_fallback"}:
+            visual_images = result.images
+        elif actual_return_mode == "preview":
+            visual_images = tuple(
+                asset.preview or image
+                for asset, image in zip(assets, result.images, strict=True)
+            )
+        else:
+            visual_images = ()
+
+        content: list[Any] = []
+        for image in visual_images:
             content.append(
                 mcp.types.ImageContent(
                     type="image",
@@ -971,7 +1057,99 @@ class ImageStudioPlugin(Star):
                     mimeType=image.mime_type,
                 )
             )
+        manifest = [
+            {
+                "asset_id": asset.id,
+                "original_path": asset.path,
+                "mime_type": asset.mime_type,
+                "size_bytes": asset.size_bytes,
+                "preview_size_bytes": (
+                    len(asset.preview.data) if asset.preview is not None else 0
+                ),
+            }
+            for asset in assets
+        ]
+        if actual_return_mode == "preview":
+            visual_notice = (
+                "本次 ImageContent 是供视觉判断的轻量预览；Core 生成的 tool_images 缓存路径也是预览。"
+                "发送、图生图、拼接、GIF 或其他文件处理必须使用 assets 中的 original_path。"
+            )
+        elif actual_return_mode == "asset":
+            visual_notice = (
+                "本次未自动注入视觉图片。普通发送和基于文件的后续处理直接使用 original_path；"
+                "只有确实需要观察画面内容时才调用 image_studio_view_asset。"
+            )
+        else:
+            visual_notice = (
+                "本次 ImageContent 为完整原图；发送和后续处理仍优先使用 assets 中的 original_path。"
+                if assets
+                else "临时资产暂存失败，本次仅返回完整 ImageContent。"
+            )
+        content.append(
+            mcp.types.TextContent(
+                type="text",
+                text=(
+                    f"工作流资产已生成：{len(result.images)} 张图片；"
+                    f"generation_id={result.generation_id or '未保存'}；"
+                    f"return_mode={actual_return_mode}；"
+                    f"assets={json.dumps(manifest, ensure_ascii=False, separators=(',', ':'))}。"
+                    f"{visual_notice} 若任务还需多次生图、改图、拼接或制作 GIF，请继续处理。"
+                    "send_message_to_user 只执行即时发送，不会结束本轮 Agent；已发送内容已经对目标可见，"
+                    "后续步骤和最终回复不得复述。完成剩余任务后仍需正常结束本轮。"
+                ),
+            )
+        )
         return mcp.types.CallToolResult(content=content)
+
+    @filter.llm_tool(name="image_studio_view_asset")
+    async def image_studio_view_asset(
+        self,
+        event: AstrMessageEvent,
+        asset_id: str = "",
+        detail: str = "preview",
+    ) -> mcp.types.CallToolResult:
+        """按需查看 Image Studio 原图资产，不用于普通发送或文件处理。
+
+        image_studio_generate 返回的 original_path 可以直接用于发送、图生图、拼接和其他文件
+        操作，不需要调用本工具。只有必须观察画面内容时才调用；默认 preview 可减少后续多模态
+        请求负担，只有像素级检查确有必要时才使用 original。
+
+        Args:
+            asset_id(string): image_studio_generate 返回的 64 位资产 ID。
+            detail(string): preview 或 original，默认 preview。
+        """
+
+        if not self._settings.enable_llm_tool:
+            return _tool_error("Image Studio 的 LLM 生图工具已关闭。")
+        normalized_detail = str(detail or "preview").strip().lower()
+        if normalized_detail not in {"preview", "original"}:
+            return _tool_error("detail 仅支持 preview 或 original。")
+        loaded = await self.store.load_agent_image(
+            asset_id,
+            detail=normalized_detail,
+            preview_max_edge=self._settings.llm_preview_max_edge,
+            preview_quality=self._settings.llm_preview_quality,
+            retention_hours=self._settings.llm_asset_retention_hours,
+        )
+        if loaded is None:
+            return _tool_error("图片资产不存在或已超过临时保留时间。")
+        image, original_path = loaded
+        return mcp.types.CallToolResult(
+            content=[
+                mcp.types.ImageContent(
+                    type="image",
+                    data=base64.b64encode(image.data).decode("ascii"),
+                    mimeType=image.mime_type,
+                ),
+                mcp.types.TextContent(
+                    type="text",
+                    text=(
+                        f"已加载 {normalized_detail} 视觉内容。该 ImageContent 只用于观察；"
+                        f"发送和后续文件处理必须使用原图路径 original_path={original_path}。"
+                    ),
+                ),
+            ]
+        )
 
 
 def _tool_error(message: str) -> mcp.types.CallToolResult:
@@ -1008,7 +1186,7 @@ def _remember_capability_query(
             }
     for entry in entries:
         ref = str(entry.get("model_ref") or "")
-        modes = entry.get("modes")
+        modes = entry.get("query_modes", entry.get("modes"))
         if not ref or not isinstance(modes, list):
             continue
         models[ref] = sorted(set(models.get(ref, ())) | {str(item) for item in modes})

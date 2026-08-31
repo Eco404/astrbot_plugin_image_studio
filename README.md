@@ -58,11 +58,19 @@ OpenAI Images 会预填尺寸、数量、质量、背景和输出格式；Gemini
 /image_gen 重新绘制这张图片 --mode img2img --ref /path/from/astrbot/temp/tool_images/file.png
 ```
 
-LLM 工具包括 `image_studio_get_capabilities` 和 `image_studio_generate`。每次生成前都必须先查询能力。未指定模型或模型类型的常规请求首先使用 `query_type=default`，并根据是否有参考图指定 `text2img` 或 `img2img`；如果默认模型支持用户明确要求的模式、参考图数量和参数，就直接生成，不再查询全部模型。普通主体、画风、构图和文字描述可以通过提示词表达，不属于模型能力缺口。只有默认模型存在明确能力缺口或不可用、用户要求比较模型，或者指定了模型类型但不知道具体 `model_ref` 时，才使用 `query_type=all`，并尽量携带相同的 `mode`。明确指定模型时使用 `query_type=model` 和完整 `model_ref`。
+LLM 工具包括 `image_studio_get_capabilities`、`image_studio_generate` 和 `image_studio_view_asset`。每次生成前都必须先查询能力。未指定模型或模型类型的常规请求首先使用 `query_type=default`；`mode` 可以省略，此时同时返回文生图和图生图默认模型，也可以指定 `text2img` 或 `img2img` 只获取对应默认。如果默认模型支持用户明确要求的模式、参考图数量和参数，就直接生成，不再查询全部模型。普通主体、画风、构图和文字描述可以通过提示词表达，不属于模型能力缺口。只有默认模型存在明确能力缺口或不可用、用户要求比较模型，或者指定了模型类型但不知道具体 `model_ref` 时，才使用 `query_type=all`，并尽量携带相同的 `mode`。明确指定模型时使用 `query_type=model` 和完整 `model_ref`。
 
 查询结果会明确自然语言或 NAI tag 提示词格式，并只列出当前模型允许 LLM 使用的动态参数；一次查询授权只供对应模型和模式生成一次。查询 `all` 后可以直接使用选中的模型，不需要再次查询 `model`。
 
-`image_studio_generate` 支持动态参数、多张参考图和严格 `model_ref`。`negative_prompt` 不再是所有模型都能看到的固定工具参数，只有能力查询明确返回时才能通过 `parameters.negative_prompt` 传入。生成成功后返回 MCP `ImageContent`，AstrBot 会缓存图片并把它加入后续支持视觉输入的 Agent 步骤。指令和 LLM 工具均能读取当前消息及引用消息中的图片；没有显式指定模式时，检测到图片会自动使用图生图。
+`image_studio_generate` 支持动态参数、多张参考图和严格 `model_ref`。`negative_prompt` 不再是所有模型都能看到的固定工具参数，只有能力查询明确返回时才能通过 `parameters.negative_prompt` 传入。指令和 LLM 工具均能读取当前消息及引用消息中的图片；没有显式指定模式时，检测到图片会自动使用图生图。
+
+LLM 工具生成的每张图片都会进入独立的临时 Agent 资产区，并返回 `asset_id`、`original_path`、MIME 类型和原图大小。发送、再次图生图、拼接、GIF 或其他文件操作必须使用 `original_path`，不需要为了普通文件处理把图片再次送入视觉模型。设置页“Agent 图片”支持三种返回方式：
+
+- `轻量预览`：默认方式，向 LLM 返回压缩 WebP 预览，同时保留原图路径；可配置最大边长和质量。
+- `仅资产路径`：不自动返回 `ImageContent`，速度最快；确实需要观察画面时再调用 `image_studio_view_asset`。
+- `完整原图`：保持原行为，适合必须进行像素级检查的任务，但多模态请求可能明显变慢。
+
+`image_studio_view_asset` 默认只加载轻量预览，也可显式请求完整原图。临时原图按设置的保留小时自动清理；画廊原图拥有独立的历史保留策略，不受该 TTL 影响。由于 AstrBot Core 会在同一 Agent 流程中持续携带已返回的 `ImageContent`，轻量预览仍可能被重复发送，但请求体会比完整原图小得多。
 
 `image_studio_generate` 返回的是可继续处理的工作流资产，单次生图成功不代表整个用户任务已经完成。Agent 可以继续多次生图、改图、拼接或制作 GIF。`send_message_to_user` 只执行即时发送，不会终止本轮 Agent；它可以发送阶段产物或必要的中途文字，但已经通过它发送的内容不得在后续步骤或最终回复中复述。完成剩余处理后仍需正常输出本轮最终回复，并且只补充尚未发送的内容。
 
@@ -84,6 +92,7 @@ LLM 工具包括 `image_studio_get_capabilities` 和 `image_studio_generate`。�
 - 历史数据库：`data/plugin_data/astrbot_plugin_image_studio/history.sqlite3`。
 - 去重后的原图资源：`data/plugin_data/astrbot_plugin_image_studio/history/assets`。
 - 内容寻址缩略图：`data/plugin_data/astrbot_plugin_image_studio/history/thumbnails`。
+- Agent 临时原图和预览：`data/plugin_data/astrbot_plugin_image_studio/agent_assets`。
 - 历史数据库中的来源身份字段：`context_type`、`platform_name`、`platform_id`、`group_id`、`group_name`、`user_id`、`user_name`。
 
 ## 开发验证

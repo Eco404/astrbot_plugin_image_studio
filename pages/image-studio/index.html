@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Image Studio 生图工作台</title>
-  <link rel="stylesheet" href="./app.css?v=0.3.2" />
+  <link rel="stylesheet" href="./app.css?v=0.4.0" />
 </head>
 <body>
   <main class="app-shell quiet-glass-background">
@@ -84,6 +84,13 @@
           <section class="settings-panel glass">
             <div class="section-heading"><div><h2>运行</h2><p>控制 Agent 是否可以使用 Image Studio 生图工具。</p></div></div>
             <div class="toggle-row"><label for="settingTool">启用 LLM 生图工具</label><label class="toggle-control"><input id="settingTool" type="checkbox" /><span aria-hidden="true"></span></label></div>
+          </section>
+          <section class="settings-panel glass">
+            <div class="section-heading"><div><h2>Agent 图片</h2><p>控制生成结果进入后续 LLM 上下文的方式。</p></div></div>
+            <div class="field"><label for="agentImageReturnMode">返回方式</label><select id="agentImageReturnMode"><option value="preview">轻量预览</option><option value="asset">仅资产路径</option><option value="original">完整原图</option></select></div>
+            <div class="field"><label for="agentPreviewMaxEdge">预览图最大边长</label><input id="agentPreviewMaxEdge" type="number" min="256" max="2048" step="64" /></div>
+            <div class="field"><label for="agentPreviewQuality">WebP 预览质量</label><input id="agentPreviewQuality" type="number" min="40" max="95" step="1" /></div>
+            <div class="field"><label for="agentAssetRetentionHours">临时原图保留小时</label><input id="agentAssetRetentionHours" type="number" min="1" max="168" step="1" /></div>
           </section>
           <section class="settings-panel glass">
             <div class="section-heading"><div><h2>默认值</h2><p>页面和指令、LLM 工具分别使用的默认模型。</p></div><div class="model-tabs default-tabs" role="group" aria-label="默认模型使用范围"><button class="model-tab is-active" data-default-scope="page" type="button">页面</button><button class="model-tab" data-default-scope="tool" type="button">工具</button></div></div>
@@ -191,6 +198,6 @@
     });
   </script>
   <script src="/api/plugin/page/bridge-sdk.js"></script>
-  <script src="./app.js?v=0.3.2" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./app.js?v=0.4.0" onerror="window.__reportImageStudioPageError(true)"></script>
 </body>
 </html>

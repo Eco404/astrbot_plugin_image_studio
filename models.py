@@ -394,6 +394,17 @@ class GeneratedImage:
 
 
 @dataclass(frozen=True, slots=True)
+class AgentImageAsset:
+    """An original tool image plus an optional lightweight LLM preview."""
+
+    id: str
+    path: str
+    mime_type: str
+    size_bytes: int
+    preview: GeneratedImage | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class GenerationResult:
     """Result from the image service before presentation to a caller."""
 

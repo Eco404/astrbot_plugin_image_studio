@@ -3,7 +3,7 @@
     "type": "bool",
     "default": true,
     "description": "启用 LLM 生图工具",
-    "hint": "允许 Agent 调用 image_studio_generate，并把生成图返回给 Agent 继续处理。",
+    "hint": "允许 Agent 查询生图能力、生成图片，并通过原图资产或轻量预览继续处理。",
     "obvious": true
   }
 }

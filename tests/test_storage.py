@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
 import json
+import os
 import re
 import sqlite3
+import time
 import zipfile
+from pathlib import Path
 
 from astrbot_plugin_image_studio.config import HistorySettings
 from astrbot_plugin_image_studio.models import (
@@ -35,6 +39,76 @@ def provider() -> ImageProvider:
             "max_reference_images": 1,
         }
     )
+
+
+def test_agent_assets_keep_original_and_create_expiring_preview(tmp_path) -> None:
+    async def run() -> None:
+        from PIL import Image
+
+        source = Image.effect_noise((1024, 768), 96).convert("RGB")
+        output = io.BytesIO()
+        source.save(output, "PNG")
+        original_data = output.getvalue()
+
+        store = GenerationStore(tmp_path)
+        await store.initialize()
+        await store.record_success(
+            provider=provider(),
+            request=GenerationRequest(
+                mode="text2img", provider_id="test-provider", prompt="noise"
+            ),
+            images=(GeneratedImage(original_data, "image/png"),),
+            elapsed_ms=10,
+            history=HistorySettings(True, 10, 50, False),
+        )
+        history_original = next(store.assets_dir.rglob("*.png"))
+        assets = await store.stage_agent_images(
+            (GeneratedImage(original_data, "image/png"),),
+            create_preview=True,
+            preview_max_edge=320,
+            preview_quality=75,
+            retention_hours=24,
+        )
+
+        assert len(assets) == 1
+        asset = assets[0]
+        assert re.fullmatch(r"[a-f0-9]{64}", asset.id)
+        assert asset.path.startswith(str(store.agent_originals_dir))
+        assert Path(asset.path).read_bytes() == original_data
+        assert os.path.samefile(history_original, asset.path)
+        assert asset.preview is not None
+        assert len(asset.preview.data) < len(original_data)
+        with Image.open(io.BytesIO(asset.preview.data)) as preview:
+            assert max(preview.size) <= 320
+
+        loaded_preview = await store.load_agent_image(
+            asset.id,
+            detail="preview",
+            preview_max_edge=320,
+            preview_quality=75,
+            retention_hours=24,
+        )
+        loaded_original = await store.load_agent_image(
+            asset.id,
+            detail="original",
+            preview_max_edge=320,
+            preview_quality=75,
+            retention_hours=24,
+        )
+        assert loaded_preview is not None and loaded_original is not None
+        assert loaded_preview[0].data == asset.preview.data
+        assert loaded_original[0].data == original_data
+        assert loaded_original[1] == asset.path
+
+        paths = [Path(asset.path), *store.agent_previews_dir.rglob("*.webp")]
+        old = time.time() - 7200
+        for path in paths:
+            os.utime(path, (old, old))
+        await store.cleanup_agent_assets(1)
+        assert all(not path.exists() for path in paths)
+        assert history_original.exists()
+
+    asyncio.run(run())
 
 
 def test_gallery_keeps_references_out_of_collection_and_deletes_them(tmp_path) -> None:
