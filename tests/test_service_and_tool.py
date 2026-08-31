@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import mcp
@@ -15,6 +16,7 @@ from astrbot_plugin_image_studio.main import (
     ImageStudioPlugin,
     _iter_event_images,
     _parse_command,
+    _provider_request_image_refs,
 )
 from astrbot_plugin_image_studio.models import (
     GeneratedImage,
@@ -50,12 +52,10 @@ def settings() -> RuntimeSettings:
     return RuntimeSettings(
         enable_llm_tool=True,
         providers=(provider,),
-        default_provider_id="test-provider",
-        default_size="1024x1024",
-        default_count=1,
         history=HistorySettings(False, 0, 0, False),
         revision=0,
-        default_text2img_model_ref="test-provider:test-image",
+        default_page_text2img_model_ref="test-provider:test-image",
+        default_tool_text2img_model_ref="test-provider:test-image",
     )
 
 
@@ -76,6 +76,77 @@ def test_service_generates_without_history(tmp_path) -> None:
         )
         assert result.generation_id == ""
         assert result.images[0].data == PNG
+
+    asyncio.run(run())
+
+
+def test_page_and_tool_defaults_use_each_models_parameter_defaults(tmp_path) -> None:
+    async def run() -> None:
+        provider = ImageProvider.from_mapping(
+            {
+                "id": "provider",
+                "name": "Provider",
+                "kind": "openai_images",
+                "base_url": "https://example.test",
+                "models": [
+                    {
+                        "id": "page-model",
+                        "parameters": {
+                            "size": {
+                                "type": "select",
+                                "default": "1024x1536",
+                                "choices": ["1024x1536"],
+                            },
+                            "count": {"type": "number", "default": 2},
+                        },
+                    },
+                    {
+                        "id": "tool-model",
+                        "parameters": {
+                            "size": {
+                                "type": "select",
+                                "default": "1536x1024",
+                                "choices": ["1536x1024"],
+                            },
+                            "count": {"type": "number", "default": 3},
+                        },
+                    },
+                ],
+            }
+        )
+        captured = []
+
+        class CapturingExecutor:
+            async def generate(self, _provider, request):
+                captured.append(request)
+                return (GeneratedImage(PNG, "image/png"),)
+
+        store = GenerationStore(tmp_path)
+        await store.initialize()
+        service = ImageGenerationService(
+            settings=RuntimeSettings(
+                enable_llm_tool=True,
+                providers=(provider,),
+                history=HistorySettings(False, 0, 0, False),
+                revision=0,
+                default_page_text2img_model_ref="provider:page-model",
+                default_tool_text2img_model_ref="provider:tool-model",
+            ),
+            executor=CapturingExecutor(),
+            store=store,
+        )
+
+        await service.generate(
+            mode="text2img", provider_id="", prompt="page", source="webui"
+        )
+        await service.generate(
+            mode="text2img", provider_id="", prompt="tool", source="llm_tool"
+        )
+
+        assert [(item.model, item.size, item.count) for item in captured] == [
+            ("page-model", "1024x1536", 2),
+            ("tool-model", "1536x1024", 3),
+        ]
 
     asyncio.run(run())
 
@@ -121,11 +192,9 @@ def test_capabilities_only_lists_llm_enabled_models() -> None:
     plugin._settings = RuntimeSettings(
         enable_llm_tool=True,
         providers=(provider,),
-        default_provider_id="provider",
-        default_size="1024x1024",
-        default_count=1,
         history=HistorySettings(False, 0, 0, False),
         revision=0,
+        default_tool_text2img_model_ref="provider:visible",
     )
 
     result = asyncio.run(
@@ -134,6 +203,10 @@ def test_capabilities_only_lists_llm_enabled_models() -> None:
     payload = json.loads(result.content[0].text)
 
     assert [item["model_ref"] for item in payload["models"]] == ["provider:visible"]
+    assert payload["default_model_refs"] == {
+        "text2img": "provider:visible",
+        "img2img": "",
+    }
 
 
 def test_capabilities_excludes_zero_limit_model_from_img2img() -> None:
@@ -161,9 +234,6 @@ def test_capabilities_excludes_zero_limit_model_from_img2img() -> None:
     plugin._settings = RuntimeSettings(
         enable_llm_tool=True,
         providers=(provider,),
-        default_provider_id="provider",
-        default_size="1024x1024",
-        default_count=1,
         history=HistorySettings(False, 0, 0, False),
         revision=0,
     )
@@ -294,9 +364,6 @@ def test_service_limits_concurrency_per_provider(tmp_path) -> None:
             settings=RuntimeSettings(
                 enable_llm_tool=True,
                 providers=providers,
-                default_provider_id="",
-                default_size="1024x1024",
-                default_count=1,
                 history=HistorySettings(False, 0, 0, False),
                 revision=0,
             ),
@@ -361,9 +428,6 @@ def test_service_maps_model_schema_parameter_names(tmp_path) -> None:
             settings=RuntimeSettings(
                 enable_llm_tool=True,
                 providers=(provider,),
-                default_provider_id="custom",
-                default_size="1024x1024",
-                default_count=1,
                 history=HistorySettings(False, 0, 0, False),
                 revision=0,
             ),
@@ -458,6 +522,282 @@ def test_event_image_iterator_reads_current_and_quoted_images() -> None:
     images = list(_iter_event_images([current, Reply(id="1", chain=[quoted])]))
 
     assert images == [current, quoted]
+
+
+def test_safe_reference_path_resolves_relative_agent_workspace(tmp_path) -> None:
+    async def run() -> None:
+        data_dir = tmp_path / "plugin-data"
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        (workspace / "img1.png").write_bytes(PNG)
+        store = GenerationStore(data_dir)
+        await store.initialize()
+        service = ImageGenerationService(
+            settings=settings(), executor=FakeExecutor(), store=store
+        )
+
+        reference = await service.reference_from_safe_path(
+            "img1.png",
+            workspace_root=workspace,
+        )
+
+        assert reference is not None
+        assert reference.filename == "img1.png"
+        assert reference.data == PNG
+
+    asyncio.run(run())
+
+
+def test_safe_reference_path_rejects_workspace_escape(tmp_path) -> None:
+    async def run() -> None:
+        data_dir = tmp_path / "plugin-data"
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        (tmp_path / "outside.png").write_bytes(PNG)
+        store = GenerationStore(data_dir)
+        await store.initialize()
+        service = ImageGenerationService(
+            settings=settings(), executor=FakeExecutor(), store=store
+        )
+
+        with pytest.raises(ValueError, match="不在当前 Agent 工作区"):
+            await service.reference_from_safe_path(
+                "../outside.png",
+                workspace_root=workspace,
+            )
+
+    asyncio.run(run())
+
+
+def test_llm_tool_reads_multiple_relative_agent_workspace_images(
+    tmp_path, monkeypatch
+) -> None:
+    async def run() -> None:
+        data_dir = tmp_path / "plugin-data"
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        (workspace / "img1.png").write_bytes(PNG)
+        (workspace / "img2.jpg").write_bytes(PNG + b"second")
+        store = GenerationStore(data_dir)
+        await store.initialize()
+        service = ImageGenerationService(
+            settings=settings(), executor=FakeExecutor(), store=store
+        )
+        plugin = object.__new__(ImageStudioPlugin)
+        plugin._service = service
+        plugin.context = SimpleNamespace(_db=None)
+
+        async def fake_workspace_root(_umo, _db):
+            return workspace
+
+        async def no_quoted_images(_event):
+            return []
+
+        monkeypatch.setattr(
+            "astrbot_plugin_image_studio.main.resolve_workspace_root_for_umo",
+            fake_workspace_root,
+        )
+        monkeypatch.setattr(
+            "astrbot_plugin_image_studio.main.extract_quoted_message_images",
+            no_quoted_images,
+        )
+        event = SimpleNamespace(
+            unified_msg_origin="qq_official:GroupMessage:test",
+            get_messages=list,
+            get_extra=lambda _key: None,
+        )
+
+        references = await plugin._event_references(
+            event,
+            ["img1.png", "img2.jpg"],
+        )
+
+        assert [item.filename for item in references] == ["img1.png", "img2.jpg"]
+        assert [item.data for item in references] == [PNG, PNG + b"second"]
+
+    asyncio.run(run())
+
+
+def test_provider_request_refs_include_serialized_quoted_message_images() -> None:
+    first = "https://multimedia.nt.qq.com.cn/download?fileid=first&spec=0"
+    second = "https://multimedia.nt.qq.com.cn/download?fileid=second&spec=0"
+    quoted = SimpleNamespace(
+        text=(
+            "<Quoted Message>\n"
+            f"[附件1] 类型:图片 文件名:first.png URL:{first}\n"
+            f"[附件1] 类型:图片 文件名:second.jpg URL:{second}\n"
+            "</Quoted Message>"
+        )
+    )
+    request = SimpleNamespace(
+        image_urls=[first],
+        extra_user_content_parts=[quoted],
+    )
+    event = SimpleNamespace(
+        get_extra=lambda key: request if key == "provider_request" else None
+    )
+
+    assert _provider_request_image_refs(event) == [first, second]
+
+
+def test_event_references_materializes_serialized_quoted_message_images(
+    monkeypatch,
+) -> None:
+    async def run() -> None:
+        first = "https://multimedia.nt.qq.com.cn/download?fileid=first&spec=0"
+        second = "https://multimedia.nt.qq.com.cn/download?fileid=second&spec=0"
+        data_by_ref = {first: PNG, second: PNG + b"second"}
+
+        class FakeService:
+            async def reference_from_media_ref(self, raw_ref, *, workspace_root=None):
+                assert workspace_root is not None
+                data = data_by_ref[raw_ref]
+                return ReferenceImage(raw_ref, "reference.png", data, "image/png")
+
+        async def fake_workspace_root(_umo, _db):
+            return Path("/tmp/image-studio-test-workspace")
+
+        async def no_quoted_images(_event):
+            return []
+
+        monkeypatch.setattr(
+            "astrbot_plugin_image_studio.main.resolve_workspace_root_for_umo",
+            fake_workspace_root,
+        )
+        monkeypatch.setattr(
+            "astrbot_plugin_image_studio.main.extract_quoted_message_images",
+            no_quoted_images,
+        )
+        quoted = SimpleNamespace(
+            text=(
+                "<Quoted Message>\n"
+                f"[附件1] 类型:图片 文件名:first.png URL:{first}\n"
+                f"[附件1] 类型:图片 文件名:second.jpg URL:{second}\n"
+                "</Quoted Message>"
+            )
+        )
+        request = SimpleNamespace(
+            image_urls=[],
+            extra_user_content_parts=[quoted],
+        )
+        event = SimpleNamespace(
+            unified_msg_origin="qq_official:GroupMessage:test",
+            get_messages=list,
+            get_extra=lambda key: request if key == "provider_request" else None,
+        )
+        plugin = object.__new__(ImageStudioPlugin)
+        plugin._service = FakeService()
+        plugin.context = SimpleNamespace(_db=None)
+
+        references = await plugin._event_references(event)
+
+        assert [item.data for item in references] == [PNG, PNG + b"second"]
+
+    asyncio.run(run())
+
+
+def test_img2img_missing_references_reports_read_failure(tmp_path) -> None:
+    async def run() -> None:
+        provider = ImageProvider.from_mapping(
+            {
+                "id": "provider",
+                "name": "Provider",
+                "kind": "openai_images",
+                "base_url": "https://example.test",
+                "models": [
+                    {
+                        "id": "image-model",
+                        "supports_img2img": True,
+                        "max_reference_images": 8,
+                        "tool": {"enabled": True, "max_reference_images": 8},
+                    }
+                ],
+            }
+        )
+        store = GenerationStore(tmp_path)
+        await store.initialize()
+        service = ImageGenerationService(
+            settings=RuntimeSettings(
+                enable_llm_tool=True,
+                providers=(provider,),
+                history=HistorySettings(False, 0, 0, False),
+                revision=0,
+                default_tool_img2img_model_ref="provider:image-model",
+            ),
+            executor=FakeExecutor(),
+            store=store,
+        )
+
+        with pytest.raises(ValueError, match="未读取到可用参考图"):
+            await service.generate(
+                mode="img2img",
+                provider_id="",
+                prompt="transfer style",
+                source="llm_tool",
+            )
+
+    asyncio.run(run())
+
+
+def test_openai_multipart_uses_array_field_for_multiple_references() -> None:
+    async def run() -> None:
+        class FakeResponse:
+            status = 200
+
+            def __init__(self):
+                self.headers = {"Content-Type": "image/png"}
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return False
+
+            async def read(self):
+                return PNG
+
+        class FakeSession:
+            data = None
+
+            def post(self, _endpoint, **kwargs):
+                self.data = kwargs.get("data")
+                return FakeResponse()
+
+        provider = ImageProvider.from_mapping(
+            {
+                "id": "openai",
+                "name": "OpenAI",
+                "kind": "openai_images",
+                "base_url": "https://example.test/v1",
+                "models": [
+                    {
+                        "id": "image-model",
+                        "supports_img2img": True,
+                        "max_reference_images": 2,
+                    }
+                ],
+            }
+        )
+        request = GenerationRequest(
+            mode="img2img",
+            provider_id=provider.id,
+            prompt="transfer style",
+            model="image-model",
+            references=(
+                ReferenceImage("one", "one.png", PNG, "image/png"),
+                ReferenceImage("two", "two.png", PNG + b"two", "image/png"),
+            ),
+        )
+        session = FakeSession()
+
+        images = await ProviderExecutor(session).generate(provider, request)
+
+        assert images[0].data == PNG
+        field_names = [field[0]["name"] for field in session.data._fields]
+        assert field_names.count("image[]") == 2
+        assert "image" not in field_names
+
+    asyncio.run(run())
 
 
 def test_nai_model_discovery_is_not_supported() -> None:

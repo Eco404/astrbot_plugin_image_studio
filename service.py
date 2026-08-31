@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
+from astrbot.core.utils.media_utils import MediaResolver, file_uri_to_path, is_file_uri
 
 from .config import RuntimeSettings
 from .models import (
@@ -94,29 +97,28 @@ class ImageGenerationService:
 
         settings = self.settings
         normalized_mode = _mode(mode)
-        mode_default_ref = (
-            settings.default_img2img_model_ref
-            if normalized_mode == "img2img"
-            else settings.default_text2img_model_ref
-        )
+        mode_default_ref = settings.default_model_ref(normalized_mode, source)
         if (
             source == "llm_tool"
             and not str(model_ref or model or "").strip()
-            and not str(mode_default_ref or settings.default_model_ref or "").strip()
+            and not mode_default_ref
         ):
             raise ValueError(
                 "当前模式未设置默认 LLM 生图模型，请先查询模型能力并传入 model_ref"
             )
         provider, selected_model = self._select_model(
-            settings, provider_id, model_ref, model, normalized_mode
+            settings,
+            provider_id,
+            model_ref,
+            model,
+            normalized_mode,
+            mode_default_ref,
         )
         selection_source = (
             "explicit"
             if str(model_ref or model or "").strip()
             else "mode_default"
             if mode_default_ref
-            else "legacy_default"
-            if settings.default_model_ref
             else "fallback"
         )
         if source == "llm_tool" and not selected_model.llm_enabled:
@@ -131,11 +133,16 @@ class ImageGenerationService:
                 if source == "llm_tool"
                 else selected_model.max_reference_images
             )
+            if reference_limit <= 0:
+                if source == "llm_tool":
+                    raise ValueError("当前模型未向 LLM 工具开放可用的参考图数量")
+                raise ValueError("当前模型的参考图能力上限为 0，不能用于图生图")
+            if not references:
+                raise ValueError(
+                    "未读取到可用参考图；请使用当前消息或引用消息中的图片，"
+                    "或传入当前 Agent 工作区内的有效图片路径"
+                )
         normalized_refs = references[:reference_limit]
-        if normalized_mode == "img2img" and not normalized_refs:
-            if source == "llm_tool" and selected_model.img2img:
-                raise ValueError("当前模型未向 LLM 工具开放可用的参考图数量")
-            raise ValueError("图生图需要至少一张参考图")
         request = GenerationRequest(
             mode=normalized_mode,
             provider_id=provider.id,
@@ -150,8 +157,7 @@ class ImageGenerationService:
                 size
                 or _control_parameter_value(
                     parameters, selected_model, "size", source=source
-                )
-                or settings.default_size,
+                ),
                 provider.kind,
             ),
             count=max(
@@ -164,7 +170,7 @@ class ImageGenerationService:
                         else _control_parameter_value(
                             parameters, selected_model, "count", source=source
                         ),
-                        settings.default_count,
+                        1,
                     ),
                 ),
             ),
@@ -214,28 +220,93 @@ class ImageGenerationService:
             [str(item or "") for item in reference_ids]
         )
 
-    async def reference_from_safe_path(self, raw_path: str) -> ReferenceImage | None:
-        """Read a local Agent reference only from plugin data or AstrBot temp roots."""
+    async def reference_from_safe_path(
+        self,
+        raw_path: str,
+        *,
+        workspace_root: Path | None = None,
+    ) -> ReferenceImage | None:
+        """Read a local reference from an explicitly allowed AstrBot-owned root."""
 
         text = str(raw_path or "").strip()
         if not text:
             return None
+        if is_file_uri(text):
+            text = file_uri_to_path(text)
         path = Path(text).expanduser()
-        try:
-            resolved = path.resolve(strict=True)
-        except (OSError, ValueError):
+        roots = [
+            self.store.data_dir.resolve(strict=False),
+            Path(get_astrbot_temp_path()).resolve(strict=False),
+        ]
+        if workspace_root is not None:
+            roots.insert(0, Path(workspace_root).resolve(strict=False))
+        candidates = [path] if path.is_absolute() else [root / path for root in roots]
+        escaped_existing_path = False
+        resolved: Path | None = None
+        for candidate in candidates:
+            try:
+                current = candidate.resolve(strict=True)
+            except (OSError, ValueError):
+                continue
+            if not any(_within(current, root) for root in roots):
+                escaped_existing_path = True
+                continue
+            if current.is_file():
+                resolved = current
+                break
+        if resolved is None:
+            if escaped_existing_path:
+                raise ValueError(
+                    "参考图路径不在当前 Agent 工作区、AstrBot 临时目录或插件数据目录内"
+                )
             return None
-        roots = (self.store.data_dir, Path(get_astrbot_temp_path()).resolve())
-        if not any(_within(resolved, root) for root in roots):
-            raise ValueError("参考图路径不在允许的 AstrBot 临时目录或插件数据目录内")
         raw = await asyncio.to_thread(resolved.read_bytes)
         if not raw or len(raw) > 20 * 1024 * 1024:
             raise ValueError("参考图为空或超过 20 MB 上限")
+        mime_type = detect_mime_type(raw, "")
         return ReferenceImage(
-            id="local-" + resolved.name[:32],
+            id="local-" + hashlib.sha256(raw).hexdigest()[:24],
             filename=resolved.name,
             data=raw,
-            mime_type=detect_mime_type(raw, ""),
+            mime_type=mime_type,
+        )
+
+    async def reference_from_media_ref(
+        self,
+        raw_ref: str,
+        *,
+        workspace_root: Path | None = None,
+    ) -> ReferenceImage | None:
+        """Materialize an event or Agent image reference into bounded image bytes."""
+
+        text = str(raw_ref or "").strip()
+        if not text:
+            return None
+        if not text.lower().startswith(
+            ("http://", "https://", "data:image/", "base64://")
+        ):
+            return await self.reference_from_safe_path(
+                text,
+                workspace_root=workspace_root,
+            )
+        try:
+            resolved = await MediaResolver(text, media_type="image").to_base64_data(
+                strict=True,
+                default_mime_type=None,
+            )
+        except (OSError, ValueError) as exc:
+            raise ValueError("参考图无法读取或不是有效图片") from exc
+        if resolved is None:
+            return None
+        raw = resolved.to_bytes()
+        if not raw or len(raw) > 20 * 1024 * 1024:
+            raise ValueError("参考图为空或超过 20 MB 上限")
+        mime_type = detect_mime_type(raw, resolved.mime_type)
+        return ReferenceImage(
+            id="media-" + hashlib.sha256(raw).hexdigest()[:24],
+            filename=_reference_filename(text, mime_type),
+            data=raw,
+            mime_type=mime_type,
         )
 
     async def reproduction_plan(self, generation_id: str) -> dict[str, Any]:
@@ -304,17 +375,13 @@ class ImageGenerationService:
         model_ref: str,
         model_id: str,
         mode: str,
+        mode_default_ref: str,
     ) -> tuple[ImageProvider, ImageModel]:
         """Resolve the selected model and its owning provider."""
 
         explicit_ref = str(model_ref or model_id or "").strip()
-        mode_default = (
-            settings.default_img2img_model_ref
-            if mode == "img2img"
-            else settings.default_text2img_model_ref
-        )
-        requested_ref = explicit_ref or mode_default or settings.default_model_ref
-        requested_provider = provider_id or settings.default_provider_id
+        requested_ref = explicit_ref or mode_default_ref
+        requested_provider = provider_id
         selected = settings.find_model(requested_ref, requested_provider, mode)
         if selected is None and explicit_ref:
             raise ValueError("所选模型不存在、已禁用或不支持当前生图模式")
@@ -530,3 +597,26 @@ def _within(path: Path, root: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _reference_filename(value: str, mime_type: str) -> str:
+    """Return a provider-safe filename for a local, remote, or encoded image."""
+
+    try:
+        name = Path(urlsplit(value).path).name
+    except ValueError:
+        name = ""
+    if name and Path(name).suffix.lower() in {
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".webp",
+        ".gif",
+    }:
+        return name[:120]
+    suffix = {
+        "image/jpeg": ".jpg",
+        "image/webp": ".webp",
+        "image/gif": ".gif",
+    }.get(mime_type, ".png")
+    return f"reference{suffix}"

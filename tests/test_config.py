@@ -97,6 +97,37 @@ def test_empty_tool_choice_descriptions_are_removed() -> None:
     assert parameters["format"]["choice_descriptions"] == {"png": "无损格式"}
 
 
+def test_generation_default_models_are_scoped_without_global_parameters() -> None:
+    normalized, errors = normalize_webui_settings(
+        {
+            "generation_defaults": {
+                "page": {
+                    "text2img_model_ref": "page:text",
+                    "img2img_model_ref": "page:image",
+                },
+                "tool": {
+                    "text2img_model_ref": "tool:text",
+                    "img2img_model_ref": "tool:image",
+                },
+                "size": "2048x2048",
+                "count": 4,
+            }
+        }
+    )
+
+    assert errors == []
+    assert normalized["generation_defaults"] == {
+        "page": {
+            "text2img_model_ref": "page:text",
+            "img2img_model_ref": "page:image",
+        },
+        "tool": {
+            "text2img_model_ref": "tool:text",
+            "img2img_model_ref": "tool:image",
+        },
+    }
+
+
 def test_plugin_owned_settings_round_trip_atomically(tmp_path) -> None:
     settings = {
         "providers": [],

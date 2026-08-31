@@ -18,7 +18,7 @@
     generationForm: $("generationForm"), prompt: $("prompt"), negativePromptField: $("negativePromptField"), negativePrompt: $("negativePrompt"), negativePromptHint: $("negativePromptHint"), resetNegativePromptButton: $("resetNegativePromptButton"), advancedParameters: $("advancedParameters"), parameters: $("parameters"), generationError: $("generationError"), generateButton: $("generateButton"), resultEmpty: $("resultEmpty"), resultGrid: $("resultGrid"), resultMeta: $("resultMeta"),
     galleryGrid: $("galleryGrid"), galleryEmpty: $("galleryEmpty"), gallerySearch: $("gallerySearch"), galleryProvider: $("galleryProvider"), galleryMode: $("galleryMode"), selectionBar: $("selectionBar"), selectionCount: $("selectionCount"),
     detailDrawer: $("detailDrawer"), drawerBody: $("drawerBody"), detailDate: $("detailDate"), scrim: $("scrim"), imagePreview: $("imagePreview"), previewImage: $("previewImage"), imagePreviewTitle: $("imagePreviewTitle"), downloadImageButton: $("downloadImageButton"),
-    settingTool: $("settingTool"), settingDefaultTextModel: $("settingDefaultTextModel"), settingDefaultImageModel: $("settingDefaultImageModel"), settingDefaultSize: $("settingDefaultSize"), settingDefaultCount: $("settingDefaultCount"), historyEnabled: $("historyEnabled"), retainReferences: $("retainReferences"), historyRecords: $("historyRecords"), historyMegabytes: $("historyMegabytes"), settingsProviderList: $("settingsProviderList"), providerForm: $("providerForm"), settingsModelList: $("settingsModelList"), modelForm: $("modelForm"), settingsError: $("settingsError"), addProviderButton: $("addProviderButton"), addModelButton: $("addModelButton"), newModelChoice: $("newModelChoice"), newModelChoices: $("newModelChoices"), saveSettingsButton: $("saveSettingsButton"), parameterDialog: $("parameterDialog"), toolParameterExposed: $("toolParameterExposed"), toolParameterDescription: $("toolParameterDescription"), toolParameterDefault: $("toolParameterDefault"), toolParameterDefaultChoice: $("toolParameterDefaultChoice"), toolParameterDefaultHint: $("toolParameterDefaultHint"), toolParameterChoices: $("toolParameterChoices"),
+    settingTool: $("settingTool"), settingPageDefaultTextModel: $("settingPageDefaultTextModel"), settingPageDefaultImageModel: $("settingPageDefaultImageModel"), settingToolDefaultTextModel: $("settingToolDefaultTextModel"), settingToolDefaultImageModel: $("settingToolDefaultImageModel"), historyEnabled: $("historyEnabled"), retainReferences: $("retainReferences"), historyRecords: $("historyRecords"), historyMegabytes: $("historyMegabytes"), settingsProviderList: $("settingsProviderList"), providerForm: $("providerForm"), settingsModelList: $("settingsModelList"), modelForm: $("modelForm"), settingsError: $("settingsError"), addProviderButton: $("addProviderButton"), addModelButton: $("addModelButton"), newModelChoice: $("newModelChoice"), newModelChoices: $("newModelChoices"), saveSettingsButton: $("saveSettingsButton"), parameterDialog: $("parameterDialog"), toolParameterExposed: $("toolParameterExposed"), toolParameterDescription: $("toolParameterDescription"), toolParameterDefault: $("toolParameterDefault"), toolParameterDefaultChoice: $("toolParameterDefaultChoice"), toolParameterDefaultHint: $("toolParameterDefaultHint"), toolParameterChoices: $("toolParameterChoices"),
   };
 
   async function bridge() {
@@ -202,9 +202,8 @@
     const payload = await apiGet("studio/bootstrap");
     state.providers = Array.isArray(payload.providers) ? payload.providers : [];
     state.models = Array.isArray(payload.models) ? payload.models : [];
-    state.parameterValues = { size: payload.defaults?.size || "1024x1024", count: payload.defaults?.count || 1 };
-    state.selectedProviderId = payload.defaults?.provider_id || "";
-    state.defaultModelRefs = { text2img: payload.defaults?.text2img_model_ref || payload.defaults?.model_ref || "", img2img: payload.defaults?.img2img_model_ref || "" };
+    state.parameterValues = {};
+    state.defaultModelRefs = { text2img: payload.defaults?.text2img_model_ref || "", img2img: payload.defaults?.img2img_model_ref || "" };
     state.selectedModelRef = state.defaultModelRefs[state.mode] || "";
     els.negativePrompt.value = selectedModel()?.negative_prompt_default || "";
     els.runtimeStatus.textContent = `已加载 ${state.providers.length} 个生图服务商`;
@@ -360,6 +359,11 @@
     } catch (error) { showNotice(errorMessage(error, "复现参数读取失败"), "error"); }
   }
 
+  function populateDefaultModelSelect(select, models, selectedRef) {
+    select.innerHTML = `<option value="">未设置</option>${models.map((model) => `<option value="${escape(model.model_ref)}">${escape(model.name)} · ${escape(model.provider_name)}</option>`).join("")}`;
+    select.value = models.some((model) => model.model_ref === selectedRef) ? selectedRef : "";
+  }
+
   async function loadSettings() {
     if (settingsLoadPromise) return settingsLoadPromise;
     els.addProviderButton.disabled = true; els.addModelButton.disabled = true; els.saveSettingsButton.disabled = true;
@@ -371,10 +375,11 @@
         state.settings = payload;
         els.settingTool.checked = !!payload.base.enable_llm_tool;
         const history = payload.webui.history; els.historyEnabled.checked = !!history.enabled; els.retainReferences.checked = !!history.retain_reference_images; els.historyRecords.value = history.max_records; els.historyMegabytes.value = history.max_megabytes;
-        const defaults = payload.webui.generation_defaults || {};
-        const defaultModels = payload.webui.providers.flatMap((item) => (item.models || []).map((model) => ({ ...model, provider_name: item.name, model_ref: `${item.id}:${model.id}` })));
-        els.settingDefaultTextModel.innerHTML = `<option value="">未设置</option>${defaultModels.filter((model) => model.supports_text2img).map((model) => `<option value="${escape(model.model_ref)}">${escape(model.name)} · ${escape(model.provider_name)}</option>`).join("")}`; els.settingDefaultImageModel.innerHTML = `<option value="">未设置</option>${defaultModels.filter((model) => referenceLimitForModel(model) > 0).map((model) => `<option value="${escape(model.model_ref)}">${escape(model.name)} · ${escape(model.provider_name)}</option>`).join("")}`;
-        els.settingDefaultTextModel.value = defaults.text2img_model_ref || defaults.model_ref || ""; els.settingDefaultImageModel.value = defaults.img2img_model_ref || ""; els.settingDefaultSize.value = defaults.size || "1024x1024"; els.settingDefaultCount.value = defaults.count || 1;
+        const defaults = payload.webui.generation_defaults || {}; const pageDefaults = defaults.page || {}; const toolDefaults = defaults.tool || {};
+        const defaultModels = payload.webui.providers.filter((provider) => provider.enabled).flatMap((provider) => (provider.models || []).map((model) => ({ ...model, provider_name: provider.name, model_ref: `${provider.id}:${model.id}` })));
+        const pageTextModels = defaultModels.filter((model) => model.supports_text2img); const pageImageModels = defaultModels.filter((model) => referenceLimitForModel(model) > 0);
+        const toolModels = defaultModels.filter((model) => model.tool?.enabled !== false); const toolTextModels = toolModels.filter((model) => model.supports_text2img); const toolImageModels = toolModels.filter((model) => referenceLimitForModel(model) > 0 && Number(model.tool?.max_reference_images || 0) > 0);
+        populateDefaultModelSelect(els.settingPageDefaultTextModel, pageTextModels, pageDefaults.text2img_model_ref || ""); populateDefaultModelSelect(els.settingPageDefaultImageModel, pageImageModels, pageDefaults.img2img_model_ref || ""); populateDefaultModelSelect(els.settingToolDefaultTextModel, toolTextModels, toolDefaults.text2img_model_ref || ""); populateDefaultModelSelect(els.settingToolDefaultImageModel, toolImageModels, toolDefaults.img2img_model_ref || "");
         if (!payload.webui.providers.some((item) => item.id === state.selectedSettingsProviderId)) state.selectedSettingsProviderId = payload.webui.providers[0]?.id || "";
         state.selectedSettingsModelId = "";
         renderSettingsProviders();
@@ -616,7 +621,7 @@
     if (!state.settings && !await loadSettings()) return;
     setError(els.settingsError, "正在保存设置…"); els.saveSettingsButton.disabled = true; els.saveSettingsButton.textContent = "保存中…";
     const webui = state.settings.webui; webui.history = { enabled: els.historyEnabled.checked, retain_reference_images: els.retainReferences.checked, max_records: Number(els.historyRecords.value), max_megabytes: Number(els.historyMegabytes.value) };
-    webui.generation_defaults = { ...(webui.generation_defaults || {}), model_ref: els.settingDefaultTextModel.value, text2img_model_ref: els.settingDefaultTextModel.value, img2img_model_ref: els.settingDefaultImageModel.value, size: els.settingDefaultSize.value, count: Number(els.settingDefaultCount.value) };
+    webui.generation_defaults = { page: { text2img_model_ref: els.settingPageDefaultTextModel.value, img2img_model_ref: els.settingPageDefaultImageModel.value }, tool: { text2img_model_ref: els.settingToolDefaultTextModel.value, img2img_model_ref: els.settingToolDefaultImageModel.value } };
     try {
       await apiPost("settings/save", { settings_revision: webui.revision ?? webui.ui.settings_revision, base: { enable_llm_tool: els.settingTool.checked }, studio: webui });
       await bootstrap(); await loadSettings(); setError(els.settingsError, ""); showNotice("设置已保存并生效。", "success");
@@ -636,6 +641,7 @@
     eventsBound = true;
     document.querySelectorAll(".nav-item").forEach((button) => button.addEventListener("click", () => switchView(button.dataset.view)));
     document.querySelectorAll(".segment").forEach((button) => button.addEventListener("click", () => { state.mode = button.dataset.mode; state.selectedModelRef = state.defaultModelRefs[state.mode] || ""; state.parameterValues = {}; document.querySelectorAll(".segment").forEach((item) => item.classList.toggle("is-active", item === button)); renderModelChoices(); }));
+    document.querySelectorAll("[data-default-scope]").forEach((button) => button.addEventListener("click", () => { document.querySelectorAll("[data-default-scope]").forEach((item) => item.classList.toggle("is-active", item === button)); document.querySelectorAll("[data-default-panel]").forEach((panel) => panel.classList.toggle("is-hidden", panel.dataset.defaultPanel !== button.dataset.defaultScope)); }));
     els.modelChoice.addEventListener("change", () => { state.selectedModelRef = els.modelChoice.value; state.parameterValues = {}; els.negativePrompt.value = selectedModel()?.negative_prompt_default || ""; renderModelWorkspace(); });
     els.resetNegativePromptButton.addEventListener("click", () => { els.negativePrompt.value = selectedModel()?.negative_prompt_default || ""; els.negativePrompt.focus(); });
     els.referenceUpload.addEventListener("change", async () => { try { await uploadReferences(els.referenceUpload.files); } catch (error) { setError(els.generationError, errorMessage(error, "上传参考图失败")); } finally { els.referenceUpload.value = ""; } });

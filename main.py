@@ -5,6 +5,7 @@ import base64
 import copy
 import hashlib
 import json
+import re
 import shlex
 import time
 import uuid
@@ -19,6 +20,11 @@ from astrbot.api.message_components import Image, Plain, Reply
 from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.api.web import error_response, file_response, json_response
 from astrbot.api.web import request as web_request
+from astrbot.core.utils.quoted_message import extract_quoted_message_images
+from astrbot.core.workspace import (
+    default_workspace_root,
+    resolve_workspace_root_for_umo,
+)
 from starlette.background import BackgroundTask
 
 from .config import (
@@ -197,12 +203,12 @@ class ImageStudioPlugin(Star):
             {
                 "settings_revision": self._settings.revision,
                 "defaults": {
-                    "provider_id": self._settings.default_provider_id,
-                    "model_ref": self._settings.default_model_ref,
-                    "size": self._settings.default_size,
-                    "count": self._settings.default_count,
-                    "text2img_model_ref": self._settings.default_text2img_model_ref,
-                    "img2img_model_ref": self._settings.default_img2img_model_ref,
+                    "text2img_model_ref": self._settings.default_model_ref(
+                        "text2img", "webui"
+                    ),
+                    "img2img_model_ref": self._settings.default_model_ref(
+                        "img2img", "webui"
+                    ),
                 },
                 "providers": [
                     provider.public_dict()
@@ -554,26 +560,66 @@ class ImageStudioPlugin(Star):
         service = self._service_or_raise()
         references: list[Any] = []
         seen: set[str] = set()
-        for raw_path in explicit_paths or []:
-            reference = await service.reference_from_safe_path(raw_path)
-            if reference is not None:
-                digest = hashlib.sha256(reference.data).hexdigest()
-                if digest not in seen:
-                    seen.add(digest)
-                    references.append(reference)
-        message_chain = event.get_messages() if hasattr(event, "get_messages") else []
-        for component in _iter_event_images(message_chain):
+        workspace_root = await _event_workspace_root(
+            event,
+            getattr(self, "context", None),
+        )
+
+        async def append_reference(raw_ref: str, *, required: bool = False) -> bool:
+            if len(references) >= 8:
+                return True
             try:
-                path = await component.convert_to_file_path()
-                reference = await service.reference_from_safe_path(path)
-            except (OSError, ValueError):
-                continue
+                reference = await service.reference_from_media_ref(
+                    raw_ref,
+                    workspace_root=workspace_root,
+                )
+            except Exception as exc:
+                if required:
+                    raise ValueError("显式参考图无法读取或不在允许的目录内") from exc
+                logger.debug(
+                    "%s 忽略无法读取的事件参考图: %s",
+                    LOG_TAG,
+                    type(exc).__name__,
+                )
+                return False
             if reference is None:
-                continue
+                if required:
+                    raise ValueError("显式参考图不存在或不是有效图片")
+                return False
             digest = hashlib.sha256(reference.data).hexdigest()
             if digest not in seen:
                 seen.add(digest)
                 references.append(reference)
+            return True
+
+        for raw_path in (explicit_paths or [])[:8]:
+            await append_reference(raw_path, required=True)
+        message_chain = event.get_messages() if hasattr(event, "get_messages") else []
+        for component in _iter_event_images(message_chain):
+            try:
+                path = await component.convert_to_file_path()
+                await append_reference(path)
+            except Exception as exc:
+                logger.debug(
+                    "%s 忽略无法转换的消息图片: %s",
+                    LOG_TAG,
+                    type(exc).__name__,
+                )
+                continue
+
+        try:
+            quoted_refs = await extract_quoted_message_images(event)
+        except Exception as exc:
+            logger.debug(
+                "%s AstrBot 引用图片解析失败: %s",
+                LOG_TAG,
+                type(exc).__name__,
+            )
+            quoted_refs = []
+        for raw_ref in quoted_refs:
+            await append_reference(raw_ref)
+        for raw_ref in _provider_request_image_refs(event):
+            await append_reference(raw_ref)
         return tuple(references[:8])
 
     @filter.llm_tool(name="image_studio_get_capabilities")
@@ -687,6 +733,10 @@ class ImageStudioPlugin(Star):
             )
         payload = {
             "usage": "一般需求使用默认自然语言模型；明确要求 NAI 或特殊参数时选择对应 model_ref。",
+            "default_model_refs": {
+                "text2img": self._settings.default_model_ref("text2img", "llm_tool"),
+                "img2img": self._settings.default_model_ref("img2img", "llm_tool"),
+            },
             "models": entries,
         }
         return mcp.types.CallToolResult(
@@ -728,10 +778,10 @@ class ImageStudioPlugin(Star):
             model(string): 可选的兼容模型 ID；优先使用 model_ref。
             size(string): 可选的图片尺寸。
             negative_prompt(string): 当前模型支持时使用的可选反向提示词。
-            reference_image_path(string): Agent 已有工具图片的可选路径，用于图生图。
+            reference_image_path(string): Agent 已有工具图片的可选路径；相对路径按当前 Agent 工作区解析。
             count(number): 生成数量，受模型和服务商限制。
             parameters(object): 能力查询工具返回并向 LLM 暴露的动态参数。
-            reference_image_paths(array[string]): 多张 Agent 已有工具图片的路径。
+            reference_image_paths(array[string]): 多张 Agent 已有工具图片的路径；当前或引用消息图片通常无需填写。
 
         Returns:
             Text and image MCP content. AstrBot caches image content for the next Agent step.
@@ -864,6 +914,66 @@ def _llm_parameter_descriptor(
             for choice in choices
         ]
     return visible
+
+
+_QUOTED_ATTACHMENT_IMAGE_URL_RE = re.compile(
+    r"(?im)^\s*\[附件\d+\][^\r\n]*?类型\s*[:：]\s*图片\b"
+    r"[^\r\n]*?URL\s*[:：]\s*(https?://\S+)"
+)
+
+
+async def _event_workspace_root(event: Any, context: Any) -> Path | None:
+    """Resolve the same per-session workspace used by AstrBot computer tools."""
+
+    umo = str(getattr(event, "unified_msg_origin", "") or "").strip()
+    if not umo:
+        return None
+    try:
+        return await resolve_workspace_root_for_umo(
+            umo,
+            getattr(context, "_db", None),
+        )
+    except Exception as exc:
+        logger.debug(
+            "%s Agent 工作区解析失败，使用会话默认目录: %s",
+            LOG_TAG,
+            type(exc).__name__,
+        )
+        return default_workspace_root(umo)
+
+
+def _provider_request_image_refs(event: Any) -> list[str]:
+    """Read image refs already materialized or serialized by AstrBot."""
+
+    getter = getattr(event, "get_extra", None)
+    if not callable(getter):
+        return []
+    try:
+        request = getter("provider_request")
+    except Exception:
+        return []
+    if request is None:
+        return []
+
+    refs: list[str] = []
+    image_urls = getattr(request, "image_urls", None)
+    if isinstance(image_urls, (list, tuple)):
+        refs.extend(str(item).strip() for item in image_urls if str(item).strip())
+
+    parts = getattr(request, "extra_user_content_parts", None)
+    if isinstance(parts, (list, tuple)):
+        for part in parts:
+            if isinstance(part, dict):
+                text = part.get("text") if part.get("type") == "text" else ""
+            else:
+                text = getattr(part, "text", "")
+            if not isinstance(text, str) or "<Quoted Message>" not in text:
+                continue
+            refs.extend(
+                match.group(1).strip()
+                for match in _QUOTED_ATTACHMENT_IMAGE_URL_RE.finditer(text)
+            )
+    return list(dict.fromkeys(refs))
 
 
 def _iter_event_images(value: Any):

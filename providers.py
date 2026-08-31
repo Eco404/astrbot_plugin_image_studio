@@ -111,9 +111,10 @@ class ProviderExecutor:
                 form.add_field("negative_prompt", request.negative_prompt)
             for key, value in _safe_parameters(request.parameters).items():
                 form.add_field(key, _form_value(value))
+            image_field = "image[]" if len(request.references) > 1 else "image"
             for reference in request.references:
                 form.add_field(
-                    "image",
+                    image_field,
                     io.BytesIO(reference.data),
                     filename=reference.filename,
                     content_type=reference.mime_type,

@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Image Studio 生图工作台</title>
-  <link rel="stylesheet" href="./app.css?v=0.2.0" />
+  <link rel="stylesheet" href="./app.css?v=0.3.0" />
 </head>
 <body>
   <main class="app-shell quiet-glass-background">
@@ -85,18 +85,22 @@
             <div class="toggle-row"><label for="settingTool">启用 LLM 生图工具</label><label class="toggle-control"><input id="settingTool" type="checkbox" /><span aria-hidden="true"></span></label></div>
           </section>
           <section class="settings-panel glass">
+            <div class="section-heading"><div><h2>默认值</h2><p>页面和指令、LLM 工具分别使用的默认模型。</p></div><div class="model-tabs default-tabs" role="group" aria-label="默认模型使用范围"><button class="model-tab is-active" data-default-scope="page" type="button">页面</button><button class="model-tab" data-default-scope="tool" type="button">工具</button></div></div>
+            <div class="default-scope-panel" data-default-panel="page">
+              <div class="field"><label for="settingPageDefaultTextModel">默认文生图模型</label><select id="settingPageDefaultTextModel"><option value="">未设置</option></select></div>
+              <div class="field"><label for="settingPageDefaultImageModel">默认图生图模型</label><select id="settingPageDefaultImageModel"><option value="">未设置</option></select></div>
+            </div>
+            <div class="default-scope-panel is-hidden" data-default-panel="tool">
+              <div class="field"><label for="settingToolDefaultTextModel">默认文生图模型</label><select id="settingToolDefaultTextModel"><option value="">未设置</option></select></div>
+              <div class="field"><label for="settingToolDefaultImageModel">默认图生图模型</label><select id="settingToolDefaultImageModel"><option value="">未设置</option></select></div>
+            </div>
+          </section>
+          <section class="settings-panel glass">
             <div class="section-heading"><div><h2>历史</h2><p>结果图进入画廊；参考图仅存在于记录详情。</p></div></div>
             <div class="toggle-row"><label for="historyEnabled">保留生成历史</label><label class="toggle-control"><input id="historyEnabled" type="checkbox" /><span aria-hidden="true"></span></label></div>
             <div class="toggle-row"><label for="retainReferences">保留参考图</label><label class="toggle-control"><input id="retainReferences" type="checkbox" /><span aria-hidden="true"></span></label></div>
             <div class="field"><label for="historyRecords">最大记录数（-1 表示不限）</label><input id="historyRecords" type="number" min="-1" max="100000" /></div>
             <div class="field"><label for="historyMegabytes">最大图片容量 MB（0 表示不限）</label><input id="historyMegabytes" type="number" min="0" max="10240" /></div>
-          </section>
-          <section class="settings-panel glass">
-            <div class="section-heading"><div><h2>默认值</h2><p>生图页面打开时使用的默认模型和基础参数。</p></div></div>
-            <div class="field"><label for="settingDefaultTextModel">默认文生图模型</label><select id="settingDefaultTextModel"><option value="">未设置</option></select></div>
-            <div class="field"><label for="settingDefaultImageModel">默认图生图模型</label><select id="settingDefaultImageModel"><option value="">未设置</option></select></div>
-            <div class="field"><label for="settingDefaultSize">默认尺寸</label><input id="settingDefaultSize" value="1024x1024" maxlength="40" /></div>
-            <div class="field"><label for="settingDefaultCount">默认数量</label><input id="settingDefaultCount" type="number" min="1" max="4" value="1" /></div>
           </section>
         </div>
         <section class="provider-settings glass">
@@ -141,6 +145,7 @@
     <div class="parameter-dialog__actions"><button class="quiet-button" id="parameterDialogCancel" type="button">取消</button><button class="primary-button" id="parameterDialogApply" type="button">应用</button></div>
   </div>
   <script>
+    window.__imageStudioAppLoaded = false;
     window.__dismissImageStudioNotice = function () {
       window.clearTimeout(window.__imageStudioNoticeTimer);
       var notice = document.getElementById("appNotice");
@@ -174,7 +179,8 @@
       if (status) status.textContent = "页面运行异常";
     };
     window.addEventListener("error", function (event) {
-      if (event.filename && !event.filename.includes("app.js")) return;
+      var filename = String(event.filename || "");
+      if (!filename || !/(^|\/)app\.js(?:$|\?)/.test(filename)) return;
       window.__reportImageStudioPageError(!window.__imageStudioAppLoaded);
     });
     window.addEventListener("unhandledrejection", function () {
@@ -182,6 +188,6 @@
     });
   </script>
   <script src="/api/plugin/page/bridge-sdk.js"></script>
-  <script src="./app.js?v=0.2.0" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./app.js?v=0.3.0" onerror="window.__reportImageStudioPageError(true)"></script>
 </body>
 </html>

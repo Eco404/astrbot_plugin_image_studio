@@ -34,14 +34,28 @@ class RuntimeSettings:
 
     enable_llm_tool: bool
     providers: tuple[ImageProvider, ...]
-    default_provider_id: str
-    default_size: str
-    default_count: int
     history: HistorySettings
     revision: int
-    default_model_ref: str = ""
-    default_text2img_model_ref: str = ""
-    default_img2img_model_ref: str = ""
+    default_page_text2img_model_ref: str = ""
+    default_page_img2img_model_ref: str = ""
+    default_tool_text2img_model_ref: str = ""
+    default_tool_img2img_model_ref: str = ""
+
+    def default_model_ref(self, mode: str, source: str) -> str:
+        """Return the mode default for a page/command or LLM-tool request."""
+
+        tool = source == "llm_tool"
+        if mode == "img2img":
+            return (
+                self.default_tool_img2img_model_ref
+                if tool
+                else self.default_page_img2img_model_ref
+            )
+        return (
+            self.default_tool_text2img_model_ref
+            if tool
+            else self.default_page_text2img_model_ref
+        )
 
     def provider(self, provider_id: str) -> ImageProvider | None:
         """Return an enabled provider by stable ID."""
@@ -104,12 +118,8 @@ def default_webui_settings() -> dict[str, Any]:
             "retain_reference_images": True,
         },
         "generation_defaults": {
-            "provider_id": "",
-            "model_ref": "",
-            "text2img_model_ref": "",
-            "img2img_model_ref": "",
-            "size": "1024x1024",
-            "count": 1,
+            "page": {"text2img_model_ref": "", "img2img_model_ref": ""},
+            "tool": {"text2img_model_ref": "", "img2img_model_ref": ""},
         },
         "llm_policy": {
             "natural_language_first": True,
@@ -181,21 +191,24 @@ def normalize_webui_settings(value: Any) -> tuple[dict[str, Any], list[str]]:
     )
     merged["history"] = history
 
-    defaults = (
+    raw_defaults = (
         merged.get("generation_defaults")
         if isinstance(merged.get("generation_defaults"), dict)
         else {}
     )
-    defaults["provider_id"] = str(defaults.get("provider_id") or "").strip()[:64]
-    defaults["model_ref"] = str(defaults.get("model_ref") or "").strip()[:240]
-    defaults["text2img_model_ref"] = str(
-        defaults.get("text2img_model_ref") or defaults.get("model_ref") or ""
-    ).strip()[:240]
-    defaults["img2img_model_ref"] = str(
-        defaults.get("img2img_model_ref") or ""
-    ).strip()[:240]
-    defaults["size"] = str(defaults.get("size") or "1024x1024").strip()[:40]
-    defaults["count"] = max(1, min(4, _as_int(defaults.get("count"), 1)))
+    defaults: dict[str, dict[str, str]] = {}
+    for scope in ("page", "tool"):
+        raw_scope = (
+            raw_defaults.get(scope) if isinstance(raw_defaults.get(scope), dict) else {}
+        )
+        defaults[scope] = {
+            "text2img_model_ref": str(
+                raw_scope.get("text2img_model_ref") or ""
+            ).strip()[:240],
+            "img2img_model_ref": str(raw_scope.get("img2img_model_ref") or "").strip()[
+                :240
+            ],
+        }
     merged["generation_defaults"] = defaults
     policy = (
         merged.get("llm_policy") if isinstance(merged.get("llm_policy"), dict) else {}
@@ -282,12 +295,18 @@ def runtime_settings(
     return RuntimeSettings(
         enable_llm_tool=_as_bool(config.get("enable_llm_tool"), True),
         providers=providers,
-        default_provider_id=webui["generation_defaults"]["provider_id"],
-        default_model_ref=webui["generation_defaults"]["model_ref"],
-        default_text2img_model_ref=webui["generation_defaults"]["text2img_model_ref"],
-        default_img2img_model_ref=webui["generation_defaults"]["img2img_model_ref"],
-        default_size=webui["generation_defaults"]["size"],
-        default_count=webui["generation_defaults"]["count"],
+        default_page_text2img_model_ref=webui["generation_defaults"]["page"][
+            "text2img_model_ref"
+        ],
+        default_page_img2img_model_ref=webui["generation_defaults"]["page"][
+            "img2img_model_ref"
+        ],
+        default_tool_text2img_model_ref=webui["generation_defaults"]["tool"][
+            "text2img_model_ref"
+        ],
+        default_tool_img2img_model_ref=webui["generation_defaults"]["tool"][
+            "img2img_model_ref"
+        ],
         history=HistorySettings(
             enabled=history_raw["enabled"],
             max_records=history_raw["max_records"],
