@@ -12,6 +12,7 @@ from astrbot_plugin_image_studio.models import (
     GeneratedImage,
     GenerationRequest,
     ImageProvider,
+    InvocationSource,
     ReferenceImage,
 )
 from astrbot_plugin_image_studio.storage import GenerationStore
@@ -77,6 +78,82 @@ def test_gallery_keeps_references_out_of_collection_and_deletes_them(tmp_path) -
     asyncio.run(run())
 
 
+def test_gallery_stores_and_searches_invocation_identity_snapshot(tmp_path) -> None:
+    async def run() -> None:
+        store = GenerationStore(tmp_path)
+        await store.initialize()
+        generation_id = await store.record_success(
+            provider=provider(),
+            request=GenerationRequest(
+                mode="text2img",
+                provider_id="test-provider",
+                prompt="identity search",
+                source="llm_tool",
+                invocation_source=InvocationSource(
+                    context_type="group",
+                    platform_name="aiocqhttp",
+                    platform_id="bot-1",
+                    group_id="group-42",
+                    group_name="绘图讨论组",
+                    user_id="user-7",
+                    user_name="空雨",
+                ),
+            ),
+            images=(GeneratedImage(PNG, "image/png"),),
+            elapsed_ms=12,
+            history=HistorySettings(True, 10, 50, False, True),
+        )
+
+        detail = await store.generation_detail(generation_id)
+        assert detail is not None
+        assert detail["invocation_source"] == {
+            "context_type": "group",
+            "platform_name": "aiocqhttp",
+            "platform_id": "bot-1",
+            "group_id": "group-42",
+            "group_name": "绘图讨论组",
+            "user_id": "user-7",
+            "user_name": "空雨",
+        }
+        for keyword in ("group-42", "绘图讨论组", "user-7", "空雨"):
+            listing = await store.list_generations({"query": keyword})
+            assert listing["total"] == 1
+            assert listing["items"][0]["id"] == generation_id
+
+    asyncio.run(run())
+
+
+def test_gallery_does_not_store_identity_when_disabled(tmp_path) -> None:
+    async def run() -> None:
+        store = GenerationStore(tmp_path)
+        await store.initialize()
+        generation_id = await store.record_success(
+            provider=provider(),
+            request=GenerationRequest(
+                mode="text2img",
+                provider_id="test-provider",
+                prompt="private identity",
+                invocation_source=InvocationSource(
+                    context_type="private",
+                    platform_name="qq_official",
+                    platform_id="bot-1",
+                    user_id="user-secret",
+                    user_name="用户昵称",
+                ),
+            ),
+            images=(GeneratedImage(PNG, "image/png"),),
+            elapsed_ms=12,
+            history=HistorySettings(True, 10, 50, False, False),
+        )
+
+        detail = await store.generation_detail(generation_id)
+        assert detail is not None
+        assert not any(detail["invocation_source"].values())
+        assert (await store.list_generations({"query": "user-secret"}))["total"] == 0
+
+    asyncio.run(run())
+
+
 def test_initialize_removes_only_orphaned_asset_files(tmp_path) -> None:
     async def run() -> None:
         store = GenerationStore(tmp_path)
@@ -107,6 +184,33 @@ def test_initialize_removes_only_orphaned_asset_files(tmp_path) -> None:
         assert referenced_asset.is_file()
         assert not orphan_thumbnail.exists()
         assert not orphan_asset.exists()
+
+    asyncio.run(run())
+
+
+def test_gallery_filters_generations_by_invocation_source(tmp_path) -> None:
+    async def run() -> None:
+        store = GenerationStore(tmp_path)
+        await store.initialize()
+        for source in ("webui", "llm_tool"):
+            await store.record_success(
+                provider=provider(),
+                request=GenerationRequest(
+                    mode="text2img",
+                    provider_id="test-provider",
+                    prompt=f"source {source}",
+                    source=source,
+                ),
+                images=(GeneratedImage(PNG, "image/png"),),
+                elapsed_ms=12,
+                history=HistorySettings(True, 10, 50, False),
+            )
+
+        listing = await store.list_generations({"source": "llm_tool"})
+
+        assert listing["total"] == 1
+        assert listing["items"][0]["source"] == "llm_tool"
+        assert listing["items"][0]["prompt_preview"] == "source llm_tool"
 
     asyncio.run(run())
 

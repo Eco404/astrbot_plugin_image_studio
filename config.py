@@ -26,6 +26,7 @@ class HistorySettings:
     max_records: int
     max_megabytes: int
     retain_reference_images: bool
+    record_invocation_identity: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +117,7 @@ def default_webui_settings() -> dict[str, Any]:
             "max_records": 200,
             "max_megabytes": 2048,
             "retain_reference_images": True,
+            "record_invocation_identity": False,
         },
         "generation_defaults": {
             "page": {"text2img_model_ref": "", "img2img_model_ref": ""},
@@ -188,6 +190,9 @@ def normalize_webui_settings(value: Any) -> tuple[dict[str, Any], list[str]]:
     )
     history["retain_reference_images"] = _as_bool(
         history.get("retain_reference_images"), True
+    )
+    history["record_invocation_identity"] = _as_bool(
+        history.get("record_invocation_identity"), False
     )
     merged["history"] = history
 
@@ -312,6 +317,7 @@ def runtime_settings(
             max_records=history_raw["max_records"],
             max_megabytes=history_raw["max_megabytes"],
             retain_reference_images=history_raw["retain_reference_images"],
+            record_invocation_identity=history_raw["record_invocation_identity"],
         ),
         revision=webui.get("revision", webui["ui"]["settings_revision"]),
     ), errors

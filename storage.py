@@ -71,7 +71,14 @@ class GenerationStore:
                     final_prompt TEXT NOT NULL,
                     parameters_json TEXT NOT NULL,
                     elapsed_ms INTEGER NOT NULL,
-                    error_message TEXT NOT NULL DEFAULT ''
+                    error_message TEXT NOT NULL DEFAULT '',
+                    context_type TEXT NOT NULL DEFAULT '',
+                    platform_name TEXT NOT NULL DEFAULT '',
+                    platform_id TEXT NOT NULL DEFAULT '',
+                    group_id TEXT NOT NULL DEFAULT '',
+                    group_name TEXT NOT NULL DEFAULT '',
+                    user_id TEXT NOT NULL DEFAULT '',
+                    user_name TEXT NOT NULL DEFAULT ''
                 );
                 CREATE TABLE IF NOT EXISTS image_assets (
                     id TEXT PRIMARY KEY,
@@ -111,6 +118,23 @@ class GenerationStore:
                 CREATE INDEX IF NOT EXISTS idx_generation_references_asset ON generation_references(asset_id);
                 """
             )
+            generation_columns = {
+                str(row["name"])
+                for row in conn.execute("PRAGMA table_info(generations)").fetchall()
+            }
+            for column in (
+                "context_type",
+                "platform_name",
+                "platform_id",
+                "group_id",
+                "group_name",
+                "user_id",
+                "user_name",
+            ):
+                if column not in generation_columns:
+                    conn.execute(
+                        f"ALTER TABLE generations ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
+                    )
             try:
                 conn.execute(
                     "CREATE VIRTUAL TABLE IF NOT EXISTS generation_search USING fts5("
@@ -220,6 +244,7 @@ class GenerationStore:
                 images,
                 elapsed_ms,
                 history.retain_reference_images,
+                history.record_invocation_identity,
             )
             await asyncio.to_thread(self._cleanup_sync, history)
         return generation_id
@@ -231,6 +256,7 @@ class GenerationStore:
         images: tuple[GeneratedImage, ...],
         elapsed_ms: int,
         retain_references: bool,
+        record_invocation_identity: bool,
     ) -> str:
         generation_id = uuid.uuid4().hex
         created_at = time.time()
@@ -273,6 +299,19 @@ class GenerationStore:
                     "selection_source": request.selection_source,
                 }
             )
+            invocation = (
+                request.invocation_source.public_dict()
+                if record_invocation_identity
+                else {
+                    "context_type": "",
+                    "platform_name": "",
+                    "platform_id": "",
+                    "group_id": "",
+                    "group_name": "",
+                    "user_id": "",
+                    "user_name": "",
+                }
+            )
             with self._connect() as conn:
                 conn.executemany(
                     "INSERT INTO image_assets (id, path, mime_type, size_bytes, created_at) "
@@ -303,8 +342,9 @@ class GenerationStore:
                 )
                 conn.execute(
                     "INSERT INTO generations (id, created_at, source, status, mode, provider_id, provider_name, "
-                    "provider_kind, model, original_prompt, final_prompt, parameters_json, elapsed_ms) "
-                    "VALUES (?, ?, ?, 'succeeded', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "provider_kind, model, original_prompt, final_prompt, parameters_json, elapsed_ms, "
+                    "context_type, platform_name, platform_id, group_id, group_name, user_id, user_name) "
+                    "VALUES (?, ?, ?, 'succeeded', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         generation_id,
                         created_at,
@@ -320,6 +360,13 @@ class GenerationStore:
                             parameters, ensure_ascii=False, separators=(",", ":")
                         ),
                         elapsed_ms,
+                        invocation["context_type"],
+                        invocation["platform_name"],
+                        invocation["platform_id"],
+                        invocation["group_id"],
+                        invocation["group_name"],
+                        invocation["user_id"],
+                        invocation["user_name"],
                     ),
                 )
                 conn.executemany(
@@ -383,10 +430,12 @@ class GenerationStore:
             args.append(source)
         if query:
             where.append(
-                "(g.original_prompt LIKE ? OR g.final_prompt LIKE ? OR g.provider_name LIKE ? OR g.model LIKE ?)"
+                "(g.original_prompt LIKE ? OR g.final_prompt LIKE ? OR g.provider_name LIKE ? OR g.model LIKE ? "
+                "OR g.platform_name LIKE ? OR g.platform_id LIKE ? OR g.group_id LIKE ? "
+                "OR g.group_name LIKE ? OR g.user_id LIKE ? OR g.user_name LIKE ?)"
             )
             token = f"%{query}%"
-            args.extend([token, token, token, token])
+            args.extend([token] * 10)
         clause = f"WHERE {' AND '.join(where)}" if where else ""
         with self._connect() as conn:
             total = int(
@@ -499,6 +548,18 @@ class GenerationStore:
             ).fetchall()
         result = dict(row)
         result["parameters"] = _load_json(result.pop("parameters_json", "{}"))
+        result["invocation_source"] = {
+            key: str(result.pop(key, "") or "")
+            for key in (
+                "context_type",
+                "platform_name",
+                "platform_id",
+                "group_id",
+                "group_name",
+                "user_id",
+                "user_name",
+            )
+        }
         result["images"] = [
             self._asset_item(dict(item), preview_full=include_assets)
             for item in image_rows
@@ -636,6 +697,18 @@ class GenerationStore:
 
     def _gallery_item(self, row: dict[str, Any]) -> dict[str, Any]:
         thumbnail = self.data_dir / str(row.get("thumbnail_path") or "")
+        invocation_source = {
+            key: str(row.get(key) or "")
+            for key in (
+                "context_type",
+                "platform_name",
+                "platform_id",
+                "group_id",
+                "group_name",
+                "user_id",
+                "user_name",
+            )
+        }
         return {
             "id": row["id"],
             "created_at": row["created_at"],
@@ -649,6 +722,7 @@ class GenerationStore:
             "image_id": row["image_id"],
             "mime_type": row["mime_type"],
             "size_bytes": row["size_bytes"],
+            "invocation_source": invocation_source,
             "thumbnail_data_url": _path_data_url(
                 thumbnail, str(row.get("thumbnail_mime_type") or "image/webp")
             ),

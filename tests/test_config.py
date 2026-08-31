@@ -36,6 +36,16 @@ def test_webui_settings_normalize_provider_and_history() -> None:
     assert errors == []
     assert normalized["history"]["max_records"] == 12
     assert normalized["providers"][0]["api_key"] == "visible-in-webui"
+    assert normalized["history"]["record_invocation_identity"] is False
+
+
+def test_history_can_enable_invocation_identity_snapshots() -> None:
+    normalized, errors = normalize_webui_settings(
+        {"history": {"record_invocation_identity": True}}
+    )
+
+    assert errors == []
+    assert normalized["history"]["record_invocation_identity"] is True
 
 
 def test_provider_without_models_is_a_valid_saved_draft() -> None:

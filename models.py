@@ -331,6 +331,32 @@ class ReferenceImage:
 
 
 @dataclass(frozen=True, slots=True)
+class InvocationSource:
+    """Identity snapshot for the chat event that requested a generation."""
+
+    context_type: str = ""
+    platform_name: str = ""
+    platform_id: str = ""
+    group_id: str = ""
+    group_name: str = ""
+    user_id: str = ""
+    user_name: str = ""
+
+    def public_dict(self) -> dict[str, str]:
+        """Return the snapshot fields used by gallery details and exports."""
+
+        return {
+            "context_type": self.context_type,
+            "platform_name": self.platform_name,
+            "platform_id": self.platform_id,
+            "group_id": self.group_id,
+            "group_name": self.group_name,
+            "user_id": self.user_id,
+            "user_name": self.user_name,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class GenerationRequest:
     """A validated normalized image generation request."""
 
@@ -345,6 +371,7 @@ class GenerationRequest:
     references: tuple[ReferenceImage, ...] = ()
     source: str = "webui"
     selection_source: str = "fallback"
+    invocation_source: InvocationSource = field(default_factory=InvocationSource)
 
 
 @dataclass(frozen=True, slots=True)

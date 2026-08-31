@@ -20,6 +20,7 @@ from .models import (
     GenerationResult,
     ImageModel,
     ImageProvider,
+    InvocationSource,
     ReferenceImage,
 )
 from .providers import ProviderExecutor
@@ -71,6 +72,7 @@ class ImageGenerationService:
         parameters: Any = None,
         references: tuple[ReferenceImage, ...] = (),
         source: str = "webui",
+        invocation_source: InvocationSource | None = None,
     ) -> GenerationResult:
         """Generate images through a validated provider request.
 
@@ -178,6 +180,7 @@ class ImageGenerationService:
             references=normalized_refs,
             source=source if source in {"webui", "command", "llm_tool"} else "webui",
             selection_source=selection_source,
+            invocation_source=invocation_source or InvocationSource(),
         )
         started = time.perf_counter()
         images = await self.run_provider_request(provider, request)

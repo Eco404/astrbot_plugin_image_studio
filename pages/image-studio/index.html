@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Image Studio 生图工作台</title>
-  <link rel="stylesheet" href="./app.css?v=0.3.0" />
+  <link rel="stylesheet" href="./app.css?v=0.3.2" />
 </head>
 <body>
   <main class="app-shell quiet-glass-background">
@@ -71,6 +71,7 @@
           <label class="search-field"><span>搜索</span><input id="gallerySearch" placeholder="提示词、模型或生图服务商" /></label>
           <select id="galleryProvider" aria-label="按生图服务商筛选"><option value="">全部服务商</option></select>
           <select id="galleryMode" aria-label="按模式筛选"><option value="">全部模式</option><option value="text2img">文生图</option><option value="img2img">图生图</option></select>
+          <select id="gallerySource" aria-label="按调用来源筛选"><option value="">全部来源</option><option value="webui">WebUI</option><option value="command">指令</option><option value="llm_tool">LLM 工具</option></select>
           <button class="quiet-button" id="galleryRefresh" type="button">刷新</button>
         </div>
         <div class="selection-bar glass is-hidden" id="selectionBar"><span id="selectionCount">已选 0 项</span><button class="quiet-button" id="cancelSelectionButton" type="button">取消</button><button class="quiet-button" id="selectAllButton" type="button">全选当前页</button><button class="quiet-button" id="exportButton" type="button">导出</button><button class="danger-button" id="deleteButton" type="button">删除</button></div>
@@ -99,6 +100,8 @@
             <div class="section-heading"><div><h2>历史</h2><p>结果图进入画廊；参考图仅存在于记录详情。</p></div></div>
             <div class="toggle-row"><label for="historyEnabled">保留生成历史</label><label class="toggle-control"><input id="historyEnabled" type="checkbox" /><span aria-hidden="true"></span></label></div>
             <div class="toggle-row"><label for="retainReferences">保留参考图</label><label class="toggle-control"><input id="retainReferences" type="checkbox" /><span aria-hidden="true"></span></label></div>
+            <div class="toggle-row"><label for="recordInvocationIdentity">记录调用来源身份</label><label class="toggle-control"><input id="recordInvocationIdentity" type="checkbox" /><span aria-hidden="true"></span></label></div>
+            <p class="field-hint">记录指令或 LLM 工具调用时的平台、群聊和用户身份快照；WebUI 生图不记录聊天身份。</p>
             <div class="field"><label for="historyRecords">最大记录数（-1 表示不限）</label><input id="historyRecords" type="number" min="-1" max="100000" /></div>
             <div class="field"><label for="historyMegabytes">最大图片容量 MB（0 表示不限）</label><input id="historyMegabytes" type="number" min="0" max="10240" /></div>
           </section>
@@ -188,6 +191,6 @@
     });
   </script>
   <script src="/api/plugin/page/bridge-sdk.js"></script>
-  <script src="./app.js?v=0.3.0" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./app.js?v=0.3.2" onerror="window.__reportImageStudioPageError(true)"></script>
 </body>
 </html>

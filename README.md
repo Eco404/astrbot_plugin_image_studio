@@ -60,9 +60,12 @@ OpenAI Images 会预填尺寸、数量、质量、背景和输出格式；Gemini
 
 LLM 工具包括 `image_studio_get_capabilities` 和 `image_studio_generate`。前者按需返回允许 LLM 使用的模型、提示词规范和参数；后者支持动态参数、多张参考图和严格 `model_ref`。生成成功后返回 MCP `ImageContent`，AstrBot 会缓存图片并把它加入后续支持视觉输入的 Agent 步骤。指令和 LLM 工具均能读取当前消息及引用消息中的图片；没有显式指定模式时，检测到图片会自动使用图生图。
 
+`image_studio_generate` 返回的是可继续处理的工作流资产，单次生图成功不代表整个用户任务已经完成。Agent 可以继续多次生图、改图、拼接或制作 GIF。`send_message_to_user` 只执行即时发送，不会终止本轮 Agent；它可以发送阶段产物或必要的中途文字，但已经通过它发送的内容不得在后续步骤或最终回复中复述。完成剩余处理后仍需正常输出本轮最终回复，并且只补充尚未发送的内容。
+
 ## 历史与参考图
 
 - 是否保留历史、最大记录数和最大图片容量均可在 WebUI 设置。
+- 开启“记录调用来源身份”后，指令和 LLM 工具记录平台、群聊/私聊、群 ID、群名称快照、用户 ID 和用户昵称；WebUI 生图没有聊天身份，不记录这些字段。名称仅是生成时快照，筛选和匹配仍使用 ID。
 - 生成图和保留的参考图按内容 SHA-256 共享同一份文件；相同图片被多次使用不会重复占用历史空间。
 - 结果图会作为画廊记录保存；参考图只显示在对应生成记录的详情中，不会单独成为画廊卡片。
 - 参考图可以在详情中单独删除，删除后不会影响结果图和请求参数。
@@ -77,6 +80,7 @@ LLM 工具包括 `image_studio_get_capabilities` 和 `image_studio_generate`。�
 - 历史数据库：`data/plugin_data/astrbot_plugin_image_studio/history.sqlite3`。
 - 去重后的原图资源：`data/plugin_data/astrbot_plugin_image_studio/history/assets`。
 - 内容寻址缩略图：`data/plugin_data/astrbot_plugin_image_studio/history/thumbnails`。
+- 历史数据库中的来源身份字段：`context_type`、`platform_name`、`platform_id`、`group_id`、`group_name`、`user_id`、`user_name`。
 
 ## 开发验证
 

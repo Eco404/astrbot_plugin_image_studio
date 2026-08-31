@@ -33,7 +33,7 @@ from .config import (
     runtime_settings,
     save_studio_settings,
 )
-from .models import ImageProvider
+from .models import ImageProvider, InvocationSource
 from .providers import ProviderError, ProviderExecutor
 from .service import ImageGenerationService
 from .storage import GenerationStore, detect_mime_type, image_data_url
@@ -47,7 +47,7 @@ LOG_TAG = "[ImageStudio]"
     PLUGIN_NAME,
     "local",
     "多 Provider 生图、画廊与 Agent 可读图片工具。",
-    "0.2.0",
+    "0.3.2",
 )
 class ImageStudioPlugin(Star):
     """Own Image Studio configuration, generation, gallery, and tool APIs."""
@@ -546,6 +546,11 @@ class ImageStudioPlugin(Star):
                 parameters=options["parameters"],
                 references=references,
                 source="command",
+                invocation_source=(
+                    _invocation_source(event)
+                    if self._settings.history.record_invocation_identity
+                    else None
+                ),
             )
         except (ValueError, ProviderError) as exc:
             yield event.plain_result(f"生图失败：{exc}")
@@ -733,6 +738,18 @@ class ImageStudioPlugin(Star):
             )
         payload = {
             "usage": "一般需求使用默认自然语言模型；明确要求 NAI 或特殊参数时选择对应 model_ref。",
+            "workflow_contract": {
+                "generation_result": (
+                    "image_studio_generate 返回可继续处理的图片资产；生成成功不等于整个用户任务已经完成。"
+                ),
+                "delivery_tool": (
+                    "send_message_to_user 只执行即时发送，不会结束本轮 Agent。可用于发送阶段产物或必要的"
+                    "中途文字；凡通过它发送的内容都已对目标可见，后续步骤和最终回复不得复述。"
+                ),
+                "final_response": (
+                    "完成剩余处理后仍需正常结束本轮；最终回复只补充尚未发送的用户可见内容。"
+                ),
+            },
             "default_model_refs": {
                 "text2img": self._settings.default_model_ref("text2img", "llm_tool"),
                 "img2img": self._settings.default_model_ref("img2img", "llm_tool"),
@@ -763,12 +780,15 @@ class ImageStudioPlugin(Star):
         parameters: dict[str, Any] | None = None,
         reference_image_paths: list[str] | None = None,
     ) -> mcp.types.CallToolResult:
-        """使用 Image Studio 生成或修改图片，并返回 Agent 可读取的图片内容。
+        """使用 Image Studio 生成或修改图片，并返回 Agent 可继续处理的工作流资产。
 
         一般自然语言生图可直接调用，省略 model_ref 时使用对应模式的默认模型。用户明确
         要求 NAI、指定模型或特殊参数，或者不能确定模型能力时，先调用
         image_studio_get_capabilities。用户消息或引用消息中的图片可直接用于图生图；不要编造
-        模型、参数或参考图路径。
+        模型、参数或参考图路径。生成成功不代表整个用户任务已经完成：如果还需要多次生图、
+        改图、拼接、制作 GIF 或其他处理，继续使用返回的缓存图片，除非用户需要查看阶段结果，
+        否则不要发送中间产物。send_message_to_user 只执行即时发送，不会结束本轮 Agent；它可用于
+        发送产物或必要的中途文字。凡通过它发送的内容都已对目标可见，后续步骤和最终回复不得复述。
 
         Args:
             prompt(string): 希望生成或修改的图片描述。
@@ -784,7 +804,7 @@ class ImageStudioPlugin(Star):
             reference_image_paths(array[string]): 多张 Agent 已有工具图片的路径；当前或引用消息图片通常无需填写。
 
         Returns:
-            Text and image MCP content. AstrBot caches image content for the next Agent step.
+            Workflow metadata and image MCP content. AstrBot caches images for later Agent steps.
         """
 
         if not self._settings.enable_llm_tool:
@@ -815,6 +835,11 @@ class ImageStudioPlugin(Star):
                 parameters=parameters,
                 references=references,
                 source="llm_tool",
+                invocation_source=(
+                    _invocation_source(event)
+                    if self._settings.history.record_invocation_identity
+                    else None
+                ),
             )
         except (ValueError, ProviderError) as exc:
             return mcp.types.CallToolResult(
@@ -825,8 +850,12 @@ class ImageStudioPlugin(Star):
             mcp.types.TextContent(
                 type="text",
                 text=(
-                    f"已生成 {len(result.images)} 张图片。请先查看图片；确认满足用户请求后，"
-                    "使用 send_message_to_user 发送对应缓存图片。"
+                    f"工作流资产已生成：{len(result.images)} 张图片；"
+                    f"generation_id={result.generation_id or '未保存'}。"
+                    "图片会作为可继续处理的缓存资产返回。若任务还需多次生图、改图、拼接或制作 GIF，"
+                    "继续处理，除非用户需要查看阶段结果，否则不要发送中间产物。send_message_to_user "
+                    "只执行即时发送，不会结束本轮 Agent；可用它发送产物或必要的中途文字，但已发送内容"
+                    "已经对目标可见，后续步骤和最终回复不得复述。完成剩余任务后仍需正常结束本轮。"
                 ),
             )
         ]
@@ -1059,3 +1088,48 @@ def _as_int(value: Any, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _invocation_source(event: Any) -> InvocationSource:
+    """Capture a best-effort chat identity snapshot for a generation."""
+
+    def value(raw: Any) -> str:
+        text = str(raw or "").strip()
+        return "" if text.casefold() in {"n/a", "na", "none", "null"} else text[:240]
+
+    try:
+        platform_name = value(event.get_platform_name())
+    except Exception:
+        platform_name = ""
+    try:
+        platform_id = value(event.get_platform_id())
+    except Exception:
+        platform_id = ""
+    try:
+        group_id = value(event.get_group_id())
+    except Exception:
+        group_id = ""
+    try:
+        user_id = value(event.get_sender_id())
+    except Exception:
+        user_id = ""
+    try:
+        user_name = value(event.get_sender_name())
+    except Exception:
+        user_name = ""
+    group = getattr(getattr(event, "message_obj", None), "group", None)
+    group_name = value(getattr(group, "group_name", "")) if group_id else ""
+    if user_name == user_id:
+        user_name = ""
+    if group_name == group_id:
+        group_name = ""
+    context_type = "group" if group_id else "private" if user_id else ""
+    return InvocationSource(
+        context_type=context_type,
+        platform_name=platform_name,
+        platform_id=platform_id,
+        group_id=group_id,
+        group_name=group_name,
+        user_id=user_id,
+        user_name=user_name,
+    )

@@ -14,6 +14,7 @@ from astrbot.core.provider.register import llm_tools
 from astrbot_plugin_image_studio.config import HistorySettings, RuntimeSettings
 from astrbot_plugin_image_studio.main import (
     ImageStudioPlugin,
+    _invocation_source,
     _iter_event_images,
     _parse_command,
     _provider_request_image_refs,
@@ -160,7 +161,11 @@ def test_llm_tool_returns_mcp_image_content() -> None:
             provider = settings().providers[0]
             request = SimpleNamespace(model=provider.model, mode="text2img")
             return GenerationResult(
-                provider, request, (GeneratedImage(PNG, "image/png"),), 5
+                provider,
+                request,
+                (GeneratedImage(PNG, "image/png"),),
+                5,
+                generation_id="gallery-123",
             )
 
     plugin = object.__new__(ImageStudioPlugin)
@@ -173,6 +178,12 @@ def test_llm_tool_returns_mcp_image_content() -> None:
 
     assert isinstance(result, mcp.types.CallToolResult)
     assert any(isinstance(item, mcp.types.ImageContent) for item in result.content)
+    text = next(
+        item.text for item in result.content if isinstance(item, mcp.types.TextContent)
+    )
+    assert "generation_id=gallery-123" in text
+    assert "不会结束本轮 Agent" in text
+    assert "最终回复不得复述" in text
 
 
 def test_capabilities_only_lists_llm_enabled_models() -> None:
@@ -207,6 +218,8 @@ def test_capabilities_only_lists_llm_enabled_models() -> None:
         "text2img": "provider:visible",
         "img2img": "",
     }
+    assert "不会结束本轮 Agent" in payload["workflow_contract"]["delivery_tool"]
+    assert "最终回复不得复述" in payload["workflow_contract"]["delivery_tool"]
 
 
 def test_capabilities_excludes_zero_limit_model_from_img2img() -> None:
@@ -262,6 +275,8 @@ def test_registered_image_tool_descriptions_contain_routing_contract() -> None:
     assert "一般自然语言生图可直接调用" in generate.description
     assert "image_studio_get_capabilities" in generate.description
     assert "不要编造" in generate.description
+    assert "不会结束本轮 Agent" in generate.description
+    assert "最终回复不得复述" in generate.description
     assert (
         light_tools.get_tool("image_studio_get_capabilities").description
         == capabilities.description
@@ -522,6 +537,48 @@ def test_event_image_iterator_reads_current_and_quoted_images() -> None:
     images = list(_iter_event_images([current, Reply(id="1", chain=[quoted])]))
 
     assert images == [current, quoted]
+
+
+def test_invocation_source_captures_group_and_display_names() -> None:
+    event = SimpleNamespace(
+        get_platform_name=lambda: "aiocqhttp",
+        get_platform_id=lambda: "bot-1",
+        get_group_id=lambda: "group-42",
+        get_sender_id=lambda: "user-7",
+        get_sender_name=lambda: "空雨",
+        message_obj=SimpleNamespace(group=SimpleNamespace(group_name="绘图讨论组")),
+    )
+
+    assert _invocation_source(event).public_dict() == {
+        "context_type": "group",
+        "platform_name": "aiocqhttp",
+        "platform_id": "bot-1",
+        "group_id": "group-42",
+        "group_name": "绘图讨论组",
+        "user_id": "user-7",
+        "user_name": "空雨",
+    }
+
+
+def test_invocation_source_keeps_private_user_without_group_name() -> None:
+    event = SimpleNamespace(
+        get_platform_name=lambda: "qq_official",
+        get_platform_id=lambda: "bot-1",
+        get_group_id=lambda: "",
+        get_sender_id=lambda: "user-7",
+        get_sender_name=lambda: "user-7",
+        message_obj=SimpleNamespace(group=None),
+    )
+
+    assert _invocation_source(event).public_dict() == {
+        "context_type": "private",
+        "platform_name": "qq_official",
+        "platform_id": "bot-1",
+        "group_id": "",
+        "group_name": "",
+        "user_id": "user-7",
+        "user_name": "",
+    }
 
 
 def test_safe_reference_path_resolves_relative_agent_workspace(tmp_path) -> None:
