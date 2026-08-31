@@ -47,7 +47,7 @@ OpenAI Images 会预填尺寸、数量、质量、背景和输出格式；Gemini
 - Gemini `generateContent` 图片输出没有专用反向提示词字段，限制内容应写入正向提示词。
 - 自定义 JSON 服务商默认关闭该字段；确认目标模型对应接口明确支持后，可在模型配置中开启，插件才会注入 `negative_prompt`。
 
-生图页面会根据当前服务商能力禁用或启用反向提示词输入，后端也会再次校验，避免把不受支持的字段发送给标准接口。
+生图页面会根据当前服务商能力禁用或启用反向提示词输入，后端也会再次校验，避免把不受支持的字段发送给标准接口。支持反向提示词的模型还可以在“工具配置”中单独控制“向 LLM 暴露反向提示词”：关闭后，LLM 能力查询不会返回该参数，LLM 也不能覆盖它，但后端仍会使用模型配置中的默认反向提示词。
 
 ## 指令与 Agent 工具
 
@@ -58,7 +58,9 @@ OpenAI Images 会预填尺寸、数量、质量、背景和输出格式；Gemini
 /image_gen 重新绘制这张图片 --mode img2img --ref /path/from/astrbot/temp/tool_images/file.png
 ```
 
-LLM 工具包括 `image_studio_get_capabilities` 和 `image_studio_generate`。前者按需返回允许 LLM 使用的模型、提示词规范和参数；后者支持动态参数、多张参考图和严格 `model_ref`。生成成功后返回 MCP `ImageContent`，AstrBot 会缓存图片并把它加入后续支持视觉输入的 Agent 步骤。指令和 LLM 工具均能读取当前消息及引用消息中的图片；没有显式指定模式时，检测到图片会自动使用图生图。
+LLM 工具包括 `image_studio_get_capabilities` 和 `image_studio_generate`。每次生成前都必须先查询能力：不确定模型时使用 `query_type=all`；使用默认模型时使用 `query_type=default` 并指定 `mode`；明确模型时使用 `query_type=model` 并传入完整 `model_ref`。查询结果会明确自然语言或 NAI tag 提示词格式，并只列出当前模型允许 LLM 使用的动态参数；一次查询授权只供对应模型和模式生成一次。
+
+`image_studio_generate` 支持动态参数、多张参考图和严格 `model_ref`。`negative_prompt` 不再是所有模型都能看到的固定工具参数，只有能力查询明确返回时才能通过 `parameters.negative_prompt` 传入。生成成功后返回 MCP `ImageContent`，AstrBot 会缓存图片并把它加入后续支持视觉输入的 Agent 步骤。指令和 LLM 工具均能读取当前消息及引用消息中的图片；没有显式指定模式时，检测到图片会自动使用图生图。
 
 `image_studio_generate` 返回的是可继续处理的工作流资产，单次生图成功不代表整个用户任务已经完成。Agent 可以继续多次生图、改图、拼接或制作 GIF。`send_message_to_user` 只执行即时发送，不会终止本轮 Agent；它可以发送阶段产物或必要的中途文字，但已经通过它发送的内容不得在后续步骤或最终回复中复述。完成剩余处理后仍需正常输出本轮最终回复，并且只补充尚未发送的内容。
 

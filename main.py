@@ -41,6 +41,7 @@ from .storage import GenerationStore, detect_mime_type, image_data_url
 PLUGIN_NAME = "astrbot_plugin_image_studio"
 PAGE_PREFIX = f"/{PLUGIN_NAME}"
 LOG_TAG = "[ImageStudio]"
+CAPABILITY_QUERY_EXTRA_KEY = "_image_studio_capability_queries"
 
 
 @register(
@@ -631,18 +632,20 @@ class ImageStudioPlugin(Star):
     async def image_studio_get_capabilities(
         self,
         event: AstrMessageEvent,
+        query_type: str = "all",
         mode: str = "",
         model_ref: str = "",
     ) -> mcp.types.CallToolResult:
         """查询当前可供 LLM 使用的生图模型、选择规则和参数。
 
-        用户明确要求 NAI、指定模型或特殊参数，或者不能确定模型能力时，先调用本工具，
-        再严格按照返回的 model_ref、prompt_profile、prompt_instructions 和参数说明调用
-        image_studio_generate。一般自然语言生图无需预先查询。不要编造模型或参数。
+        每次调用 image_studio_generate 前都必须先调用本工具。不能确定模型时使用 all；
+        使用默认模型时选择 default 并指定 mode；已有明确模型时选择 model 并传入
+        model_ref。随后严格按照返回的提示词格式和 parameters 调用生图工具。
 
         Args:
+            query_type(string): all、default 或 model。默认 all 返回全部可用模型。
             mode(string): 可选的 text2img 或 img2img，用于筛选模式。
-            model_ref(string): 可选的 provider_id:model_id，用于查询单个模型详情。
+            model_ref(string): query_type=model 时必填的 provider_id:model_id。
         """
 
         if not self._settings.enable_llm_tool:
@@ -664,7 +667,22 @@ class ImageStudioPlugin(Star):
                 ],
                 isError=True,
             )
+        normalized_query_type = str(query_type or "all").strip().lower()
         requested_ref = str(model_ref or "").strip()
+        if normalized_query_type == "all" and requested_ref:
+            normalized_query_type = "model"
+        if normalized_query_type not in {"all", "default", "model"}:
+            return _tool_error("query_type 仅支持 all、default 或 model。")
+        if normalized_query_type == "default":
+            if not normalized_mode:
+                return _tool_error("查询默认模型时必须指定 mode。")
+            requested_ref = self._settings.default_model_ref(
+                normalized_mode, "llm_tool"
+            )
+            if not requested_ref:
+                return _tool_error("当前模式尚未设置默认 LLM 生图模型。")
+        elif normalized_query_type == "model" and not requested_ref:
+            return _tool_error("查询指定模型时必须传入 model_ref。")
         entries: list[dict[str, Any]] = []
         for provider in self._settings.providers:
             if not provider.enabled:
@@ -689,6 +707,10 @@ class ImageStudioPlugin(Star):
                 exposed_parameters: dict[str, Any] = {}
                 configured_parameters = tool.get("parameters")
                 for name, descriptor in model.parameters.items():
+                    # negative_prompt is a reserved dynamic field whose exposure
+                    # is controlled separately from the model schema.
+                    if name == "negative_prompt":
+                        continue
                     if (
                         descriptor.get("ui_only")
                         and str(descriptor.get("type") or "").lower() != "preset"
@@ -711,6 +733,17 @@ class ImageStudioPlugin(Star):
                         exposed_parameters[name] = _llm_parameter_descriptor(
                             descriptor, {}
                         )
+                if model.llm_negative_prompt_enabled:
+                    exposed_parameters["negative_prompt"] = {
+                        "type": "string",
+                        "description": (
+                            "专用反向提示词，只填写不希望出现在画面中的内容；"
+                            "省略时使用模型配置中的默认反向提示词。"
+                        ),
+                        "default": model.negative_prompt_default,
+                    }
+                prompt_profile = tool.get("prompt_profile", "natural_language")
+                prompt_instructions = tool.get("prompt_instructions", "")
                 entries.append(
                     {
                         "model_ref": ref,
@@ -718,26 +751,36 @@ class ImageStudioPlugin(Star):
                         "model_name": model.name,
                         "modes": modes,
                         "supports_negative_prompt": model.negative_prompt,
+                        "negative_prompt_exposed": (model.llm_negative_prompt_enabled),
                         "max_reference_images": model.llm_max_reference_images,
                         "selection_description": tool.get("selection_description", ""),
-                        "prompt_profile": tool.get(
-                            "prompt_profile", "natural_language"
-                        ),
-                        "prompt_instructions": tool.get("prompt_instructions", ""),
+                        "prompt_profile": prompt_profile,
+                        "prompt_instructions": prompt_instructions,
+                        "prompt_contract": {
+                            "format": prompt_profile,
+                            "instruction": prompt_instructions,
+                            "negative_prompt": (
+                                "需要时仅通过 parameters.negative_prompt 传入。"
+                                if model.llm_negative_prompt_enabled
+                                else "不要传入 negative_prompt。"
+                            ),
+                        },
                         "parameters": exposed_parameters,
                     }
                 )
-        if requested_ref and not entries:
-            return mcp.types.CallToolResult(
-                content=[
-                    mcp.types.TextContent(
-                        type="text", text="指定模型不存在、已停用或未向 LLM 工具开放。"
-                    )
-                ],
-                isError=True,
+        if requested_ref and len(entries) > 1 and ":" not in requested_ref:
+            return _tool_error("模型 ID 不唯一，请使用 provider_id:model_id 查询。")
+        if not entries:
+            return _tool_error(
+                "没有符合条件的模型；模型可能不存在、已停用、不支持该模式或未向 LLM 工具开放。"
             )
+        _remember_capability_query(event, self._settings.revision, entries)
         payload = {
-            "usage": "一般需求使用默认自然语言模型；明确要求 NAI 或特殊参数时选择对应 model_ref。",
+            "query_type": normalized_query_type,
+            "usage": (
+                "本次查询结果只授权当前轮次中列出的模型和模式。生成时必须遵守每个模型的 "
+                "prompt_contract，且只能传入 parameters 中列出的动态参数。"
+            ),
             "workflow_contract": {
                 "generation_result": (
                     "image_studio_generate 返回可继续处理的图片资产；生成成功不等于整个用户任务已经完成。"
@@ -774,7 +817,6 @@ class ImageStudioPlugin(Star):
         model_ref: str = "",
         model: str = "",
         size: str = "",
-        negative_prompt: str = "",
         reference_image_path: str = "",
         count: int = 0,
         parameters: dict[str, Any] | None = None,
@@ -782,10 +824,11 @@ class ImageStudioPlugin(Star):
     ) -> mcp.types.CallToolResult:
         """使用 Image Studio 生成或修改图片，并返回 Agent 可继续处理的工作流资产。
 
-        一般自然语言生图可直接调用，省略 model_ref 时使用对应模式的默认模型。用户明确
-        要求 NAI、指定模型或特殊参数，或者不能确定模型能力时，先调用
-        image_studio_get_capabilities。用户消息或引用消息中的图片可直接用于图生图；不要编造
-        模型、参数或参考图路径。生成成功不代表整个用户任务已经完成：如果还需要多次生图、
+        每次生成前都必须先调用 image_studio_get_capabilities：不确定模型时查询 all，使用
+        默认模型时查询 default，明确模型时查询 model。严格使用查询结果指定的提示词格式，
+        不要把自然语言模型的提示词写成 NAI tag 串，也不要传入查询结果未列出的参数。
+        用户消息或引用消息中的图片可直接用于图生图；不要编造模型、参数或参考图路径。
+        生成成功不代表整个用户任务已经完成：如果还需要多次生图、
         改图、拼接、制作 GIF 或其他处理，继续使用返回的缓存图片，除非用户需要查看阶段结果，
         否则不要发送中间产物。send_message_to_user 只执行即时发送，不会结束本轮 Agent；它可用于
         发送产物或必要的中途文字。凡通过它发送的内容都已对目标可见，后续步骤和最终回复不得复述。
@@ -797,10 +840,9 @@ class ImageStudioPlugin(Star):
             model_ref(string): 稳定的 provider_id:model_id，可选。
             model(string): 可选的兼容模型 ID；优先使用 model_ref。
             size(string): 可选的图片尺寸。
-            negative_prompt(string): 当前模型支持时使用的可选反向提示词。
             reference_image_path(string): Agent 已有工具图片的可选路径；相对路径按当前 Agent 工作区解析。
             count(number): 生成数量，受模型和服务商限制。
-            parameters(object): 能力查询工具返回并向 LLM 暴露的动态参数。
+            parameters(object): 能力查询返回并向 LLM 暴露的动态参数；只有查询结果列出时才可包含 negative_prompt。
             reference_image_paths(array[string]): 多张 Agent 已有工具图片的路径；当前或引用消息图片通常无需填写。
 
         Returns:
@@ -823,16 +865,48 @@ class ImageStudioPlugin(Star):
             normalized_mode = str(mode or "").strip() or (
                 "img2img" if references else "text2img"
             )
-            result = await self._service_or_raise().generate(
-                mode=normalized_mode,
+            normalized_mode = _llm_mode(normalized_mode)
+            provider, selected_model, canonical_ref = _select_llm_tool_model(
+                self._settings,
+                normalized_mode,
                 provider_id=provider_id,
-                prompt=prompt,
-                negative_prompt=negative_prompt,
                 model_ref=model_ref,
                 model=model,
+            )
+            if not _consume_capability_query(
+                event, self._settings.revision, canonical_ref, normalized_mode
+            ):
+                raise ValueError(
+                    "生成前必须先调用 image_studio_get_capabilities 查询当前模型能力和提示词格式"
+                )
+            if parameters is not None and not isinstance(parameters, dict):
+                raise ValueError("parameters 必须是对象")
+            dynamic_parameters = dict(parameters or {})
+            has_negative_prompt = "negative_prompt" in dynamic_parameters
+            supplied_negative_prompt = dynamic_parameters.pop("negative_prompt", "")
+            if has_negative_prompt and not selected_model.negative_prompt:
+                raise ValueError("当前模型不支持专用反向提示词，请移除 negative_prompt")
+            if has_negative_prompt and not selected_model.llm_negative_prompt_enabled:
+                raise ValueError("negative_prompt 未在当前模型的工具配置中向 LLM 开放")
+            if has_negative_prompt and not isinstance(supplied_negative_prompt, str):
+                raise ValueError("negative_prompt 必须是字符串")
+            effective_negative_prompt = (
+                supplied_negative_prompt
+                if has_negative_prompt
+                else selected_model.negative_prompt_default
+                if selected_model.negative_prompt
+                else ""
+            )
+            result = await self._service_or_raise().generate(
+                mode=normalized_mode,
+                provider_id=provider.id,
+                prompt=prompt,
+                negative_prompt=effective_negative_prompt,
+                model_ref=canonical_ref,
+                model="",
                 size=size,
                 count=count,
-                parameters=parameters,
+                parameters=dynamic_parameters,
                 references=references,
                 source="llm_tool",
                 invocation_source=(
@@ -868,6 +942,122 @@ class ImageStudioPlugin(Star):
                 )
             )
         return mcp.types.CallToolResult(content=content)
+
+
+def _tool_error(message: str) -> mcp.types.CallToolResult:
+    return mcp.types.CallToolResult(
+        content=[mcp.types.TextContent(type="text", text=message)], isError=True
+    )
+
+
+def _remember_capability_query(
+    event: Any, revision: int, entries: list[dict[str, Any]]
+) -> None:
+    """Remember model contracts disclosed during the current AstrBot event."""
+
+    getter = getattr(event, "get_extra", None)
+    setter = getattr(event, "set_extra", None)
+    if not callable(setter):
+        return
+    current: Any = None
+    if callable(getter):
+        try:
+            current = getter(CAPABILITY_QUERY_EXTRA_KEY, None)
+        except TypeError:
+            current = getter(CAPABILITY_QUERY_EXTRA_KEY)
+        except Exception:
+            current = None
+    models: dict[str, list[str]] = {}
+    if isinstance(current, dict) and current.get("revision") == revision:
+        stored_models = current.get("models")
+        if isinstance(stored_models, dict):
+            models = {
+                str(ref): [str(mode) for mode in modes]
+                for ref, modes in stored_models.items()
+                if isinstance(modes, list)
+            }
+    for entry in entries:
+        ref = str(entry.get("model_ref") or "")
+        modes = entry.get("modes")
+        if not ref or not isinstance(modes, list):
+            continue
+        models[ref] = sorted(set(models.get(ref, ())) | {str(item) for item in modes})
+    setter(CAPABILITY_QUERY_EXTRA_KEY, {"revision": revision, "models": models})
+
+
+def _consume_capability_query(
+    event: Any, revision: int, model_ref: str, mode: str
+) -> bool:
+    getter = getattr(event, "get_extra", None)
+    setter = getattr(event, "set_extra", None)
+    if not callable(getter) or not callable(setter):
+        return False
+    try:
+        state = getter(CAPABILITY_QUERY_EXTRA_KEY, None)
+    except TypeError:
+        state = getter(CAPABILITY_QUERY_EXTRA_KEY)
+    except Exception:
+        return False
+    if not isinstance(state, dict) or state.get("revision") != revision:
+        return False
+    models = state.get("models")
+    if not isinstance(models, dict) or mode not in models.get(model_ref, ()):
+        return False
+    remaining = [item for item in models[model_ref] if item != mode]
+    if remaining:
+        models[model_ref] = remaining
+    else:
+        models.pop(model_ref, None)
+    setter(CAPABILITY_QUERY_EXTRA_KEY, {"revision": revision, "models": models})
+    return True
+
+
+def _llm_mode(value: str) -> str:
+    aliases = {
+        "text": "text2img",
+        "txt2img": "text2img",
+        "image": "img2img",
+        "edit": "img2img",
+    }
+    normalized = aliases.get(
+        str(value or "").strip().lower(), str(value or "").strip().lower()
+    )
+    if normalized not in {"text2img", "img2img"}:
+        raise ValueError("模式仅支持 text2img 或 img2img")
+    return normalized
+
+
+def _select_llm_tool_model(
+    settings: Any,
+    mode: str,
+    *,
+    provider_id: str,
+    model_ref: str,
+    model: str,
+) -> tuple[Any, Any, str]:
+    """Resolve an exact LLM-enabled model after capability discovery."""
+
+    requested_provider = str(provider_id or "").strip()
+    explicit_ref = str(model_ref or model or "").strip()
+    requested_ref = explicit_ref or settings.default_model_ref(mode, "llm_tool")
+    if not requested_ref:
+        raise ValueError(
+            "当前模式未设置默认 LLM 生图模型，请查询全部模型并传入 model_ref"
+        )
+    candidates = [
+        (provider, candidate, f"{provider.id}:{candidate.id}")
+        for provider in settings.providers
+        if provider.enabled
+        and (not requested_provider or provider.id == requested_provider)
+        for candidate in provider.models
+        if candidate.llm_enabled and candidate.supports(mode)
+    ]
+    matches = [item for item in candidates if requested_ref in {item[1].id, item[2]}]
+    if not matches:
+        raise ValueError("所选模型不存在、已停用、不支持当前模式或未向 LLM 工具开放")
+    if len(matches) > 1:
+        raise ValueError("模型 ID 不唯一，请使用 provider_id:model_id 指定模型")
+    return matches[0]
 
 
 async def _save_config_async(config: Any) -> None:

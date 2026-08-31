@@ -211,6 +211,37 @@ def test_negative_prompt_capability_defaults_to_nai_only() -> None:
     assert openai_errors == [] and nai_errors == []
     assert openai["providers"][0]["supports_negative_prompt"] is False
     assert nai["providers"][0]["supports_negative_prompt"] is True
+    assert (
+        openai["providers"][0]["models"][0]["tool"]["negative_prompt_exposed"] is False
+    )
+    assert nai["providers"][0]["models"][0]["tool"]["negative_prompt_exposed"] is True
+
+
+def test_negative_prompt_tool_exposure_can_be_disabled() -> None:
+    normalized, errors = normalize_webui_settings(
+        {
+            "providers": [
+                {
+                    "id": "custom",
+                    "name": "Custom",
+                    "kind": "custom_json",
+                    "base_url": "https://example.test",
+                    "models": [
+                        {
+                            "id": "image-model",
+                            "supports_negative_prompt": True,
+                            "tool": {"negative_prompt_exposed": False},
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+
+    assert errors == []
+    model = normalized["providers"][0]["models"][0]
+    assert model["supports_negative_prompt"] is True
+    assert model["tool"]["negative_prompt_exposed"] is False
 
 
 def test_openai_payload_only_includes_negative_prompt_when_enabled() -> None:

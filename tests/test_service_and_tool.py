@@ -65,6 +65,21 @@ class FakeExecutor:
         return (GeneratedImage(PNG, "image/png"),)
 
 
+class ToolEvent:
+    def __init__(self) -> None:
+        self._extras = {}
+        self.unified_msg_origin = ""
+
+    def get_extra(self, key, default=None):
+        return self._extras.get(key, default)
+
+    def set_extra(self, key, value) -> None:
+        self._extras[key] = value
+
+    def get_messages(self):
+        return []
+
+
 def test_service_generates_without_history(tmp_path) -> None:
     async def run() -> None:
         store = GenerationStore(tmp_path)
@@ -171,10 +186,16 @@ def test_llm_tool_returns_mcp_image_content() -> None:
     plugin = object.__new__(ImageStudioPlugin)
     plugin._settings = settings()
     plugin._service = FakeService()
+    event = ToolEvent()
 
-    result = asyncio.run(
-        plugin.image_studio_generate(SimpleNamespace(), prompt="one tree")
+    capability_result = asyncio.run(
+        plugin.image_studio_get_capabilities(
+            event, query_type="default", mode="text2img"
+        )
     )
+    assert not capability_result.isError
+
+    result = asyncio.run(plugin.image_studio_generate(event, prompt="one tree"))
 
     assert isinstance(result, mcp.types.CallToolResult)
     assert any(isinstance(item, mcp.types.ImageContent) for item in result.content)
@@ -184,6 +205,270 @@ def test_llm_tool_returns_mcp_image_content() -> None:
     assert "generation_id=gallery-123" in text
     assert "不会结束本轮 Agent" in text
     assert "最终回复不得复述" in text
+
+
+def test_llm_tool_rejects_generation_before_capability_query() -> None:
+    plugin = object.__new__(ImageStudioPlugin)
+    plugin._settings = settings()
+    plugin._service = SimpleNamespace()
+
+    result = asyncio.run(plugin.image_studio_generate(ToolEvent(), prompt="one tree"))
+
+    assert result.isError
+    assert "必须先调用 image_studio_get_capabilities" in result.content[0].text
+
+
+def test_capability_query_is_consumed_by_one_generation() -> None:
+    plugin = object.__new__(ImageStudioPlugin)
+    plugin._settings = settings()
+
+    class FakeService:
+        async def generate(self, **_kwargs):
+            provider = settings().providers[0]
+            return GenerationResult(
+                provider,
+                SimpleNamespace(model=provider.model, mode="text2img"),
+                (GeneratedImage(PNG, "image/png"),),
+                5,
+            )
+
+    plugin._service = FakeService()
+    event = ToolEvent()
+    asyncio.run(
+        plugin.image_studio_get_capabilities(
+            event, query_type="default", mode="text2img"
+        )
+    )
+
+    first = asyncio.run(plugin.image_studio_generate(event, prompt="one tree"))
+    second = asyncio.run(plugin.image_studio_generate(event, prompt="another tree"))
+
+    assert not first.isError
+    assert second.isError
+    assert "必须先调用 image_studio_get_capabilities" in second.content[0].text
+
+
+def test_capability_query_supports_all_default_and_model() -> None:
+    provider = ImageProvider.from_mapping(
+        {
+            "id": "provider",
+            "name": "Provider",
+            "kind": "custom_json",
+            "base_url": "https://example.test",
+            "models": [
+                {"id": "text-model"},
+                {
+                    "id": "edit-model",
+                    "supports_text2img": False,
+                    "supports_img2img": True,
+                    "max_reference_images": 1,
+                },
+            ],
+        }
+    )
+    plugin = object.__new__(ImageStudioPlugin)
+    plugin._settings = RuntimeSettings(
+        enable_llm_tool=True,
+        providers=(provider,),
+        history=HistorySettings(False, 0, 0, False),
+        revision=7,
+        default_tool_text2img_model_ref="provider:text-model",
+        default_tool_img2img_model_ref="provider:edit-model",
+    )
+    event = ToolEvent()
+
+    all_result = asyncio.run(
+        plugin.image_studio_get_capabilities(event, query_type="all")
+    )
+    default_result = asyncio.run(
+        plugin.image_studio_get_capabilities(
+            event, query_type="default", mode="text2img"
+        )
+    )
+    model_result = asyncio.run(
+        plugin.image_studio_get_capabilities(
+            event, query_type="model", model_ref="provider:edit-model"
+        )
+    )
+
+    assert [
+        item["model_ref"] for item in json.loads(all_result.content[0].text)["models"]
+    ] == ["provider:text-model", "provider:edit-model"]
+    assert [
+        item["model_ref"]
+        for item in json.loads(default_result.content[0].text)["models"]
+    ] == ["provider:text-model"]
+    assert [
+        item["model_ref"] for item in json.loads(model_result.content[0].text)["models"]
+    ] == ["provider:edit-model"]
+
+
+def test_negative_prompt_requires_model_tool_exposure() -> None:
+    provider = ImageProvider.from_mapping(
+        {
+            "id": "provider",
+            "name": "Provider",
+            "kind": "custom_json",
+            "base_url": "https://example.test",
+            "models": [
+                {
+                    "id": "hidden-negative",
+                    "supports_negative_prompt": True,
+                    "negative_prompt_default": "low quality",
+                    "tool": {"negative_prompt_exposed": False},
+                }
+            ],
+        }
+    )
+    configured = RuntimeSettings(
+        enable_llm_tool=True,
+        providers=(provider,),
+        history=HistorySettings(False, 0, 0, False),
+        revision=3,
+        default_tool_text2img_model_ref="provider:hidden-negative",
+    )
+    captured = []
+
+    class CapturingService:
+        async def generate(self, **kwargs):
+            captured.append(kwargs)
+            return GenerationResult(
+                provider,
+                SimpleNamespace(model="hidden-negative", mode="text2img"),
+                (GeneratedImage(PNG, "image/png"),),
+                5,
+            )
+
+    plugin = object.__new__(ImageStudioPlugin)
+    plugin._settings = configured
+    plugin._service = CapturingService()
+    event = ToolEvent()
+    capability_result = asyncio.run(
+        plugin.image_studio_get_capabilities(
+            event, query_type="model", model_ref="provider:hidden-negative"
+        )
+    )
+    capability = json.loads(capability_result.content[0].text)["models"][0]
+
+    success = asyncio.run(plugin.image_studio_generate(event, prompt="one tree"))
+    asyncio.run(
+        plugin.image_studio_get_capabilities(
+            event, query_type="model", model_ref="provider:hidden-negative"
+        )
+    )
+    rejected = asyncio.run(
+        plugin.image_studio_generate(
+            event,
+            prompt="one tree",
+            parameters={"negative_prompt": "fog"},
+        )
+    )
+
+    assert "negative_prompt" not in capability["parameters"]
+    assert capability["negative_prompt_exposed"] is False
+    assert (
+        "不要传入 negative_prompt" in capability["prompt_contract"]["negative_prompt"]
+    )
+    assert not success.isError
+    assert captured[0]["negative_prompt"] == "low quality"
+    assert rejected.isError
+    assert "未在当前模型的工具配置中向 LLM 开放" in rejected.content[0].text
+
+
+def test_exposed_negative_prompt_is_disclosed_and_forwarded() -> None:
+    provider = ImageProvider.from_mapping(
+        {
+            "id": "provider",
+            "name": "Provider",
+            "kind": "custom_json",
+            "base_url": "https://example.test",
+            "models": [
+                {
+                    "id": "negative-model",
+                    "supports_negative_prompt": True,
+                    "parameters": {
+                        "negative_prompt": {
+                            "type": "string",
+                            "description": "schema description must not override tool policy",
+                        }
+                    },
+                    "tool": {"negative_prompt_exposed": True},
+                }
+            ],
+        }
+    )
+    configured = RuntimeSettings(
+        enable_llm_tool=True,
+        providers=(provider,),
+        history=HistorySettings(False, 0, 0, False),
+        revision=4,
+        default_tool_text2img_model_ref="provider:negative-model",
+    )
+    captured = {}
+
+    class CapturingService:
+        async def generate(self, **kwargs):
+            captured.update(kwargs)
+            return GenerationResult(
+                provider,
+                SimpleNamespace(model="negative-model", mode="text2img"),
+                (GeneratedImage(PNG, "image/png"),),
+                5,
+            )
+
+    plugin = object.__new__(ImageStudioPlugin)
+    plugin._settings = configured
+    plugin._service = CapturingService()
+    event = ToolEvent()
+    capability_result = asyncio.run(
+        plugin.image_studio_get_capabilities(
+            event, query_type="default", mode="text2img"
+        )
+    )
+    capability = json.loads(capability_result.content[0].text)["models"][0]
+    result = asyncio.run(
+        plugin.image_studio_generate(
+            event,
+            prompt="one tree",
+            parameters={"negative_prompt": "fog"},
+        )
+    )
+
+    assert capability["parameters"]["negative_prompt"]["type"] == "string"
+    assert capability["negative_prompt_exposed"] is True
+    assert not result.isError
+    assert captured["negative_prompt"] == "fog"
+    assert "negative_prompt" not in captured["parameters"]
+
+
+def test_unsupported_model_rejects_dynamic_negative_prompt() -> None:
+    plugin = object.__new__(ImageStudioPlugin)
+    plugin._settings = settings()
+    plugin._service = SimpleNamespace()
+    event = ToolEvent()
+    capability_result = asyncio.run(
+        plugin.image_studio_get_capabilities(
+            event, query_type="default", mode="text2img"
+        )
+    )
+    capability = json.loads(capability_result.content[0].text)["models"][0]
+
+    result = asyncio.run(
+        plugin.image_studio_generate(
+            event,
+            prompt="one tree",
+            parameters={"negative_prompt": "fog"},
+        )
+    )
+
+    assert capability["prompt_contract"]["format"] == "natural_language"
+    assert (
+        "不要使用英文逗号分隔的 NAI tag 串"
+        in capability["prompt_contract"]["instruction"]
+    )
+    assert "negative_prompt" not in capability["parameters"]
+    assert result.isError
+    assert "当前模型不支持专用反向提示词" in result.content[0].text
 
 
 def test_capabilities_only_lists_llm_enabled_models() -> None:
@@ -270,13 +555,15 @@ def test_registered_image_tool_descriptions_contain_routing_contract() -> None:
     assert llm_tools.get_func("image_gen_generate") is None
     assert capabilities is not None
     assert generate is not None
-    assert "用户明确要求 NAI" in capabilities.description
+    assert "每次调用 image_studio_generate 前" in capabilities.description
+    assert "query_type" in capabilities.parameters["properties"]
     assert "image_studio_generate" in capabilities.description
-    assert "一般自然语言生图可直接调用" in generate.description
+    assert "每次生成前都必须先调用" in generate.description
     assert "image_studio_get_capabilities" in generate.description
     assert "不要编造" in generate.description
     assert "不会结束本轮 Agent" in generate.description
     assert "最终回复不得复述" in generate.description
+    assert "negative_prompt" not in generate.parameters["properties"]
     assert (
         light_tools.get_tool("image_studio_get_capabilities").description
         == capabilities.description

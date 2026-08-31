@@ -128,6 +128,14 @@ class ImageModel:
         configured = max(0, min(8, configured))
         return max(0, min(self.max_reference_images, configured))
 
+    @property
+    def llm_negative_prompt_enabled(self) -> bool:
+        """Whether the LLM may override this model's negative prompt."""
+
+        return self.negative_prompt and _as_bool(
+            self.tool.get("negative_prompt_exposed"), self.negative_prompt
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class ProviderCapabilities:
@@ -192,23 +200,26 @@ class ImageProvider:
         img2img = kind != "nai_direct" and _as_bool(
             value.get("supports_img2img"), False
         )
+        supports_negative_prompt = (
+            False
+            if kind == "gemini"
+            else _as_bool(value.get("supports_negative_prompt"), kind == "nai_direct")
+        )
         legacy_model = ImageModel(
             id=legacy_model_id,
             name=legacy_model_id,
             text2img=_as_bool(value.get("supports_text2img"), True),
             img2img=img2img,
-            negative_prompt=(
-                False
-                if kind == "gemini"
-                else _as_bool(
-                    value.get("supports_negative_prompt"), kind == "nai_direct"
-                )
-            ),
+            negative_prompt=supports_negative_prompt,
             max_reference_images=max_refs if img2img else 0,
             negative_prompt_default=_model_negative_default(value, kind),
             parameters=_normalize_parameters(value.get("parameters")),
             tool=_normalize_tool(
-                value.get("tool"), img2img, max_refs if img2img else 0, kind
+                value.get("tool"),
+                img2img,
+                max_refs if img2img else 0,
+                supports_negative_prompt,
+                kind,
             ),
             capability_source=_text(value.get("capability_source"), 32) or "manual",
         )
@@ -464,26 +475,37 @@ def _model_from_mapping(value: dict[str, Any], kind: str) -> ImageModel:
     max_reference_images = (
         max(0, min(8, _as_int(value.get("max_reference_images"), 0))) if img2img else 0
     )
+    supports_negative_prompt = (
+        False
+        if kind == "gemini"
+        else _as_bool(value.get("supports_negative_prompt"), kind == "nai_direct")
+    )
     return ImageModel(
         id=model_id,
         name=_text(value.get("name"), 160) or model_id,
         text2img=_as_bool(value.get("supports_text2img"), True),
         img2img=img2img,
-        negative_prompt=(
-            False
-            if kind == "gemini"
-            else _as_bool(value.get("supports_negative_prompt"), kind == "nai_direct")
-        ),
+        negative_prompt=supports_negative_prompt,
         max_reference_images=max_reference_images,
         negative_prompt_default=_model_negative_default(value, kind),
         parameters=_normalize_parameters(value.get("parameters")),
-        tool=_normalize_tool(value.get("tool"), img2img, max_reference_images, kind),
+        tool=_normalize_tool(
+            value.get("tool"),
+            img2img,
+            max_reference_images,
+            supports_negative_prompt,
+            kind,
+        ),
         capability_source=capability_source,
     )
 
 
 def _normalize_tool(
-    value: Any, img2img: bool, max_reference_images: int, kind: str
+    value: Any,
+    img2img: bool,
+    max_reference_images: int,
+    negative_prompt: bool,
+    kind: str,
 ) -> dict[str, Any]:
     """Normalize the LLM-facing model policy without changing model schema."""
 
@@ -515,11 +537,24 @@ def _normalize_tool(
     return {
         "enabled": _as_bool(raw.get("enabled", raw.get("available_to_llm")), True),
         "selection_description": _text(raw.get("selection_description"), 1200)
-        or ("仅在用户明确要求 NAI 或 NovelAI 风格标签生图时使用。" if nai else ""),
+        or (
+            "仅在用户明确要求 NAI 或 NovelAI 风格标签生图时使用。"
+            if nai
+            else "适合一般自然语言生图需求。"
+        ),
         "prompt_profile": _text(raw.get("prompt_profile"), 48)
         or ("nai_tags" if nai else "natural_language"),
         "prompt_instructions": _text(raw.get("prompt_instructions"), 4000)
-        or (NAI_TOOL_PROMPT_INSTRUCTIONS if nai else ""),
+        or (
+            NAI_TOOL_PROMPT_INSTRUCTIONS
+            if nai
+            else "使用清晰、连贯的自然语言描述，不要使用英文逗号分隔的 NAI tag 串。"
+        ),
+        "negative_prompt_exposed": (
+            _as_bool(raw.get("negative_prompt_exposed"), True)
+            if negative_prompt
+            else False
+        ),
         "max_reference_images": max(
             0, min(8, _as_int(raw.get("max_reference_images"), limit_default))
         )
