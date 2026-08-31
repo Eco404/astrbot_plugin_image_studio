@@ -35,11 +35,6 @@ from .storage import GenerationStore, detect_mime_type, image_data_url
 PLUGIN_NAME = "astrbot_plugin_image_studio"
 PAGE_PREFIX = f"/{PLUGIN_NAME}"
 LOG_TAG = "[ImageStudio]"
-LLM_TOOL_PROMPT_MARKER = "<ImageStudio-Tool-Guide>"
-LLM_TOOL_PROMPT = """当用户要求生成或修改图片时，可以使用 Image Studio 工具。
-一般生图直接调用 image_gen_generate，省略 model_ref 时使用对应模式的默认自然语言模型。
-当用户明确要求 NAI、指定模型、特殊参数，或你不确定模型能力时，先调用 image_gen_get_capabilities，再严格按返回的 prompt_profile、prompt_instructions 和参数说明调用生成工具。
-用户消息或引用消息含图片时可用于图生图；不要编造模型、参数或参考图路径。"""
 
 
 @register(
@@ -98,26 +93,6 @@ class ImageStudioPlugin(Star):
             await self._session.close()
         self._session = None
         self._service = None
-
-    @filter.on_llm_request()
-    async def inject_image_tool_guide(self, event: AstrMessageEvent, req: Any) -> None:
-        """Inject a compact routing contract for the two image tools."""
-
-        if not self._settings.enable_llm_tool or req is None:
-            return
-        if not any(
-            model.llm_enabled
-            for provider in self._settings.providers
-            if provider.enabled
-            for model in provider.models
-        ):
-            return
-        current = str(getattr(req, "system_prompt", "") or "")
-        if LLM_TOOL_PROMPT_MARKER in current:
-            return
-        req.system_prompt = (
-            f"{current}\n\n{LLM_TOOL_PROMPT_MARKER}\n{LLM_TOOL_PROMPT}".strip()
-        )
 
     def _register_web_apis(self) -> None:
         routes = (
@@ -608,14 +583,15 @@ class ImageStudioPlugin(Star):
         mode: str = "",
         model_ref: str = "",
     ) -> mcp.types.CallToolResult:
-        """查询当前可供 LLM 使用的生图模型和参数。
+        """查询当前可供 LLM 使用的生图模型、选择规则和参数。
+
+        用户明确要求 NAI、指定模型或特殊参数，或者不能确定模型能力时，先调用本工具，
+        再严格按照返回的 model_ref、prompt_profile、prompt_instructions 和参数说明调用
+        image_gen_generate。一般自然语言生图无需预先查询。不要编造模型或参数。
 
         Args:
             mode(string): 可选的 text2img 或 img2img，用于筛选模式。
             model_ref(string): 可选的 provider_id:model_id，用于查询单个模型详情。
-
-        一般生图可直接使用默认自然语言模型；用户明确要求 NAI、指定模型或高级参数
-        时先调用本工具，再调用 image_gen_generate。返回内容不包含密钥和请求头。
         """
 
         if not self._settings.enable_llm_tool:
@@ -737,20 +713,25 @@ class ImageStudioPlugin(Star):
         parameters: dict[str, Any] | None = None,
         reference_image_paths: list[str] | None = None,
     ) -> mcp.types.CallToolResult:
-        """Generate an image and return it to the Agent as visual tool content.
+        """使用 Image Studio 生成或修改图片，并返回 Agent 可读取的图片内容。
+
+        一般自然语言生图可直接调用，省略 model_ref 时使用对应模式的默认模型。用户明确
+        要求 NAI、指定模型或特殊参数，或者不能确定模型能力时，先调用
+        image_gen_get_capabilities。用户消息或引用消息中的图片可直接用于图生图；不要编造
+        模型、参数或参考图路径。
 
         Args:
-            prompt(string): Image description.
+            prompt(string): 希望生成或修改的图片描述。
             mode(string): ``text2img`` or ``img2img``，省略时根据参考图自动判断。
-            provider_id(string): Optional configured provider ID.
+            provider_id(string): 可选的已配置服务商 ID。
             model_ref(string): 稳定的 provider_id:model_id，可选。
-            model(string): Optional configured-model override.
-            size(string): Optional image size.
-            negative_prompt(string): Optional negative prompt.
-            reference_image_path(string): A prior Agent tool-image path for image-to-image.
+            model(string): 可选的兼容模型 ID；优先使用 model_ref。
+            size(string): 可选的图片尺寸。
+            negative_prompt(string): 当前模型支持时使用的可选反向提示词。
+            reference_image_path(string): Agent 已有工具图片的可选路径，用于图生图。
             count(number): 生成数量，受模型和服务商限制。
-            parameters(object): 当前模型向 LLM 暴露的动态参数。
-            reference_image_paths(array[string]): 多张参考图路径。
+            parameters(object): 能力查询工具返回并向 LLM 暴露的动态参数。
+            reference_image_paths(array[string]): 多张 Agent 已有工具图片的路径。
 
         Returns:
             Text and image MCP content. AstrBot caches image content for the next Agent step.

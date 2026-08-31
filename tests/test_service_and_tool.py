@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import mcp
 import pytest
 from astrbot.api.message_components import Image, Reply
+from astrbot.core.provider.register import llm_tools
 from astrbot_plugin_image_studio.config import HistorySettings, RuntimeSettings
 from astrbot_plugin_image_studio.main import (
     ImageStudioPlugin,
@@ -177,17 +178,25 @@ def test_capabilities_excludes_zero_limit_model_from_img2img() -> None:
     ]
 
 
-def test_llm_tool_guide_is_injected_once() -> None:
-    plugin = object.__new__(ImageStudioPlugin)
-    plugin._settings = settings()
-    request = SimpleNamespace(system_prompt="base")
+def test_registered_image_tool_descriptions_contain_routing_contract() -> None:
+    capabilities = llm_tools.get_func("image_gen_get_capabilities")
+    generate = llm_tools.get_func("image_gen_generate")
+    light_tools = llm_tools.get_full_tool_set().get_light_tool_set()
 
-    asyncio.run(plugin.inject_image_tool_guide(SimpleNamespace(), request))
-    first = request.system_prompt
-    asyncio.run(plugin.inject_image_tool_guide(SimpleNamespace(), request))
-
-    assert "image_gen_get_capabilities" in first
-    assert request.system_prompt == first
+    assert capabilities is not None
+    assert generate is not None
+    assert "用户明确要求 NAI" in capabilities.description
+    assert "image_gen_generate" in capabilities.description
+    assert "一般自然语言生图可直接调用" in generate.description
+    assert "image_gen_get_capabilities" in generate.description
+    assert "不要编造" in generate.description
+    assert (
+        light_tools.get_tool("image_gen_get_capabilities").description
+        == capabilities.description
+    )
+    assert (
+        light_tools.get_tool("image_gen_generate").description == generate.description
+    )
 
 
 def test_reproduction_keeps_available_parameters_without_reference(tmp_path) -> None:
