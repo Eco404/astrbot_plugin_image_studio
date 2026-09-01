@@ -232,9 +232,54 @@ def test_llm_tool_returns_mcp_image_content() -> None:
         item.text for item in result.content if isinstance(item, mcp.types.TextContent)
     )
     assert "generation_id=gallery-123" in text
-    assert "不会结束本轮 Agent" in text
-    assert "最终 assistant 响应（llm.response）" in text
-    assert "不要复述已发送的中途内容" in text
+    assert "original_path" in text
+
+
+def test_llm_tool_reference_paths_have_omitted_empty_and_explicit_states() -> None:
+    class FakeService:
+        async def generate(self, **kwargs):
+            provider = settings().providers[0]
+            return GenerationResult(
+                provider,
+                SimpleNamespace(model=provider.model, mode=kwargs["mode"]),
+                (GeneratedImage(PNG, "image/png"),),
+                5,
+            )
+
+    plugin = object.__new__(ImageStudioPlugin)
+    plugin._settings = settings()
+    plugin._service = FakeService()
+    plugin.store = FakeAgentAssetStore()
+    calls = []
+
+    async def capture_references(event, paths, *, include_event_references=True):
+        calls.append((list(paths), include_event_references))
+        return ()
+
+    plugin._event_references = capture_references
+    event = ToolEvent()
+
+    async def generate(reference_paths=...):
+        await plugin.image_studio_get_capabilities(
+            event, query_type="default", mode="text2img"
+        )
+        kwargs = {"prompt": "one tree", "mode": "text2img"}
+        if reference_paths is not ...:
+            kwargs["reference_image_paths"] = reference_paths
+        return await plugin.image_studio_generate(event, **kwargs)
+
+    omitted = asyncio.run(generate())
+    empty = asyncio.run(generate([]))
+    explicit = asyncio.run(generate(["chosen.png"]))
+
+    assert not omitted.isError
+    assert not empty.isError
+    assert not explicit.isError
+    assert calls == [
+        ([], True),
+        ([], False),
+        (["chosen.png"], False),
+    ]
 
 
 def test_llm_tool_image_return_modes_preserve_original_asset_path() -> None:
@@ -758,15 +803,19 @@ def test_registered_image_tool_descriptions_contain_routing_contract() -> None:
     assert capabilities is not None
     assert generate is not None
     assert view_asset is not None
-    assert "生成前必调" in capabilities.description
-    assert "常规请求用 default" in capabilities.description
-    assert "mode 可省略" in capabilities.description
+    assert "必须先调用本工具" in capabilities.description
     assert "query_type" in capabilities.parameters["properties"]
-    assert "最近一次能力查询" in generate.description
-    assert "不得编造参数" in generate.description
-    assert "不会结束本轮 Agent" in generate.description
-    assert "llm.response" in generate.description
-    assert "空响应" in generate.description
+    assert (
+        "default(查询默认模型参数)"
+        in capabilities.parameters["properties"]["query_type"]["description"]
+    )
+    assert "生成图片" in generate.description
+    reference_description = generate.parameters["properties"]["reference_image_paths"][
+        "description"
+    ]
+    assert "省略时自动读取" in reference_description
+    assert "空数组时不读取" in reference_description
+    assert "只使用这些路径" in reference_description
     assert "negative_prompt" not in generate.parameters["properties"]
     assert set(generate.parameters["properties"]) == {
         "prompt",
@@ -793,7 +842,7 @@ def test_registered_image_tool_descriptions_contain_routing_contract() -> None:
     )
 
 
-def test_agent_workflow_prompt_keeps_final_text_on_llm_response_path() -> None:
+def test_agent_workflow_prompt_is_scoped_and_idempotent() -> None:
     plugin = object.__new__(ImageStudioPlugin)
     plugin._settings = settings()
 
@@ -808,9 +857,9 @@ def test_agent_workflow_prompt_keeps_final_text_on_llm_response_path() -> None:
 
     assert request.system_prompt.startswith("原有人格")
     assert request.system_prompt.count(AGENT_WORKFLOW_PROMPT_MARKER) == 1
-    assert "最终 assistant 响应（llm.response）" in request.system_prompt
-    assert "中途文字仍可按需发送" in request.system_prompt
-    assert "以空响应结束" in request.system_prompt
+    assert "先调用 image_studio_get_capabilities" in request.system_prompt
+    assert "assets.original_path" in request.system_prompt
+    assert "媒体和文字消息分开发送" in request.system_prompt
 
     request_without_tool = SimpleNamespace(
         func_tool=SimpleNamespace(get_tool=lambda _name: None),
@@ -1281,6 +1330,47 @@ def test_provider_request_refs_include_serialized_quoted_message_images() -> Non
     )
 
     assert _provider_request_image_refs(event) == [first, second]
+
+
+def test_event_references_explicit_paths_can_disable_automatic_discovery() -> None:
+    async def run() -> None:
+        data_by_ref = {
+            "explicit.png": PNG,
+            "automatic.png": PNG + b"automatic",
+        }
+
+        class FakeService:
+            async def reference_from_media_ref(self, raw_ref, *, workspace_root=None):
+                return ReferenceImage(
+                    raw_ref,
+                    raw_ref,
+                    data_by_ref[raw_ref],
+                    "image/png",
+                )
+
+        request = SimpleNamespace(
+            image_urls=["automatic.png"], extra_user_content_parts=[]
+        )
+        event = SimpleNamespace(
+            unified_msg_origin="qq_official:GroupMessage:test",
+            get_messages=lambda: [],
+            get_extra=lambda key: request if key == "provider_request" else None,
+        )
+        plugin = object.__new__(ImageStudioPlugin)
+        plugin._service = FakeService()
+        plugin.context = SimpleNamespace(_db=None)
+
+        explicit_only = await plugin._event_references(
+            event,
+            ["explicit.png"],
+            include_event_references=False,
+        )
+        automatic = await plugin._event_references(event)
+
+        assert [item.filename for item in explicit_only] == ["explicit.png"]
+        assert [item.filename for item in automatic] == ["automatic.png"]
+
+    asyncio.run(run())
 
 
 def test_event_references_materializes_serialized_quoted_message_images(

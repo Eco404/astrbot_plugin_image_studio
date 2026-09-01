@@ -62,7 +62,7 @@ LLM 工具包括 `image_studio_get_capabilities`、`image_studio_generate` 和 `
 
 查询结果会明确自然语言或 NAI tag 提示词格式，并只列出当前模型允许 LLM 使用的动态参数；一次查询授权只供对应模型和模式生成一次。查询 `all` 后可以直接使用选中的模型，不需要再次查询 `model`。
 
-`image_studio_generate` 只公开 `prompt`、`mode`、`model_ref`、`parameters` 和 `reference_image_paths`。Provider 由完整 `model_ref` 确定；尺寸、数量和 `negative_prompt` 等模型参数只有在能力查询返回时才能放入 `parameters`。LLM 仍传入未暴露或模型不支持的字段时，插件会静默丢弃并使用模型或工具配置的默认值；已暴露字段仍按 schema 校验。多张显式参考图统一使用路径数组。指令和 LLM 工具均能读取当前消息及引用消息中的图片，没有显式指定模式时，检测到图片会自动使用图生图。
+`image_studio_generate` 只公开 `prompt`、`mode`、`model_ref`、`parameters` 和 `reference_image_paths`。Provider 由完整 `model_ref` 确定；尺寸、数量和 `negative_prompt` 等模型参数只有在能力查询返回时才能放入 `parameters`。LLM 仍传入未暴露或模型不支持的字段时，插件会静默丢弃并使用模型或工具配置的默认值；已暴露字段仍按 schema 校验。`reference_image_paths` 省略时自动读取当前消息和引用消息中的图片，传入空数组时明确不使用消息图片，传入路径数组时只使用指定图片。多张显式参考图统一使用路径数组。指令调用继续自动读取当前消息及引用消息中的图片；没有显式指定模式时，检测到图片会自动使用图生图。
 
 LLM 工具生成的每张图片都会进入独立的临时 Agent 资产区，并返回 `asset_id`、`original_path`、MIME 类型和原图大小。发送、再次图生图、拼接、GIF 或其他文件操作必须使用 `original_path`，不需要为了普通文件处理把图片再次送入视觉模型。设置页“Agent 图片”支持三种返回方式：
 

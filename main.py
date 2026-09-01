@@ -44,11 +44,13 @@ LOG_TAG = "[ImageStudio]"
 CAPABILITY_QUERY_EXTRA_KEY = "_image_studio_capability_queries"
 AGENT_WORKFLOW_PROMPT_MARKER = "<!-- image_studio_agent_workflow_v1 -->"
 AGENT_WORKFLOW_PROMPT = (
-    "使用 Image Studio 产物时，媒体发送工具只负责投递产物或有意的中途通知，不会结束本轮。"
-    "最终面向用户的文字必须由最终 assistant 响应（llm.response）输出；不要把最终文字放进 "
-    "消息发送工具后以空响应结束。中途文字仍可按需发送，"
-    "但最终响应不要复述已经发送的中途内容。媒体工具要求静默时，只省略重复的发送回执或 caption，"
-    "不得吞掉尚未输出的最终文字。"
+    "使用 image_studio 系列工具时遵循以下流程和规范："
+    "先调用 image_studio_get_capabilities 获取模型参数，再调用 image_studio_generate 进行图像生成或处理，"
+    "ImageContent 可能只是预览，只有需要看图时才调用 image_studio_view_asset。"
+    "严格使用查询工具返回的模型参数，不得编造参数；严格遵守模型的提示词输入方式(自然语言/NAI tag)；"
+    "文件操作与发送路径使用 assets.original_path；"
+    "发送媒体时使用 send_message_to_user，禁止将文字与媒体一起发送；"
+    "中途需要发送文字可以调用 send_message_to_user，但最终一轮的文字消息必须放在 llm.response 输出"
 )
 
 
@@ -570,7 +572,11 @@ class ImageStudioPlugin(Star):
         yield event.chain_result(chain)
 
     async def _event_references(
-        self, event: AstrMessageEvent, explicit_paths: list[str] | None = None
+        self,
+        event: AstrMessageEvent,
+        explicit_paths: list[str] | None = None,
+        *,
+        include_event_references: bool = True,
     ) -> tuple[Any, ...]:
         service = self._service_or_raise()
         references: list[Any] = []
@@ -609,6 +615,8 @@ class ImageStudioPlugin(Star):
 
         for raw_path in (explicit_paths or [])[:8]:
             await append_reference(raw_path, required=True)
+        if not include_event_references:
+            return tuple(references[:8])
         message_chain = event.get_messages() if hasattr(event, "get_messages") else []
         for component in _iter_event_images(message_chain):
             try:
@@ -666,16 +674,12 @@ class ImageStudioPlugin(Star):
         mode: str = "",
         model_ref: str = "",
     ) -> mcp.types.CallToolResult:
-        """生成前必调的模型能力查询。
-
-        常规请求用 default；mode 可省略以返回文生图和图生图默认。普通画面描述不是能力
-        缺口，默认模型满足明确能力时直接生成。仅在默认不可用、缺少明确能力、需要比较模型，
-        或只知道模型类型时用 all；明确 model_ref 时用 model。
+        """使用 image_studio_generate 工具前必须先调用本工具查询模型能力。
 
         Args:
-            query_type(string): default、all 或 model；默认 default。
-            mode(string): text2img 或 img2img；default 时可省略。
-            model_ref(string): model 查询所需的 provider_id:model_id。
+            query_type(string): default(查询默认模型参数)/all(查询全部模型参数)/model(搭配model_ref参数查询指定模型参数); 默认 default
+            mode(string): text2img/img2img; query_type=default 时可省略
+            model_ref(string): provider_id:model_id; 仅在 query_type=model 时使用
         """
 
         if not self._settings.enable_llm_tool:
@@ -891,20 +895,14 @@ class ImageStudioPlugin(Star):
         parameters: dict[str, Any] | None = None,
         reference_image_paths: list[str] | None = None,
     ) -> mcp.types.CallToolResult:
-        """按最近一次能力查询生成图片，并返回可继续处理的原图资产。
-
-        严格使用查询返回的 model_ref、prompt_contract 和 parameters；不得编造参数或把自然语言
-        模型写成 NAI tag。消息及引用图片会自动读取。文件操作与发送使用 assets.original_path；
-        ImageContent 可能只是预览，只有需要看图时才调用 image_studio_view_asset。继续完成多步任务。
-        媒体发送工具不会结束本轮 Agent；最终文字必须由最终 assistant 响应（llm.response）输出，
-        不要放进消息发送工具后以空响应结束；中途文字仍可按需发送。
+        """生成图片，并返回可继续处理的原图资产。
 
         Args:
-            prompt(string): 生成或修改要求，格式遵循能力查询结果。
-            mode(string): text2img 或 img2img；省略时按参考图判断。
-            model_ref(string): 能力查询返回的 provider_id:model_id；省略时使用模式默认。
-            parameters(object): 仅填写能力查询为该模型返回的参数。
-            reference_image_paths(array[string]): 可选图片路径列表；消息和引用图片会自动读取。
+            prompt(string): 生图提示词，格式遵循能力查询结果
+            mode(string): text2img/img2img
+            model_ref(string): provider_id:model_id; 省略时使用模式默认
+            parameters(object): 仅填写能力查询为该模型返回的参数
+            reference_image_paths(array[string]): 传入参考图文件路径
 
         Returns:
             Original asset metadata and optional MCP preview content for Agent workflows.
@@ -919,8 +917,19 @@ class ImageStudioPlugin(Star):
                 ]
             )
         try:
-            paths = list(reference_image_paths or [])
-            references = await self._event_references(event, paths)
+            if reference_image_paths is None:
+                paths: list[str] = []
+                include_event_references = True
+            elif isinstance(reference_image_paths, (list, tuple)):
+                paths = list(reference_image_paths)
+                include_event_references = False
+            else:
+                raise ValueError("reference_image_paths 必须是数组")
+            references = await self._event_references(
+                event,
+                paths,
+                include_event_references=include_event_references,
+            )
             normalized_mode = str(mode or "").strip() or (
                 "img2img" if references else "text2img"
             )
@@ -1047,9 +1056,7 @@ class ImageStudioPlugin(Star):
                     f"generation_id={result.generation_id or '未保存'}；"
                     f"return_mode={actual_return_mode}；"
                     f"assets={json.dumps(manifest, ensure_ascii=False, separators=(',', ':'))}。"
-                    f"{visual_notice} 继续未完成任务；媒体工具不会结束本轮 Agent，只负责产物或中途消息；"
-                    "最终文字必须通过最终 assistant 响应（llm.response）输出，不得以空响应结束；"
-                    "不要复述已发送的中途内容。"
+                    f"{visual_notice}"
                 ),
             )
         )
@@ -1062,13 +1069,11 @@ class ImageStudioPlugin(Star):
         asset_id: str = "",
         detail: str = "preview",
     ) -> mcp.types.CallToolResult:
-        """按需查看图片资产；普通发送和文件处理直接使用 original_path。
-
-        仅需观察画面时调用。默认 preview；像素级检查才使用 original。
+        """按需查看图片资产; 普通发送和文件处理直接使用 original_path。
 
         Args:
             asset_id(string): generate 返回的资产 ID。
-            detail(string): preview 或 original；默认 preview。
+            detail(string): preview 或 original; 默认 preview。
         """
 
         if not self._settings.enable_llm_tool:
