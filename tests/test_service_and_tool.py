@@ -14,6 +14,7 @@ from astrbot.api.message_components import Image, Reply
 from astrbot.core.provider.register import llm_tools
 from astrbot_plugin_image_studio.config import HistorySettings, RuntimeSettings
 from astrbot_plugin_image_studio.main import (
+    AGENT_WORKFLOW_PROMPT_MARKER,
     CAPABILITY_QUERY_EXTRA_KEY,
     ImageStudioPlugin,
     _invocation_source,
@@ -33,6 +34,7 @@ from astrbot_plugin_image_studio.models import (
 from astrbot_plugin_image_studio.providers import ProviderError, ProviderExecutor
 from astrbot_plugin_image_studio.service import (
     ImageGenerationService,
+    _control_parameter_value,
     _parameters_for_model,
     _size,
 )
@@ -231,7 +233,8 @@ def test_llm_tool_returns_mcp_image_content() -> None:
     )
     assert "generation_id=gallery-123" in text
     assert "不会结束本轮 Agent" in text
-    assert "后续回复不得复述已发送内容" in text
+    assert "最终 assistant 响应（llm.response）" in text
+    assert "不要复述已发送的中途内容" in text
 
 
 def test_llm_tool_image_return_modes_preserve_original_asset_path() -> None:
@@ -482,7 +485,10 @@ def test_negative_prompt_requires_model_tool_exposure() -> None:
                     "id": "hidden-negative",
                     "supports_negative_prompt": True,
                     "negative_prompt_default": "low quality",
-                    "tool": {"negative_prompt_exposed": False},
+                    "tool": {
+                        "negative_prompt_exposed": False,
+                        "parameters": {"count": {"exposed": False}},
+                    },
                 }
             ],
         }
@@ -524,11 +530,15 @@ def test_negative_prompt_requires_model_tool_exposure() -> None:
             event, query_type="model", model_ref="provider:hidden-negative"
         )
     )
-    rejected = asyncio.run(
+    ignored = asyncio.run(
         plugin.image_studio_generate(
             event,
             prompt="one tree",
-            parameters={"negative_prompt": "fog"},
+            parameters={
+                "negative_prompt": "fog",
+                "count": 4,
+                "unknown": "discard me",
+            },
         )
     )
 
@@ -538,8 +548,9 @@ def test_negative_prompt_requires_model_tool_exposure() -> None:
     )
     assert not success.isError
     assert captured[0]["negative_prompt"] == "low quality"
-    assert rejected.isError
-    assert "未在当前模型的工具配置中向 LLM 开放" in rejected.content[0].text
+    assert not ignored.isError
+    assert captured[1]["negative_prompt"] == "low quality"
+    assert captured[1]["parameters"] == {}
 
 
 def test_exposed_negative_prompt_is_disclosed_and_forwarded() -> None:
@@ -609,10 +620,24 @@ def test_exposed_negative_prompt_is_disclosed_and_forwarded() -> None:
     assert "negative_prompt" not in captured["parameters"]
 
 
-def test_unsupported_model_rejects_dynamic_negative_prompt() -> None:
+def test_unsupported_model_ignores_dynamic_negative_prompt() -> None:
     plugin = object.__new__(ImageStudioPlugin)
     plugin._settings = settings()
-    plugin._service = SimpleNamespace()
+    captured = {}
+
+    class CapturingService:
+        async def generate(self, **kwargs):
+            captured.update(kwargs)
+            provider = settings().providers[0]
+            return GenerationResult(
+                provider,
+                SimpleNamespace(model="test-image", mode="text2img"),
+                (GeneratedImage(PNG, "image/png"),),
+                5,
+            )
+
+    plugin._service = CapturingService()
+    plugin.store = FakeAgentAssetStore()
     event = ToolEvent()
     capability_result = asyncio.run(
         plugin.image_studio_get_capabilities(
@@ -635,8 +660,9 @@ def test_unsupported_model_rejects_dynamic_negative_prompt() -> None:
         in capability["prompt_contract"]["instruction"]
     )
     assert "negative_prompt" not in capability["parameters"]
-    assert result.isError
-    assert "当前模型不支持专用反向提示词" in result.content[0].text
+    assert not result.isError
+    assert captured["negative_prompt"] == ""
+    assert "negative_prompt" not in captured["parameters"]
 
 
 def test_capabilities_only_lists_llm_enabled_models() -> None:
@@ -739,7 +765,8 @@ def test_registered_image_tool_descriptions_contain_routing_contract() -> None:
     assert "最近一次能力查询" in generate.description
     assert "不得编造参数" in generate.description
     assert "不会结束本轮 Agent" in generate.description
-    assert "不得复述已发送内容" in generate.description
+    assert "llm.response" in generate.description
+    assert "空响应" in generate.description
     assert "negative_prompt" not in generate.parameters["properties"]
     assert set(generate.parameters["properties"]) == {
         "prompt",
@@ -764,6 +791,33 @@ def test_registered_image_tool_descriptions_contain_routing_contract() -> None:
         light_tools.get_tool("image_studio_view_asset").description
         == view_asset.description
     )
+
+
+def test_agent_workflow_prompt_keeps_final_text_on_llm_response_path() -> None:
+    plugin = object.__new__(ImageStudioPlugin)
+    plugin._settings = settings()
+
+    class ToolSet:
+        @staticmethod
+        def get_tool(name):
+            return object() if name == "image_studio_generate" else None
+
+    request = SimpleNamespace(func_tool=ToolSet(), system_prompt="原有人格")
+    asyncio.run(plugin.inject_agent_workflow_prompt(object(), request))
+    asyncio.run(plugin.inject_agent_workflow_prompt(object(), request))
+
+    assert request.system_prompt.startswith("原有人格")
+    assert request.system_prompt.count(AGENT_WORKFLOW_PROMPT_MARKER) == 1
+    assert "最终 assistant 响应（llm.response）" in request.system_prompt
+    assert "中途文字仍可按需发送" in request.system_prompt
+    assert "以空响应结束" in request.system_prompt
+
+    request_without_tool = SimpleNamespace(
+        func_tool=SimpleNamespace(get_tool=lambda _name: None),
+        system_prompt="保持不变",
+    )
+    asyncio.run(plugin.inject_agent_workflow_prompt(object(), request_without_tool))
+    assert request_without_tool.system_prompt == "保持不变"
 
 
 def test_llm_parameter_descriptor_omits_redundant_choice_fields() -> None:
@@ -960,7 +1014,7 @@ def test_service_maps_model_schema_parameter_names(tmp_path) -> None:
     asyncio.run(run())
 
 
-def test_llm_parameters_apply_defaults_expand_presets_and_reject_hidden() -> None:
+def test_llm_parameters_apply_defaults_expand_presets_and_ignore_hidden() -> None:
     model = ImageProvider.from_mapping(
         {
             "id": "nai",
@@ -991,11 +1045,18 @@ def test_llm_parameters_apply_defaults_expand_presets_and_reject_hidden() -> Non
                             "min": 1,
                             "max": 28,
                         },
+                        "count": {
+                            "type": "number",
+                            "default": 1,
+                            "min": 1,
+                            "max": 4,
+                        },
                     },
                     "tool": {
                         "parameters": {
                             "style": {"exposed": True},
                             "steps": {"exposed": False},
+                            "count": {"exposed": False},
                         }
                     },
                 }
@@ -1010,12 +1071,15 @@ def test_llm_parameters_apply_defaults_expand_presets_and_reject_hidden() -> Non
         _parameters_for_model({"style": "custom"}, model, source="llm_tool")["artist"]
         == ""
     )
-    try:
-        _parameters_for_model({"steps": 25}, model, source="llm_tool")
-    except ValueError as exc:
-        assert "未向 LLM 工具开放" in str(exc)
-    else:
-        raise AssertionError("hidden tool parameter should be rejected")
+    filtered = _parameters_for_model(
+        {"steps": 25, "unknown": "discard me"}, model, source="llm_tool"
+    )
+    assert filtered["steps"] == 24
+    assert "unknown" not in filtered
+    assert (
+        _control_parameter_value({"count": 4}, model, "count", source="llm_tool") == 1
+    )
+    assert _control_parameter_value({"count": 4}, model, "count", source="webui") == 4
 
 
 def test_command_parser_accepts_multiple_references_and_tracks_explicit_mode() -> None:

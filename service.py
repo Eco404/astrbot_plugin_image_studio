@@ -476,13 +476,7 @@ def _parameters_for_model(
             ):
                 values[name] = descriptor["default"]
     _expand_parameter_presets(values, model)
-    allowed = set(model.parameters)
-    if source == "llm_tool" and isinstance(tool_parameters, dict) and tool_parameters:
-        allowed = {
-            name
-            for name, descriptor in tool_parameters.items()
-            if not isinstance(descriptor, dict) or descriptor.get("exposed", True)
-        }
+    allowed = model.llm_exposed_parameter_names
     mapped: dict[str, Any] = {}
     for key, item in values.items():
         descriptor = model.parameters.get(key)
@@ -494,7 +488,7 @@ def _parameters_for_model(
     for key, item in raw.items():
         descriptor = model.parameters.get(key)
         if source == "llm_tool" and key not in allowed:
-            raise ValueError(f"参数 {key} 未向 LLM 工具开放")
+            continue
         if isinstance(descriptor, dict) and descriptor.get("ui_only"):
             target = str(descriptor.get("target") or "")
             choice = next(
@@ -549,7 +543,9 @@ def _control_parameter_value(
     value: Any, model: ImageModel, name: str, *, source: str
 ) -> Any:
     raw = _parameters(value)
-    if name in raw:
+    if name in raw and (
+        source != "llm_tool" or name in model.llm_exposed_parameter_names
+    ):
         return raw[name]
     descriptor = model.parameters.get(name)
     if not isinstance(descriptor, dict):

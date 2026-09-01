@@ -62,7 +62,7 @@ LLM 工具包括 `image_studio_get_capabilities`、`image_studio_generate` 和 `
 
 查询结果会明确自然语言或 NAI tag 提示词格式，并只列出当前模型允许 LLM 使用的动态参数；一次查询授权只供对应模型和模式生成一次。查询 `all` 后可以直接使用选中的模型，不需要再次查询 `model`。
 
-`image_studio_generate` 只公开 `prompt`、`mode`、`model_ref`、`parameters` 和 `reference_image_paths`。Provider 由完整 `model_ref` 确定；尺寸、数量和 `negative_prompt` 等模型参数只有在能力查询返回时才能放入 `parameters`；多张显式参考图统一使用路径数组。指令和 LLM 工具均能读取当前消息及引用消息中的图片，没有显式指定模式时，检测到图片会自动使用图生图。
+`image_studio_generate` 只公开 `prompt`、`mode`、`model_ref`、`parameters` 和 `reference_image_paths`。Provider 由完整 `model_ref` 确定；尺寸、数量和 `negative_prompt` 等模型参数只有在能力查询返回时才能放入 `parameters`。LLM 仍传入未暴露或模型不支持的字段时，插件会静默丢弃并使用模型或工具配置的默认值；已暴露字段仍按 schema 校验。多张显式参考图统一使用路径数组。指令和 LLM 工具均能读取当前消息及引用消息中的图片，没有显式指定模式时，检测到图片会自动使用图生图。
 
 LLM 工具生成的每张图片都会进入独立的临时 Agent 资产区，并返回 `asset_id`、`original_path`、MIME 类型和原图大小。发送、再次图生图、拼接、GIF 或其他文件操作必须使用 `original_path`，不需要为了普通文件处理把图片再次送入视觉模型。设置页“Agent 图片”支持三种返回方式：
 
@@ -72,7 +72,7 @@ LLM 工具生成的每张图片都会进入独立的临时 Agent 资产区，并
 
 `image_studio_view_asset` 默认只加载轻量预览，也可显式请求完整原图。临时原图按设置的保留小时自动清理；画廊原图拥有独立的历史保留策略，不受该 TTL 影响。由于 AstrBot Core 会在同一 Agent 流程中持续携带已返回的 `ImageContent`，轻量预览仍可能被重复发送，但请求体会比完整原图小得多。
 
-`image_studio_generate` 返回的是可继续处理的工作流资产，单次生图成功不代表整个用户任务已经完成。Agent 可以继续多次生图、改图、拼接或制作 GIF。`send_message_to_user` 只执行即时发送，不会终止本轮 Agent；它可以发送阶段产物或必要的中途文字，但已经通过它发送的内容不得在后续步骤或最终回复中复述。完成剩余处理后仍需正常输出本轮最终回复，并且只补充尚未发送的内容。
+`image_studio_generate` 返回的是可继续处理的工作流资产，单次生图成功不代表整个用户任务已经完成。Agent 可以继续多次生图、改图、拼接或制作 GIF。`pc_send_current_media`、`send_message_to_user` 等发送工具只负责投递产物或有意的中途通知，不会终止本轮 Agent。最终面向用户的文字应通过最终 assistant 响应（`llm.response`）输出，不能塞进发送工具后以空响应结束；中途已发送的文字则不应在最终回复中复述。
 
 ## 历史与参考图
 

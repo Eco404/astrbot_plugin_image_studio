@@ -42,6 +42,14 @@ PLUGIN_NAME = "astrbot_plugin_image_studio"
 PAGE_PREFIX = f"/{PLUGIN_NAME}"
 LOG_TAG = "[ImageStudio]"
 CAPABILITY_QUERY_EXTRA_KEY = "_image_studio_capability_queries"
+AGENT_WORKFLOW_PROMPT_MARKER = "<!-- image_studio_agent_workflow_v1 -->"
+AGENT_WORKFLOW_PROMPT = (
+    "使用 Image Studio 产物时，媒体发送工具只负责投递产物或有意的中途通知，不会结束本轮。"
+    "最终面向用户的文字必须由最终 assistant 响应（llm.response）输出；不要把最终文字放进 "
+    "消息发送工具后以空响应结束。中途文字仍可按需发送，"
+    "但最终响应不要复述已经发送的中途内容。媒体工具要求静默时，只省略重复的发送回执或 caption，"
+    "不得吞掉尚未输出的最终文字。"
+)
 
 
 @register(
@@ -629,6 +637,27 @@ class ImageStudioPlugin(Star):
             await append_reference(raw_ref)
         return tuple(references[:8])
 
+    @filter.on_llm_request()
+    async def inject_agent_workflow_prompt(
+        self, event: AstrMessageEvent, req: Any
+    ) -> None:
+        """Keep final user-facing text on the Agent's final response path."""
+
+        del event
+        if (
+            not self._settings.enable_llm_tool
+            or req is None
+            or not _request_has_tool(req, "image_studio_generate")
+        ):
+            return
+        current_prompt = str(getattr(req, "system_prompt", "") or "")
+        if AGENT_WORKFLOW_PROMPT_MARKER in current_prompt:
+            return
+        req.system_prompt = (
+            f"{current_prompt}\n\n{AGENT_WORKFLOW_PROMPT_MARKER}\n"
+            f"{AGENT_WORKFLOW_PROMPT}"
+        ).strip()
+
     @filter.llm_tool(name="image_studio_get_capabilities")
     async def image_studio_get_capabilities(
         self,
@@ -743,15 +772,13 @@ class ImageStudioPlugin(Star):
                 tool = model.tool
                 exposed_parameters: dict[str, Any] = {}
                 configured_parameters = tool.get("parameters")
+                exposed_parameter_names = model.llm_exposed_parameter_names
                 for name, descriptor in model.parameters.items():
                     # negative_prompt is a reserved dynamic field whose exposure
                     # is controlled separately from the model schema.
                     if name == "negative_prompt":
                         continue
-                    if (
-                        descriptor.get("ui_only")
-                        and str(descriptor.get("type") or "").lower() != "preset"
-                    ):
+                    if name not in exposed_parameter_names:
                         continue
                     if (
                         isinstance(configured_parameters, dict)
@@ -868,8 +895,9 @@ class ImageStudioPlugin(Star):
 
         严格使用查询返回的 model_ref、prompt_contract 和 parameters；不得编造参数或把自然语言
         模型写成 NAI tag。消息及引用图片会自动读取。文件操作与发送使用 assets.original_path；
-        ImageContent 可能只是预览，只有需要看图时才调用 image_studio_view_asset。继续完成多步任务；
-        send_message_to_user 不会结束本轮 Agent，后续回复不得复述已发送内容。
+        ImageContent 可能只是预览，只有需要看图时才调用 image_studio_view_asset。继续完成多步任务。
+        媒体发送工具不会结束本轮 Agent；最终文字必须由最终 assistant 响应（llm.response）输出，
+        不要放进消息发送工具后以空响应结束；中途文字仍可按需发送。
 
         Args:
             prompt(string): 生成或修改要求，格式遵循能力查询结果。
@@ -910,13 +938,13 @@ class ImageStudioPlugin(Star):
                 )
             if parameters is not None and not isinstance(parameters, dict):
                 raise ValueError("parameters 必须是对象")
-            dynamic_parameters = dict(parameters or {})
+            dynamic_parameters = {
+                key: value
+                for key, value in dict(parameters or {}).items()
+                if key in selected_model.llm_exposed_parameter_names
+            }
             has_negative_prompt = "negative_prompt" in dynamic_parameters
             supplied_negative_prompt = dynamic_parameters.pop("negative_prompt", "")
-            if has_negative_prompt and not selected_model.negative_prompt:
-                raise ValueError("当前模型不支持专用反向提示词，请移除 negative_prompt")
-            if has_negative_prompt and not selected_model.llm_negative_prompt_enabled:
-                raise ValueError("negative_prompt 未在当前模型的工具配置中向 LLM 开放")
             if has_negative_prompt and not isinstance(supplied_negative_prompt, str):
                 raise ValueError("negative_prompt 必须是字符串")
             effective_negative_prompt = (
@@ -1019,8 +1047,9 @@ class ImageStudioPlugin(Star):
                     f"generation_id={result.generation_id or '未保存'}；"
                     f"return_mode={actual_return_mode}；"
                     f"assets={json.dumps(manifest, ensure_ascii=False, separators=(',', ':'))}。"
-                    f"{visual_notice} 继续未完成任务；send_message_to_user 不会结束本轮 Agent；"
-                    "后续回复不得复述已发送内容。"
+                    f"{visual_notice} 继续未完成任务；媒体工具不会结束本轮 Agent，只负责产物或中途消息；"
+                    "最终文字必须通过最终 assistant 响应（llm.response）输出，不得以空响应结束；"
+                    "不要复述已发送的中途内容。"
                 ),
             )
         )
@@ -1328,6 +1357,20 @@ def _iter_event_images(value: Any):
     if isinstance(value, (list, tuple)):
         for item in value:
             yield from _iter_event_images(item)
+
+
+def _request_has_tool(req: Any, tool_name: str) -> bool:
+    tool_set = getattr(req, "func_tool", None)
+    getter = getattr(tool_set, "get_tool", None)
+    if callable(getter):
+        try:
+            return getter(tool_name) is not None
+        except (AttributeError, KeyError, TypeError, ValueError):
+            getter = None
+    tools = getattr(tool_set, "tools", None)
+    if isinstance(tools, (list, tuple)):
+        return any(str(getattr(tool, "name", "") or "") == tool_name for tool in tools)
+    return False
 
 
 def _parse_command(raw: str) -> dict[str, Any]:

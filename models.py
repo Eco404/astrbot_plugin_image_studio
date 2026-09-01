@@ -136,6 +136,30 @@ class ImageModel:
             self.tool.get("negative_prompt_exposed"), self.negative_prompt
         )
 
+    @property
+    def llm_exposed_parameter_names(self) -> frozenset[str]:
+        """Return schema keys that the LLM may override for this model."""
+
+        configured = self.tool.get("parameters")
+        restrict_to_configured = isinstance(configured, dict) and bool(configured)
+        exposed: set[str] = set()
+        for name, descriptor in self.parameters.items():
+            if name == "negative_prompt":
+                continue
+            if (
+                descriptor.get("ui_only")
+                and str(descriptor.get("type") or "").lower() != "preset"
+            ):
+                continue
+            if restrict_to_configured:
+                policy = configured.get(name)
+                if not isinstance(policy, dict) or not policy.get("exposed", True):
+                    continue
+            exposed.add(name)
+        if self.llm_negative_prompt_enabled:
+            exposed.add("negative_prompt")
+        return frozenset(exposed)
+
 
 @dataclass(frozen=True, slots=True)
 class ProviderCapabilities:
