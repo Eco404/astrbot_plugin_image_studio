@@ -16,6 +16,8 @@ from astrbot_plugin_image_studio.config import HistorySettings, RuntimeSettings
 from astrbot_plugin_image_studio.main import (
     AGENT_WORKFLOW_PROMPT_MARKER,
     CAPABILITY_QUERY_EXTRA_KEY,
+    IMAGE_WORKFLOW_CONTINUATION_MARKER,
+    IMAGE_WORKFLOW_STATE_EXTRA_KEY,
     ImageStudioPlugin,
     _invocation_source,
     _iter_event_images,
@@ -813,9 +815,7 @@ def test_registered_image_tool_descriptions_contain_routing_contract() -> None:
     reference_description = generate.parameters["properties"]["reference_image_paths"][
         "description"
     ]
-    assert "省略时自动读取" in reference_description
-    assert "空数组时不读取" in reference_description
-    assert "只使用这些路径" in reference_description
+    assert "参考图文件路径" in reference_description
     assert "negative_prompt" not in generate.parameters["properties"]
     assert set(generate.parameters["properties"]) == {
         "prompt",
@@ -859,7 +859,10 @@ def test_agent_workflow_prompt_is_scoped_and_idempotent() -> None:
     assert request.system_prompt.count(AGENT_WORKFLOW_PROMPT_MARKER) == 1
     assert "先调用 image_studio_get_capabilities" in request.system_prompt
     assert "assets.original_path" in request.system_prompt
-    assert "媒体和文字消息分开发送" in request.system_prompt
+    assert "中途消息可以包含图片和文字" in request.system_prompt
+    assert "普通 assistant 文本回复" in request.system_prompt
+    assert "llm.response" not in request.system_prompt
+    assert "pc_send_current_media" not in request.system_prompt
 
     request_without_tool = SimpleNamespace(
         func_tool=SimpleNamespace(get_tool=lambda _name: None),
@@ -867,6 +870,59 @@ def test_agent_workflow_prompt_is_scoped_and_idempotent() -> None:
     )
     asyncio.run(plugin.inject_agent_workflow_prompt(object(), request_without_tool))
     assert request_without_tool.system_prompt == "保持不变"
+
+
+def test_agent_tool_send_adds_one_shot_continuation_prompt() -> None:
+    plugin = object.__new__(ImageStudioPlugin)
+    plugin._settings = settings()
+    request = SimpleNamespace(extra_user_content_parts=[])
+    event = ToolEvent()
+    event.set_extra("provider_request", request)
+    generated = mcp.types.CallToolResult(
+        content=[mcp.types.TextContent(type="text", text="asset")]
+    )
+    send_result = mcp.types.CallToolResult(
+        content=[mcp.types.TextContent(type="text", text="Message sent")]
+    )
+
+    asyncio.run(
+        plugin.observe_agent_tool_result(
+            event,
+            SimpleNamespace(name="image_studio_generate"),
+            {},
+            generated,
+        )
+    )
+    assert event.get_extra(IMAGE_WORKFLOW_STATE_EXTRA_KEY) == {
+        "active": True,
+        "reminder_added": False,
+    }
+
+    asyncio.run(
+        plugin.observe_agent_tool_result(
+            event,
+            SimpleNamespace(name="send_message_to_user"),
+            {"messages": [{"type": "image"}]},
+            send_result,
+        )
+    )
+    assert len(request.extra_user_content_parts) == 1
+    reminder = request.extra_user_content_parts[0].text
+    assert IMAGE_WORKFLOW_CONTINUATION_MARKER in reminder
+    assert "普通 assistant 文本回复" in reminder
+    assert "llm.response" not in reminder
+    assert "pc_send_current_media" not in reminder
+    assert event.get_extra(IMAGE_WORKFLOW_STATE_EXTRA_KEY)["reminder_added"] is True
+
+    asyncio.run(
+        plugin.observe_agent_tool_result(
+            event,
+            SimpleNamespace(name="send_message_to_user"),
+            {"messages": [{"type": "image"}]},
+            send_result,
+        )
+    )
+    assert len(request.extra_user_content_parts) == 1
 
 
 def test_llm_parameter_descriptor_omits_redundant_choice_fields() -> None:

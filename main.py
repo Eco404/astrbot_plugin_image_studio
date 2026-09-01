@@ -20,6 +20,7 @@ from astrbot.api.message_components import Image, Plain, Reply
 from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.api.web import error_response, file_response, json_response
 from astrbot.api.web import request as web_request
+from astrbot.core.agent.message import TextPart
 from astrbot.core.utils.quoted_message import extract_quoted_message_images
 from astrbot.core.workspace import (
     default_workspace_root,
@@ -48,9 +49,19 @@ AGENT_WORKFLOW_PROMPT = (
     "先调用 image_studio_get_capabilities 获取模型参数，再调用 image_studio_generate 进行图像生成或处理，"
     "ImageContent 可能只是预览，只有需要看图时才调用 image_studio_view_asset。"
     "严格使用查询工具返回的模型参数，不得编造参数；严格遵守模型的提示词输入方式(自然语言/NAI tag)；"
-    "文件操作与发送路径使用 assets.original_path；"
-    "发送媒体时使用 send_message_to_user，禁止将文字与媒体一起发送；"
-    "中途需要发送文字可以调用 send_message_to_user，但最终一轮的文字消息必须放在 llm.response 输出"
+    "文件操作与发送路径使用 assets.original_path。"
+    "send_message_to_user 只负责中途投递产物或通知，不代表本轮结束；中途消息可以包含图片和文字，"
+    "但已经发送的文字不得在后续 assistant 文本回复中重复。"
+    "任务完成后停止调用工具，直接输出一条非空的普通 assistant 文本回复；"
+    "禁止把最终正文放进 send_message_to_user 的 messages 后再输出空文本。"
+)
+IMAGE_WORKFLOW_STATE_EXTRA_KEY = "_image_studio_workflow_state"
+IMAGE_WORKFLOW_CONTINUATION_MARKER = "<!-- image_studio_continuation_v1 -->"
+IMAGE_WORKFLOW_CONTINUATION_PROMPT = (
+    f"{IMAGE_WORKFLOW_CONTINUATION_MARKER}\n"
+    "Image Studio 的中途发送工具刚刚返回。发送工具中的文字若已发送就已经对用户可见，"
+    "不要在后续回复重复或改写同一段文字。若任务还有步骤，继续调用所需工具；若任务已完成，"
+    "停止调用工具并直接输出一条非空的普通 assistant 文本回复，不要返回空文本。"
 )
 
 
@@ -666,6 +677,53 @@ class ImageStudioPlugin(Star):
             f"{AGENT_WORKFLOW_PROMPT}"
         ).strip()
 
+    @filter.on_llm_tool_respond()
+    async def observe_agent_tool_result(
+        self,
+        event: AstrMessageEvent,
+        tool: Any,
+        tool_args: dict[str, Any] | None,
+        tool_result: Any,
+    ) -> None:
+        """Add a one-shot continuation reminder after Image Studio delivery."""
+
+        del tool_args
+        tool_name = str(getattr(tool, "name", "") or "")
+        if tool_name == "image_studio_generate":
+            if tool_result is not None and not bool(
+                getattr(tool_result, "isError", False)
+            ):
+                _set_event_extra(
+                    event,
+                    IMAGE_WORKFLOW_STATE_EXTRA_KEY,
+                    {"active": True, "reminder_added": False},
+                )
+            return
+        if tool_name != "send_message_to_user":
+            return
+        state = _get_event_extra(event, IMAGE_WORKFLOW_STATE_EXTRA_KEY)
+        if not isinstance(state, dict) or not state.get("active"):
+            return
+        if state.get("reminder_added"):
+            return
+        request = _get_event_extra(event, "provider_request")
+        parts = getattr(request, "extra_user_content_parts", None)
+        if not isinstance(parts, list):
+            return
+        if not any(
+            IMAGE_WORKFLOW_CONTINUATION_MARKER
+            in str(
+                getattr(part, "text", "")
+                if not isinstance(part, dict)
+                else part.get("text", "")
+            )
+            for part in parts
+        ):
+            parts.append(TextPart(text=IMAGE_WORKFLOW_CONTINUATION_PROMPT))
+        state = dict(state)
+        state["reminder_added"] = True
+        _set_event_extra(event, IMAGE_WORKFLOW_STATE_EXTRA_KEY, state)
+
     @filter.llm_tool(name="image_studio_get_capabilities")
     async def image_studio_get_capabilities(
         self,
@@ -897,6 +955,10 @@ class ImageStudioPlugin(Star):
     ) -> mcp.types.CallToolResult:
         """生成图片，并返回可继续处理的原图资产。
 
+        send_message_to_user 只负责中途投递产物或通知，不代表本轮结束；中途消息可以包含图片和文字，
+        但已发送的文字不能在后续重复。任务完成后停止调用工具，直接输出一条非空的普通 assistant 文本；
+        不要把最终正文放进 send_message_to_user 的 messages 后返回空文本。
+
         Args:
             prompt(string): 生图提示词，格式遵循能力查询结果
             mode(string): text2img/img2img
@@ -1056,7 +1118,9 @@ class ImageStudioPlugin(Star):
                     f"generation_id={result.generation_id or '未保存'}；"
                     f"return_mode={actual_return_mode}；"
                     f"assets={json.dumps(manifest, ensure_ascii=False, separators=(',', ':'))}。"
-                    f"{visual_notice}"
+                    f"{visual_notice} 这是 Image Studio 工作流资产；发送工具只负责中途投递。"
+                    "如果任务还有步骤，继续调用工具；任务完成后停止调用工具，直接输出一条非空的普通 assistant 文本，"
+                    "不要重复已发送文字或返回空文本。"
                 ),
             )
         )
@@ -1376,6 +1440,31 @@ def _request_has_tool(req: Any, tool_name: str) -> bool:
     if isinstance(tools, (list, tuple)):
         return any(str(getattr(tool, "name", "") or "") == tool_name for tool in tools)
     return False
+
+
+def _get_event_extra(event: Any, key: str, default: Any = None) -> Any:
+    getter = getattr(event, "get_extra", None)
+    if not callable(getter):
+        return default
+    try:
+        return getter(key, default)
+    except TypeError:
+        try:
+            return getter(key)
+        except (AttributeError, KeyError, TypeError, ValueError):
+            return default
+    except (AttributeError, KeyError, ValueError):
+        return default
+
+
+def _set_event_extra(event: Any, key: str, value: Any) -> None:
+    setter = getattr(event, "set_extra", None)
+    if not callable(setter):
+        return
+    try:
+        setter(key, value)
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return
 
 
 def _parse_command(raw: str) -> dict[str, Any]:

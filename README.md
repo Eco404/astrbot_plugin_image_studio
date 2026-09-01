@@ -72,7 +72,7 @@ LLM 工具生成的每张图片都会进入独立的临时 Agent 资产区，并
 
 `image_studio_view_asset` 默认只加载轻量预览，也可显式请求完整原图。临时原图按设置的保留小时自动清理；画廊原图拥有独立的历史保留策略，不受该 TTL 影响。由于 AstrBot Core 会在同一 Agent 流程中持续携带已返回的 `ImageContent`，轻量预览仍可能被重复发送，但请求体会比完整原图小得多。
 
-`image_studio_generate` 返回的是可继续处理的工作流资产，单次生图成功不代表整个用户任务已经完成。Agent 可以继续多次生图、改图、拼接或制作 GIF。`pc_send_current_media`、`send_message_to_user` 等发送工具只负责投递产物或有意的中途通知，不会终止本轮 Agent。最终面向用户的文字应通过最终 assistant 响应（`llm.response`）输出，不能塞进发送工具后以空响应结束；中途已发送的文字则不应在最终回复中复述。
+`image_studio_generate` 返回的是可继续处理的工作流资产，单次生图成功不代表整个用户任务已经完成。Agent 可以继续多次生图、改图、拼接或制作 GIF。AstrBot 原生的 `send_message_to_user` 只负责投递产物或有意的中途通知，不会终止本轮 Agent；中途消息可以包含图片和文字，但已经发送的文字不应在后续重复。任务完成后应停止调用工具，直接输出一条非空的普通 assistant 文本回复；不能把最终正文塞进发送工具后以空响应结束。
 
 ## 历史与参考图
 
