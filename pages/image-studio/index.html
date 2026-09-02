@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Image Studio 生图工作台</title>
-  <link rel="stylesheet" href="./app.css?v=0.4.0" />
+  <link rel="stylesheet" href="./app.css?v=0.5.0" />
 </head>
 <body>
   <main class="app-shell quiet-glass-background">
@@ -87,11 +87,11 @@
             <div class="toggle-row"><label for="settingTool">启用 LLM 生图工具</label><label class="toggle-control"><input id="settingTool" type="checkbox" /><span aria-hidden="true"></span></label></div>
           </section>
           <section class="settings-panel glass">
-            <div class="section-heading"><div><h2>Agent 图片</h2><p>控制生成结果进入后续 LLM 上下文的方式。</p></div></div>
-            <div class="field"><label for="agentImageReturnMode">返回方式</label><select id="agentImageReturnMode"><option value="preview">轻量预览</option><option value="asset">仅资产路径</option><option value="original">完整原图</option></select></div>
-            <div class="field"><label for="agentPreviewMaxEdge">预览图最大边长</label><input id="agentPreviewMaxEdge" type="number" min="256" max="2048" step="64" /></div>
-            <div class="field"><label for="agentPreviewQuality">WebP 预览质量</label><input id="agentPreviewQuality" type="number" min="40" max="95" step="1" /></div>
-            <div class="field"><label for="agentAssetRetentionHours">临时原图保留小时</label><input id="agentAssetRetentionHours" type="number" min="1" max="168" step="1" /></div>
+            <div class="section-heading"><div><h2>图片资产</h2><p>控制 LLM 返回方式、共享预览和工作流资产保留时间。</p></div></div>
+            <div class="field"><label for="agentImageReturnMode">LLM 返回方式</label><select id="agentImageReturnMode"><option value="preview">轻量预览</option><option value="asset">仅返回资产信息</option><option value="original">完整原图</option></select></div>
+            <div class="field"><label for="agentPreviewMaxEdge">统一预览最大边长</label><input id="agentPreviewMaxEdge" type="number" min="256" max="2048" step="64" /></div>
+            <div class="field"><label for="agentPreviewQuality">WebP 统一预览质量</label><input id="agentPreviewQuality" type="number" min="40" max="95" step="1" /></div>
+            <div class="field"><label for="agentAssetRetentionHours">工作流资产租约时长（小时）</label><input id="agentAssetRetentionHours" type="number" min="1" max="168" step="1" /></div>
           </section>
           <section class="settings-panel glass">
             <div class="section-heading"><div><h2>默认值</h2><p>页面和指令、LLM 工具分别使用的默认模型。</p></div><div class="model-tabs default-tabs" role="group" aria-label="默认模型使用范围"><button class="model-tab is-active" data-default-scope="page" type="button">页面</button><button class="model-tab" data-default-scope="tool" type="button">工具</button></div></div>
@@ -112,6 +112,12 @@
             <p class="field-hint">记录指令或 LLM 工具调用时的平台、群聊和用户身份快照；WebUI 生图不记录聊天身份。</p>
             <div class="field"><label for="historyRecords">最大记录数（-1 表示不限）</label><input id="historyRecords" type="number" min="-1" max="100000" /></div>
             <div class="field"><label for="historyMegabytes">最大图片容量 MB（0 表示不限）</label><input id="historyMegabytes" type="number" min="0" max="10240" /></div>
+          </section>
+          <section class="settings-panel glass">
+            <div class="section-heading"><div><h2>存储健康</h2><p>每小时自动检查数据库、租约、资产和预览关系。</p></div><span class="health-status" id="storageHealthStatus">未检查</span></div>
+            <div class="storage-health-grid" id="storageHealthGrid"><div><span>最近检查</span><strong id="storageHealthCheckedAt">尚未执行</strong></div><div><span>耗时</span><strong id="storageHealthDuration">-</strong></div><div><span>原图 / 预览</span><strong id="storageHealthAssets">-</strong></div><div><span>有效租约</span><strong id="storageHealthLeases">-</strong></div><div><span>生成记录</span><strong id="storageHealthGenerations">-</strong></div><div><span>物理占用</span><strong id="storageHealthSize">-</strong></div></div>
+            <p class="maintenance-report" id="storageHealthErrors">暂无异常。</p>
+            <div class="section-actions maintenance-actions"><button class="quiet-button" id="runMaintenanceButton" type="button">立即检查</button><button class="quiet-button" id="runDeepMaintenanceButton" type="button">深度检查</button></div>
           </section>
         </div>
         <section class="provider-settings glass">
@@ -199,6 +205,6 @@
     });
   </script>
   <script src="/api/plugin/page/bridge-sdk.js"></script>
-  <script src="./app.js?v=0.4.0" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./app.js?v=0.5.0" onerror="window.__reportImageStudioPageError(true)"></script>
 </body>
 </html>

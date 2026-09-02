@@ -18,7 +18,7 @@
     generationForm: $("generationForm"), prompt: $("prompt"), negativePromptField: $("negativePromptField"), negativePrompt: $("negativePrompt"), negativePromptHint: $("negativePromptHint"), resetNegativePromptButton: $("resetNegativePromptButton"), advancedParameters: $("advancedParameters"), parameters: $("parameters"), generationError: $("generationError"), generateButton: $("generateButton"), resultEmpty: $("resultEmpty"), resultGrid: $("resultGrid"), resultMeta: $("resultMeta"),
     galleryGrid: $("galleryGrid"), galleryEmpty: $("galleryEmpty"), galleryPagination: $("galleryPagination"), galleryPrev: $("galleryPrev"), galleryNext: $("galleryNext"), galleryPageLabel: $("galleryPageLabel"), gallerySearch: $("gallerySearch"), galleryProvider: $("galleryProvider"), galleryMode: $("galleryMode"), gallerySource: $("gallerySource"), selectionBar: $("selectionBar"), selectionCount: $("selectionCount"),
     detailDrawer: $("detailDrawer"), drawerBody: $("drawerBody"), detailDate: $("detailDate"), scrim: $("scrim"), imagePreview: $("imagePreview"), previewImage: $("previewImage"), imagePreviewTitle: $("imagePreviewTitle"), downloadImageButton: $("downloadImageButton"),
-    settingTool: $("settingTool"), agentImageReturnMode: $("agentImageReturnMode"), agentPreviewMaxEdge: $("agentPreviewMaxEdge"), agentPreviewQuality: $("agentPreviewQuality"), agentAssetRetentionHours: $("agentAssetRetentionHours"), settingPageDefaultTextModel: $("settingPageDefaultTextModel"), settingPageDefaultImageModel: $("settingPageDefaultImageModel"), settingToolDefaultTextModel: $("settingToolDefaultTextModel"), settingToolDefaultImageModel: $("settingToolDefaultImageModel"), historyEnabled: $("historyEnabled"), retainReferences: $("retainReferences"), recordInvocationIdentity: $("recordInvocationIdentity"), historyRecords: $("historyRecords"), historyMegabytes: $("historyMegabytes"), settingsProviderList: $("settingsProviderList"), providerForm: $("providerForm"), settingsModelList: $("settingsModelList"), modelForm: $("modelForm"), settingsError: $("settingsError"), addProviderButton: $("addProviderButton"), addModelButton: $("addModelButton"), newModelChoice: $("newModelChoice"), newModelChoices: $("newModelChoices"), saveSettingsButton: $("saveSettingsButton"), parameterDialog: $("parameterDialog"), toolParameterExposed: $("toolParameterExposed"), toolParameterDescription: $("toolParameterDescription"), toolParameterDefault: $("toolParameterDefault"), toolParameterDefaultChoice: $("toolParameterDefaultChoice"), toolParameterDefaultHint: $("toolParameterDefaultHint"), toolParameterChoices: $("toolParameterChoices"),
+    settingTool: $("settingTool"), agentImageReturnMode: $("agentImageReturnMode"), agentPreviewMaxEdge: $("agentPreviewMaxEdge"), agentPreviewQuality: $("agentPreviewQuality"), agentAssetRetentionHours: $("agentAssetRetentionHours"), storageHealthStatus: $("storageHealthStatus"), storageHealthCheckedAt: $("storageHealthCheckedAt"), storageHealthDuration: $("storageHealthDuration"), storageHealthAssets: $("storageHealthAssets"), storageHealthLeases: $("storageHealthLeases"), storageHealthGenerations: $("storageHealthGenerations"), storageHealthSize: $("storageHealthSize"), storageHealthErrors: $("storageHealthErrors"), runMaintenanceButton: $("runMaintenanceButton"), runDeepMaintenanceButton: $("runDeepMaintenanceButton"), settingPageDefaultTextModel: $("settingPageDefaultTextModel"), settingPageDefaultImageModel: $("settingPageDefaultImageModel"), settingToolDefaultTextModel: $("settingToolDefaultTextModel"), settingToolDefaultImageModel: $("settingToolDefaultImageModel"), historyEnabled: $("historyEnabled"), retainReferences: $("retainReferences"), recordInvocationIdentity: $("recordInvocationIdentity"), historyRecords: $("historyRecords"), historyMegabytes: $("historyMegabytes"), settingsProviderList: $("settingsProviderList"), providerForm: $("providerForm"), settingsModelList: $("settingsModelList"), modelForm: $("modelForm"), settingsError: $("settingsError"), addProviderButton: $("addProviderButton"), addModelButton: $("addModelButton"), newModelChoice: $("newModelChoice"), newModelChoices: $("newModelChoices"), saveSettingsButton: $("saveSettingsButton"), parameterDialog: $("parameterDialog"), toolParameterExposed: $("toolParameterExposed"), toolParameterDescription: $("toolParameterDescription"), toolParameterDefault: $("toolParameterDefault"), toolParameterDefaultChoice: $("toolParameterDefaultChoice"), toolParameterDefaultHint: $("toolParameterDefaultHint"), toolParameterChoices: $("toolParameterChoices"),
   };
 
   async function bridge() {
@@ -71,7 +71,7 @@
     const labels = { generate: ["生图", "选择模式和模型后开始创作"], gallery: ["画廊", "搜索、筛选、复现或导出历史生成记录"], settings: ["设置", "管理运行策略、历史、生图服务商和模型"], };
     els.pageTitle.textContent = labels[view][0]; els.pageSubtitle.textContent = labels[view][1];
     if (view === "gallery") void loadGallery();
-    if (view === "settings") void loadSettings();
+    if (view === "settings") { void loadSettings(); void loadStorageHealth(); }
   }
 
   function collectModelParameters() {
@@ -375,7 +375,29 @@
     select.value = models.some((model) => model.model_ref === selectedRef) ? selectedRef : "";
   }
 
-  function syncAgentImageSettings() { const preview = els.agentImageReturnMode.value === "preview"; els.agentPreviewMaxEdge.disabled = !preview; els.agentPreviewQuality.disabled = !preview; }
+  function syncAgentImageSettings() { els.agentPreviewMaxEdge.disabled = false; els.agentPreviewQuality.disabled = false; }
+
+  function renderStorageHealth(report) {
+    const stats = report?.stats || {}; const errors = Array.isArray(report?.errors) ? report.errors : [];
+    const labels = { healthy: "正常", warning: "需关注", error: "异常", never: "未检查" };
+    els.storageHealthStatus.textContent = report?.running ? "检查中" : (labels[report?.status] || "未知");
+    els.storageHealthStatus.dataset.status = report?.status || "never";
+    els.storageHealthCheckedAt.textContent = report?.checked_at ? formatDate(report.checked_at) : "尚未执行";
+    els.storageHealthDuration.textContent = report?.duration_ms >= 0 ? `${Number(report.duration_ms)} ms` : "-";
+    els.storageHealthAssets.textContent = `${Number(stats.assets || 0)} / ${Number(stats.thumbnails || 0)}`;
+    els.storageHealthLeases.textContent = String(Number(stats.active_leases || 0)); els.storageHealthGenerations.textContent = String(Number(stats.generations || 0)); els.storageHealthSize.textContent = formatBytes(stats.size_bytes || 0);
+    els.storageHealthErrors.textContent = errors.length ? errors.join("；") : "暂无异常。";
+  }
+
+  async function loadStorageHealth() { try { renderStorageHealth(await apiGet("storage/health")); } catch (error) { els.storageHealthStatus.textContent = "读取失败"; els.storageHealthErrors.textContent = errorMessage(error, "存储状态读取失败"); } }
+
+  async function runStorageMaintenance(deep) {
+    if (deep && !await confirmAction("深度检查会重新计算全部原图哈希，历史较多时可能耗时较长。继续执行？")) return;
+    els.runMaintenanceButton.disabled = true; els.runDeepMaintenanceButton.disabled = true; els.storageHealthStatus.textContent = "检查中";
+    try { const report = await apiPost("storage/maintenance", { deep: !!deep }); renderStorageHealth(report); showNotice(deep ? "存储深度检查已完成。" : "存储检查已完成。", report.status === "error" ? "error" : "success"); }
+    catch (error) { showNotice(errorMessage(error, "存储检查失败"), "error"); await loadStorageHealth(); }
+    finally { els.runMaintenanceButton.disabled = false; els.runDeepMaintenanceButton.disabled = false; }
+  }
 
   async function loadSettings() {
     if (settingsLoadPromise) return settingsLoadPromise;
@@ -387,7 +409,7 @@
         if (!payload?.base || !payload?.webui || !Array.isArray(payload.webui.providers)) throw new Error("设置接口返回的数据格式无效");
         state.settings = payload;
         els.settingTool.checked = !!payload.base.enable_llm_tool;
-        const llmPolicy = payload.webui.llm_policy || {}; els.agentImageReturnMode.value = ["asset", "preview", "original"].includes(llmPolicy.image_return_mode) ? llmPolicy.image_return_mode : "preview"; els.agentPreviewMaxEdge.value = Number(llmPolicy.preview_max_edge || 768); els.agentPreviewQuality.value = Number(llmPolicy.preview_quality || 80); els.agentAssetRetentionHours.value = Number(llmPolicy.asset_retention_hours || 24); syncAgentImageSettings();
+        const llmPolicy = payload.webui.llm_policy || {}; const assetPolicy = payload.webui.asset_policy || {}; els.agentImageReturnMode.value = ["asset", "preview", "original"].includes(llmPolicy.image_return_mode) ? llmPolicy.image_return_mode : "preview"; els.agentPreviewMaxEdge.value = Number(assetPolicy.preview_max_edge || 768); els.agentPreviewQuality.value = Number(assetPolicy.preview_quality || 80); els.agentAssetRetentionHours.value = Number(assetPolicy.lease_hours || 24); syncAgentImageSettings();
         const history = payload.webui.history; els.historyEnabled.checked = !!history.enabled; els.retainReferences.checked = !!history.retain_reference_images; els.recordInvocationIdentity.checked = !!history.record_invocation_identity; els.historyRecords.value = history.max_records; els.historyMegabytes.value = history.max_megabytes;
         const defaults = payload.webui.generation_defaults || {}; const pageDefaults = defaults.page || {}; const toolDefaults = defaults.tool || {};
         const defaultModels = payload.webui.providers.filter((provider) => provider.enabled).flatMap((provider) => (provider.models || []).map((model) => ({ ...model, provider_name: provider.name, model_ref: `${provider.id}:${model.id}` })));
@@ -635,7 +657,7 @@
     if (!state.settings && !await loadSettings()) return;
     setError(els.settingsError, "正在保存设置…"); els.saveSettingsButton.disabled = true; els.saveSettingsButton.textContent = "保存中…";
     const webui = state.settings.webui; webui.history = { enabled: els.historyEnabled.checked, retain_reference_images: els.retainReferences.checked, record_invocation_identity: els.recordInvocationIdentity.checked, max_records: Number(els.historyRecords.value), max_megabytes: Number(els.historyMegabytes.value) };
-    webui.llm_policy = { ...(webui.llm_policy || {}), image_return_mode: els.agentImageReturnMode.value, preview_max_edge: Number(els.agentPreviewMaxEdge.value), preview_quality: Number(els.agentPreviewQuality.value), asset_retention_hours: Number(els.agentAssetRetentionHours.value) };
+    webui.llm_policy = { ...(webui.llm_policy || {}), image_return_mode: els.agentImageReturnMode.value }; webui.asset_policy = { preview_max_edge: Number(els.agentPreviewMaxEdge.value), preview_quality: Number(els.agentPreviewQuality.value), lease_hours: Number(els.agentAssetRetentionHours.value) };
     webui.generation_defaults = { page: { text2img_model_ref: els.settingPageDefaultTextModel.value, img2img_model_ref: els.settingPageDefaultImageModel.value }, tool: { text2img_model_ref: els.settingToolDefaultTextModel.value, img2img_model_ref: els.settingToolDefaultImageModel.value } };
     try {
       await apiPost("settings/save", { settings_revision: webui.revision ?? webui.ui.settings_revision, base: { enable_llm_tool: els.settingTool.checked }, studio: webui });
@@ -658,6 +680,7 @@
     document.querySelectorAll(".segment").forEach((button) => button.addEventListener("click", () => { state.mode = button.dataset.mode; state.selectedModelRef = state.defaultModelRefs[state.mode] || ""; state.parameterValues = {}; document.querySelectorAll(".segment").forEach((item) => item.classList.toggle("is-active", item === button)); renderModelChoices(); }));
     document.querySelectorAll("[data-default-scope]").forEach((button) => button.addEventListener("click", () => { document.querySelectorAll("[data-default-scope]").forEach((item) => item.classList.toggle("is-active", item === button)); document.querySelectorAll("[data-default-panel]").forEach((panel) => panel.classList.toggle("is-hidden", panel.dataset.defaultPanel !== button.dataset.defaultScope)); }));
     els.agentImageReturnMode.addEventListener("change", syncAgentImageSettings);
+    els.runMaintenanceButton.addEventListener("click", () => void runStorageMaintenance(false)); els.runDeepMaintenanceButton.addEventListener("click", () => void runStorageMaintenance(true));
     els.modelChoice.addEventListener("change", () => { state.selectedModelRef = els.modelChoice.value; state.parameterValues = {}; els.negativePrompt.value = selectedModel()?.negative_prompt_default || ""; renderModelWorkspace(); });
     els.resetNegativePromptButton.addEventListener("click", () => { els.negativePrompt.value = selectedModel()?.negative_prompt_default || ""; els.negativePrompt.focus(); });
     els.referenceUpload.addEventListener("change", async () => { try { await uploadReferences(els.referenceUpload.files); } catch (error) { setError(els.generationError, errorMessage(error, "上传参考图失败")); } finally { els.referenceUpload.value = ""; } });
