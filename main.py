@@ -5,6 +5,7 @@ import base64
 import copy
 import hashlib
 import json
+import os
 import re
 import shlex
 import time
@@ -15,12 +16,13 @@ from typing import Any
 import aiohttp
 import mcp
 from astrbot.api import AstrBotConfig, logger
-from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.message_components import Image, Plain, Reply
+from astrbot.api.event import AstrMessageEvent, MessageChain, filter
+from astrbot.api.message_components import File, Image, Plain, Record, Reply, Video
 from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.api.web import error_response, file_response, json_response
 from astrbot.api.web import request as web_request
 from astrbot.core.agent.message import TextPart
+from astrbot.core.computer.computer_client import get_booter
 from astrbot.core.utils.quoted_message import extract_quoted_message_images
 from astrbot.core.workspace import (
     default_workspace_root,
@@ -34,7 +36,7 @@ from .config import (
     runtime_settings,
     save_studio_settings,
 )
-from .models import ImageProvider, InvocationSource
+from .models import ImageProvider, InvocationSource, ReferenceImage
 from .providers import ProviderError, ProviderExecutor
 from .service import ImageGenerationService
 from .storage import GenerationStore, detect_mime_type, image_data_url
@@ -49,11 +51,11 @@ AGENT_WORKFLOW_PROMPT = (
     "先调用 image_studio_get_capabilities 获取模型参数，再调用 image_studio_generate 进行图像生成或处理，"
     "ImageContent 可能只是预览，只有需要看图时才调用 image_studio_view_asset。"
     "严格使用查询工具返回的模型参数，不得编造参数；严格遵守模型的提示词输入方式(自然语言/NAI tag)；"
-    "文件操作与发送路径使用 assets.original_path。"
-    "send_message_to_user 只负责中途投递产物或通知，不代表本轮结束；中途消息可以包含图片和文字，"
+    "插件资产只使用 asset_id，通过 image_studio_send_output 发送到当前会话或复制到当前 workspace。"
+    "image_studio_send_output 只负责中途投递产物或通知，不代表本轮结束；中途消息可以包含图片和文字，"
     "但已经发送的文字不得在后续 assistant 文本回复中重复。"
     "任务完成后停止调用工具，直接输出一条非空的普通 assistant 文本回复；"
-    "禁止把最终正文放进 send_message_to_user 的 messages 后再输出空文本。"
+    "禁止把最终正文放进 image_studio_send_output 的 messages 后再输出空文本。"
 )
 IMAGE_WORKFLOW_STATE_EXTRA_KEY = "_image_studio_workflow_state"
 IMAGE_WORKFLOW_CONTINUATION_MARKER = "<!-- image_studio_continuation_v1 -->"
@@ -69,7 +71,7 @@ IMAGE_WORKFLOW_CONTINUATION_PROMPT = (
     PLUGIN_NAME,
     "local",
     "多 Provider 生图、画廊与 Agent 可读图片工具。",
-    "0.4.0",
+    "0.5.0",
 )
 class ImageStudioPlugin(Star):
     """Own Image Studio configuration, generation, gallery, and tool APIs."""
@@ -84,6 +86,7 @@ class ImageStudioPlugin(Star):
         self._session: aiohttp.ClientSession | None = None
         self._service: ImageGenerationService | None = None
         self._settings_lock = asyncio.Lock()
+        self._maintenance_task: asyncio.Task[None] | None = None
         self._exports: dict[str, tuple[Path, float]] = {}
         self._studio_settings, studio_errors = load_studio_settings(Path(self.data_dir))
         self._settings, runtime_errors = runtime_settings(config, self._studio_settings)
@@ -93,7 +96,14 @@ class ImageStudioPlugin(Star):
         """Initialize storage, HTTP resources, and Page API routes."""
 
         await self.store.initialize()
-        await self.store.cleanup_agent_assets(self._settings.llm_asset_retention_hours)
+        await self.store.run_maintenance(
+            self._settings.history,
+            preview_max_edge=self._settings.asset_preview_max_edge,
+            preview_quality=self._settings.asset_preview_quality,
+        )
+        self._maintenance_task = asyncio.create_task(
+            self._maintenance_loop(), name="image-studio-maintenance"
+        )
         self._session = aiohttp.ClientSession(
             connector=aiohttp.TCPConnector(limit=12, limit_per_host=6),
             timeout=aiohttp.ClientTimeout(total=180),
@@ -118,10 +128,31 @@ class ImageStudioPlugin(Star):
     async def terminate(self) -> None:
         """Close plugin-owned HTTP resources during reload or shutdown."""
 
+        if self._maintenance_task is not None:
+            self._maintenance_task.cancel()
+            try:
+                await self._maintenance_task
+            except asyncio.CancelledError:
+                pass
+        self._maintenance_task = None
         if self._session is not None and not self._session.closed:
             await self._session.close()
         self._session = None
         self._service = None
+
+    async def _maintenance_loop(self) -> None:
+        while True:
+            await asyncio.sleep(3600)
+            try:
+                await self.store.run_maintenance(
+                    self._settings.history,
+                    preview_max_edge=self._settings.asset_preview_max_edge,
+                    preview_quality=self._settings.asset_preview_quality,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("%s 定时存储维护失败: %s", LOG_TAG, type(exc).__name__)
 
     def _register_web_apis(self) -> None:
         routes = (
@@ -149,6 +180,18 @@ class ImageStudioPlugin(Star):
                 self._api_save_settings,
                 ["POST"],
                 "Image Studio: save settings",
+            ),
+            (
+                "storage/health",
+                self._api_storage_health,
+                ["GET"],
+                "Image Studio: storage health",
+            ),
+            (
+                "storage/maintenance",
+                self._api_storage_maintenance,
+                ["POST"],
+                "Image Studio: storage maintenance",
             ),
             (
                 "model/test",
@@ -319,6 +362,21 @@ class ImageStudioPlugin(Star):
             )
             self._service_or_raise().update_settings(self._settings)
         return json_response({"settings_revision": self._settings.revision})
+
+    async def _api_storage_health(self) -> Any:
+        return json_response(await self.store.maintenance_report())
+
+    async def _api_storage_maintenance(self) -> Any:
+        body = await web_request.json(default={})
+        if not isinstance(body, dict):
+            return error_response("请求体必须是 JSON 对象", status_code=400)
+        report = await self.store.run_maintenance(
+            self._settings.history,
+            preview_max_edge=self._settings.asset_preview_max_edge,
+            preview_quality=self._settings.asset_preview_quality,
+            deep=bool(body.get("deep", False)),
+        )
+        return json_response(report)
 
     async def _api_upload_reference(self) -> Any:
         files = await web_request.files()
@@ -585,7 +643,7 @@ class ImageStudioPlugin(Star):
     async def _event_references(
         self,
         event: AstrMessageEvent,
-        explicit_paths: list[str] | None = None,
+        explicit_references: list[Any] | None = None,
         *,
         include_event_references: bool = True,
     ) -> tuple[Any, ...]:
@@ -624,8 +682,39 @@ class ImageStudioPlugin(Star):
                 references.append(reference)
             return True
 
-        for raw_path in (explicit_paths or [])[:8]:
-            await append_reference(raw_path, required=True)
+        for item in (explicit_references or [])[:8]:
+            if isinstance(item, dict):
+                asset_id = str(item.get("asset_id") or "").strip().lower()
+                path = str(item.get("path") or "").strip()
+                if bool(asset_id) == bool(path):
+                    raise ValueError("参考图必须且只能填写 asset_id 或 path")
+                if asset_id:
+                    loaded = await self.store.load_workflow_image(
+                        asset_id,
+                        scope_id=_event_scope_id(event),
+                        detail="original",
+                        preview_max_edge=self._settings.asset_preview_max_edge,
+                        preview_quality=self._settings.asset_preview_quality,
+                        retention_hours=self._settings.asset_lease_hours,
+                    )
+                    if loaded is None:
+                        raise ValueError("参考图资产不存在、已过期或不属于当前会话")
+                    image, internal_path = loaded
+                    digest = hashlib.sha256(image.data).hexdigest()
+                    if digest not in seen:
+                        seen.add(digest)
+                        references.append(
+                            ReferenceImage(
+                                id=f"asset-{asset_id[:24]}",
+                                filename=Path(internal_path).name,
+                                data=image.data,
+                                mime_type=image.mime_type,
+                            )
+                        )
+                    continue
+                await append_reference(path, required=True)
+                continue
+            await append_reference(str(item or ""), required=True)
         if not include_event_references:
             return tuple(references[:8])
         message_chain = event.get_messages() if hasattr(event, "get_messages") else []
@@ -687,7 +776,6 @@ class ImageStudioPlugin(Star):
     ) -> None:
         """Add a one-shot continuation reminder after Image Studio delivery."""
 
-        del tool_args
         tool_name = str(getattr(tool, "name", "") or "")
         if tool_name == "image_studio_generate":
             if tool_result is not None and not bool(
@@ -696,10 +784,19 @@ class ImageStudioPlugin(Star):
                 _set_event_extra(
                     event,
                     IMAGE_WORKFLOW_STATE_EXTRA_KEY,
-                    {"active": True, "reminder_added": False},
+                    {
+                        **(
+                            _get_event_extra(event, IMAGE_WORKFLOW_STATE_EXTRA_KEY, {})
+                            or {}
+                        ),
+                        "active": True,
+                        "reminder_added": False,
+                    },
                 )
             return
-        if tool_name != "send_message_to_user":
+        if tool_name != "image_studio_send_output":
+            return
+        if str((tool_args or {}).get("destination") or "").strip().lower() != "session":
             return
         state = _get_event_extra(event, IMAGE_WORKFLOW_STATE_EXTRA_KEY)
         if not isinstance(state, dict) or not state.get("active"):
@@ -907,6 +1004,7 @@ class ImageStudioPlugin(Star):
                 "没有符合条件的模型；模型可能不存在、已停用、不支持该模式或未向 LLM 工具开放。"
             )
         _remember_capability_query(event, self._settings.revision, entries)
+        _activate_image_workflow(event)
         if normalized_query_type == "default":
             next_action = (
                 "按请求模式选择 default_for_modes；普通画面描述不是能力缺口。满足明确能力则直接生成，"
@@ -923,10 +1021,11 @@ class ImageStudioPlugin(Star):
             "next_action": next_action,
             "asset_policy": {
                 "return_mode": self._settings.llm_image_return_mode,
-                "preview_max_edge": self._settings.llm_preview_max_edge,
-                "retention_hours": self._settings.llm_asset_retention_hours,
-                "use_original_path_for_file_operations": True,
+                "preview_max_edge": self._settings.asset_preview_max_edge,
+                "retention_hours": self._settings.asset_lease_hours,
+                "private_asset_handle": "asset_id",
                 "view_tool": "image_studio_view_asset",
+                "delivery_tool": "image_studio_send_output",
             },
             "default_model_refs": {
                 "text2img": self._settings.default_model_ref("text2img", "llm_tool"),
@@ -951,20 +1050,20 @@ class ImageStudioPlugin(Star):
         mode: str = "",
         model_ref: str = "",
         parameters: dict[str, Any] | None = None,
-        reference_image_paths: list[str] | None = None,
+        references: list[dict[str, Any]] | None = None,
     ) -> mcp.types.CallToolResult:
         """生成图片，并返回可继续处理的原图资产。
 
-        send_message_to_user 只负责中途投递产物或通知，不代表本轮结束；中途消息可以包含图片和文字，
+        image_studio_send_output 只负责中途投递产物或通知，不代表本轮结束；中途消息可以包含图片和文字，
         但已发送的文字不能在后续重复。任务完成后停止调用工具，直接输出一条非空的普通 assistant 文本；
-        不要把最终正文放进 send_message_to_user 的 messages 后返回空文本。
+        不要把最终正文放进 image_studio_send_output 的 messages 后返回空文本。
 
         Args:
             prompt(string): 生图提示词，格式遵循能力查询结果
-            mode(string): text2img/img2img
+            mode(string): text2img/img2img; 应明确指定，缺失时仅作容错推断
             model_ref(string): provider_id:model_id; 省略时使用模式默认
             parameters(object): 仅填写能力查询为该模型返回的参数
-            reference_image_paths(array[string]): 传入参考图文件路径
+            references(array[object]): 图生图参考，元素使用 asset_id 或当前 workspace 的 path
 
         Returns:
             Original asset metadata and optional MCP preview content for Agent workflows.
@@ -979,23 +1078,26 @@ class ImageStudioPlugin(Star):
                 ]
             )
         try:
-            if reference_image_paths is None:
-                paths: list[str] = []
-                include_event_references = True
-            elif isinstance(reference_image_paths, (list, tuple)):
-                paths = list(reference_image_paths)
-                include_event_references = False
+            if references is None:
+                explicit_references: list[Any] = []
+            elif isinstance(references, (list, tuple)):
+                explicit_references = list(references)
             else:
-                raise ValueError("reference_image_paths 必须是数组")
-            references = await self._event_references(
+                raise ValueError("references 必须是数组")
+            requested_mode = str(mode or "").strip()
+            normalized_requested_mode = (
+                _llm_mode(requested_mode) if requested_mode else ""
+            )
+            resolved_references = await self._event_references(
                 event,
-                paths,
-                include_event_references=include_event_references,
+                explicit_references,
+                include_event_references=(
+                    not explicit_references and normalized_requested_mode != "text2img"
+                ),
             )
-            normalized_mode = str(mode or "").strip() or (
-                "img2img" if references else "text2img"
+            normalized_mode = normalized_requested_mode or (
+                "img2img" if resolved_references else "text2img"
             )
-            normalized_mode = _llm_mode(normalized_mode)
             provider, selected_model, canonical_ref = _select_llm_tool_model(
                 self._settings,
                 normalized_mode,
@@ -1035,7 +1137,7 @@ class ImageStudioPlugin(Star):
                 size="",
                 count=0,
                 parameters=dynamic_parameters,
-                references=references,
+                references=resolved_references,
                 source="llm_tool",
                 invocation_source=(
                     _invocation_source(event)
@@ -1051,12 +1153,13 @@ class ImageStudioPlugin(Star):
         configured_return_mode = self._settings.llm_image_return_mode
         actual_return_mode = configured_return_mode
         try:
-            assets = await self.store.stage_agent_images(
+            assets = await self.store.lease_agent_images(
                 result.images,
+                scope_id=_event_scope_id(event),
                 create_preview=configured_return_mode == "preview",
-                preview_max_edge=self._settings.llm_preview_max_edge,
-                preview_quality=self._settings.llm_preview_quality,
-                retention_hours=self._settings.llm_asset_retention_hours,
+                preview_max_edge=self._settings.asset_preview_max_edge,
+                preview_quality=self._settings.asset_preview_quality,
+                retention_hours=self._settings.asset_lease_hours,
             )
         except Exception as exc:
             logger.warning(
@@ -1088,8 +1191,7 @@ class ImageStudioPlugin(Star):
             )
         manifest = [
             {
-                "asset_id": asset.id,
-                "original_path": asset.path,
+                "asset_id": asset.asset_id,
                 "mime_type": asset.mime_type,
                 "size_bytes": asset.size_bytes,
                 "preview_size_bytes": (
@@ -1099,14 +1201,14 @@ class ImageStudioPlugin(Star):
             for asset in assets
         ]
         if actual_return_mode == "preview":
-            visual_notice = (
-                "ImageContent 和 tool_images 路径均为预览；文件操作使用 original_path。"
-            )
+            visual_notice = "ImageContent 是轻量预览；继续操作插件资产时使用 asset_id。"
         elif actual_return_mode == "asset":
-            visual_notice = "未附视觉图；文件操作使用 original_path，需要看图时调用 image_studio_view_asset。"
+            visual_notice = (
+                "未附视觉图；需要看图时使用 asset_id 调用 image_studio_view_asset。"
+            )
         else:
             visual_notice = (
-                "ImageContent 为原图；文件操作使用 original_path。"
+                "ImageContent 为原图；后续插件操作仍使用 asset_id。"
                 if assets
                 else "资产暂存失败，仅返回完整 ImageContent。"
             )
@@ -1133,7 +1235,7 @@ class ImageStudioPlugin(Star):
         asset_id: str = "",
         detail: str = "preview",
     ) -> mcp.types.CallToolResult:
-        """按需查看图片资产; 普通发送和文件处理直接使用 original_path。
+        """按需查看当前会话有权访问的 Image Studio 图片资产。
 
         Args:
             asset_id(string): generate 返回的资产 ID。
@@ -1145,16 +1247,17 @@ class ImageStudioPlugin(Star):
         normalized_detail = str(detail or "preview").strip().lower()
         if normalized_detail not in {"preview", "original"}:
             return _tool_error("detail 仅支持 preview 或 original。")
-        loaded = await self.store.load_agent_image(
+        loaded = await self.store.load_workflow_image(
             asset_id,
+            scope_id=_event_scope_id(event),
             detail=normalized_detail,
-            preview_max_edge=self._settings.llm_preview_max_edge,
-            preview_quality=self._settings.llm_preview_quality,
-            retention_hours=self._settings.llm_asset_retention_hours,
+            preview_max_edge=self._settings.asset_preview_max_edge,
+            preview_quality=self._settings.asset_preview_quality,
+            retention_hours=self._settings.asset_lease_hours,
         )
         if loaded is None:
             return _tool_error("图片资产不存在或已超过临时保留时间。")
-        image, original_path = loaded
+        image, _internal_path = loaded
         return mcp.types.CallToolResult(
             content=[
                 mcp.types.ImageContent(
@@ -1164,19 +1267,329 @@ class ImageStudioPlugin(Star):
                 ),
                 mcp.types.TextContent(
                     type="text",
-                    text=(
-                        f"已加载 {normalized_detail}；仅供观察。"
-                        f"文件操作使用 original_path={original_path}。"
-                    ),
+                    text=f"已加载 {normalized_detail}；后续插件操作继续使用 asset_id。",
                 ),
             ]
         )
+
+    @filter.llm_tool(name="image_studio_send_output")
+    async def image_studio_send_output(
+        self,
+        event: AstrMessageEvent,
+        destination: str,
+        messages: list[dict[str, Any]],
+    ) -> mcp.types.CallToolResult:
+        """向当前会话投递中途消息/产物，或将插件资产复制到当前 workspace；不会结束任务。
+
+        Args:
+            destination(string): session 或 workspace；必须明确填写
+            messages(array[object]): 有序消息。session 支持 plain/image/record/video/file；plain 使用 text，媒体使用 asset_id/path/url 三选一并可填 name。workspace 仅接受带 asset_id 的图片项
+        """
+
+        if not self._settings.enable_llm_tool:
+            return _tool_error("Image Studio 的 LLM 生图工具已关闭。")
+        state = _get_event_extra(event, IMAGE_WORKFLOW_STATE_EXTRA_KEY, {})
+        if not isinstance(state, dict) or not state.get("active"):
+            return _tool_error("请先调用 image_studio_get_capabilities 开始工作流。")
+        normalized_destination = str(destination or "").strip().lower()
+        if normalized_destination not in {"session", "workspace"}:
+            return _tool_error("destination 必须明确填写 session 或 workspace。")
+        if not isinstance(messages, list) or not messages:
+            return _tool_error("messages 必须是非空数组。")
+        try:
+            if normalized_destination == "workspace":
+                paths = await self._materialize_assets_to_workspace(event, messages)
+                return _tool_text_result(
+                    json.dumps(
+                        {
+                            "destination": "workspace",
+                            "workspace_paths": paths,
+                            "notice": "资产已复制；本轮任务仍在继续。",
+                        },
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                )
+            count = await self._send_output_to_session(event, messages)
+            return _tool_text_result(
+                f"已向当前会话投递 {count} 个消息组件；这不会结束本轮任务。"
+                "如果任务已完成，请停止调用工具并输出非空的普通 assistant 最终回复。"
+            )
+        except ValueError as exc:
+            return _tool_error(str(exc))
+        except Exception as exc:
+            logger.warning("%s 工作流产物投递失败: %s", LOG_TAG, type(exc).__name__)
+            return _tool_error(f"工作流产物投递失败：{type(exc).__name__}")
+
+    async def _load_workflow_asset(
+        self, event: AstrMessageEvent, asset_id: str
+    ) -> tuple[Any, str]:
+        loaded = await self.store.load_workflow_image(
+            str(asset_id or "").strip().lower(),
+            scope_id=_event_scope_id(event),
+            detail="original",
+            preview_max_edge=self._settings.asset_preview_max_edge,
+            preview_quality=self._settings.asset_preview_quality,
+            retention_hours=self._settings.asset_lease_hours,
+        )
+        if loaded is None:
+            raise ValueError("图片资产不存在、已过期或不属于当前会话。")
+        return loaded
+
+    async def _materialize_assets_to_workspace(
+        self, event: AstrMessageEvent, messages: list[dict[str, Any]]
+    ) -> list[str]:
+        runtime = _computer_runtime(self.context, event)
+        if runtime not in {"local", "sandbox"}:
+            raise ValueError("当前会话未启用 local 或 sandbox 计算工作区。")
+        results: list[str] = []
+        workspace_root = (
+            await _event_workspace_root(event, self.context)
+            if runtime == "local"
+            else None
+        )
+        booter = (
+            await get_booter(self.context, event.unified_msg_origin)
+            if runtime == "sandbox"
+            else None
+        )
+        if len(messages) > 20:
+            raise ValueError("workspace 单次最多复制 20 个资产。")
+        for index, item in enumerate(messages):
+            if not isinstance(item, dict):
+                raise ValueError(f"messages[{index}] 必须是对象。")
+            if str(item.get("type") or "image").strip().lower() != "image":
+                raise ValueError("workspace 目标只接受 Image Studio 图片资产。")
+            asset_id = str(item.get("asset_id") or "").strip().lower()
+            if not asset_id or item.get("path") or item.get("url") or item.get("text"):
+                raise ValueError(
+                    "workspace 目标的每一项只能填写 asset_id 和可选 name。"
+                )
+            image, internal_path = await self._load_workflow_asset(event, asset_id)
+            default_name = Path(internal_path).name
+            name = _safe_output_filename(item.get("name"), default_name)
+            if runtime == "local":
+                assert workspace_root is not None
+                target_dir = workspace_root / "image-studio-assets"
+                target = await asyncio.to_thread(
+                    _write_unique_workspace_file, target_dir, name, image.data
+                )
+                results.append(str(target.relative_to(workspace_root)))
+            else:
+                assert booter is not None
+                uploaded = await booter.upload_file(internal_path, name)
+                if not isinstance(uploaded, dict) or not uploaded.get("success"):
+                    raise ValueError("资产上传到当前 sandbox workspace 失败。")
+                remote_path = str(uploaded.get("file_path") or "").strip()
+                if not remote_path:
+                    raise ValueError("sandbox 未返回可用的 workspace 路径。")
+                results.append(remote_path)
+        return results
+
+    async def _send_output_to_session(
+        self, event: AstrMessageEvent, messages: list[dict[str, Any]]
+    ) -> int:
+        runtime = _computer_runtime(self.context, event)
+        workspace_root = (
+            await _event_workspace_root(event, self.context)
+            if runtime == "local"
+            else None
+        )
+        booter = None
+        components: list[Any] = []
+        temporary_files: list[Path] = []
+        try:
+            if len(messages) > 40:
+                raise ValueError("session 单次最多投递 40 个消息组件。")
+            for index, item in enumerate(messages):
+                if not isinstance(item, dict):
+                    raise ValueError(f"messages[{index}] 必须是对象。")
+                kind = str(item.get("type") or "").strip().lower()
+                if kind == "plain":
+                    text = str(item.get("text") or "").strip()
+                    if not text:
+                        raise ValueError(f"messages[{index}] 的 plain 文本为空。")
+                    components.append(Plain(text))
+                    continue
+                if kind not in {"image", "record", "video", "file"}:
+                    raise ValueError(f"messages[{index}] 的类型不受支持。")
+                asset_id = str(item.get("asset_id") or "").strip().lower()
+                path = str(item.get("path") or "").strip()
+                url = str(item.get("url") or "").strip()
+                if sum(bool(value) for value in (asset_id, path, url)) != 1:
+                    raise ValueError(
+                        f"messages[{index}] 必须且只能填写 asset_id、path 或 url。"
+                    )
+                if asset_id:
+                    if kind != "image":
+                        raise ValueError("Image Studio asset_id 只能作为 image 发送。")
+                    image, _internal_path = await self._load_workflow_asset(
+                        event, asset_id
+                    )
+                    components.append(Image.fromBytes(image.data))
+                    continue
+                if url:
+                    if not url.lower().startswith(("http://", "https://")):
+                        raise ValueError("媒体 URL 仅支持 http 或 https。")
+                    components.append(_url_component(kind, url, item.get("name")))
+                    continue
+                if runtime == "sandbox" and booter is None:
+                    booter = await get_booter(self.context, event.unified_msg_origin)
+                local_path = await _resolve_delivery_path(
+                    path,
+                    runtime=runtime,
+                    workspace_root=workspace_root,
+                    booter=booter,
+                    delivery_dir=self.store.delivery_dir,
+                )
+                if runtime == "sandbox":
+                    temporary_files.append(local_path)
+                components.append(_file_component(kind, local_path, item.get("name")))
+            await event.send(MessageChain(chain=components))
+        finally:
+            for path in temporary_files:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        return len(components)
 
 
 def _tool_error(message: str) -> mcp.types.CallToolResult:
     return mcp.types.CallToolResult(
         content=[mcp.types.TextContent(type="text", text=message)], isError=True
     )
+
+
+def _tool_text_result(message: str) -> mcp.types.CallToolResult:
+    return mcp.types.CallToolResult(
+        content=[mcp.types.TextContent(type="text", text=message)]
+    )
+
+
+def _activate_image_workflow(event: Any) -> None:
+    state = _get_event_extra(event, IMAGE_WORKFLOW_STATE_EXTRA_KEY, {})
+    if not isinstance(state, dict):
+        state = {}
+    _set_event_extra(
+        event,
+        IMAGE_WORKFLOW_STATE_EXTRA_KEY,
+        {**state, "active": True, "reminder_added": False},
+    )
+    request = _get_event_extra(event, "provider_request")
+    if request is None or not _request_has_tool(request, "image_studio_send_output"):
+        return
+    tool_set = getattr(request, "func_tool", None)
+    remover = getattr(tool_set, "remove_tool", None)
+    if callable(remover):
+        remover("send_message_to_user")
+
+
+def _event_scope_id(event: Any) -> str:
+    scope = str(getattr(event, "unified_msg_origin", "") or "").strip()
+    if scope:
+        return scope
+    existing = str(_get_event_extra(event, "_image_studio_scope_id", "") or "")
+    if existing:
+        return existing
+    generated = f"event:{uuid.uuid4().hex}"
+    _set_event_extra(event, "_image_studio_scope_id", generated)
+    return generated
+
+
+def _computer_runtime(context: Any, event: Any) -> str:
+    getter = getattr(context, "get_config", None)
+    if not callable(getter):
+        return "none"
+    try:
+        config = getter(umo=str(getattr(event, "unified_msg_origin", "") or ""))
+    except Exception:
+        return "none"
+    if not isinstance(config, dict):
+        return "none"
+    provider_settings = config.get("provider_settings")
+    if not isinstance(provider_settings, dict):
+        return "none"
+    return str(provider_settings.get("computer_use_runtime") or "none").lower()
+
+
+def _safe_output_filename(value: Any, fallback: str) -> str:
+    candidate = Path(str(value or "").replace("\\", "/")).name.strip()
+    candidate = re.sub(r"[^A-Za-z0-9._-]+", "_", candidate).strip("._")[:120]
+    if not candidate:
+        candidate = Path(fallback).name
+    return candidate or "asset.png"
+
+
+def _write_unique_workspace_file(directory: Path, name: str, data: bytes) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    base = Path(name).stem or "asset"
+    suffix = Path(name).suffix
+    target = directory / name
+    index = 1
+    while target.exists():
+        target = directory / f"{base}-{index}{suffix}"
+        index += 1
+    temporary = directory / f".{target.name}.{uuid.uuid4().hex}.tmp"
+    try:
+        temporary.write_bytes(data)
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return target
+
+
+async def _resolve_delivery_path(
+    raw_path: str,
+    *,
+    runtime: str,
+    workspace_root: Path | None,
+    booter: Any,
+    delivery_dir: Path,
+) -> Path:
+    if runtime == "local":
+        if workspace_root is None:
+            raise ValueError("当前会话 workspace 不可用。")
+        candidate = Path(raw_path).expanduser()
+        if not candidate.is_absolute():
+            candidate = workspace_root / candidate
+        try:
+            resolved = candidate.resolve(strict=True)
+            resolved.relative_to(workspace_root.resolve(strict=False))
+        except (OSError, ValueError) as exc:
+            raise ValueError("媒体路径不存在或不在当前 workspace 内。") from exc
+        if not resolved.is_file():
+            raise ValueError("媒体路径不是文件。")
+        return resolved
+    if runtime == "sandbox" and booter is not None:
+        name = _safe_output_filename(raw_path, "sandbox-output")
+        delivery_dir.mkdir(parents=True, exist_ok=True)
+        target = delivery_dir / f"{uuid.uuid4().hex}_{name}"
+        await booter.download_file(raw_path, str(target))
+        if not target.is_file():
+            raise ValueError("无法从当前 sandbox workspace 读取媒体文件。")
+        return target
+    raise ValueError("当前会话未启用可读取 workspace 文件的计算运行时。")
+
+
+def _file_component(kind: str, path: Path, name: Any) -> Any:
+    if kind == "image":
+        return Image.fromFileSystem(str(path))
+    if kind == "record":
+        return Record.fromFileSystem(str(path))
+    if kind == "video":
+        return Video.fromFileSystem(str(path))
+    return File(name=_safe_output_filename(name, path.name), file=str(path))
+
+
+def _url_component(kind: str, url: str, name: Any) -> Any:
+    if kind == "image":
+        return Image.fromURL(url)
+    if kind == "record":
+        return Record.fromURL(url)
+    if kind == "video":
+        return Video.fromURL(url)
+    return File(name=_safe_output_filename(name, Path(url).name), url=url)
 
 
 def _remember_capability_query(

@@ -418,11 +418,10 @@ class GeneratedImage:
 
 
 @dataclass(frozen=True, slots=True)
-class AgentImageAsset:
-    """An original tool image plus an optional lightweight LLM preview."""
+class WorkflowImageAsset:
+    """A leased private image asset plus an optional LLM preview."""
 
-    id: str
-    path: str
+    asset_id: str
     mime_type: str
     size_bytes: int
     preview: GeneratedImage | None = None

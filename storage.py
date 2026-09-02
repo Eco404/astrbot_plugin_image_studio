@@ -17,11 +17,11 @@ from typing import Any
 
 from .config import HistorySettings
 from .models import (
-    AgentImageAsset,
     GeneratedImage,
     GenerationRequest,
     ImageProvider,
     ReferenceImage,
+    WorkflowImageAsset,
 )
 
 _IMAGE_SUFFIXES = {
@@ -44,11 +44,19 @@ class GenerationStore:
         self.thumbnails_dir = self.history_dir / "thumbnails"
         self.staging_dir = self.data_dir / "staging_references"
         self.exports_dir = self.data_dir / "exports"
-        self.agent_assets_dir = self.data_dir / "agent_assets"
-        self.agent_originals_dir = self.agent_assets_dir / "originals"
-        self.agent_previews_dir = self.agent_assets_dir / "previews"
+        self.delivery_dir = self.data_dir / "delivery_staging"
         self.db_path = self.data_dir / "history.sqlite3"
         self._lock = asyncio.Lock()
+        self._last_maintenance_report: dict[str, Any] = {
+            "status": "never",
+            "running": False,
+            "checked_at": 0,
+            "duration_ms": 0,
+            "deep": False,
+            "stats": {},
+            "repaired": {},
+            "errors": [],
+        }
 
     async def initialize(self) -> None:
         """Create directories and database tables."""
@@ -62,8 +70,7 @@ class GenerationStore:
             self.thumbnails_dir,
             self.staging_dir,
             self.exports_dir,
-            self.agent_originals_dir,
-            self.agent_previews_dir,
+            self.delivery_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
@@ -103,7 +110,9 @@ class GenerationStore:
                     asset_id TEXT PRIMARY KEY REFERENCES image_assets(id) ON DELETE CASCADE,
                     path TEXT NOT NULL UNIQUE,
                     mime_type TEXT NOT NULL,
-                    size_bytes INTEGER NOT NULL
+                    size_bytes INTEGER NOT NULL,
+                    max_edge INTEGER NOT NULL DEFAULT 0,
+                    quality INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE TABLE IF NOT EXISTS generation_images (
                     id TEXT PRIMARY KEY,
@@ -122,12 +131,24 @@ class GenerationStore:
                     deleted_at REAL,
                     asset_id TEXT REFERENCES image_assets(id)
                 );
+                CREATE TABLE IF NOT EXISTS agent_asset_leases (
+                    id TEXT PRIMARY KEY,
+                    asset_id TEXT NOT NULL REFERENCES image_assets(id) ON DELETE CASCADE,
+                    scope_id TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    last_accessed_at REAL NOT NULL,
+                    expires_at REAL NOT NULL,
+                    hard_expires_at REAL NOT NULL,
+                    UNIQUE(scope_id, asset_id)
+                );
                 CREATE INDEX IF NOT EXISTS idx_generations_created_at ON generations(created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_generations_provider ON generations(provider_id);
                 CREATE INDEX IF NOT EXISTS idx_generation_images_generation ON generation_images(generation_id);
                 CREATE INDEX IF NOT EXISTS idx_generation_references_generation ON generation_references(generation_id);
                 CREATE INDEX IF NOT EXISTS idx_generation_images_asset ON generation_images(asset_id);
                 CREATE INDEX IF NOT EXISTS idx_generation_references_asset ON generation_references(asset_id);
+                CREATE INDEX IF NOT EXISTS idx_agent_asset_leases_asset ON agent_asset_leases(asset_id);
+                CREATE INDEX IF NOT EXISTS idx_agent_asset_leases_expiry ON agent_asset_leases(expires_at);
                 """
             )
             generation_columns = {
@@ -147,6 +168,18 @@ class GenerationStore:
                     conn.execute(
                         f"ALTER TABLE generations ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
                     )
+            thumbnail_columns = {
+                str(row["name"])
+                for row in conn.execute(
+                    "PRAGMA table_info(image_thumbnails)"
+                ).fetchall()
+            }
+            for column in ("max_edge", "quality"):
+                if column not in thumbnail_columns:
+                    conn.execute(
+                        f"ALTER TABLE image_thumbnails ADD COLUMN {column} "
+                        "INTEGER NOT NULL DEFAULT 0"
+                    )
             try:
                 conn.execute(
                     "CREATE VIRTUAL TABLE IF NOT EXISTS generation_search USING fts5("
@@ -154,9 +187,162 @@ class GenerationStore:
                 )
             except sqlite3.OperationalError:
                 pass
+        self._delete_expired_leases_sync(time.time())
         self._purge_unreferenced_assets_sync()
         self._cleanup_orphaned_asset_files_sync()
         self._cleanup_orphaned_thumbnails_sync()
+
+    async def maintenance_report(self) -> dict[str, Any]:
+        """Return the latest maintenance report plus current lightweight stats."""
+
+        async with self._lock:
+            report = dict(self._last_maintenance_report)
+            report["stats"] = await asyncio.to_thread(self._storage_stats_sync)
+        return report
+
+    async def run_maintenance(
+        self,
+        history: HistorySettings,
+        *,
+        preview_max_edge: int,
+        preview_quality: int,
+        deep: bool = False,
+    ) -> dict[str, Any]:
+        """Check and repair the complete plugin-owned storage graph."""
+
+        async with self._lock:
+            self._last_maintenance_report = {
+                **self._last_maintenance_report,
+                "running": True,
+            }
+            try:
+                report = await asyncio.to_thread(
+                    self._run_maintenance_sync,
+                    history,
+                    preview_max_edge,
+                    preview_quality,
+                    bool(deep),
+                )
+            except Exception as exc:
+                report = {
+                    "status": "error",
+                    "running": False,
+                    "checked_at": time.time(),
+                    "duration_ms": 0,
+                    "deep": bool(deep),
+                    "stats": self._storage_stats_sync(),
+                    "repaired": {},
+                    "errors": [f"存储维护失败：{type(exc).__name__}"],
+                }
+            self._last_maintenance_report = report
+            return dict(report)
+
+    def _run_maintenance_sync(
+        self,
+        history: HistorySettings,
+        preview_max_edge: int,
+        preview_quality: int,
+        deep: bool,
+    ) -> dict[str, Any]:
+        started = time.perf_counter()
+        checked_at = time.time()
+        errors: list[str] = []
+        repaired = {
+            "expired_leases": 0,
+            "broken_assets": 0,
+            "rebuilt_thumbnails": 0,
+            "unreferenced_assets": 0,
+            "orphan_files": 0,
+            "stale_temporary_files": 0,
+        }
+
+        try:
+            with self._connect() as conn:
+                quick = str(conn.execute("PRAGMA quick_check").fetchone()[0])
+                if quick != "ok":
+                    errors.append(f"SQLite quick_check：{quick}")
+                foreign_rows = conn.execute("PRAGMA foreign_key_check").fetchall()
+                if foreign_rows:
+                    errors.append(f"SQLite 外键异常：{len(foreign_rows)} 项")
+        except sqlite3.Error as exc:
+            errors.append(f"SQLite 检查失败：{type(exc).__name__}")
+
+        repaired["expired_leases"] = self._delete_expired_leases_sync(checked_at)
+        broken_ids: list[str] = []
+        with self._connect() as conn:
+            asset_rows = [
+                dict(row)
+                for row in conn.execute(
+                    "SELECT id, path, mime_type, size_bytes FROM image_assets"
+                ).fetchall()
+            ]
+        for asset in asset_rows:
+            path = self.data_dir / str(asset["path"])
+            try:
+                valid = (
+                    _is_within(path, self.assets_dir)
+                    and path.is_file()
+                    and path.stat().st_size == int(asset["size_bytes"])
+                )
+                if valid and deep:
+                    valid = hashlib.sha256(path.read_bytes()).hexdigest() == asset["id"]
+            except OSError:
+                valid = False
+            if not valid:
+                broken_ids.append(str(asset["id"]))
+                continue
+            thumbnail = self._prepare_thumbnail_sync(
+                asset,
+                max_edge=preview_max_edge,
+                quality=preview_quality,
+            )
+            with self._connect() as conn:
+                previous = conn.execute(
+                    "SELECT path, size_bytes, max_edge, quality FROM image_thumbnails "
+                    "WHERE asset_id = ?",
+                    (asset["id"],),
+                ).fetchone()
+                self._upsert_thumbnails_sync(conn, [thumbnail])
+            if (
+                previous is None
+                or int(previous["size_bytes"]) != thumbnail["size_bytes"]
+                or int(previous["max_edge"]) != thumbnail["max_edge"]
+                or int(previous["quality"]) != thumbnail["quality"]
+            ):
+                repaired["rebuilt_thumbnails"] += 1
+
+        for asset_id in broken_ids:
+            repaired["broken_assets"] += self._remove_broken_asset_sync(asset_id)
+
+        self._cleanup_sync(history)
+        before_assets = self._asset_count_sync()
+        self._purge_unreferenced_assets_sync()
+        repaired["unreferenced_assets"] = max(
+            0, before_assets - self._asset_count_sync()
+        )
+        grace_cutoff = checked_at - 600
+        repaired["orphan_files"] += self._cleanup_orphaned_asset_files_sync(
+            older_than=grace_cutoff
+        )
+        repaired["orphan_files"] += self._cleanup_orphaned_thumbnails_sync(
+            older_than=grace_cutoff
+        )
+        repaired["stale_temporary_files"] = self._cleanup_stale_files_sync(checked_at)
+        try:
+            with self._connect() as conn:
+                conn.execute("PRAGMA optimize")
+        except sqlite3.Error as exc:
+            errors.append(f"SQLite optimize 失败：{type(exc).__name__}")
+        return {
+            "status": "warning" if errors else "healthy",
+            "running": False,
+            "checked_at": checked_at,
+            "duration_ms": round((time.perf_counter() - started) * 1000),
+            "deep": deep,
+            "stats": self._storage_stats_sync(),
+            "repaired": repaired,
+            "errors": errors,
+        }
 
     async def stage_reference(
         self,
@@ -231,91 +417,117 @@ class GenerationStore:
             for path in self.staging_dir.glob(f"{ref_id}.*"):
                 _unlink_if_owned(path, self.staging_dir)
 
-    async def stage_agent_images(
+    async def lease_agent_images(
         self,
         images: tuple[GeneratedImage, ...],
         *,
+        scope_id: str,
         create_preview: bool,
         preview_max_edge: int,
         preview_quality: int,
         retention_hours: int,
-    ) -> tuple[AgentImageAsset, ...]:
-        """Persist generated originals independently from optional gallery history."""
+    ) -> tuple[WorkflowImageAsset, ...]:
+        """Store generated assets once and lease them to an Agent session."""
 
         async with self._lock:
             return await asyncio.to_thread(
-                self._stage_agent_images_sync,
+                self._lease_agent_images_sync,
                 images,
+                scope_id,
                 create_preview,
                 preview_max_edge,
                 preview_quality,
                 retention_hours,
             )
 
-    def _stage_agent_images_sync(
+    def _lease_agent_images_sync(
         self,
         images: tuple[GeneratedImage, ...],
+        scope_id: str,
         create_preview: bool,
         preview_max_edge: int,
         preview_quality: int,
         retention_hours: int,
-    ) -> tuple[AgentImageAsset, ...]:
-        self._cleanup_agent_assets_sync(retention_hours)
+    ) -> tuple[WorkflowImageAsset, ...]:
+        normalized_scope = str(scope_id or "").strip()
+        if not normalized_scope:
+            raise ValueError("Agent 资产缺少会话范围")
+        now = time.time()
+        retention_seconds = max(1, min(168, int(retention_hours))) * 3600
+        self._delete_expired_leases_sync(now)
         max_edge = max(256, min(2048, int(preview_max_edge)))
         quality = max(40, min(95, int(preview_quality)))
-        assets: list[AgentImageAsset] = []
+        assets: list[WorkflowImageAsset] = []
+        prepared_assets: dict[str, dict[str, Any]] = {}
+        prepared_thumbnails: dict[str, dict[str, Any]] = {}
         for image in images:
-            digest = hashlib.sha256(image.data).hexdigest()
-            mime_type = detect_mime_type(image.data, image.mime_type)
-            suffix = _image_suffix(mime_type, image.data)
-            original = self.agent_originals_dir / digest[:2] / f"{digest}{suffix}"
-            try:
-                current_size = original.stat().st_size
-            except OSError:
-                current_size = -1
-            if current_size != len(image.data):
-                history_source = self.assets_dir / digest[:2] / f"{digest}{suffix}"
-                _link_or_write(original, history_source, image.data)
-            else:
-                os.utime(original, None)
-
+            asset = self._prepare_asset_sync(image.data, image.mime_type)
+            prepared_assets[asset["id"]] = asset
             preview: GeneratedImage | None = None
             if create_preview:
-                preview_path = (
-                    self.agent_previews_dir
-                    / digest[:2]
-                    / f"{digest}_{max_edge}_{quality}.webp"
+                thumbnail = self._prepare_thumbnail_sync(
+                    asset,
+                    max_edge=max_edge,
+                    quality=quality,
                 )
-                if not preview_path.is_file():
-                    _create_agent_preview(
-                        image.data,
-                        preview_path,
-                        max_edge=max_edge,
-                        quality=quality,
-                    )
-                else:
-                    os.utime(preview_path, None)
-                preview_data = preview_path.read_bytes()
+                prepared_thumbnails[asset["id"]] = thumbnail
+                preview_data = (self.data_dir / thumbnail["path"]).read_bytes()
                 preview = GeneratedImage(
                     data=preview_data,
                     mime_type=detect_mime_type(preview_data, "image/webp"),
                 )
 
             assets.append(
-                AgentImageAsset(
-                    id=digest,
-                    path=str(original.resolve(strict=False)),
-                    mime_type=mime_type,
+                WorkflowImageAsset(
+                    asset_id=asset["id"],
+                    mime_type=asset["mime_type"],
                     size_bytes=len(image.data),
                     preview=preview,
                 )
             )
+        with self._connect() as conn:
+            conn.executemany(
+                "INSERT INTO image_assets (id, path, mime_type, size_bytes, created_at) "
+                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET "
+                "path=excluded.path, mime_type=excluded.mime_type, size_bytes=excluded.size_bytes",
+                [
+                    (
+                        asset["id"],
+                        asset["path"],
+                        asset["mime_type"],
+                        asset["size_bytes"],
+                        now,
+                    )
+                    for asset in prepared_assets.values()
+                ],
+            )
+            self._upsert_thumbnails_sync(conn, prepared_thumbnails.values())
+            for asset in prepared_assets.values():
+                hard_expires_at = now + 7 * 24 * 3600
+                conn.execute(
+                    "INSERT INTO agent_asset_leases "
+                    "(id, asset_id, scope_id, created_at, last_accessed_at, expires_at, hard_expires_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(scope_id, asset_id) DO UPDATE SET "
+                    "last_accessed_at=excluded.last_accessed_at, "
+                    "expires_at=excluded.expires_at, hard_expires_at=excluded.hard_expires_at",
+                    (
+                        uuid.uuid4().hex,
+                        asset["id"],
+                        normalized_scope,
+                        now,
+                        now,
+                        now + retention_seconds,
+                        hard_expires_at,
+                    ),
+                )
         return tuple(assets)
 
-    async def load_agent_image(
+    async def load_workflow_image(
         self,
         asset_id: str,
         *,
+        scope_id: str,
         detail: str,
         preview_max_edge: int,
         preview_quality: int,
@@ -325,35 +537,58 @@ class GenerationStore:
 
         async with self._lock:
             return await asyncio.to_thread(
-                self._load_agent_image_sync,
+                self._load_workflow_image_sync,
                 asset_id,
+                scope_id,
                 detail,
                 preview_max_edge,
                 preview_quality,
                 retention_hours,
             )
 
-    def _load_agent_image_sync(
+    def _load_workflow_image_sync(
         self,
         asset_id: str,
+        scope_id: str,
         detail: str,
         preview_max_edge: int,
         preview_quality: int,
         retention_hours: int,
     ) -> tuple[GeneratedImage, str] | None:
         clean_id = str(asset_id or "").strip().lower()
-        if not _SHA256_RE.fullmatch(clean_id):
+        normalized_scope = str(scope_id or "").strip()
+        if not _SHA256_RE.fullmatch(clean_id) or not normalized_scope:
             return None
-        self._cleanup_agent_assets_sync(retention_hours)
-        originals = list(
-            (self.agent_originals_dir / clean_id[:2]).glob(f"{clean_id}.*")
-        )
-        if len(originals) != 1 or not originals[0].is_file():
+        now = time.time()
+        retention_seconds = max(1, min(168, int(retention_hours))) * 3600
+        self._delete_expired_leases_sync(now)
+        with self._connect() as conn:
+            lease = conn.execute(
+                "SELECT hard_expires_at FROM agent_asset_leases "
+                "WHERE asset_id = ? AND scope_id = ? AND expires_at > ? AND hard_expires_at > ?",
+                (clean_id, normalized_scope, now, now),
+            ).fetchone()
+            row = conn.execute(
+                "SELECT path, mime_type, size_bytes FROM image_assets WHERE id = ?",
+                (clean_id,),
+            ).fetchone()
+            if lease is None or row is None:
+                return None
+            conn.execute(
+                "UPDATE agent_asset_leases SET last_accessed_at = ?, expires_at = ? "
+                "WHERE asset_id = ? AND scope_id = ?",
+                (
+                    now,
+                    min(now + retention_seconds, float(lease["hard_expires_at"])),
+                    clean_id,
+                    normalized_scope,
+                ),
+            )
+        original = self.data_dir / str(row["path"])
+        if not original.is_file() or not _is_within(original, self.assets_dir):
             return None
-        original = originals[0]
-        os.utime(original, None)
         raw = original.read_bytes()
-        mime_type = detect_mime_type(raw, "")
+        mime_type = detect_mime_type(raw, str(row["mime_type"]))
         if detail == "original":
             return GeneratedImage(data=raw, mime_type=mime_type), str(
                 original.resolve(strict=False)
@@ -361,20 +596,19 @@ class GenerationStore:
 
         max_edge = max(256, min(2048, int(preview_max_edge)))
         quality = max(40, min(95, int(preview_quality)))
-        preview_path = (
-            self.agent_previews_dir
-            / clean_id[:2]
-            / f"{clean_id}_{max_edge}_{quality}.webp"
+        thumbnail = self._prepare_thumbnail_sync(
+            {
+                "id": clean_id,
+                "path": str(row["path"]),
+                "mime_type": mime_type,
+                "size_bytes": int(row["size_bytes"]),
+            },
+            max_edge=max_edge,
+            quality=quality,
         )
-        if not preview_path.is_file():
-            _create_agent_preview(
-                raw,
-                preview_path,
-                max_edge=max_edge,
-                quality=quality,
-            )
-        else:
-            os.utime(preview_path, None)
+        with self._connect() as conn:
+            self._upsert_thumbnails_sync(conn, [thumbnail])
+        preview_path = self.data_dir / thumbnail["path"]
         preview_data = preview_path.read_bytes()
         return (
             GeneratedImage(
@@ -384,28 +618,13 @@ class GenerationStore:
             str(original.resolve(strict=False)),
         )
 
-    async def cleanup_agent_assets(self, retention_hours: int) -> None:
-        """Delete expired temporary originals and previews."""
-
-        async with self._lock:
-            await asyncio.to_thread(self._cleanup_agent_assets_sync, retention_hours)
-
-    def _cleanup_agent_assets_sync(self, retention_hours: int) -> None:
-        cutoff = time.time() - max(1, min(168, int(retention_hours))) * 3600
-        for root in (self.agent_originals_dir, self.agent_previews_dir):
-            if not root.is_dir():
-                continue
-            for path in root.rglob("*"):
-                try:
-                    if (
-                        path.is_file()
-                        and _is_within(path, root)
-                        and path.stat().st_mtime < cutoff
-                    ):
-                        path.unlink()
-                except OSError:
-                    continue
-            _remove_empty_directories(root)
+    def _delete_expired_leases_sync(self, now: float) -> int:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM agent_asset_leases WHERE expires_at <= ? OR hard_expires_at <= ?",
+                (now, now),
+            )
+        return max(0, int(cursor.rowcount))
 
     async def record_success(
         self,
@@ -415,6 +634,8 @@ class GenerationStore:
         images: tuple[GeneratedImage, ...],
         elapsed_ms: int,
         history: HistorySettings,
+        preview_max_edge: int = 768,
+        preview_quality: int = 80,
     ) -> str:
         """Persist a successful generation when history is enabled.
 
@@ -433,6 +654,8 @@ class GenerationStore:
                 elapsed_ms,
                 history.retain_reference_images,
                 history.record_invocation_identity,
+                preview_max_edge,
+                preview_quality,
             )
             await asyncio.to_thread(self._cleanup_sync, history)
         return generation_id
@@ -445,6 +668,8 @@ class GenerationStore:
         elapsed_ms: int,
         retain_references: bool,
         record_invocation_identity: bool,
+        preview_max_edge: int,
+        preview_quality: int,
     ) -> str:
         generation_id = uuid.uuid4().hex
         created_at = time.time()
@@ -457,7 +682,11 @@ class GenerationStore:
                 image_id = uuid.uuid4().hex
                 asset = self._prepare_asset_sync(image.data, image.mime_type)
                 assets[asset["id"]] = asset
-                thumbnails[asset["id"]] = self._prepare_thumbnail_sync(asset)
+                thumbnails[asset["id"]] = self._prepare_thumbnail_sync(
+                    asset,
+                    max_edge=preview_max_edge,
+                    quality=preview_quality,
+                )
                 image_rows.append((image_id, ordinal, asset["id"]))
             if retain_references:
                 for ordinal, reference in enumerate(request.references):
@@ -466,6 +695,11 @@ class GenerationStore:
                         reference.data, reference.mime_type
                     )
                     assets[asset["id"]] = asset
+                    thumbnails[asset["id"]] = self._prepare_thumbnail_sync(
+                        asset,
+                        max_edge=preview_max_edge,
+                        quality=preview_quality,
+                    )
                     suffix = _image_suffix(asset["mime_type"], reference.data)
                     reference_rows.append(
                         (
@@ -515,19 +749,7 @@ class GenerationStore:
                         for asset in assets.values()
                     ],
                 )
-                conn.executemany(
-                    "INSERT INTO image_thumbnails (asset_id, path, mime_type, size_bytes) "
-                    "VALUES (?, ?, ?, ?) ON CONFLICT(asset_id) DO NOTHING",
-                    [
-                        (
-                            thumbnail["asset_id"],
-                            thumbnail["path"],
-                            thumbnail["mime_type"],
-                            thumbnail["size_bytes"],
-                        )
-                        for thumbnail in thumbnails.values()
-                    ],
-                )
+                self._upsert_thumbnails_sync(conn, thumbnails.values())
                 conn.execute(
                     "INSERT INTO generations (id, created_at, source, status, mode, provider_id, provider_name, "
                     "provider_kind, model, original_prompt, final_prompt, parameters_json, elapsed_ms, "
@@ -729,8 +951,10 @@ class GenerationStore:
                 (generation_id,),
             ).fetchall()
             reference_rows = conn.execute(
-                "SELECT r.*, a.path FROM generation_references r "
+                "SELECT r.*, a.path, t.path AS thumbnail_path, "
+                "t.mime_type AS thumbnail_mime_type FROM generation_references r "
                 "LEFT JOIN image_assets a ON a.id = r.asset_id "
+                "LEFT JOIN image_thumbnails t ON t.asset_id = a.id "
                 "WHERE r.generation_id = ? ORDER BY r.ordinal",
                 (generation_id,),
             ).fetchall()
@@ -932,6 +1156,7 @@ class GenerationStore:
         self, row: dict[str, Any], *, include_data: bool = True
     ) -> dict[str, Any]:
         path = self.data_dir / str(row.get("path") or "")
+        thumbnail = self.data_dir / str(row.get("thumbnail_path") or "")
         available = (
             bool(row["available"])
             and path.is_file()
@@ -945,7 +1170,10 @@ class GenerationStore:
             "available": available,
             "deleted_at": row["deleted_at"],
             "data_url": (
-                _path_data_url(path, row["mime_type"])
+                _path_data_url(
+                    thumbnail if thumbnail.is_file() else path,
+                    str(row.get("thumbnail_mime_type") or row["mime_type"]),
+                )
                 if available and include_data
                 else ""
             ),
@@ -964,7 +1192,7 @@ class GenerationStore:
 
         if settings.max_megabytes > 0:
             capacity = settings.max_megabytes * 1024 * 1024
-            while self._stored_asset_bytes_sync() > capacity:
+            while self._history_asset_bytes_sync() > capacity:
                 with self._connect() as conn:
                     oldest = conn.execute(
                         "SELECT id FROM generations ORDER BY created_at ASC LIMIT 1"
@@ -993,27 +1221,155 @@ class GenerationStore:
             "size_bytes": len(data),
         }
 
-    def _prepare_thumbnail_sync(self, asset: dict[str, Any]) -> dict[str, Any]:
+    def _prepare_thumbnail_sync(
+        self,
+        asset: dict[str, Any],
+        *,
+        max_edge: int,
+        quality: int,
+    ) -> dict[str, Any]:
+        max_edge = max(256, min(2048, int(max_edge)))
+        quality = max(40, min(95, int(quality)))
         relative_path = Path("history") / "thumbnails" / f"{asset['id']}.webp"
         target = self.data_dir / relative_path
-        if not target.is_file():
-            _create_thumbnail(self.data_dir / asset["path"], target)
+        with self._connect() as conn:
+            current = conn.execute(
+                "SELECT size_bytes, max_edge, quality FROM image_thumbnails WHERE asset_id = ?",
+                (asset["id"],),
+            ).fetchone()
+        if (
+            not target.is_file()
+            or current is None
+            or target.stat().st_size != int(current["size_bytes"])
+            or int(current["max_edge"]) != max_edge
+            or int(current["quality"]) != quality
+        ):
+            _create_thumbnail(
+                self.data_dir / asset["path"],
+                target,
+                max_edge=max_edge,
+                quality=quality,
+            )
         raw = target.read_bytes()
         return {
             "asset_id": asset["id"],
             "path": str(relative_path),
             "mime_type": detect_mime_type(raw, "image/webp"),
             "size_bytes": len(raw),
+            "max_edge": max_edge,
+            "quality": quality,
         }
 
-    def _stored_asset_bytes_sync(self) -> int:
+    @staticmethod
+    def _upsert_thumbnails_sync(conn: sqlite3.Connection, thumbnails: Any) -> None:
+        conn.executemany(
+            "INSERT INTO image_thumbnails "
+            "(asset_id, path, mime_type, size_bytes, max_edge, quality) "
+            "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(asset_id) DO UPDATE SET "
+            "path=excluded.path, mime_type=excluded.mime_type, "
+            "size_bytes=excluded.size_bytes, max_edge=excluded.max_edge, "
+            "quality=excluded.quality",
+            [
+                (
+                    thumbnail["asset_id"],
+                    thumbnail["path"],
+                    thumbnail["mime_type"],
+                    thumbnail["size_bytes"],
+                    thumbnail["max_edge"],
+                    thumbnail["quality"],
+                )
+                for thumbnail in thumbnails
+            ],
+        )
+
+    def _history_asset_bytes_sync(self) -> int:
+        """Return logical gallery bytes, excluding lease-only assets."""
+
+        with self._connect() as conn:
+            row = conn.execute(
+                "WITH history_assets AS ("
+                "SELECT asset_id FROM generation_images UNION "
+                "SELECT asset_id FROM generation_references WHERE asset_id IS NOT NULL"
+                ") SELECT "
+                "COALESCE((SELECT SUM(a.size_bytes) FROM image_assets a "
+                "JOIN history_assets h ON h.asset_id = a.id), 0) + "
+                "COALESCE((SELECT SUM(t.size_bytes) FROM image_thumbnails t "
+                "JOIN history_assets h ON h.asset_id = t.asset_id), 0)"
+            ).fetchone()
+        return int(row[0])
+
+    def _asset_count_sync(self) -> int:
+        with self._connect() as conn:
+            return int(conn.execute("SELECT COUNT(*) FROM image_assets").fetchone()[0])
+
+    def _storage_stats_sync(self) -> dict[str, int]:
+        now = time.time()
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT "
+                "(SELECT COUNT(*) FROM generations), "
+                "(SELECT COUNT(*) FROM image_assets), "
+                "(SELECT COUNT(*) FROM image_thumbnails), "
+                "(SELECT COUNT(*) FROM agent_asset_leases "
+                " WHERE expires_at > ? AND hard_expires_at > ?), "
                 "COALESCE((SELECT SUM(size_bytes) FROM image_assets), 0) + "
-                "COALESCE((SELECT SUM(size_bytes) FROM image_thumbnails), 0)"
+                "COALESCE((SELECT SUM(size_bytes) FROM image_thumbnails), 0)",
+                (now, now),
             ).fetchone()
-        return int(row[0])
+        return {
+            "generations": int(row[0]),
+            "assets": int(row[1]),
+            "thumbnails": int(row[2]),
+            "active_leases": int(row[3]),
+            "size_bytes": int(row[4]),
+        }
+
+    def _remove_broken_asset_sync(self, asset_id: str) -> int:
+        if not _SHA256_RE.fullmatch(asset_id):
+            return 0
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT path FROM image_assets WHERE id = ?", (asset_id,)
+            ).fetchone()
+            if row is None:
+                return 0
+            generation_ids = [
+                str(item["generation_id"])
+                for item in conn.execute(
+                    "SELECT DISTINCT generation_id FROM generation_images "
+                    "WHERE asset_id = ?",
+                    (asset_id,),
+                ).fetchall()
+            ]
+            conn.executemany(
+                "DELETE FROM generations WHERE id = ?",
+                [(generation_id,) for generation_id in generation_ids],
+            )
+            try:
+                conn.executemany(
+                    "DELETE FROM generation_search WHERE generation_id = ?",
+                    [(generation_id,) for generation_id in generation_ids],
+                )
+            except sqlite3.OperationalError:
+                pass
+            conn.execute(
+                "UPDATE generation_references SET available = 0, deleted_at = ?, "
+                "asset_id = NULL WHERE asset_id = ?",
+                (time.time(), asset_id),
+            )
+            conn.execute(
+                "DELETE FROM agent_asset_leases WHERE asset_id = ?", (asset_id,)
+            )
+            thumbnail = conn.execute(
+                "SELECT path FROM image_thumbnails WHERE asset_id = ?", (asset_id,)
+            ).fetchone()
+            conn.execute("DELETE FROM image_assets WHERE id = ?", (asset_id,))
+        _unlink_if_owned(self.data_dir / str(row["path"]), self.assets_dir)
+        if thumbnail is not None:
+            _unlink_if_owned(
+                self.data_dir / str(thumbnail["path"]), self.thumbnails_dir
+            )
+        return 1
 
     def _purge_unreferenced_assets_sync(
         self, asset_ids: list[str] | None = None
@@ -1038,8 +1394,10 @@ class GenerationStore:
                 "LEFT JOIN image_thumbnails t ON t.asset_id = a.id "
                 "WHERE NOT EXISTS (SELECT 1 FROM generation_images i WHERE i.asset_id = a.id) "
                 "AND NOT EXISTS (SELECT 1 FROM generation_references r WHERE r.asset_id = a.id) "
+                "AND NOT EXISTS (SELECT 1 FROM agent_asset_leases l WHERE l.asset_id = a.id "
+                "AND l.expires_at > ? AND l.hard_expires_at > ?) "
                 f"{restriction}",
-                args,
+                [time.time(), time.time(), *args],
             ).fetchall()
             conn.executemany(
                 "DELETE FROM image_assets WHERE id = ?",
@@ -1053,7 +1411,9 @@ class GenerationStore:
                 )
         _remove_empty_directories(self.assets_dir)
 
-    def _cleanup_orphaned_asset_files_sync(self) -> None:
+    def _cleanup_orphaned_asset_files_sync(
+        self, *, older_than: float | None = None
+    ) -> int:
         """Delete content-addressed files that have no database asset row."""
 
         with self._connect() as conn:
@@ -1063,10 +1423,15 @@ class GenerationStore:
             for row in rows
             if _is_within(self.data_dir / str(row["path"]), self.assets_dir)
         }
-        _delete_unreferenced_files(self.assets_dir, referenced)
+        removed = _delete_unreferenced_files(
+            self.assets_dir, referenced, older_than=older_than
+        )
         _remove_empty_directories(self.assets_dir)
+        return removed
 
-    def _cleanup_orphaned_thumbnails_sync(self) -> None:
+    def _cleanup_orphaned_thumbnails_sync(
+        self, *, older_than: float | None = None
+    ) -> int:
         """Delete thumbnail files no longer registered to a shared asset."""
 
         with self._connect() as conn:
@@ -1076,7 +1441,32 @@ class GenerationStore:
             for row in rows
             if _is_within(self.data_dir / str(row["path"]), self.thumbnails_dir)
         }
-        _delete_unreferenced_files(self.thumbnails_dir, referenced)
+        return _delete_unreferenced_files(
+            self.thumbnails_dir, referenced, older_than=older_than
+        )
+
+    def _cleanup_stale_files_sync(self, now: float) -> int:
+        removed = 0
+        for root, cutoff in (
+            (self.staging_dir, now - 24 * 3600),
+            (self.exports_dir, now - 3600),
+            (self.delivery_dir, now - 3600),
+        ):
+            if not root.is_dir():
+                continue
+            for path in root.rglob("*"):
+                try:
+                    if (
+                        path.is_file()
+                        and _is_within(path, root)
+                        and path.stat().st_mtime < cutoff
+                    ):
+                        path.unlink()
+                        removed += 1
+                except OSError:
+                    continue
+            _remove_empty_directories(root)
+        return removed
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
@@ -1124,52 +1514,31 @@ def _atomic_write(path: Path, data: bytes) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _link_or_write(target: Path, source: Path, data: bytes) -> None:
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.unlink(missing_ok=True)
-    try:
-        if source.is_file() and source.stat().st_size == len(data):
-            os.link(source, target)
-            return
-    except OSError:
-        pass
-    _atomic_write(target, data)
-
-
-def _create_thumbnail(source: Path, target: Path) -> None:
-    try:
-        from PIL import Image, ImageOps
-
-        with Image.open(source) as image:
-            thumbnail = ImageOps.exif_transpose(image).convert("RGB")
-            thumbnail.thumbnail((420, 420), Image.Resampling.LANCZOS)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            thumbnail.save(target, "WEBP", quality=82, method=4)
-    except Exception:
-        # Gallery stays functional when an upstream returns an unsupported image.
-        _atomic_write(target, source.read_bytes())
-
-
-def _create_agent_preview(
-    data: bytes, target: Path, *, max_edge: int, quality: int
+def _create_thumbnail(
+    source: Path,
+    target: Path,
+    *,
+    max_edge: int,
+    quality: int,
 ) -> None:
     try:
         from PIL import Image, ImageOps
 
-        with Image.open(io.BytesIO(data)) as source:
-            image = ImageOps.exif_transpose(source)
+        with Image.open(source) as image:
+            image = ImageOps.exif_transpose(image)
             has_alpha = image.mode in {"RGBA", "LA"} or (
                 image.mode == "P" and "transparency" in image.info
             )
-            preview = image.convert("RGBA" if has_alpha else "RGB")
-            preview.thumbnail((max_edge, max_edge), Image.Resampling.LANCZOS)
+            thumbnail = image.convert("RGBA" if has_alpha else "RGB")
+            thumbnail.thumbnail((max_edge, max_edge), Image.Resampling.LANCZOS)
             output = io.BytesIO()
-            preview.save(output, "WEBP", quality=quality, method=4)
+            thumbnail.save(output, "WEBP", quality=quality, method=4)
             encoded = output.getvalue()
-        _atomic_write(target, encoded if len(encoded) < len(data) else data)
+        original = source.read_bytes()
+        _atomic_write(target, encoded if len(encoded) < len(original) else original)
     except Exception:
-        # Keep the tool usable for uncommon formats even when previewing fails.
-        _atomic_write(target, data)
+        # Keep gallery and Agent viewing usable for uncommon image formats.
+        _atomic_write(target, source.read_bytes())
 
 
 def _image_suffix(mime_type: str, data: bytes) -> str:
@@ -1225,17 +1594,26 @@ def _unlink_if_owned(path: Path, root: Path) -> None:
         pass
 
 
-def _delete_unreferenced_files(root: Path, referenced: set[Path]) -> None:
+def _delete_unreferenced_files(
+    root: Path,
+    referenced: set[Path],
+    *,
+    older_than: float | None = None,
+) -> int:
+    removed = 0
     for path in root.rglob("*"):
         try:
             if (
                 path.is_file()
                 and _is_within(path, root)
                 and path.resolve() not in referenced
+                and (older_than is None or path.stat().st_mtime < older_than)
             ):
                 path.unlink()
+                removed += 1
         except OSError:
             continue
+    return removed
 
 
 def _remove_empty_directories(root: Path) -> None:

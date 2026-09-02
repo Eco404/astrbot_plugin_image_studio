@@ -191,6 +191,8 @@ class ImageGenerationService:
             images=images,
             elapsed_ms=elapsed_ms,
             history=settings.history,
+            preview_max_edge=settings.asset_preview_max_edge,
+            preview_quality=settings.asset_preview_quality,
         )
         await self.store.discard_staged_references(request.references)
         return GenerationResult(

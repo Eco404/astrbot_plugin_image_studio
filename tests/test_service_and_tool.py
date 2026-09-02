@@ -26,12 +26,12 @@ from astrbot_plugin_image_studio.main import (
     _provider_request_image_refs,
 )
 from astrbot_plugin_image_studio.models import (
-    AgentImageAsset,
     GeneratedImage,
     GenerationRequest,
     GenerationResult,
     ImageProvider,
     ReferenceImage,
+    WorkflowImageAsset,
 )
 from astrbot_plugin_image_studio.providers import ProviderError, ProviderExecutor
 from astrbot_plugin_image_studio.service import (
@@ -74,11 +74,10 @@ class FakeExecutor:
 
 
 class FakeAgentAssetStore:
-    async def stage_agent_images(self, images, **_kwargs):
+    async def lease_agent_images(self, images, **_kwargs):
         return tuple(
-            AgentImageAsset(
-                id=f"{index + 1:064x}",
-                path=f"/AstrBot/data/temp/image-studio-original-{index + 1}.png",
+            WorkflowImageAsset(
+                asset_id=f"{index + 1:064x}",
                 mime_type=image.mime_type,
                 size_bytes=len(image.data),
                 preview=GeneratedImage(b"preview", "image/webp"),
@@ -86,7 +85,7 @@ class FakeAgentAssetStore:
             for index, image in enumerate(images)
         )
 
-    async def load_agent_image(self, asset_id, **_kwargs):
+    async def load_workflow_image(self, asset_id, **_kwargs):
         if asset_id != f"{1:064x}":
             return None
         return (
@@ -98,7 +97,8 @@ class FakeAgentAssetStore:
 class ToolEvent:
     def __init__(self) -> None:
         self._extras = {}
-        self.unified_msg_origin = ""
+        self.unified_msg_origin = "test:private:user-1"
+        self.sent = []
 
     def get_extra(self, key, default=None):
         return self._extras.get(key, default)
@@ -108,6 +108,9 @@ class ToolEvent:
 
     def get_messages(self):
         return []
+
+    async def send(self, message):
+        self.sent.append(message)
 
 
 def test_service_generates_without_history(tmp_path) -> None:
@@ -234,10 +237,11 @@ def test_llm_tool_returns_mcp_image_content() -> None:
         item.text for item in result.content if isinstance(item, mcp.types.TextContent)
     )
     assert "generation_id=gallery-123" in text
-    assert "original_path" in text
+    assert '"asset_id":"' in text
+    assert "original_path" not in text
 
 
-def test_llm_tool_reference_paths_have_omitted_empty_and_explicit_states() -> None:
+def test_llm_tool_reference_fallback_follows_explicit_mode() -> None:
     class FakeService:
         async def generate(self, **kwargs):
             provider = settings().providers[0]
@@ -261,27 +265,92 @@ def test_llm_tool_reference_paths_have_omitted_empty_and_explicit_states() -> No
     plugin._event_references = capture_references
     event = ToolEvent()
 
-    async def generate(reference_paths=...):
+    async def generate(mode="text2img", references=...):
         await plugin.image_studio_get_capabilities(
-            event, query_type="default", mode="text2img"
+            event, query_type="default", mode=mode
         )
-        kwargs = {"prompt": "one tree", "mode": "text2img"}
-        if reference_paths is not ...:
-            kwargs["reference_image_paths"] = reference_paths
+        kwargs = {"prompt": "one tree", "mode": mode}
+        if references is not ...:
+            kwargs["references"] = references
         return await plugin.image_studio_generate(event, **kwargs)
 
     omitted = asyncio.run(generate())
-    empty = asyncio.run(generate([]))
-    explicit = asyncio.run(generate(["chosen.png"]))
+    empty = asyncio.run(generate(references=[]))
+    explicit = asyncio.run(generate(references=[{"path": "chosen.png"}]))
 
     assert not omitted.isError
     assert not empty.isError
     assert not explicit.isError
     assert calls == [
-        ([], True),
         ([], False),
-        (["chosen.png"], False),
+        ([], False),
+        ([{"path": "chosen.png"}], False),
     ]
+
+
+def test_img2img_empty_references_use_event_images_only_as_fallback() -> None:
+    provider = ImageProvider.from_mapping(
+        {
+            "id": "provider",
+            "name": "Provider",
+            "kind": "openai_images",
+            "base_url": "https://example.test",
+            "models": [
+                {
+                    "id": "image-model",
+                    "supports_text2img": True,
+                    "supports_img2img": True,
+                    "max_reference_images": 2,
+                    "tool": {"enabled": True, "max_reference_images": 2},
+                }
+            ],
+        }
+    )
+    plugin = object.__new__(ImageStudioPlugin)
+    plugin._settings = RuntimeSettings(
+        enable_llm_tool=True,
+        providers=(provider,),
+        history=HistorySettings(False, 0, 0, False),
+        revision=0,
+        default_tool_text2img_model_ref="provider:image-model",
+        default_tool_img2img_model_ref="provider:image-model",
+    )
+    captured = []
+
+    class FakeService:
+        async def generate(self, **kwargs):
+            captured.append(kwargs)
+            return GenerationResult(
+                provider,
+                SimpleNamespace(model="image-model", mode=kwargs["mode"]),
+                (GeneratedImage(PNG, "image/png"),),
+                5,
+            )
+
+    plugin._service = FakeService()
+    plugin.store = FakeAgentAssetStore()
+
+    async def fallback_references(_event, values, *, include_event_references=True):
+        assert values == []
+        assert include_event_references is True
+        return (ReferenceImage("event", "event.png", PNG, "image/png"),)
+
+    plugin._event_references = fallback_references
+    event = ToolEvent()
+
+    async def run():
+        await plugin.image_studio_get_capabilities(
+            event, query_type="default", mode="img2img"
+        )
+        return await plugin.image_studio_generate(
+            event, prompt="redraw", mode="img2img", references=[]
+        )
+
+    result = asyncio.run(run())
+
+    assert not result.isError
+    assert captured[0]["mode"] == "img2img"
+    assert len(captured[0]["references"]) == 1
 
 
 def test_llm_tool_image_return_modes_preserve_original_asset_path() -> None:
@@ -336,9 +405,8 @@ def test_llm_tool_image_return_modes_preserve_original_asset_path() -> None:
             if isinstance(item, mcp.types.TextContent)
         )
         assert f"return_mode={mode}" in text
-        assert (
-            '"original_path":"/AstrBot/data/temp/image-studio-original-1.png"' in text
-        )
+        assert '"asset_id":"' in text
+        assert "original_path" not in text
 
 
 def test_llm_can_view_agent_asset_on_demand() -> None:
@@ -354,12 +422,142 @@ def test_llm_can_view_agent_asset_on_demand() -> None:
     )
 
     assert isinstance(result.content[0], mcp.types.ImageContent)
-    assert (
-        "original_path=/AstrBot/data/temp/image-studio-original-1.png"
-        in result.content[1].text
-    )
+    assert "asset_id" in result.content[1].text
+    assert "original_path" not in result.content[1].text
     assert missing.isError
     assert "不存在或已超过" in missing.content[0].text
+
+
+def test_capability_query_activates_scoped_sender_and_hides_native_sender() -> None:
+    plugin = object.__new__(ImageStudioPlugin)
+    plugin._settings = settings()
+    event = ToolEvent()
+
+    class MutableToolSet:
+        def __init__(self):
+            self.names = {
+                "image_studio_send_output",
+                "image_studio_generate",
+                "send_message_to_user",
+            }
+
+        def get_tool(self, name):
+            return object() if name in self.names else None
+
+        def remove_tool(self, name):
+            self.names.discard(name)
+
+    tool_set = MutableToolSet()
+    event.set_extra(
+        "provider_request",
+        SimpleNamespace(func_tool=tool_set, extra_user_content_parts=[]),
+    )
+
+    result = asyncio.run(
+        plugin.image_studio_get_capabilities(
+            event, query_type="default", mode="text2img"
+        )
+    )
+
+    assert not result.isError
+    assert "send_message_to_user" not in tool_set.names
+    assert "image_studio_send_output" in tool_set.names
+    assert event.get_extra(IMAGE_WORKFLOW_STATE_EXTRA_KEY)["active"] is True
+
+
+def test_image_studio_sender_delivers_leased_asset_to_current_session(tmp_path) -> None:
+    async def run() -> None:
+        store = GenerationStore(tmp_path)
+        await store.initialize()
+        assets = await store.lease_agent_images(
+            (GeneratedImage(PNG, "image/png"),),
+            scope_id="test:private:user-1",
+            create_preview=True,
+            preview_max_edge=320,
+            preview_quality=75,
+            retention_hours=24,
+        )
+        plugin = object.__new__(ImageStudioPlugin)
+        plugin._settings = settings()
+        plugin.store = store
+        plugin.context = SimpleNamespace(
+            get_config=lambda **_kwargs: {
+                "provider_settings": {"computer_use_runtime": "none"}
+            }
+        )
+        event = ToolEvent()
+        event.set_extra(IMAGE_WORKFLOW_STATE_EXTRA_KEY, {"active": True})
+
+        result = await plugin.image_studio_send_output(
+            event,
+            destination="session",
+            messages=[
+                {"type": "plain", "text": "处理中"},
+                {"type": "image", "asset_id": assets[0].asset_id},
+            ],
+        )
+
+        assert not result.isError
+        assert len(event.sent) == 1
+        assert len(event.sent[0].chain) == 2
+        assert isinstance(event.sent[0].chain[1], Image)
+        assert "不会结束" in result.content[0].text
+
+    asyncio.run(run())
+
+
+def test_image_studio_sender_materializes_asset_to_local_workspace(
+    tmp_path, monkeypatch
+) -> None:
+    async def run() -> None:
+        store = GenerationStore(tmp_path / "plugin-data")
+        await store.initialize()
+        assets = await store.lease_agent_images(
+            (GeneratedImage(PNG, "image/png"),),
+            scope_id="test:private:user-1",
+            create_preview=False,
+            preview_max_edge=320,
+            preview_quality=75,
+            retention_hours=24,
+        )
+        workspace = tmp_path / "workspace"
+
+        async def fake_workspace(_event, _context):
+            return workspace
+
+        monkeypatch.setattr(
+            "astrbot_plugin_image_studio.main._event_workspace_root", fake_workspace
+        )
+        plugin = object.__new__(ImageStudioPlugin)
+        plugin._settings = settings()
+        plugin.store = store
+        plugin.context = SimpleNamespace(
+            get_config=lambda **_kwargs: {
+                "provider_settings": {"computer_use_runtime": "local"}
+            }
+        )
+        event = ToolEvent()
+        event.set_extra(IMAGE_WORKFLOW_STATE_EXTRA_KEY, {"active": True})
+
+        result = await plugin.image_studio_send_output(
+            event,
+            destination="workspace",
+            messages=[
+                {
+                    "type": "image",
+                    "asset_id": assets[0].asset_id,
+                    "name": "panel.png",
+                }
+            ],
+        )
+
+        assert not result.isError
+        payload = json.loads(result.content[0].text)
+        assert payload["workspace_paths"] == ["image-studio-assets/panel.png"]
+        assert (workspace / payload["workspace_paths"][0]).read_bytes() == PNG
+        assert event.sent == []
+
+    asyncio.run(run())
 
 
 def test_llm_tool_rejects_generation_before_capability_query() -> None:
@@ -750,7 +948,8 @@ def test_capabilities_only_lists_llm_enabled_models() -> None:
         "img2img": "",
     }
     assert payload["asset_policy"]["return_mode"] == "preview"
-    assert payload["asset_policy"]["use_original_path_for_file_operations"] is True
+    assert payload["asset_policy"]["private_asset_handle"] == "asset_id"
+    assert payload["asset_policy"]["delivery_tool"] == "image_studio_send_output"
 
 
 def test_capabilities_excludes_zero_limit_model_from_img2img() -> None:
@@ -798,6 +997,7 @@ def test_registered_image_tool_descriptions_contain_routing_contract() -> None:
     capabilities = llm_tools.get_func("image_studio_get_capabilities")
     generate = llm_tools.get_func("image_studio_generate")
     view_asset = llm_tools.get_func("image_studio_view_asset")
+    send_output = llm_tools.get_func("image_studio_send_output")
     light_tools = llm_tools.get_full_tool_set().get_light_tool_set()
 
     assert llm_tools.get_func("image_gen_get_capabilities") is None
@@ -805,6 +1005,7 @@ def test_registered_image_tool_descriptions_contain_routing_contract() -> None:
     assert capabilities is not None
     assert generate is not None
     assert view_asset is not None
+    assert send_output is not None
     assert "必须先调用本工具" in capabilities.description
     assert "query_type" in capabilities.parameters["properties"]
     assert (
@@ -812,20 +1013,20 @@ def test_registered_image_tool_descriptions_contain_routing_contract() -> None:
         in capabilities.parameters["properties"]["query_type"]["description"]
     )
     assert "生成图片" in generate.description
-    reference_description = generate.parameters["properties"]["reference_image_paths"][
+    reference_description = generate.parameters["properties"]["references"][
         "description"
     ]
-    assert "参考图文件路径" in reference_description
+    assert "asset_id" in reference_description
     assert "negative_prompt" not in generate.parameters["properties"]
     assert set(generate.parameters["properties"]) == {
         "prompt",
         "mode",
         "model_ref",
         "parameters",
-        "reference_image_paths",
+        "references",
     }
     assert "required" not in generate.parameters
-    assert "普通发送和文件处理" in view_asset.description
+    assert "当前会话" in view_asset.description
     assert "preview" in view_asset.parameters["properties"]["detail"]["description"]
     assert "required" not in view_asset.parameters
     assert (
@@ -839,6 +1040,15 @@ def test_registered_image_tool_descriptions_contain_routing_contract() -> None:
     assert (
         light_tools.get_tool("image_studio_view_asset").description
         == view_asset.description
+    )
+    assert (
+        light_tools.get_tool("image_studio_send_output").description
+        == send_output.description
+    )
+    assert "session" not in send_output.parameters["properties"]
+    assert (
+        "必须明确填写"
+        in send_output.parameters["properties"]["destination"]["description"]
     )
 
 
@@ -858,7 +1068,8 @@ def test_agent_workflow_prompt_is_scoped_and_idempotent() -> None:
     assert request.system_prompt.startswith("原有人格")
     assert request.system_prompt.count(AGENT_WORKFLOW_PROMPT_MARKER) == 1
     assert "先调用 image_studio_get_capabilities" in request.system_prompt
-    assert "assets.original_path" in request.system_prompt
+    assert "asset_id" in request.system_prompt
+    assert "original_path" not in request.system_prompt
     assert "中途消息可以包含图片和文字" in request.system_prompt
     assert "普通 assistant 文本回复" in request.system_prompt
     assert "llm.response" not in request.system_prompt
@@ -901,8 +1112,8 @@ def test_agent_tool_send_adds_one_shot_continuation_prompt() -> None:
     asyncio.run(
         plugin.observe_agent_tool_result(
             event,
-            SimpleNamespace(name="send_message_to_user"),
-            {"messages": [{"type": "image"}]},
+            SimpleNamespace(name="image_studio_send_output"),
+            {"destination": "session", "messages": [{"type": "image"}]},
             send_result,
         )
     )
@@ -917,8 +1128,8 @@ def test_agent_tool_send_adds_one_shot_continuation_prompt() -> None:
     asyncio.run(
         plugin.observe_agent_tool_result(
             event,
-            SimpleNamespace(name="send_message_to_user"),
-            {"messages": [{"type": "image"}]},
+            SimpleNamespace(name="image_studio_send_output"),
+            {"destination": "session", "messages": [{"type": "image"}]},
             send_result,
         )
     )
@@ -1272,26 +1483,35 @@ def test_safe_reference_path_resolves_relative_agent_workspace(tmp_path) -> None
     asyncio.run(run())
 
 
-def test_agent_original_path_can_be_reused_as_image_reference(tmp_path) -> None:
+def test_leased_asset_id_can_be_reused_as_image_reference(tmp_path) -> None:
     async def run() -> None:
         store = GenerationStore(tmp_path / "plugin-data")
         await store.initialize()
         service = ImageGenerationService(
             settings=settings(), executor=FakeExecutor(), store=store
         )
-        assets = await store.stage_agent_images(
+        assets = await store.lease_agent_images(
             (GeneratedImage(PNG, "image/png"),),
+            scope_id="test:private:user-1",
             create_preview=True,
             preview_max_edge=768,
             preview_quality=80,
             retention_hours=24,
         )
 
-        reference = await service.reference_from_safe_path(assets[0].path)
+        plugin = object.__new__(ImageStudioPlugin)
+        plugin._settings = settings()
+        plugin._service = service
+        plugin.store = store
+        references = await plugin._event_references(
+            ToolEvent(),
+            [{"asset_id": assets[0].asset_id}],
+            include_event_references=False,
+        )
 
-        assert reference is not None
-        assert reference.data == PNG
-        assert reference.mime_type == "image/png"
+        assert len(references) == 1
+        assert references[0].data == PNG
+        assert references[0].mime_type == "image/png"
 
     asyncio.run(run())
 

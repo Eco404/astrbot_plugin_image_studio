@@ -4,7 +4,6 @@ import asyncio
 import base64
 import io
 import json
-import os
 import re
 import sqlite3
 import time
@@ -41,7 +40,7 @@ def provider() -> ImageProvider:
     )
 
 
-def test_agent_assets_keep_original_and_create_expiring_preview(tmp_path) -> None:
+def test_workflow_lease_reuses_canonical_asset_and_shared_preview(tmp_path) -> None:
     async def run() -> None:
         from PIL import Image
 
@@ -62,8 +61,9 @@ def test_agent_assets_keep_original_and_create_expiring_preview(tmp_path) -> Non
             history=HistorySettings(True, 10, 50, False),
         )
         history_original = next(store.assets_dir.rglob("*.png"))
-        assets = await store.stage_agent_images(
+        assets = await store.lease_agent_images(
             (GeneratedImage(original_data, "image/png"),),
+            scope_id="test:private:user-1",
             create_preview=True,
             preview_max_edge=320,
             preview_quality=75,
@@ -72,24 +72,24 @@ def test_agent_assets_keep_original_and_create_expiring_preview(tmp_path) -> Non
 
         assert len(assets) == 1
         asset = assets[0]
-        assert re.fullmatch(r"[a-f0-9]{64}", asset.id)
-        assert asset.path.startswith(str(store.agent_originals_dir))
-        assert Path(asset.path).read_bytes() == original_data
-        assert os.path.samefile(history_original, asset.path)
+        assert re.fullmatch(r"[a-f0-9]{64}", asset.asset_id)
+        assert history_original.read_bytes() == original_data
         assert asset.preview is not None
         assert len(asset.preview.data) < len(original_data)
         with Image.open(io.BytesIO(asset.preview.data)) as preview:
             assert max(preview.size) <= 320
 
-        loaded_preview = await store.load_agent_image(
-            asset.id,
+        loaded_preview = await store.load_workflow_image(
+            asset.asset_id,
+            scope_id="test:private:user-1",
             detail="preview",
             preview_max_edge=320,
             preview_quality=75,
             retention_hours=24,
         )
-        loaded_original = await store.load_agent_image(
-            asset.id,
+        loaded_original = await store.load_workflow_image(
+            asset.asset_id,
+            scope_id="test:private:user-1",
             detail="original",
             preview_max_edge=320,
             preview_quality=75,
@@ -98,15 +98,172 @@ def test_agent_assets_keep_original_and_create_expiring_preview(tmp_path) -> Non
         assert loaded_preview is not None and loaded_original is not None
         assert loaded_preview[0].data == asset.preview.data
         assert loaded_original[0].data == original_data
-        assert loaded_original[1] == asset.path
+        assert Path(loaded_original[1]) == history_original
+        assert len(list(store.assets_dir.rglob("*.png"))) == 1
+        assert len(list(store.thumbnails_dir.rglob("*.webp"))) == 1
 
-        paths = [Path(asset.path), *store.agent_previews_dir.rglob("*.webp")]
-        old = time.time() - 7200
-        for path in paths:
-            os.utime(path, (old, old))
-        await store.cleanup_agent_assets(1)
-        assert all(not path.exists() for path in paths)
-        assert history_original.exists()
+        denied = await store.load_workflow_image(
+            asset.asset_id,
+            scope_id="test:private:user-2",
+            detail="preview",
+            preview_max_edge=320,
+            preview_quality=75,
+            retention_hours=24,
+        )
+        assert denied is None
+
+    asyncio.run(run())
+
+
+def test_maintenance_expires_lease_only_assets_and_ignores_legacy_directory(
+    tmp_path,
+) -> None:
+    async def run() -> None:
+        store = GenerationStore(tmp_path)
+        await store.initialize()
+        legacy = tmp_path / "agent_assets" / "originals" / "legacy.png"
+        legacy.parent.mkdir(parents=True)
+        legacy.write_bytes(PNG)
+        await store.lease_agent_images(
+            (GeneratedImage(PNG, "image/png"),),
+            scope_id="test:private:user-1",
+            create_preview=True,
+            preview_max_edge=320,
+            preview_quality=75,
+            retention_hours=24,
+        )
+        with store._connect() as conn:
+            conn.execute(
+                "UPDATE agent_asset_leases SET expires_at = 0, hard_expires_at = 0"
+            )
+
+        report = await store.run_maintenance(
+            HistorySettings(False, 0, 0, False),
+            preview_max_edge=320,
+            preview_quality=75,
+        )
+
+        assert report["status"] == "healthy"
+        assert report["repaired"]["expired_leases"] == 1
+        assert not list(store.assets_dir.rglob("*.png"))
+        assert not list(store.thumbnails_dir.rglob("*.webp"))
+        assert legacy.exists()
+
+    asyncio.run(run())
+
+
+def test_active_lease_preserves_asset_after_gallery_record_is_deleted(tmp_path) -> None:
+    async def run() -> None:
+        store = GenerationStore(tmp_path)
+        await store.initialize()
+        generation_id = await store.record_success(
+            provider=provider(),
+            request=GenerationRequest(
+                mode="text2img", provider_id="test-provider", prompt="leased"
+            ),
+            images=(GeneratedImage(PNG, "image/png"),),
+            elapsed_ms=10,
+            history=HistorySettings(True, 10, 50, False),
+            preview_max_edge=320,
+            preview_quality=75,
+        )
+        assets = await store.lease_agent_images(
+            (GeneratedImage(PNG, "image/png"),),
+            scope_id="test:private:user-1",
+            create_preview=True,
+            preview_max_edge=320,
+            preview_quality=75,
+            retention_hours=24,
+        )
+
+        assert await store.delete_generation(generation_id) is True
+        asset_path = next(store.assets_dir.rglob("*.png"))
+        assert asset_path.exists()
+        assert (
+            await store.load_workflow_image(
+                assets[0].asset_id,
+                scope_id="test:private:user-1",
+                detail="original",
+                preview_max_edge=320,
+                preview_quality=75,
+                retention_hours=24,
+            )
+            is not None
+        )
+
+    asyncio.run(run())
+
+
+def test_deep_maintenance_detects_same_size_asset_corruption(tmp_path) -> None:
+    async def run() -> None:
+        store = GenerationStore(tmp_path)
+        await store.initialize()
+        await store.lease_agent_images(
+            (GeneratedImage(PNG, "image/png"),),
+            scope_id="test:private:user-1",
+            create_preview=True,
+            preview_max_edge=320,
+            preview_quality=75,
+            retention_hours=24,
+        )
+        path = next(store.assets_dir.rglob("*.png"))
+        path.write_bytes(b"x" * len(PNG))
+
+        shallow = await store.run_maintenance(
+            HistorySettings(False, 0, 0, False),
+            preview_max_edge=320,
+            preview_quality=75,
+        )
+        assert shallow["repaired"]["broken_assets"] == 0
+        assert path.exists()
+
+        deep = await store.run_maintenance(
+            HistorySettings(False, 0, 0, False),
+            preview_max_edge=320,
+            preview_quality=75,
+            deep=True,
+        )
+        assert deep["repaired"]["broken_assets"] == 1
+        assert not path.exists()
+
+    asyncio.run(run())
+
+
+def test_asset_access_renews_soft_lease_without_extending_hard_expiry(tmp_path) -> None:
+    async def run() -> None:
+        store = GenerationStore(tmp_path)
+        await store.initialize()
+        assets = await store.lease_agent_images(
+            (GeneratedImage(PNG, "image/png"),),
+            scope_id="test:private:user-1",
+            create_preview=False,
+            preview_max_edge=320,
+            preview_quality=75,
+            retention_hours=24,
+        )
+        hard_expiry = time.time() + 60
+        with store._connect() as conn:
+            conn.execute(
+                "UPDATE agent_asset_leases SET expires_at = ?, hard_expires_at = ?",
+                (time.time() + 1, hard_expiry),
+            )
+
+        loaded = await store.load_workflow_image(
+            assets[0].asset_id,
+            scope_id="test:private:user-1",
+            detail="original",
+            preview_max_edge=320,
+            preview_quality=75,
+            retention_hours=24,
+        )
+        with store._connect() as conn:
+            lease = conn.execute(
+                "SELECT expires_at, hard_expires_at FROM agent_asset_leases"
+            ).fetchone()
+
+        assert loaded is not None
+        assert lease["expires_at"] <= hard_expiry
+        assert lease["hard_expires_at"] == hard_expiry
 
     asyncio.run(run())
 

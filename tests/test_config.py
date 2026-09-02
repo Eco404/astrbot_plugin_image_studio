@@ -38,28 +38,28 @@ def test_webui_settings_normalize_provider_and_history() -> None:
     assert normalized["providers"][0]["api_key"] == "visible-in-webui"
     assert normalized["history"]["record_invocation_identity"] is False
     assert normalized["llm_policy"]["image_return_mode"] == "preview"
-    assert normalized["llm_policy"]["preview_max_edge"] == 768
-    assert normalized["llm_policy"]["preview_quality"] == 80
-    assert normalized["llm_policy"]["asset_retention_hours"] == 24
+    assert normalized["asset_policy"]["preview_max_edge"] == 768
+    assert normalized["asset_policy"]["preview_quality"] == 80
+    assert normalized["asset_policy"]["lease_hours"] == 24
 
 
 def test_llm_image_asset_policy_is_bounded() -> None:
     normalized, errors = normalize_webui_settings(
         {
-            "llm_policy": {
-                "image_return_mode": "invalid",
+            "llm_policy": {"image_return_mode": "invalid"},
+            "asset_policy": {
                 "preview_max_edge": 9999,
                 "preview_quality": 1,
-                "asset_retention_hours": 999,
-            }
+                "lease_hours": 999,
+            },
         }
     )
 
     assert errors == []
     assert normalized["llm_policy"]["image_return_mode"] == "preview"
-    assert normalized["llm_policy"]["preview_max_edge"] == 2048
-    assert normalized["llm_policy"]["preview_quality"] == 40
-    assert normalized["llm_policy"]["asset_retention_hours"] == 168
+    assert normalized["asset_policy"]["preview_max_edge"] == 2048
+    assert normalized["asset_policy"]["preview_quality"] == 40
+    assert normalized["asset_policy"]["lease_hours"] == 168
 
 
 def test_history_can_enable_invocation_identity_snapshots() -> None:

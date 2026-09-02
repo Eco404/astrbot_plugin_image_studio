@@ -42,9 +42,9 @@ class RuntimeSettings:
     default_tool_text2img_model_ref: str = ""
     default_tool_img2img_model_ref: str = ""
     llm_image_return_mode: str = "preview"
-    llm_preview_max_edge: int = 768
-    llm_preview_quality: int = 80
-    llm_asset_retention_hours: int = 24
+    asset_preview_max_edge: int = 768
+    asset_preview_quality: int = 80
+    asset_lease_hours: int = 24
 
     def default_model_ref(self, mode: str, source: str) -> str:
         """Return the mode default for a page/command or LLM-tool request."""
@@ -113,7 +113,7 @@ def default_webui_settings() -> dict[str, Any]:
     """Return defaults for the WebUI-owned portion of plugin configuration."""
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "revision": 0,
         "providers": [],
         "history": {
@@ -131,9 +131,11 @@ def default_webui_settings() -> dict[str, Any]:
             "natural_language_first": True,
             "nai_auto_selection": "explicit_only",
             "image_return_mode": "preview",
+        },
+        "asset_policy": {
             "preview_max_edge": 768,
             "preview_quality": 80,
-            "asset_retention_hours": 24,
+            "lease_hours": 24,
         },
         "ui": {"settings_revision": 0},
     }
@@ -239,17 +241,26 @@ def normalize_webui_settings(value: Any) -> tuple[dict[str, Any], list[str]]:
         if image_return_mode in {"asset", "preview", "original"}
         else "preview"
     )
-    policy["preview_max_edge"] = max(
-        256, min(2048, _as_int(policy.get("preview_max_edge"), 768))
-    )
-    policy["preview_quality"] = max(
-        40, min(95, _as_int(policy.get("preview_quality"), 80))
-    )
-    policy["asset_retention_hours"] = max(
-        1, min(168, _as_int(policy.get("asset_retention_hours"), 24))
-    )
+    policy.pop("preview_max_edge", None)
+    policy.pop("preview_quality", None)
+    policy.pop("asset_retention_hours", None)
     merged["llm_policy"] = policy
-    merged["schema_version"] = max(1, _as_int(merged.get("schema_version"), 1))
+    asset_policy = (
+        merged.get("asset_policy")
+        if isinstance(merged.get("asset_policy"), dict)
+        else {}
+    )
+    asset_policy["preview_max_edge"] = max(
+        256, min(2048, _as_int(asset_policy.get("preview_max_edge"), 768))
+    )
+    asset_policy["preview_quality"] = max(
+        40, min(95, _as_int(asset_policy.get("preview_quality"), 80))
+    )
+    asset_policy["lease_hours"] = max(
+        1, min(168, _as_int(asset_policy.get("lease_hours"), 24))
+    )
+    merged["asset_policy"] = asset_policy
+    merged["schema_version"] = max(2, _as_int(merged.get("schema_version"), 2))
     merged["revision"] = max(
         0,
         _as_int(merged.get("revision"), 0),
@@ -321,6 +332,7 @@ def runtime_settings(
     providers = tuple(ImageProvider.from_mapping(item) for item in webui["providers"])
     history_raw = webui["history"]
     llm_policy = webui["llm_policy"]
+    asset_policy = webui["asset_policy"]
     return RuntimeSettings(
         enable_llm_tool=_as_bool(config.get("enable_llm_tool"), True),
         providers=providers,
@@ -344,9 +356,9 @@ def runtime_settings(
             record_invocation_identity=history_raw["record_invocation_identity"],
         ),
         llm_image_return_mode=llm_policy["image_return_mode"],
-        llm_preview_max_edge=llm_policy["preview_max_edge"],
-        llm_preview_quality=llm_policy["preview_quality"],
-        llm_asset_retention_hours=llm_policy["asset_retention_hours"],
+        asset_preview_max_edge=asset_policy["preview_max_edge"],
+        asset_preview_quality=asset_policy["preview_quality"],
+        asset_lease_hours=asset_policy["lease_hours"],
         revision=webui.get("revision", webui["ui"]["settings_revision"]),
     ), errors
 
