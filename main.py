@@ -39,7 +39,12 @@ from .config import (
 from .models import ImageProvider, InvocationSource, ReferenceImage
 from .providers import ProviderError, ProviderExecutor
 from .service import ImageGenerationService
-from .storage import GenerationStore, detect_mime_type, image_data_url
+from .storage import (
+    GenerationStore,
+    detect_mime_type,
+    export_image_filename,
+    image_data_url,
+)
 
 PLUGIN_NAME = "astrbot_plugin_image_studio"
 PAGE_PREFIX = f"/{PLUGIN_NAME}"
@@ -430,7 +435,14 @@ class ImageStudioPlugin(Star):
             )
         except (ValueError, ProviderError) as exc:
             return error_response(str(exc), status_code=400)
-        return json_response(_result_payload(result))
+        download_detail = (
+            await self.store.generation_detail(
+                result.generation_id, include_assets=False
+            )
+            if result.generation_id
+            else None
+        )
+        return json_response(_result_payload(result, download_detail=download_detail))
 
     async def _api_test_model(self) -> Any:
         body = await web_request.json(default={})
@@ -1712,7 +1724,16 @@ async def _save_config_async(config: Any) -> None:
     raise RuntimeError("当前插件配置对象不支持保存")
 
 
-def _result_payload(result) -> dict[str, Any]:
+def _result_payload(
+    result, *, download_detail: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    naming_detail = download_detail or {
+        "created_at": time.time(),
+        "mode": result.request.mode,
+        "model": result.request.model,
+        "provider_id": result.provider.id,
+    }
+    used_stems: set[str] = set()
     return {
         "generation_id": result.generation_id,
         "provider_id": result.provider.id,
@@ -1725,8 +1746,15 @@ def _result_payload(result) -> dict[str, Any]:
             {
                 "mime_type": image.mime_type,
                 "data_url": image_data_url(image.data, image.mime_type),
+                "download_filename": export_image_filename(
+                    naming_detail,
+                    image_index=image_index,
+                    image_count=len(result.images),
+                    mime_type=image.mime_type,
+                    used_stems=used_stems,
+                ),
             }
-            for image in result.images
+            for image_index, image in enumerate(result.images, start=1)
         ],
     }
 

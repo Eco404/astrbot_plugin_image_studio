@@ -264,7 +264,7 @@
       state.resultImages = result.images || []; state.references = []; renderReferences();
       els.resultEmpty.classList.toggle("is-hidden", state.resultImages.length > 0); els.resultGrid.innerHTML = state.resultImages.map((image, index) => `<div class="result-card"><div class="result-frame"><img class="result-image-backdrop" src="${image.data_url}" alt="" aria-hidden="true" /><img class="result-image" src="${image.data_url}" alt="生成结果" data-result-preview="${index}" /></div><div class="result-card-actions"><button class="quiet-button" data-result-reference="${index}" type="button">用作参考图</button></div></div>`).join("");
       els.resultGrid.querySelectorAll("[data-result-reference]").forEach((button) => button.addEventListener("click", () => void useDataUrlAsReference(state.resultImages[Number(button.dataset.resultReference)].data_url, "generated-reference.png")));
-      els.resultGrid.querySelectorAll("[data-result-preview]").forEach((image) => image.addEventListener("click", () => openImagePreview(image.src, `生成结果-${Number(image.dataset.resultPreview) + 1}`)));
+      els.resultGrid.querySelectorAll("[data-result-preview]").forEach((image) => image.addEventListener("click", () => { const index = Number(image.dataset.resultPreview); openImagePreview(image.src, `生成结果-${index + 1}`, state.resultImages[index]?.download_filename); }));
       els.resultMeta.textContent = `${result.provider_name} · ${result.model} · ${(result.elapsed_ms / 1000).toFixed(1)} 秒${result.generation_id ? " · 已保存到画廊" : " · 历史未保留"}`;
     } catch (error) { setError(els.generationError, errorMessage(error, "生成失败")); }
     finally { els.generateButton.disabled = false; els.generateButton.textContent = "生成图片"; }
@@ -335,10 +335,10 @@
     const dots = displayImages.length > 1 ? `<div class="detail-carousel-dots" aria-label="本次生成图片位置">${displayImages.map((_item, index) => `<button class="detail-carousel-dot ${index === imageIndex ? "is-active" : ""}" data-detail-dot="${index}" type="button" aria-label="查看本次生成的第 ${index + 1} 张图片" aria-current="${index === imageIndex ? "true" : "false"}"></button>`).join("")}</div>` : "";
     const carousel = currentImage ? `<div class="detail-images"><div class="detail-image-frame"><img class="detail-image-backdrop" src="${escape(currentImage.data_url)}" alt="" aria-hidden="true" /><img class="detail-image" src="${escape(currentImage.data_url)}" alt="生成结果 ${imageIndex + 1}" data-detail-image="${imageIndex}" /><button class="detail-carousel-nav is-previous" data-detail-nav="-1" type="button" aria-label="查看上一张图片" ${canPrevious ? "" : "disabled"}><span aria-hidden="true">‹</span></button><button class="detail-carousel-nav is-next" data-detail-nav="1" type="button" aria-label="查看下一张图片" ${canNext ? "" : "disabled"}><span aria-hidden="true">›</span></button>${dots}</div></div>` : '<div class="detail-loading">正在读取生成图片…</div>';
     els.drawerBody.innerHTML = `${carousel}<div class="detail-block"><h3>提示词</h3><pre>${escape(detail.original_prompt)}</pre></div><div class="detail-block"><h3>请求参数</h3><pre>${escape(JSON.stringify(requestParameters(detail), null, 2))}</pre></div><div class="detail-block"><h3>信息</h3><pre>${escape(JSON.stringify({ 服务商: detail.provider_name, 模型: detail.model, 模式: detail.mode === "img2img" ? "图生图" : "文生图", 来源: sourceLabel(detail.source), 调用来源身份: sourceIdentity, 生成时间: formatDate(detail.created_at), 图片数量: images.length, 文件大小: formatBytes(totalBytes), 耗时毫秒: detail.elapsed_ms }, null, 2))}</pre></div><div class="detail-block"><h3>参考图</h3><div class="detail-references">${refs.length ? refs.map((item) => item.available ? item.data_url ? `<article class="detail-reference"><img src="${escape(item.data_url)}" alt="${escape(item.filename)}" data-detail-reference="${item.id}" /><div>${escape(item.filename)}<br>${formatBytes(item.size_bytes)}</div><button class="danger-button" data-reference-delete="${item.id}" type="button">删除参考图</button></article>` : `<article class="detail-reference"><div>${escape(item.filename)}<br>参考图正在加载…</div></article>` : `<article class="detail-reference"><div>参考图已删除</div></article>`).join("") : "<span>该记录没有保留参考图</span>"}</div></div><div class="detail-block detail-actions"><button class="primary-button" data-reproduce="${detail.id}" type="button">复现参数</button><button class="quiet-button" data-copy-request="${detail.id}" type="button">复制请求参数</button>${currentImage?.data_url && state.detailAssetsLoaded ? ' <button class="quiet-button" data-output-reference="1" type="button">将当前成图用作新参考图</button>' : '<span class="field-hint">高清图片仍在加载，请稍候。</span>'}</div>`;
-    els.drawerBody.querySelector("[data-detail-image]")?.addEventListener("click", (event) => openImagePreview(event.currentTarget.src, `生成结果 ${imageIndex + 1}`));
+    els.drawerBody.querySelector("[data-detail-image]")?.addEventListener("click", (event) => openImagePreview(event.currentTarget.src, `生成结果 ${imageIndex + 1}`, currentImage.download_filename));
     els.drawerBody.querySelectorAll("[data-detail-nav]").forEach((button) => button.addEventListener("click", () => void navigateDetail(Number(button.dataset.detailNav))));
     els.drawerBody.querySelectorAll("[data-detail-dot]").forEach((button) => button.addEventListener("click", () => { state.detailRequestedImageIndex = Number(button.dataset.detailDot); renderDetail(state.detailData, state.detailFallbackThumbnail); }));
-    els.drawerBody.querySelectorAll("[data-detail-reference]").forEach((image) => image.addEventListener("click", () => openImagePreview(image.src, image.alt)));
+    els.drawerBody.querySelectorAll("[data-detail-reference]").forEach((image) => image.addEventListener("click", () => openImagePreview(image.src, image.alt, image.alt)));
     els.drawerBody.querySelectorAll("[data-reference-delete]").forEach((button) => button.addEventListener("click", async () => {
       if (!await confirmAction("删除此参考图？生成结果和参数不会删除。")) return;
       try { await apiPost("gallery/reference/delete", { reference_id: button.dataset.referenceDelete }); showNotice("参考图已删除。", "success"); await openDetail(detail.id, state.detailImageIndex); }
@@ -396,13 +396,15 @@
 
   function closeDetail() { state.detailId = ""; state.detailData = null; state.detailFallbackThumbnail = ""; state.detailAssetsLoaded = false; state.detailNavigating = false; state.detailImageIndex = 0; state.detailRequestedImageIndex = 0; closeImagePreview(); els.detailDrawer.classList.remove("is-open"); els.detailDrawer.setAttribute("aria-hidden", "true"); if (!activeConfirmation) els.scrim.classList.add("is-hidden"); }
 
-  function openImagePreview(dataUrl, title) {
+  function openImagePreview(dataUrl, title, downloadFilename = "") {
     if (!dataUrl) return;
     const extension = ((dataUrl.match(/^data:image\/([^;]+)/) || [])[1] || "png").replace("jpeg", "jpg");
-    els.previewImage.src = dataUrl; els.previewImage.alt = title; els.imagePreviewTitle.textContent = title; els.downloadImageButton.href = dataUrl; els.downloadImageButton.download = `${String(title || "image").replace(/[^\w\u3400-\u9fff-]+/g, "_")}.${extension}`; els.imagePreview.classList.remove("is-hidden");
+    const fallbackFilename = `${String(title || "image").replace(/[^\w\u3400-\u9fff-]+/g, "_")}.${extension}`;
+    const filename = String(downloadFilename || fallbackFilename).replace(/[\\/\0]/g, "_");
+    els.previewImage.src = dataUrl; els.previewImage.alt = title; els.imagePreviewTitle.textContent = title; els.downloadImageButton.href = dataUrl; els.downloadImageButton.download = filename; els.imagePreview.classList.remove("is-hidden");
   }
 
-  function closeImagePreview() { els.imagePreview.classList.add("is-hidden"); els.previewImage.removeAttribute("src"); els.downloadImageButton.href = "#"; }
+  function closeImagePreview() { els.imagePreview.classList.add("is-hidden"); els.previewImage.removeAttribute("src"); els.downloadImageButton.href = "#"; els.downloadImageButton.download = ""; }
 
   async function copyRequestParameters(detail) {
     const content = JSON.stringify(requestParameters(detail), null, 2);

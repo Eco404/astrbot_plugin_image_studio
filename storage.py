@@ -976,6 +976,16 @@ class GenerationStore:
             self._asset_item(dict(item), preview_full=include_assets)
             for item in image_rows
         ]
+        used_stems: set[str] = set()
+        for image_index, image in enumerate(result["images"], start=1):
+            image["download_filename"] = export_image_filename(
+                result,
+                image_index=image_index,
+                image_count=len(result["images"]),
+                mime_type=str(image.get("mime_type") or ""),
+                suffix=Path(str(image.get("path") or "")).suffix,
+                used_stems=used_stems,
+            )
         result["references"] = [
             self._reference_item(dict(item), include_data=include_assets)
             for item in reference_rows
@@ -1067,13 +1077,15 @@ class GenerationStore:
                 for image_index, image in enumerate(images, start=1):
                     path = self.data_dir / image["path"]
                     if path.is_file() and _is_within(path, self.assets_dir):
-                        stem = _export_stem(
+                        image_filename = export_image_filename(
                             detail,
                             image_index=image_index,
                             image_count=len(images),
+                            mime_type=image["mime_type"],
+                            suffix=path.suffix,
                             used_stems=used_stems,
                         )
-                        image_filename = f"{stem}{path.suffix.lower()}"
+                        stem = Path(image_filename).stem
                         archive.write(path, arcname=image_filename)
                         metadata = {
                             key: value
@@ -1576,6 +1588,29 @@ def _export_stem(
         collision += 1
     used_stems.add(stem)
     return stem
+
+
+def export_image_filename(
+    detail: dict[str, Any],
+    *,
+    image_index: int,
+    image_count: int,
+    mime_type: str = "",
+    suffix: str = "",
+    used_stems: set[str] | None = None,
+) -> str:
+    """Return the shared WebUI and ZIP filename for one generated image."""
+
+    stem = _export_stem(
+        detail,
+        image_index=image_index,
+        image_count=image_count,
+        used_stems=used_stems if used_stems is not None else set(),
+    )
+    extension = str(suffix or "").strip().lower()
+    if not re.fullmatch(r"\.[a-z0-9]{1,8}", extension):
+        extension = _IMAGE_SUFFIXES.get(str(mime_type or "").lower(), ".png")
+    return f"{stem}{extension}"
 
 
 def _is_within(path: Path, root: Path) -> bool:

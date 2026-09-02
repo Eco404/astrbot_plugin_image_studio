@@ -535,6 +535,7 @@ def test_gallery_export_is_a_valid_zip_archive(tmp_path) -> None:
         assert summary is not None
         assert summary["images"][0]["data_url"] == ""
         assert summary["images"][0]["path"]
+        assert summary["images"][0]["download_filename"] == image_name
 
     asyncio.run(run())
 
@@ -570,5 +571,8 @@ def test_gallery_export_pairs_each_image_in_flat_archive(tmp_path) -> None:
             )
             for image_name in image_names:
                 assert image_name.removesuffix(".png") + ".json" in names
+        detail = await store.generation_detail(generation_id, include_assets=False)
+        assert detail is not None
+        assert [image["download_filename"] for image in detail["images"]] == image_names
 
     asyncio.run(run())
