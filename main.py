@@ -71,7 +71,7 @@ IMAGE_WORKFLOW_CONTINUATION_PROMPT = (
     PLUGIN_NAME,
     "local",
     "多 Provider 生图、画廊与 Agent 可读图片工具。",
-    "0.5.0",
+    "0.5.1",
 )
 class ImageStudioPlugin(Star):
     """Own Image Studio configuration, generation, gallery, and tool APIs."""

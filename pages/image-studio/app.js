@@ -4,8 +4,8 @@
   window.__imageStudioAppLoaded = true;
 
   const state = {
-    view: "generate", mode: "text2img", providers: [], models: [], selectedProviderId: "", selectedModelRef: "", defaultModelRefs: { text2img: "", img2img: "" }, parameterValues: {}, references: [],
-    resultImages: [], galleryItems: [], galleryPage: 0, galleryLimit: 24, galleryTotal: 0, selectedIds: new Set(), settings: null, selectedSettingsProviderId: "", selectedSettingsModelId: "", modelEditorTab: "model", editingToolParameter: "", editingToolDefaultChoices: [], detailId: "",
+    view: "generate", mode: "text2img", providers: [], models: [], selectedProviderId: "", selectedModelRef: "", defaultModelRefs: { text2img: "", img2img: "" }, parameterValues: {}, parameterCarry: {}, negativePromptCarry: "", hasNegativePromptCarry: false, references: [],
+    resultImages: [], galleryItems: [], galleryPage: 0, galleryLimit: 24, galleryTotal: 0, selectedIds: new Set(), settings: null, selectedSettingsProviderId: "", selectedSettingsModelId: "", modelEditorTab: "model", editingToolParameter: "", editingToolDefaultChoices: [], detailId: "", detailData: null, detailFallbackThumbnail: "", detailImageIndex: 0, detailRequestedImageIndex: 0, detailAssetsLoaded: false, detailNavigating: false,
   };
   let activeConfirmation = null;
   let settingsLoadPromise = null;
@@ -195,6 +195,21 @@
     return result;
   }
 
+  function carriedParameterValues() {
+    const values = { ...state.parameterCarry, ...state.parameterValues, ...collectModelParameters() };
+    Object.entries(selectedModel()?.parameters || {}).forEach(([name, descriptor]) => { if (descriptor?.request_key && Object.prototype.hasOwnProperty.call(values, name)) values[descriptor.request_key] = values[name]; });
+    return values;
+  }
+
+  function applyGenerationSelection(mode, modelRef) {
+    const previousModel = selectedModel(); if (previousModel?.supports_negative_prompt) { state.negativePromptCarry = els.negativePrompt.value; state.hasNegativePromptCarry = true; }
+    const carried = carriedParameterValues(); state.parameterCarry = carried; state.mode = mode; state.selectedModelRef = modelRef || "";
+    state.parameterValues = parameterValuesForModel(selectedModel(), carried);
+    const nextModel = selectedModel(); if (nextModel?.supports_negative_prompt) { els.negativePrompt.value = state.hasNegativePromptCarry ? state.negativePromptCarry : (nextModel.negative_prompt_default || ""); state.negativePromptCarry = els.negativePrompt.value; state.hasNegativePromptCarry = true; }
+    document.querySelectorAll(".segment").forEach((button) => button.classList.toggle("is-active", button.dataset.mode === state.mode));
+    renderModelChoices();
+  }
+
   function renderReferences() {
     els.referenceStrip.innerHTML = state.references.map((item, index) => `<div class="reference-item"><img src="${item.preview_data_url}" alt="参考图 ${index + 1}" /><button type="button" data-reference-index="${index}" aria-label="移除参考图">×</button></div>`).join("");
     els.referenceStrip.querySelectorAll("[data-reference-index]").forEach((button) => button.addEventListener("click", () => { state.references.splice(Number(button.dataset.referenceIndex), 1); renderReferences(); }));
@@ -204,10 +219,11 @@
     const payload = await apiGet("studio/bootstrap");
     state.providers = Array.isArray(payload.providers) ? payload.providers : [];
     state.models = Array.isArray(payload.models) ? payload.models : [];
-    state.parameterValues = {};
+    state.parameterValues = {}; state.parameterCarry = {}; state.negativePromptCarry = ""; state.hasNegativePromptCarry = false;
     state.defaultModelRefs = { text2img: payload.defaults?.text2img_model_ref || "", img2img: payload.defaults?.img2img_model_ref || "" };
     state.selectedModelRef = state.defaultModelRefs[state.mode] || "";
     els.negativePrompt.value = selectedModel()?.negative_prompt_default || "";
+    if (selectedModel()?.supports_negative_prompt) { state.negativePromptCarry = els.negativePrompt.value; state.hasNegativePromptCarry = true; }
     els.runtimeStatus.textContent = `已加载 ${state.providers.length} 个生图服务商`;
     renderModelChoices();
   }
@@ -264,8 +280,10 @@
       if (total > 0 && requestedPage >= totalPages) { state.galleryPage = totalPages - 1; return await loadGallery(state.galleryPage); }
       state.galleryPage = Math.min(requestedPage, totalPages - 1); state.galleryLimit = limit; state.galleryTotal = total;
       state.galleryItems = payload.items || []; state.selectedIds.clear(); renderGallery(payload);
+      return true;
     } catch (error) {
       showNotice(errorMessage(error, "画廊加载失败"), "error");
+      return false;
     }
   }
 
@@ -287,52 +305,96 @@
     return { mode: detail?.mode || "", model: detail?.model || "", prompt: detail?.original_prompt || "", negative_prompt: parameters.negative_prompt || "", size: parameters.size || "", count: parameters.count || 1, parameters: parameters.parameters || {} };
   }
 
-  function renderDetail(detail, fallbackThumbnail = "") {
+  function detailDisplayImages(detail, fallbackThumbnail = "") {
     const images = Array.isArray(detail.images) ? detail.images : [];
     const availableImages = images.filter((item) => item?.data_url);
-    const displayImages = availableImages.length ? availableImages : (fallbackThumbnail ? [{ data_url: fallbackThumbnail, mime_type: "image/webp", size_bytes: 0 }] : []);
+    return availableImages.length ? availableImages : (fallbackThumbnail ? [{ data_url: fallbackThumbnail, mime_type: "image/webp", size_bytes: 0 }] : []);
+  }
+
+  function hasAdjacentGalleryRecord(direction) {
+    const index = state.galleryItems.findIndex((item) => String(item.id) === String(state.detailId));
+    if (index < 0) return false;
+    if (direction < 0) return index > 0 || state.galleryPage > 0;
+    return index < state.galleryItems.length - 1 || (state.galleryPage * state.galleryLimit) + index < state.galleryTotal - 1;
+  }
+
+  function renderDetail(detail, fallbackThumbnail = "") {
+    const images = Array.isArray(detail.images) ? detail.images : [];
+    const displayImages = detailDisplayImages(detail, fallbackThumbnail);
+    const requestedIndex = state.detailRequestedImageIndex < 0 ? displayImages.length - 1 : state.detailRequestedImageIndex;
+    const imageIndex = Math.max(0, Math.min(displayImages.length - 1, requestedIndex));
+    const currentImage = displayImages[imageIndex] || null;
+    state.detailImageIndex = imageIndex; state.detailData = detail;
+    if (state.detailAssetsLoaded) state.detailRequestedImageIndex = imageIndex;
     const refs = Array.isArray(detail.references) ? detail.references : [];
     const totalBytes = images.reduce((sum, item) => sum + Number(item.size_bytes || 0), 0);
     els.detailDate.textContent = formatDate(detail.created_at);
     const sourceIdentity = invocationSourceLabel(detail.invocation_source);
-    els.drawerBody.innerHTML = `${displayImages.length ? `<div class="detail-images">${displayImages.map((item, index) => item.data_url ? `<div class="detail-image-frame"><img class="detail-image-backdrop" src="${escape(item.data_url)}" alt="" aria-hidden="true" /><img class="detail-image" src="${escape(item.data_url)}" alt="生成结果 ${index + 1}" data-detail-image="${index}" /></div>` : "").join("")}</div>` : '<div class="detail-loading">正在读取生成图片…</div>'}<div class="detail-block"><h3>提示词</h3><pre>${escape(detail.original_prompt)}</pre></div><div class="detail-block"><h3>请求参数</h3><pre>${escape(JSON.stringify(requestParameters(detail), null, 2))}</pre></div><div class="detail-block"><h3>信息</h3><pre>${escape(JSON.stringify({ 服务商: detail.provider_name, 模型: detail.model, 模式: detail.mode === "img2img" ? "图生图" : "文生图", 来源: sourceLabel(detail.source), 调用来源身份: sourceIdentity, 生成时间: formatDate(detail.created_at), 图片数量: images.length, 文件大小: formatBytes(totalBytes), 耗时毫秒: detail.elapsed_ms }, null, 2))}</pre></div><div class="detail-block"><h3>参考图</h3><div class="detail-references">${refs.length ? refs.map((item) => item.available ? item.data_url ? `<article class="detail-reference"><img src="${escape(item.data_url)}" alt="${escape(item.filename)}" data-detail-reference="${item.id}" /><div>${escape(item.filename)}<br>${formatBytes(item.size_bytes)}</div><button class="danger-button" data-reference-delete="${item.id}" type="button">删除参考图</button></article>` : `<article class="detail-reference"><div>${escape(item.filename)}<br>参考图正在加载…</div></article>` : `<article class="detail-reference"><div>参考图已删除</div></article>`).join("") : "<span>该记录没有保留参考图</span>"}</div></div><div class="detail-block detail-actions"><button class="primary-button" data-reproduce="${detail.id}" type="button">复现参数</button><button class="quiet-button" data-copy-request="${detail.id}" type="button">复制请求参数</button>${images[0]?.data_url ? ' <button class="quiet-button" data-output-reference="1" type="button">将当前成图用作新参考图</button>' : '<span class="field-hint">高清图片仍在加载，请稍候。</span>'}</div>`;
-    els.drawerBody.querySelectorAll("[data-detail-image]").forEach((image) => image.addEventListener("click", () => openImagePreview(image.src, `生成结果 ${Number(image.dataset.detailImage) + 1}`)));
+    const canPrevious = state.detailAssetsLoaded && (imageIndex > 0 || hasAdjacentGalleryRecord(-1));
+    const canNext = state.detailAssetsLoaded && (imageIndex < displayImages.length - 1 || hasAdjacentGalleryRecord(1));
+    const dots = displayImages.length > 1 ? `<div class="detail-carousel-dots" aria-label="本次生成图片位置">${displayImages.map((_item, index) => `<button class="detail-carousel-dot ${index === imageIndex ? "is-active" : ""}" data-detail-dot="${index}" type="button" aria-label="查看本次生成的第 ${index + 1} 张图片" aria-current="${index === imageIndex ? "true" : "false"}"></button>`).join("")}</div>` : "";
+    const carousel = currentImage ? `<div class="detail-images"><div class="detail-image-frame"><img class="detail-image-backdrop" src="${escape(currentImage.data_url)}" alt="" aria-hidden="true" /><img class="detail-image" src="${escape(currentImage.data_url)}" alt="生成结果 ${imageIndex + 1}" data-detail-image="${imageIndex}" /><button class="detail-carousel-nav is-previous" data-detail-nav="-1" type="button" aria-label="查看上一张图片" ${canPrevious ? "" : "disabled"}><span aria-hidden="true">‹</span></button><button class="detail-carousel-nav is-next" data-detail-nav="1" type="button" aria-label="查看下一张图片" ${canNext ? "" : "disabled"}><span aria-hidden="true">›</span></button>${dots}</div></div>` : '<div class="detail-loading">正在读取生成图片…</div>';
+    els.drawerBody.innerHTML = `${carousel}<div class="detail-block"><h3>提示词</h3><pre>${escape(detail.original_prompt)}</pre></div><div class="detail-block"><h3>请求参数</h3><pre>${escape(JSON.stringify(requestParameters(detail), null, 2))}</pre></div><div class="detail-block"><h3>信息</h3><pre>${escape(JSON.stringify({ 服务商: detail.provider_name, 模型: detail.model, 模式: detail.mode === "img2img" ? "图生图" : "文生图", 来源: sourceLabel(detail.source), 调用来源身份: sourceIdentity, 生成时间: formatDate(detail.created_at), 图片数量: images.length, 文件大小: formatBytes(totalBytes), 耗时毫秒: detail.elapsed_ms }, null, 2))}</pre></div><div class="detail-block"><h3>参考图</h3><div class="detail-references">${refs.length ? refs.map((item) => item.available ? item.data_url ? `<article class="detail-reference"><img src="${escape(item.data_url)}" alt="${escape(item.filename)}" data-detail-reference="${item.id}" /><div>${escape(item.filename)}<br>${formatBytes(item.size_bytes)}</div><button class="danger-button" data-reference-delete="${item.id}" type="button">删除参考图</button></article>` : `<article class="detail-reference"><div>${escape(item.filename)}<br>参考图正在加载…</div></article>` : `<article class="detail-reference"><div>参考图已删除</div></article>`).join("") : "<span>该记录没有保留参考图</span>"}</div></div><div class="detail-block detail-actions"><button class="primary-button" data-reproduce="${detail.id}" type="button">复现参数</button><button class="quiet-button" data-copy-request="${detail.id}" type="button">复制请求参数</button>${currentImage?.data_url && state.detailAssetsLoaded ? ' <button class="quiet-button" data-output-reference="1" type="button">将当前成图用作新参考图</button>' : '<span class="field-hint">高清图片仍在加载，请稍候。</span>'}</div>`;
+    els.drawerBody.querySelector("[data-detail-image]")?.addEventListener("click", (event) => openImagePreview(event.currentTarget.src, `生成结果 ${imageIndex + 1}`));
+    els.drawerBody.querySelectorAll("[data-detail-nav]").forEach((button) => button.addEventListener("click", () => void navigateDetail(Number(button.dataset.detailNav))));
+    els.drawerBody.querySelectorAll("[data-detail-dot]").forEach((button) => button.addEventListener("click", () => { state.detailRequestedImageIndex = Number(button.dataset.detailDot); renderDetail(state.detailData, state.detailFallbackThumbnail); }));
     els.drawerBody.querySelectorAll("[data-detail-reference]").forEach((image) => image.addEventListener("click", () => openImagePreview(image.src, image.alt)));
     els.drawerBody.querySelectorAll("[data-reference-delete]").forEach((button) => button.addEventListener("click", async () => {
       if (!await confirmAction("删除此参考图？生成结果和参数不会删除。")) return;
-      try { await apiPost("gallery/reference/delete", { reference_id: button.dataset.referenceDelete }); showNotice("参考图已删除。", "success"); await openDetail(detail.id); }
+      try { await apiPost("gallery/reference/delete", { reference_id: button.dataset.referenceDelete }); showNotice("参考图已删除。", "success"); await openDetail(detail.id, state.detailImageIndex); }
       catch (error) { showNotice(errorMessage(error, "参考图删除失败"), "error"); }
     }));
     els.drawerBody.querySelector("[data-reproduce]")?.addEventListener("click", () => void reproduce(detail.id));
     els.drawerBody.querySelector("[data-copy-request]")?.addEventListener("click", () => void copyRequestParameters(detail));
-    els.drawerBody.querySelector("[data-output-reference]")?.addEventListener("click", () => void useDataUrlAsReference(images[0].data_url, "gallery-output-reference.png"));
+    els.drawerBody.querySelector("[data-output-reference]")?.addEventListener("click", () => void useDataUrlAsReference(currentImage.data_url, "gallery-output-reference.png"));
   }
 
   async function loadDetailAssets(id, summary, fallbackThumbnail) {
     try {
       const assets = await apiGet(`gallery/assets/${id}`);
       if (state.detailId !== id) return;
-      renderDetail({ ...summary, ...assets }, fallbackThumbnail);
+      state.detailAssetsLoaded = true; state.detailData = { ...summary, ...assets };
+      renderDetail(state.detailData, fallbackThumbnail);
     } catch (error) {
-      if (state.detailId === id) showNotice(errorMessage(error, "高清图片加载失败"), "error");
+      if (state.detailId === id) { state.detailAssetsLoaded = true; renderDetail(summary, fallbackThumbnail); showNotice(errorMessage(error, "高清图片加载失败"), "error"); }
     }
   }
 
-  async function openDetail(id) {
-    state.detailId = id;
+  async function openDetail(id, requestedImageIndex = 0) {
+    state.detailId = id; state.detailData = null; state.detailAssetsLoaded = false; state.detailRequestedImageIndex = requestedImageIndex === "last" ? -1 : Math.max(0, Number(requestedImageIndex) || 0);
     const card = state.galleryItems.find((item) => String(item.id) === String(id));
+    state.detailFallbackThumbnail = card?.thumbnail_data_url || "";
     els.detailDrawer.classList.add("is-open"); els.detailDrawer.setAttribute("aria-hidden", "false"); els.scrim.classList.remove("is-hidden"); els.detailDrawer.focus();
     els.detailDate.textContent = "";
-    els.drawerBody.innerHTML = '<div class="detail-loading">正在读取生成详情…</div>';
+    els.drawerBody.scrollTop = 0; els.drawerBody.innerHTML = '<div class="detail-loading">正在读取生成详情…</div>';
     try {
       const summary = await apiGet(`gallery/detail/${id}`, { assets: "0" });
       if (state.detailId !== id) return;
-      renderDetail(summary, card?.thumbnail_data_url || "");
-      void loadDetailAssets(id, summary, card?.thumbnail_data_url || "");
+      state.detailData = summary; renderDetail(summary, state.detailFallbackThumbnail);
+      void loadDetailAssets(id, summary, state.detailFallbackThumbnail);
     } catch (error) { if (state.detailId === id) showNotice(errorMessage(error, "生成详情加载失败"), "error"); }
   }
 
-  function closeDetail() { state.detailId = ""; closeImagePreview(); els.detailDrawer.classList.remove("is-open"); els.detailDrawer.setAttribute("aria-hidden", "true"); if (!activeConfirmation) els.scrim.classList.add("is-hidden"); }
+  async function navigateDetail(direction) {
+    if (state.detailNavigating || !state.detailAssetsLoaded || !state.detailData) return;
+    const images = detailDisplayImages(state.detailData, state.detailFallbackThumbnail);
+    const targetImageIndex = state.detailImageIndex + direction;
+    if (targetImageIndex >= 0 && targetImageIndex < images.length) { state.detailRequestedImageIndex = targetImageIndex; renderDetail(state.detailData, state.detailFallbackThumbnail); return; }
+    const currentIndex = state.galleryItems.findIndex((item) => String(item.id) === String(state.detailId));
+    if (currentIndex < 0 || !hasAdjacentGalleryRecord(direction)) return;
+    const originId = state.detailId; state.detailNavigating = true;
+    try {
+      let target = state.galleryItems[currentIndex + direction];
+      if (!target) {
+        if (!await loadGallery(state.galleryPage + direction)) return;
+        target = direction < 0 ? state.galleryItems[state.galleryItems.length - 1] : state.galleryItems[0];
+      }
+      if (state.detailId !== originId) return;
+      if (target) await openDetail(target.id, direction < 0 ? "last" : 0);
+    } finally { state.detailNavigating = false; }
+  }
+
+  function closeDetail() { state.detailId = ""; state.detailData = null; state.detailFallbackThumbnail = ""; state.detailAssetsLoaded = false; state.detailNavigating = false; state.detailImageIndex = 0; state.detailRequestedImageIndex = 0; closeImagePreview(); els.detailDrawer.classList.remove("is-open"); els.detailDrawer.setAttribute("aria-hidden", "true"); if (!activeConfirmation) els.scrim.classList.add("is-hidden"); }
 
   function openImagePreview(dataUrl, title) {
     if (!dataUrl) return;
@@ -360,7 +422,7 @@
       const draft = await apiPost(`gallery/reproduce/${id}`, {}); state.mode = draft.mode || "text2img"; state.selectedProviderId = draft.provider_id || ""; state.references = draft.references || [];
       state.selectedModelRef = draft.model_ref || (draft.provider_id && draft.model ? `${draft.provider_id}:${draft.model}` : "");
       const rawParameterValues = { ...(draft.parameters || {}), size: draft.size || "", count: draft.count || 1 };
-      state.parameterValues = rawParameterValues;
+      state.parameterValues = rawParameterValues; state.parameterCarry = { ...rawParameterValues }; state.negativePromptCarry = draft.negative_prompt || ""; state.hasNegativePromptCarry = !!selectedModel()?.supports_negative_prompt;
       els.prompt.value = draft.prompt || ""; els.negativePrompt.value = draft.negative_prompt || "";
       document.querySelectorAll(".segment").forEach((button) => button.classList.toggle("is-active", button.dataset.mode === state.mode)); renderModelChoices();
       const model = selectedModel();
@@ -677,17 +739,17 @@
     if (eventsBound) return;
     eventsBound = true;
     document.querySelectorAll(".nav-item").forEach((button) => button.addEventListener("click", () => switchView(button.dataset.view)));
-    document.querySelectorAll(".segment").forEach((button) => button.addEventListener("click", () => { state.mode = button.dataset.mode; state.selectedModelRef = state.defaultModelRefs[state.mode] || ""; state.parameterValues = {}; document.querySelectorAll(".segment").forEach((item) => item.classList.toggle("is-active", item === button)); renderModelChoices(); }));
+    document.querySelectorAll(".segment").forEach((button) => button.addEventListener("click", () => applyGenerationSelection(button.dataset.mode, state.defaultModelRefs[button.dataset.mode] || "")));
     document.querySelectorAll("[data-default-scope]").forEach((button) => button.addEventListener("click", () => { document.querySelectorAll("[data-default-scope]").forEach((item) => item.classList.toggle("is-active", item === button)); document.querySelectorAll("[data-default-panel]").forEach((panel) => panel.classList.toggle("is-hidden", panel.dataset.defaultPanel !== button.dataset.defaultScope)); }));
     els.agentImageReturnMode.addEventListener("change", syncAgentImageSettings);
     els.runMaintenanceButton.addEventListener("click", () => void runStorageMaintenance(false)); els.runDeepMaintenanceButton.addEventListener("click", () => void runStorageMaintenance(true));
-    els.modelChoice.addEventListener("change", () => { state.selectedModelRef = els.modelChoice.value; state.parameterValues = {}; els.negativePrompt.value = selectedModel()?.negative_prompt_default || ""; renderModelWorkspace(); });
+    els.modelChoice.addEventListener("change", () => applyGenerationSelection(state.mode, els.modelChoice.value));
     els.resetNegativePromptButton.addEventListener("click", () => { els.negativePrompt.value = selectedModel()?.negative_prompt_default || ""; els.negativePrompt.focus(); });
     els.referenceUpload.addEventListener("change", async () => { try { await uploadReferences(els.referenceUpload.files); } catch (error) { setError(els.generationError, errorMessage(error, "上传参考图失败")); } finally { els.referenceUpload.value = ""; } });
     els.generationForm.addEventListener("submit", generate); $("galleryRefresh").addEventListener("click", () => void loadGallery()); els.galleryPrev.addEventListener("click", () => void loadGallery(state.galleryPage - 1)); els.galleryNext.addEventListener("click", () => void loadGallery(state.galleryPage + 1)); els.gallerySearch.addEventListener("change", () => void loadGallery(0)); els.galleryProvider.addEventListener("change", () => void loadGallery(0)); els.galleryMode.addEventListener("change", () => void loadGallery(0)); els.gallerySource.addEventListener("change", () => void loadGallery(0));
     $("cancelSelectionButton").addEventListener("click", clearGallerySelection); $("selectAllButton").addEventListener("click", () => { state.galleryItems.forEach((item) => state.selectedIds.add(item.id)); els.galleryGrid.querySelectorAll("[data-select-id]").forEach((input) => { input.checked = true; }); updateSelection(); }); $("exportButton").addEventListener("click", () => void exportSelected()); $("deleteButton").addEventListener("click", () => void deleteSelected());
     $("closeDrawer").addEventListener("click", closeDetail); $("closeImagePreview").addEventListener("click", closeImagePreview); els.imagePreview.querySelector("[data-close-image-preview]").addEventListener("click", closeImagePreview); els.previewImage.addEventListener("click", closeImagePreview); els.scrim.addEventListener("click", () => { if (!els.parameterDialog.classList.contains("is-hidden")) return; if (activeConfirmation) activeConfirmation(false); else closeDetail(); }); $("parameterDialogCancel").addEventListener("click", closeToolParameterDialog); $("parameterDialogApply").addEventListener("click", applyToolParameterDialog); els.addProviderButton.addEventListener("click", () => void addProvider()); els.addModelButton.addEventListener("click", () => void addModel()); els.saveSettingsButton.addEventListener("click", () => void saveSettings());
-    document.addEventListener("keydown", (event) => { if (event.key !== "Escape") return; if (!els.imagePreview.classList.contains("is-hidden")) closeImagePreview(); else if (els.detailDrawer.classList.contains("is-open") && !activeConfirmation) closeDetail(); });
+    document.addEventListener("keydown", (event) => { if (event.key === "Escape") { if (!els.imagePreview.classList.contains("is-hidden")) closeImagePreview(); else if (els.detailDrawer.classList.contains("is-open") && !activeConfirmation) closeDetail(); return; } if (!els.imagePreview.classList.contains("is-hidden") || !els.detailDrawer.classList.contains("is-open") || activeConfirmation) return; if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); void navigateDetail(event.key === "ArrowLeft" ? -1 : 1); } });
   }
 
   async function start() {
