@@ -574,5 +574,9 @@ def test_gallery_export_pairs_each_image_in_flat_archive(tmp_path) -> None:
         detail = await store.generation_detail(generation_id, include_assets=False)
         assert detail is not None
         assert [image["download_filename"] for image in detail["images"]] == image_names
+        assert all(
+            image["thumbnail_data_url"].startswith("data:image/")
+            for image in detail["images"]
+        )
 
     asyncio.run(run())

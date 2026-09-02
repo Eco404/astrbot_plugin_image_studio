@@ -944,7 +944,8 @@ class GenerationStore:
                 return None
             image_rows = conn.execute(
                 "SELECT i.*, a.path, a.mime_type, a.size_bytes, a.id AS sha256, "
-                "t.path AS thumbnail_path FROM generation_images i "
+                "t.path AS thumbnail_path, t.mime_type AS thumbnail_mime_type "
+                "FROM generation_images i "
                 "JOIN image_assets a ON a.id = i.asset_id "
                 "JOIN image_thumbnails t ON t.asset_id = a.id "
                 "WHERE i.generation_id = ? ORDER BY i.ordinal",
@@ -1154,6 +1155,7 @@ class GenerationStore:
 
     def _asset_item(self, row: dict[str, Any], *, preview_full: bool) -> dict[str, Any]:
         path = self.data_dir / str(row["path"])
+        thumbnail = self.data_dir / str(row.get("thumbnail_path") or "")
         preview = _path_data_url(path, row["mime_type"]) if preview_full else ""
         return {
             "id": row["id"],
@@ -1162,6 +1164,15 @@ class GenerationStore:
             "size_bytes": row["size_bytes"],
             "sha256": row["sha256"],
             "data_url": preview,
+            # Keep summaries lightweight while allowing the carousel to render
+            # every result before original assets arrive.
+            "thumbnail_data_url": (
+                _path_data_url(
+                    thumbnail, str(row.get("thumbnail_mime_type") or "image/webp")
+                )
+                if not preview_full
+                else ""
+            ),
         }
 
     def _reference_item(

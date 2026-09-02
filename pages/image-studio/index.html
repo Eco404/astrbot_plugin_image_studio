@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Image Studio 生图工作台</title>
-  <link rel="stylesheet" href="./app.css?v=0.5.1" />
+  <link rel="stylesheet" href="./app.css?v=0.5.2" />
 </head>
 <body>
   <main class="app-shell quiet-glass-background">
@@ -15,8 +15,8 @@
       </div>
       <nav class="nav-list">
         <button class="nav-item is-active" data-view="generate" type="button" aria-label="生图" title="生图"><span class="nav-icon" aria-hidden="true">✦</span><span>生图</span></button>
-        <button class="nav-item" data-view="gallery" type="button" aria-label="画廊" title="画廊"><span class="nav-icon" aria-hidden="true">▦</span><span>画廊</span></button>
-        <button class="nav-item" data-view="settings" type="button" aria-label="设置" title="设置"><span class="nav-icon" aria-hidden="true">⚙</span><span>设置</span></button>
+        <button class="nav-item" data-view="gallery" type="button" aria-label="画廊" title="画廊"><span class="nav-icon nav-icon-gallery" aria-hidden="true"><span></span></span><span>画廊</span></button>
+        <button class="nav-item" data-view="settings" type="button" aria-label="设置" title="设置"><span class="nav-icon nav-icon-settings" aria-hidden="true">⚙︎</span><span>设置</span></button>
       </nav>
       <div class="sidebar-footer" id="runtimeStatus">正在读取配置</div>
     </aside>
@@ -28,7 +28,7 @@
       </header>
       <div class="app-notice is-hidden" id="appNotice" role="status" aria-live="polite">
         <div class="app-notice__message" id="appNoticeMessage"></div>
-        <button class="app-notice__close" id="appNoticeClose" type="button" aria-label="关闭通知" title="关闭通知">×</button>
+        <button class="app-notice__close" id="appNoticeClose" type="button" aria-label="关闭通知" title="关闭通知"><span aria-hidden="true">×</span></button>
       </div>
 
       <section class="view is-active" id="generateView">
@@ -134,15 +134,15 @@
   </main>
 
   <aside class="detail-drawer" id="detailDrawer" role="dialog" aria-modal="true" aria-label="生成详情" aria-hidden="true" tabindex="-1">
-    <div class="drawer-head"><div><h2>生成详情</h2><p id="detailDate"></p></div><button class="icon-button" id="closeDrawer" type="button" aria-label="关闭详情">×</button></div>
+    <div class="drawer-head"><div><h2>生成详情</h2><p id="detailDate"></p></div><button class="icon-button" id="closeDrawer" type="button" aria-label="关闭详情"><span aria-hidden="true">×</span></button></div>
     <div class="drawer-body" id="drawerBody"></div>
   </aside>
   <div class="scrim is-hidden" id="scrim"></div>
   <div class="image-preview is-hidden" id="imagePreview" role="dialog" aria-modal="true" aria-labelledby="imagePreviewTitle">
     <div class="image-preview__backdrop" data-close-image-preview></div>
     <section class="image-preview__panel">
-      <div class="image-preview__head"><h2 id="imagePreviewTitle">图片预览</h2><button class="icon-button" id="closeImagePreview" type="button" aria-label="关闭图片预览" title="关闭图片预览">×</button></div>
-      <div class="image-preview__body"><img id="previewImage" alt="图片预览" /></div>
+      <div class="image-preview__head"><h2 id="imagePreviewTitle">图片预览</h2><button class="icon-button" id="closeImagePreview" type="button" aria-label="关闭图片预览" title="关闭图片预览"><span aria-hidden="true">×</span></button></div>
+      <div class="image-preview__viewport"><div class="image-preview__body" id="imagePreviewBody"><img id="previewImage" alt="图片预览" /></div><button class="detail-carousel-nav image-preview__nav is-previous" id="imagePreviewPrev" type="button" aria-label="查看上一张图片"><span aria-hidden="true">‹</span></button><button class="detail-carousel-nav image-preview__nav is-next" id="imagePreviewNext" type="button" aria-label="查看下一张图片"><span aria-hidden="true">›</span></button><div class="detail-carousel-dots image-preview__dots is-hidden" id="imagePreviewDots" aria-label="预览图片位置"></div></div>
       <div class="image-preview__actions"><a class="quiet-button" id="downloadImageButton" href="#" download>下载图片</a></div>
     </section>
   </div>
@@ -205,6 +205,6 @@
     });
   </script>
   <script src="/api/plugin/page/bridge-sdk.js"></script>
-  <script src="./app.js?v=0.5.1" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./app.js?v=0.5.2" onerror="window.__reportImageStudioPageError(true)"></script>
 </body>
 </html>

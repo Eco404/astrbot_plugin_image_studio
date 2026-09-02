@@ -5,7 +5,7 @@
 
   const state = {
     view: "generate", mode: "text2img", providers: [], models: [], selectedProviderId: "", selectedModelRef: "", defaultModelRefs: { text2img: "", img2img: "" }, parameterValues: {}, parameterCarry: {}, negativePromptCarry: "", hasNegativePromptCarry: false, references: [],
-    resultImages: [], galleryItems: [], galleryPage: 0, galleryLimit: 24, galleryTotal: 0, selectedIds: new Set(), settings: null, selectedSettingsProviderId: "", selectedSettingsModelId: "", modelEditorTab: "model", editingToolParameter: "", editingToolDefaultChoices: [], detailId: "", detailData: null, detailFallbackThumbnail: "", detailImageIndex: 0, detailRequestedImageIndex: 0, detailAssetsLoaded: false, detailNavigating: false,
+    resultImages: [], galleryItems: [], galleryPage: 0, galleryLimit: 24, galleryTotal: 0, selectedIds: new Set(), settings: null, selectedSettingsProviderId: "", selectedSettingsModelId: "", modelEditorTab: "model", editingToolParameter: "", editingToolDefaultChoices: [], detailId: "", detailData: null, detailFallbackThumbnail: "", detailImageIndex: 0, detailRequestedImageIndex: 0, detailAssetsLoaded: false, detailNavigating: false, imagePreviewItems: [], imagePreviewIndex: 0, imagePreviewTitle: "图片预览", imagePreviewDownloadFilename: "", imagePreviewContext: null, imagePreviewNavigating: false, imagePreviewSwipeAt: 0,
   };
   let activeConfirmation = null;
   let settingsLoadPromise = null;
@@ -17,7 +17,7 @@
     modelChoice: $("modelChoice"), modelProvider: $("modelProvider"), workspaceEmpty: $("workspaceEmpty"), generatorWorkspace: $("generatorWorkspace"), modelParameters: $("modelParameters"), referenceField: $("referenceField"), referenceUpload: $("referenceUpload"), referenceStrip: $("referenceStrip"),
     generationForm: $("generationForm"), prompt: $("prompt"), negativePromptField: $("negativePromptField"), negativePrompt: $("negativePrompt"), negativePromptHint: $("negativePromptHint"), resetNegativePromptButton: $("resetNegativePromptButton"), advancedParameters: $("advancedParameters"), parameters: $("parameters"), generationError: $("generationError"), generateButton: $("generateButton"), resultEmpty: $("resultEmpty"), resultGrid: $("resultGrid"), resultMeta: $("resultMeta"),
     galleryGrid: $("galleryGrid"), galleryEmpty: $("galleryEmpty"), galleryPagination: $("galleryPagination"), galleryPrev: $("galleryPrev"), galleryNext: $("galleryNext"), galleryPageLabel: $("galleryPageLabel"), gallerySearch: $("gallerySearch"), galleryProvider: $("galleryProvider"), galleryMode: $("galleryMode"), gallerySource: $("gallerySource"), selectionBar: $("selectionBar"), selectionCount: $("selectionCount"),
-    detailDrawer: $("detailDrawer"), drawerBody: $("drawerBody"), detailDate: $("detailDate"), scrim: $("scrim"), imagePreview: $("imagePreview"), previewImage: $("previewImage"), imagePreviewTitle: $("imagePreviewTitle"), downloadImageButton: $("downloadImageButton"),
+    detailDrawer: $("detailDrawer"), drawerBody: $("drawerBody"), detailDate: $("detailDate"), scrim: $("scrim"), imagePreview: $("imagePreview"), imagePreviewBody: $("imagePreviewBody"), imagePreviewPrev: $("imagePreviewPrev"), imagePreviewNext: $("imagePreviewNext"), imagePreviewDots: $("imagePreviewDots"), previewImage: $("previewImage"), imagePreviewTitle: $("imagePreviewTitle"), downloadImageButton: $("downloadImageButton"),
     settingTool: $("settingTool"), agentImageReturnMode: $("agentImageReturnMode"), agentPreviewMaxEdge: $("agentPreviewMaxEdge"), agentPreviewQuality: $("agentPreviewQuality"), agentAssetRetentionHours: $("agentAssetRetentionHours"), storageHealthStatus: $("storageHealthStatus"), storageHealthCheckedAt: $("storageHealthCheckedAt"), storageHealthDuration: $("storageHealthDuration"), storageHealthAssets: $("storageHealthAssets"), storageHealthLeases: $("storageHealthLeases"), storageHealthGenerations: $("storageHealthGenerations"), storageHealthSize: $("storageHealthSize"), storageHealthErrors: $("storageHealthErrors"), runMaintenanceButton: $("runMaintenanceButton"), runDeepMaintenanceButton: $("runDeepMaintenanceButton"), settingPageDefaultTextModel: $("settingPageDefaultTextModel"), settingPageDefaultImageModel: $("settingPageDefaultImageModel"), settingToolDefaultTextModel: $("settingToolDefaultTextModel"), settingToolDefaultImageModel: $("settingToolDefaultImageModel"), historyEnabled: $("historyEnabled"), retainReferences: $("retainReferences"), recordInvocationIdentity: $("recordInvocationIdentity"), historyRecords: $("historyRecords"), historyMegabytes: $("historyMegabytes"), settingsProviderList: $("settingsProviderList"), providerForm: $("providerForm"), settingsModelList: $("settingsModelList"), modelForm: $("modelForm"), settingsError: $("settingsError"), addProviderButton: $("addProviderButton"), addModelButton: $("addModelButton"), newModelChoice: $("newModelChoice"), newModelChoices: $("newModelChoices"), saveSettingsButton: $("saveSettingsButton"), parameterDialog: $("parameterDialog"), toolParameterExposed: $("toolParameterExposed"), toolParameterDescription: $("toolParameterDescription"), toolParameterDefault: $("toolParameterDefault"), toolParameterDefaultChoice: $("toolParameterDefaultChoice"), toolParameterDefaultHint: $("toolParameterDefaultHint"), toolParameterChoices: $("toolParameterChoices"),
   };
 
@@ -62,6 +62,15 @@
   }
   function showNotice(message, tone = "info") {
     window.__showImageStudioNotice(message, tone);
+  }
+
+  function syncPageScrollLock() {
+    const locked = els.detailDrawer.classList.contains("is-open")
+      || !els.imagePreview.classList.contains("is-hidden")
+      || !els.parameterDialog.classList.contains("is-hidden")
+      || !$('confirmDialog').classList.contains("is-hidden");
+    document.documentElement.classList.toggle("modal-open", locked);
+    document.body.classList.toggle("modal-open", locked);
   }
 
   function switchView(view) {
@@ -211,7 +220,7 @@
   }
 
   function renderReferences() {
-    els.referenceStrip.innerHTML = state.references.map((item, index) => `<div class="reference-item"><img src="${item.preview_data_url}" alt="参考图 ${index + 1}" /><button type="button" data-reference-index="${index}" aria-label="移除参考图">×</button></div>`).join("");
+    els.referenceStrip.innerHTML = state.references.map((item, index) => `<div class="reference-item"><img src="${item.preview_data_url}" alt="参考图 ${index + 1}" /><button type="button" data-reference-index="${index}" aria-label="移除参考图"><span aria-hidden="true">×</span></button></div>`).join("");
     els.referenceStrip.querySelectorAll("[data-reference-index]").forEach((button) => button.addEventListener("click", () => { state.references.splice(Number(button.dataset.referenceIndex), 1); renderReferences(); }));
   }
 
@@ -264,7 +273,7 @@
       state.resultImages = result.images || []; state.references = []; renderReferences();
       els.resultEmpty.classList.toggle("is-hidden", state.resultImages.length > 0); els.resultGrid.innerHTML = state.resultImages.map((image, index) => `<div class="result-card"><div class="result-frame"><img class="result-image-backdrop" src="${image.data_url}" alt="" aria-hidden="true" /><img class="result-image" src="${image.data_url}" alt="生成结果" data-result-preview="${index}" /></div><div class="result-card-actions"><button class="quiet-button" data-result-reference="${index}" type="button">用作参考图</button></div></div>`).join("");
       els.resultGrid.querySelectorAll("[data-result-reference]").forEach((button) => button.addEventListener("click", () => void useDataUrlAsReference(state.resultImages[Number(button.dataset.resultReference)].data_url, "generated-reference.png")));
-      els.resultGrid.querySelectorAll("[data-result-preview]").forEach((image) => image.addEventListener("click", () => { const index = Number(image.dataset.resultPreview); openImagePreview(image.src, `生成结果-${index + 1}`, state.resultImages[index]?.download_filename); }));
+      els.resultGrid.querySelectorAll("[data-result-preview]").forEach((image) => image.addEventListener("click", () => { const index = Number(image.dataset.resultPreview); openImagePreview(image.src, `生成结果-${index + 1}`, state.resultImages[index]?.download_filename, state.resultImages, index); }));
       els.resultMeta.textContent = `${result.provider_name} · ${result.model} · ${(result.elapsed_ms / 1000).toFixed(1)} 秒${result.generation_id ? " · 已保存到画廊" : " · 历史未保留"}`;
     } catch (error) { setError(els.generationError, errorMessage(error, "生成失败")); }
     finally { els.generateButton.disabled = false; els.generateButton.textContent = "生成图片"; }
@@ -307,8 +316,24 @@
 
   function detailDisplayImages(detail, fallbackThumbnail = "") {
     const images = Array.isArray(detail.images) ? detail.images : [];
-    const availableImages = images.filter((item) => item?.data_url);
-    return availableImages.length ? availableImages : (fallbackThumbnail ? [{ data_url: fallbackThumbnail, mime_type: "image/webp", size_bytes: 0 }] : []);
+    if (!images.length) return fallbackThumbnail ? [{ data_url: fallbackThumbnail, mime_type: "image/webp", size_bytes: 0 }] : [];
+    return images.map((item, index) => ({
+      ...item,
+      data_url: item?.data_url || item?.thumbnail_data_url || (index === 0 ? fallbackThumbnail : ""),
+    }));
+  }
+
+  function detailReferenceMarkup(refs) {
+    return refs.length ? refs.map((item) => item.available ? item.data_url ? `<article class="detail-reference"><img src="${escape(item.data_url)}" alt="${escape(item.filename)}" data-detail-reference="${item.id}" /><div>${escape(item.filename)}<br>${formatBytes(item.size_bytes)}</div><button class="danger-button" data-reference-delete="${item.id}" type="button">删除参考图</button></article>` : `<article class="detail-reference"><div>${escape(item.filename)}<br>参考图正在加载…</div></article>` : `<article class="detail-reference"><div>参考图已删除</div></article>`).join("") : "<span>该记录没有保留参考图</span>";
+  }
+
+  function bindDetailReferenceEvents(detail) {
+    els.drawerBody.querySelectorAll("[data-detail-reference]").forEach((image) => image.addEventListener("click", () => openImagePreview(image.src, image.alt, image.alt)));
+    els.drawerBody.querySelectorAll("[data-reference-delete]").forEach((button) => button.addEventListener("click", async () => {
+      if (!await confirmAction("删除此参考图？生成结果和参数不会删除。")) return;
+      try { await apiPost("gallery/reference/delete", { reference_id: button.dataset.referenceDelete }); showNotice("参考图已删除。", "success"); await openDetail(detail.id, state.detailImageIndex); }
+      catch (error) { showNotice(errorMessage(error, "参考图删除失败"), "error"); }
+    }));
   }
 
   function hasAdjacentGalleryRecord(direction) {
@@ -322,41 +347,123 @@
     const images = Array.isArray(detail.images) ? detail.images : [];
     const displayImages = detailDisplayImages(detail, fallbackThumbnail);
     const requestedIndex = state.detailRequestedImageIndex < 0 ? displayImages.length - 1 : state.detailRequestedImageIndex;
-    const imageIndex = Math.max(0, Math.min(displayImages.length - 1, requestedIndex));
+    const imageIndex = displayImages.length ? Math.max(0, Math.min(displayImages.length - 1, requestedIndex)) : 0;
     const currentImage = displayImages[imageIndex] || null;
+    const currentImageUrl = currentImage?.data_url || "";
     state.detailImageIndex = imageIndex; state.detailData = detail;
     if (state.detailAssetsLoaded) state.detailRequestedImageIndex = imageIndex;
     const refs = Array.isArray(detail.references) ? detail.references : [];
     const totalBytes = images.reduce((sum, item) => sum + Number(item.size_bytes || 0), 0);
     els.detailDate.textContent = formatDate(detail.created_at);
     const sourceIdentity = invocationSourceLabel(detail.invocation_source);
-    const canPrevious = state.detailAssetsLoaded && (imageIndex > 0 || hasAdjacentGalleryRecord(-1));
-    const canNext = state.detailAssetsLoaded && (imageIndex < displayImages.length - 1 || hasAdjacentGalleryRecord(1));
+    const canPrevious = imageIndex > 0 || hasAdjacentGalleryRecord(-1);
+    const canNext = imageIndex < displayImages.length - 1 || hasAdjacentGalleryRecord(1);
     const dots = displayImages.length > 1 ? `<div class="detail-carousel-dots" aria-label="本次生成图片位置">${displayImages.map((_item, index) => `<button class="detail-carousel-dot ${index === imageIndex ? "is-active" : ""}" data-detail-dot="${index}" type="button" aria-label="查看本次生成的第 ${index + 1} 张图片" aria-current="${index === imageIndex ? "true" : "false"}"></button>`).join("")}</div>` : "";
-    const carousel = currentImage ? `<div class="detail-images"><div class="detail-image-frame"><img class="detail-image-backdrop" src="${escape(currentImage.data_url)}" alt="" aria-hidden="true" /><img class="detail-image" src="${escape(currentImage.data_url)}" alt="生成结果 ${imageIndex + 1}" data-detail-image="${imageIndex}" /><button class="detail-carousel-nav is-previous" data-detail-nav="-1" type="button" aria-label="查看上一张图片" ${canPrevious ? "" : "disabled"}><span aria-hidden="true">‹</span></button><button class="detail-carousel-nav is-next" data-detail-nav="1" type="button" aria-label="查看下一张图片" ${canNext ? "" : "disabled"}><span aria-hidden="true">›</span></button>${dots}</div></div>` : '<div class="detail-loading">正在读取生成图片…</div>';
-    els.drawerBody.innerHTML = `${carousel}<div class="detail-block"><h3>提示词</h3><pre>${escape(detail.original_prompt)}</pre></div><div class="detail-block"><h3>请求参数</h3><pre>${escape(JSON.stringify(requestParameters(detail), null, 2))}</pre></div><div class="detail-block"><h3>信息</h3><pre>${escape(JSON.stringify({ 服务商: detail.provider_name, 模型: detail.model, 模式: detail.mode === "img2img" ? "图生图" : "文生图", 来源: sourceLabel(detail.source), 调用来源身份: sourceIdentity, 生成时间: formatDate(detail.created_at), 图片数量: images.length, 文件大小: formatBytes(totalBytes), 耗时毫秒: detail.elapsed_ms }, null, 2))}</pre></div><div class="detail-block"><h3>参考图</h3><div class="detail-references">${refs.length ? refs.map((item) => item.available ? item.data_url ? `<article class="detail-reference"><img src="${escape(item.data_url)}" alt="${escape(item.filename)}" data-detail-reference="${item.id}" /><div>${escape(item.filename)}<br>${formatBytes(item.size_bytes)}</div><button class="danger-button" data-reference-delete="${item.id}" type="button">删除参考图</button></article>` : `<article class="detail-reference"><div>${escape(item.filename)}<br>参考图正在加载…</div></article>` : `<article class="detail-reference"><div>参考图已删除</div></article>`).join("") : "<span>该记录没有保留参考图</span>"}</div></div><div class="detail-block detail-actions"><button class="primary-button" data-reproduce="${detail.id}" type="button">复现参数</button><button class="quiet-button" data-copy-request="${detail.id}" type="button">复制请求参数</button>${currentImage?.data_url && state.detailAssetsLoaded ? ' <button class="quiet-button" data-output-reference="1" type="button">将当前成图用作新参考图</button>' : '<span class="field-hint">高清图片仍在加载，请稍候。</span>'}</div>`;
-    els.drawerBody.querySelector("[data-detail-image]")?.addEventListener("click", (event) => openImagePreview(event.currentTarget.src, `生成结果 ${imageIndex + 1}`, currentImage.download_filename));
+    const imageMarkup = currentImageUrl ? `<img class="detail-image-backdrop" src="${escape(currentImageUrl)}" alt="" aria-hidden="true" /><img class="detail-image" src="${escape(currentImageUrl)}" alt="生成结果 ${imageIndex + 1}" data-detail-image="${imageIndex}" />` : '<div class="detail-image-pending">正在读取图片…</div>';
+    const carousel = currentImage ? `<div class="detail-images"><div class="detail-image-frame">${imageMarkup}<button class="detail-carousel-nav is-previous" data-detail-nav="-1" type="button" aria-label="查看上一张图片" ${canPrevious ? "" : "disabled"}><span aria-hidden="true">‹</span></button><button class="detail-carousel-nav is-next" data-detail-nav="1" type="button" aria-label="查看下一张图片" ${canNext ? "" : "disabled"}><span aria-hidden="true">›</span></button>${dots}</div></div>` : '<div class="detail-loading">正在读取生成图片…</div>';
+    els.drawerBody.innerHTML = `${carousel}<div class="detail-block"><h3>提示词</h3><pre>${escape(detail.original_prompt)}</pre></div><div class="detail-block"><h3>请求参数</h3><pre>${escape(JSON.stringify(requestParameters(detail), null, 2))}</pre></div><div class="detail-block"><h3>信息</h3><pre>${escape(JSON.stringify({ 服务商: detail.provider_name, 模型: detail.model, 模式: detail.mode === "img2img" ? "图生图" : "文生图", 来源: sourceLabel(detail.source), 调用来源身份: sourceIdentity, 生成时间: formatDate(detail.created_at), 图片数量: images.length, 文件大小: formatBytes(totalBytes), 耗时毫秒: detail.elapsed_ms }, null, 2))}</pre></div><div class="detail-block"><h3>参考图</h3><div class="detail-references" data-detail-references>${detailReferenceMarkup(refs)}</div></div><div class="detail-block detail-actions"><button class="primary-button" data-reproduce="${detail.id}" type="button">复现参数</button><button class="quiet-button" data-copy-request="${detail.id}" type="button">复制请求参数</button>${currentImage?.data_url && state.detailAssetsLoaded ? ' <button class="quiet-button" data-output-reference="1" type="button">将当前成图用作新参考图</button>' : '<span class="field-hint" data-detail-assets-placeholder>高清图片仍在加载，请稍候。</span>'}</div>`;
+    const imageFrame = els.drawerBody.querySelector(".detail-image-frame");
+    let lastSwipeAt = 0;
+    if (imageFrame) {
+      let touchStartX = 0;
+      let touchStartY = 0;
+      let touchStarted = false;
+      imageFrame.addEventListener("touchstart", (event) => {
+        if (event.touches.length !== 1) { touchStarted = false; return; }
+        touchStartX = event.touches[0].clientX;
+        touchStartY = event.touches[0].clientY;
+        touchStarted = true;
+      }, { passive: true });
+      imageFrame.addEventListener("touchend", (event) => {
+        if (!touchStarted) return;
+        touchStarted = false;
+        const touch = event.changedTouches[0];
+        if (!touch) return;
+        const deltaX = touch.clientX - touchStartX;
+        const deltaY = touch.clientY - touchStartY;
+        if (Math.abs(deltaX) < 48 || Math.abs(deltaX) < Math.abs(deltaY) * 1.15) return;
+        lastSwipeAt = Date.now();
+        event.preventDefault();
+        void navigateDetail(deltaX < 0 ? 1 : -1);
+      }, { passive: false });
+      imageFrame.addEventListener("touchcancel", () => { touchStarted = false; }, { passive: true });
+    }
+    els.drawerBody.querySelector("[data-detail-image]")?.addEventListener("click", (event) => { if (Date.now() - lastSwipeAt < 500) return; openImagePreview(event.currentTarget.src, `生成结果 ${imageIndex + 1}`, currentImage.download_filename, detailDisplayImages(state.detailData || detail, state.detailFallbackThumbnail), imageIndex, { type: "detail", generationId: detail.id, imageIndex }); });
     els.drawerBody.querySelectorAll("[data-detail-nav]").forEach((button) => button.addEventListener("click", () => void navigateDetail(Number(button.dataset.detailNav))));
     els.drawerBody.querySelectorAll("[data-detail-dot]").forEach((button) => button.addEventListener("click", () => { state.detailRequestedImageIndex = Number(button.dataset.detailDot); renderDetail(state.detailData, state.detailFallbackThumbnail); }));
-    els.drawerBody.querySelectorAll("[data-detail-reference]").forEach((image) => image.addEventListener("click", () => openImagePreview(image.src, image.alt, image.alt)));
-    els.drawerBody.querySelectorAll("[data-reference-delete]").forEach((button) => button.addEventListener("click", async () => {
-      if (!await confirmAction("删除此参考图？生成结果和参数不会删除。")) return;
-      try { await apiPost("gallery/reference/delete", { reference_id: button.dataset.referenceDelete }); showNotice("参考图已删除。", "success"); await openDetail(detail.id, state.detailImageIndex); }
-      catch (error) { showNotice(errorMessage(error, "参考图删除失败"), "error"); }
-    }));
+    bindDetailReferenceEvents(detail);
     els.drawerBody.querySelector("[data-reproduce]")?.addEventListener("click", () => void reproduce(detail.id));
     els.drawerBody.querySelector("[data-copy-request]")?.addEventListener("click", () => void copyRequestParameters(detail));
-    els.drawerBody.querySelector("[data-output-reference]")?.addEventListener("click", () => void useDataUrlAsReference(currentImage.data_url, "gallery-output-reference.png"));
+    els.drawerBody.querySelector("[data-output-reference]")?.addEventListener("click", () => void useDataUrlAsReference(currentImageUrl, "gallery-output-reference.png"));
   }
 
   async function loadDetailAssets(id, summary, fallbackThumbnail) {
     try {
       const assets = await apiGet(`gallery/assets/${id}`);
       if (state.detailId !== id) return;
-      state.detailAssetsLoaded = true; state.detailData = { ...summary, ...assets };
-      renderDetail(state.detailData, fallbackThumbnail);
+      const summaryImages = Array.isArray(summary.images) ? summary.images : [];
+      const assetImages = Array.isArray(assets.images) ? assets.images : [];
+      const mergedImages = assetImages.map((item, index) => ({
+        ...summaryImages[index],
+        ...item,
+        thumbnail_data_url: item?.thumbnail_data_url || summaryImages[index]?.thumbnail_data_url || "",
+      }));
+      state.detailAssetsLoaded = true;
+      state.detailData = { ...summary, ...assets, images: mergedImages };
+      if (state.imagePreviewContext?.type === "detail" && state.imagePreviewContext.generationId === id) {
+        const previewItems = normalizePreviewItems(detailDisplayImages(state.detailData, fallbackThumbnail), "", "");
+        if (previewItems.length) {
+          state.imagePreviewItems = previewItems;
+          state.imagePreviewIndex = Math.max(0, Math.min(previewItems.length - 1, state.imagePreviewContext.imageIndex || 0));
+          state.imagePreviewContext.imageIndex = state.imagePreviewIndex;
+          if (!els.imagePreview.classList.contains("is-hidden")) renderImagePreview();
+        }
+      }
+      const currentImage = detailDisplayImages(state.detailData, fallbackThumbnail)[state.detailImageIndex];
+      const currentImageUrl = currentImage?.data_url || "";
+      const image = els.drawerBody.querySelector("[data-detail-image]");
+      const backdrop = els.drawerBody.querySelector(".detail-image-backdrop");
+      if (currentImageUrl) {
+        if (backdrop) backdrop.src = currentImageUrl;
+        if (image) {
+          image.src = currentImageUrl;
+        } else {
+          const frame = els.drawerBody.querySelector(".detail-image-frame");
+          const pending = frame?.querySelector(".detail-image-pending");
+          if (frame && pending) {
+            const upgradedImage = document.createElement("img");
+            upgradedImage.className = "detail-image";
+            upgradedImage.src = currentImageUrl;
+            upgradedImage.alt = `生成结果 ${state.detailImageIndex + 1}`;
+            upgradedImage.dataset.detailImage = String(state.detailImageIndex);
+            upgradedImage.addEventListener("click", () => openImagePreview(upgradedImage.src, `生成结果 ${state.detailImageIndex + 1}`, currentImage.download_filename, detailDisplayImages(state.detailData, state.detailFallbackThumbnail), state.detailImageIndex, { type: "detail", generationId: state.detailId, imageIndex: state.detailImageIndex }));
+            const upgradedBackdrop = document.createElement("img");
+            upgradedBackdrop.className = "detail-image-backdrop";
+            upgradedBackdrop.src = currentImageUrl;
+            upgradedBackdrop.alt = "";
+            upgradedBackdrop.setAttribute("aria-hidden", "true");
+            pending.replaceWith(upgradedBackdrop, upgradedImage);
+          }
+        }
+      }
+      const references = els.drawerBody.querySelector("[data-detail-references]");
+      if (references) {
+        const refs = Array.isArray(state.detailData.references) ? state.detailData.references : [];
+        references.innerHTML = detailReferenceMarkup(refs);
+        bindDetailReferenceEvents(state.detailData);
+      }
+      const placeholder = els.drawerBody.querySelector("[data-detail-assets-placeholder]");
+      if (placeholder && currentImageUrl) {
+        const referenceButton = document.createElement("button");
+        referenceButton.className = "quiet-button";
+        referenceButton.type = "button";
+        referenceButton.dataset.outputReference = "1";
+        referenceButton.textContent = "将当前成图用作新参考图";
+        referenceButton.addEventListener("click", () => void useDataUrlAsReference(currentImageUrl, "gallery-output-reference.png"));
+        placeholder.replaceWith(referenceButton);
+      }
     } catch (error) {
-      if (state.detailId === id) { state.detailAssetsLoaded = true; renderDetail(summary, fallbackThumbnail); showNotice(errorMessage(error, "高清图片加载失败"), "error"); }
+      if (state.detailId === id) showNotice(errorMessage(error, "高清图片加载失败"), "error");
     }
   }
 
@@ -364,7 +471,7 @@
     state.detailId = id; state.detailData = null; state.detailAssetsLoaded = false; state.detailRequestedImageIndex = requestedImageIndex === "last" ? -1 : Math.max(0, Number(requestedImageIndex) || 0);
     const card = state.galleryItems.find((item) => String(item.id) === String(id));
     state.detailFallbackThumbnail = card?.thumbnail_data_url || "";
-    els.detailDrawer.classList.add("is-open"); els.detailDrawer.setAttribute("aria-hidden", "false"); els.scrim.classList.remove("is-hidden"); els.detailDrawer.focus();
+    els.detailDrawer.classList.add("is-open"); els.detailDrawer.setAttribute("aria-hidden", "false"); els.scrim.classList.remove("is-hidden"); syncPageScrollLock(); els.detailDrawer.focus();
     els.detailDate.textContent = "";
     els.drawerBody.scrollTop = 0; els.drawerBody.innerHTML = '<div class="detail-loading">正在读取生成详情…</div>';
     try {
@@ -376,7 +483,7 @@
   }
 
   async function navigateDetail(direction) {
-    if (state.detailNavigating || !state.detailAssetsLoaded || !state.detailData) return;
+    if (state.detailNavigating || !state.detailData) return;
     const images = detailDisplayImages(state.detailData, state.detailFallbackThumbnail);
     const targetImageIndex = state.detailImageIndex + direction;
     if (targetImageIndex >= 0 && targetImageIndex < images.length) { state.detailRequestedImageIndex = targetImageIndex; renderDetail(state.detailData, state.detailFallbackThumbnail); return; }
@@ -394,17 +501,113 @@
     } finally { state.detailNavigating = false; }
   }
 
-  function closeDetail() { state.detailId = ""; state.detailData = null; state.detailFallbackThumbnail = ""; state.detailAssetsLoaded = false; state.detailNavigating = false; state.detailImageIndex = 0; state.detailRequestedImageIndex = 0; closeImagePreview(); els.detailDrawer.classList.remove("is-open"); els.detailDrawer.setAttribute("aria-hidden", "true"); if (!activeConfirmation) els.scrim.classList.add("is-hidden"); }
+  function closeDetail() { state.detailId = ""; state.detailData = null; state.detailFallbackThumbnail = ""; state.detailAssetsLoaded = false; state.detailNavigating = false; state.detailImageIndex = 0; state.detailRequestedImageIndex = 0; closeImagePreview(); els.detailDrawer.classList.remove("is-open"); els.detailDrawer.setAttribute("aria-hidden", "true"); if (!activeConfirmation) els.scrim.classList.add("is-hidden"); syncPageScrollLock(); }
 
-  function openImagePreview(dataUrl, title, downloadFilename = "") {
-    if (!dataUrl) return;
-    const extension = ((dataUrl.match(/^data:image\/([^;]+)/) || [])[1] || "png").replace("jpeg", "jpg");
-    const fallbackFilename = `${String(title || "image").replace(/[^\w\u3400-\u9fff-]+/g, "_")}.${extension}`;
-    const filename = String(downloadFilename || fallbackFilename).replace(/[\\/\0]/g, "_");
-    els.previewImage.src = dataUrl; els.previewImage.alt = title; els.imagePreviewTitle.textContent = title; els.downloadImageButton.href = dataUrl; els.downloadImageButton.download = filename; els.imagePreview.classList.remove("is-hidden");
+  function normalizePreviewItems(items, dataUrl, downloadFilename) {
+    const source = Array.isArray(items) && items.length ? items : [{ data_url: dataUrl, download_filename: downloadFilename }];
+    return source.map((item) => typeof item === "string" ? { data_url: item } : { ...item, data_url: item?.data_url || item?.thumbnail_data_url || "" }).filter((item) => item.data_url);
   }
 
-  function closeImagePreview() { els.imagePreview.classList.add("is-hidden"); els.previewImage.removeAttribute("src"); els.downloadImageButton.href = "#"; els.downloadImageButton.download = ""; }
+  function renderImagePreview() {
+    const items = state.imagePreviewItems;
+    const index = Math.max(0, Math.min(items.length - 1, state.imagePreviewIndex));
+    const item = items[index];
+    if (!item) return;
+    state.imagePreviewIndex = index;
+    const title = items.length > 1 || state.imagePreviewContext?.type === "detail" ? `生成结果 ${index + 1}` : state.imagePreviewTitle;
+    const dataUrl = item.data_url;
+    const extension = ((dataUrl.match(/^data:image\/([^;]+)/) || [])[1] || "png").replace("jpeg", "jpg");
+    const fallbackFilename = `${String(title || "image").replace(/[^\w\u3400-\u9fff-]+/g, "_")}.${extension}`;
+    const filename = String(item.download_filename || state.imagePreviewDownloadFilename || fallbackFilename).replace(/[\\/\0]/g, "_");
+    els.previewImage.src = dataUrl;
+    els.previewImage.alt = title;
+    els.imagePreviewTitle.textContent = title;
+    els.downloadImageButton.href = dataUrl;
+    els.downloadImageButton.download = filename;
+    const canCrossPrevious = state.imagePreviewContext?.type === "detail" && hasAdjacentGalleryRecord(-1);
+    const canCrossNext = state.imagePreviewContext?.type === "detail" && hasAdjacentGalleryRecord(1);
+    const hasCarousel = items.length > 1 || canCrossPrevious || canCrossNext;
+    els.imagePreviewPrev.classList.toggle("is-hidden", !hasCarousel);
+    els.imagePreviewNext.classList.toggle("is-hidden", !hasCarousel);
+    els.imagePreviewPrev.disabled = !hasCarousel || (index <= 0 && !canCrossPrevious);
+    els.imagePreviewNext.disabled = !hasCarousel || (index >= items.length - 1 && !canCrossNext);
+    els.imagePreviewDots.classList.toggle("is-hidden", items.length <= 1);
+    els.imagePreviewDots.innerHTML = items.length > 1 ? items.map((_entry, itemIndex) => `<button class="detail-carousel-dot ${itemIndex === index ? "is-active" : ""}" data-preview-index="${itemIndex}" type="button" aria-label="查看第 ${itemIndex + 1} 张生成结果" aria-current="${itemIndex === index ? "true" : "false"}"></button>`).join("") : "";
+    els.imagePreviewDots.querySelectorAll("[data-preview-index]").forEach((dot) => dot.addEventListener("click", () => { state.imagePreviewIndex = Number(dot.dataset.previewIndex); if (state.imagePreviewContext?.type === "detail") state.imagePreviewContext.imageIndex = state.imagePreviewIndex; renderImagePreview(); }));
+  }
+
+  async function navigateImagePreview(direction) {
+    if (state.imagePreviewNavigating) return;
+    const target = state.imagePreviewIndex + direction;
+    if (target >= 0 && target < state.imagePreviewItems.length) {
+      state.imagePreviewIndex = target;
+      if (state.imagePreviewContext?.type === "detail") state.imagePreviewContext.imageIndex = target;
+      renderImagePreview();
+      return;
+    }
+    if (state.imagePreviewContext?.type !== "detail") return;
+    const originId = state.imagePreviewContext.generationId;
+    state.imagePreviewNavigating = true;
+    try {
+      await navigateDetail(direction);
+      if (state.detailId === originId || !state.detailData) return;
+      const items = normalizePreviewItems(detailDisplayImages(state.detailData, state.detailFallbackThumbnail), "", "");
+      if (!items.length) return;
+      state.imagePreviewItems = items;
+      state.imagePreviewIndex = direction < 0 ? items.length - 1 : 0;
+      state.imagePreviewContext = { type: "detail", generationId: state.detailId, imageIndex: state.imagePreviewIndex };
+      renderImagePreview();
+    } finally {
+      state.imagePreviewNavigating = false;
+    }
+  }
+
+  function syncDetailFromImagePreview() {
+    const context = state.imagePreviewContext;
+    if (context?.type !== "detail" || state.detailId !== context.generationId || !state.detailData) return;
+    state.detailRequestedImageIndex = context.imageIndex;
+    renderDetail(state.detailData, state.detailFallbackThumbnail);
+  }
+
+  function bindImagePreviewGestures() {
+    let touchStartX = 0;
+    let touchStartY = 0;
+    let touchStarted = false;
+    els.imagePreviewBody.addEventListener("touchstart", (event) => {
+      if (event.touches.length !== 1) { touchStarted = false; return; }
+      touchStartX = event.touches[0].clientX;
+      touchStartY = event.touches[0].clientY;
+      touchStarted = true;
+    }, { passive: true });
+    els.imagePreviewBody.addEventListener("touchend", (event) => {
+      if (!touchStarted) return;
+      touchStarted = false;
+      const touch = event.changedTouches[0];
+      if (!touch) return;
+      const deltaX = touch.clientX - touchStartX;
+      const deltaY = touch.clientY - touchStartY;
+      if (Math.abs(deltaX) < 48 || Math.abs(deltaX) < Math.abs(deltaY) * 1.15) return;
+      state.imagePreviewSwipeAt = Date.now();
+      event.preventDefault();
+      void navigateImagePreview(deltaX < 0 ? 1 : -1);
+    }, { passive: false });
+    els.imagePreviewBody.addEventListener("touchcancel", () => { touchStarted = false; }, { passive: true });
+  }
+
+  function openImagePreview(dataUrl, title, downloadFilename = "", items = null, index = 0, context = null) {
+    const normalizedItems = normalizePreviewItems(items, dataUrl, downloadFilename);
+    if (!normalizedItems.length) return;
+    state.imagePreviewItems = normalizedItems;
+    state.imagePreviewIndex = Math.max(0, Math.min(normalizedItems.length - 1, Number(index) || 0));
+    state.imagePreviewTitle = title || "图片预览";
+    state.imagePreviewDownloadFilename = downloadFilename || "";
+    state.imagePreviewContext = context ? { ...context, imageIndex: state.imagePreviewIndex } : null;
+    renderImagePreview();
+    els.imagePreview.classList.remove("is-hidden");
+    syncPageScrollLock();
+  }
+
+  function closeImagePreview() { syncDetailFromImagePreview(); els.imagePreview.classList.add("is-hidden"); els.previewImage.removeAttribute("src"); els.downloadImageButton.href = "#"; els.downloadImageButton.download = ""; state.imagePreviewItems = []; state.imagePreviewIndex = 0; state.imagePreviewDownloadFilename = ""; state.imagePreviewContext = null; state.imagePreviewNavigating = false; state.imagePreviewSwipeAt = 0; syncPageScrollLock(); }
 
   async function copyRequestParameters(detail) {
     const content = JSON.stringify(requestParameters(detail), null, 2);
@@ -666,9 +869,9 @@
     }
     const choiceDescriptions = policy.choice_descriptions;
     els.toolParameterChoices.value = choiceDescriptions && typeof choiceDescriptions === "object" && !Array.isArray(choiceDescriptions) && Object.keys(choiceDescriptions).length ? JSON.stringify(choiceDescriptions, null, 2) : "";
-    els.parameterDialog.classList.remove("is-hidden"); els.scrim.classList.remove("is-hidden");
+    els.parameterDialog.classList.remove("is-hidden"); els.scrim.classList.remove("is-hidden"); syncPageScrollLock();
   }
-  function closeToolParameterDialog() { state.editingToolParameter = ""; state.editingToolDefaultChoices = []; els.parameterDialog.classList.add("is-hidden"); if (!els.detailDrawer.classList.contains("is-open")) els.scrim.classList.add("is-hidden"); }
+  function closeToolParameterDialog() { state.editingToolParameter = ""; state.editingToolDefaultChoices = []; els.parameterDialog.classList.add("is-hidden"); if (!els.detailDrawer.classList.contains("is-open")) els.scrim.classList.add("is-hidden"); syncPageScrollLock(); }
   function applyToolParameterDialog() {
     const model = currentSettingsModel(); const name = state.editingToolParameter; if (!model || !name) return;
     let choiceDescriptions = {}; try { choiceDescriptions = els.toolParameterChoices.value.trim() ? JSON.parse(els.toolParameterChoices.value) : {}; } catch { showNotice("选项说明必须是合法 JSON。", "error"); return; }
@@ -735,7 +938,7 @@
   async function exportSelected() { try { const result = await apiPost("gallery/export", { ids: Array.from(state.selectedIds) }); const client = await bridge(); await client.download(result.download_endpoint, {}, result.filename); showNotice("导出文件已开始下载。", "success"); } catch (error) { showNotice(errorMessage(error, "画廊导出失败"), "error"); } }
   async function deleteSelected() { if (!await confirmAction(`永久删除 ${state.selectedIds.size} 条生成记录及其结果图？`)) return; try { await apiPost("gallery/delete", { ids: Array.from(state.selectedIds) }); await loadGallery(); showNotice("所选生成记录已删除。", "success"); } catch (error) { showNotice(errorMessage(error, "生成记录删除失败"), "error"); } }
   async function useDataUrlAsReference(dataUrl, name) { try { const client = await bridge(); const uploaded = await client.upload("studio/reference/upload", dataUrlToFile(dataUrl, name)); state.references = [uploaded]; state.mode = "img2img"; document.querySelectorAll(".segment").forEach((button) => button.classList.toggle("is-active", button.dataset.mode === "img2img")); renderModelChoices(); renderReferences(); closeDetail(); switchView("generate"); setError(els.generationError, "已将当前成图作为新的图生图参考图。它不会被当作历史原始参考图。"); } catch (error) { setError(els.generationError, errorMessage(error, "添加参考图失败")); } }
-  function confirmAction(message) { return new Promise((resolve) => { const dialog = $("confirmDialog"); const cancel = $("confirmCancel"); const accept = $("confirmAccept"); $("confirmMessage").textContent = message; dialog.classList.remove("is-hidden"); els.scrim.classList.remove("is-hidden"); accept.focus(); const onKeydown = (event) => { if (event.key === "Escape") finish(false); }; const finish = (value) => { dialog.classList.add("is-hidden"); if (!els.detailDrawer.classList.contains("is-open")) els.scrim.classList.add("is-hidden"); cancel.removeEventListener("click", onCancel); accept.removeEventListener("click", onAccept); document.removeEventListener("keydown", onKeydown); activeConfirmation = null; resolve(value); }; const onCancel = () => finish(false); const onAccept = () => finish(true); activeConfirmation = finish; cancel.addEventListener("click", onCancel); accept.addEventListener("click", onAccept); document.addEventListener("keydown", onKeydown); }); }
+  function confirmAction(message) { return new Promise((resolve) => { const dialog = $("confirmDialog"); const cancel = $("confirmCancel"); const accept = $("confirmAccept"); $("confirmMessage").textContent = message; dialog.classList.remove("is-hidden"); els.scrim.classList.remove("is-hidden"); syncPageScrollLock(); accept.focus(); const onKeydown = (event) => { if (event.key === "Escape") finish(false); }; const finish = (value) => { dialog.classList.add("is-hidden"); if (!els.detailDrawer.classList.contains("is-open")) els.scrim.classList.add("is-hidden"); syncPageScrollLock(); cancel.removeEventListener("click", onCancel); accept.removeEventListener("click", onAccept); document.removeEventListener("keydown", onKeydown); activeConfirmation = null; resolve(value); }; const onCancel = () => finish(false); const onAccept = () => finish(true); activeConfirmation = finish; cancel.addEventListener("click", onCancel); accept.addEventListener("click", onAccept); document.addEventListener("keydown", onKeydown); }); }
 
   function bindEvents() {
     if (eventsBound) return;
@@ -750,8 +953,8 @@
     els.referenceUpload.addEventListener("change", async () => { try { await uploadReferences(els.referenceUpload.files); } catch (error) { setError(els.generationError, errorMessage(error, "上传参考图失败")); } finally { els.referenceUpload.value = ""; } });
     els.generationForm.addEventListener("submit", generate); $("galleryRefresh").addEventListener("click", () => void loadGallery()); els.galleryPrev.addEventListener("click", () => void loadGallery(state.galleryPage - 1)); els.galleryNext.addEventListener("click", () => void loadGallery(state.galleryPage + 1)); els.gallerySearch.addEventListener("change", () => void loadGallery(0)); els.galleryProvider.addEventListener("change", () => void loadGallery(0)); els.galleryMode.addEventListener("change", () => void loadGallery(0)); els.gallerySource.addEventListener("change", () => void loadGallery(0));
     $("cancelSelectionButton").addEventListener("click", clearGallerySelection); $("selectAllButton").addEventListener("click", () => { state.galleryItems.forEach((item) => state.selectedIds.add(item.id)); els.galleryGrid.querySelectorAll("[data-select-id]").forEach((input) => { input.checked = true; }); updateSelection(); }); $("exportButton").addEventListener("click", () => void exportSelected()); $("deleteButton").addEventListener("click", () => void deleteSelected());
-    $("closeDrawer").addEventListener("click", closeDetail); $("closeImagePreview").addEventListener("click", closeImagePreview); els.imagePreview.querySelector("[data-close-image-preview]").addEventListener("click", closeImagePreview); els.previewImage.addEventListener("click", closeImagePreview); els.scrim.addEventListener("click", () => { if (!els.parameterDialog.classList.contains("is-hidden")) return; if (activeConfirmation) activeConfirmation(false); else closeDetail(); }); $("parameterDialogCancel").addEventListener("click", closeToolParameterDialog); $("parameterDialogApply").addEventListener("click", applyToolParameterDialog); els.addProviderButton.addEventListener("click", () => void addProvider()); els.addModelButton.addEventListener("click", () => void addModel()); els.saveSettingsButton.addEventListener("click", () => void saveSettings());
-    document.addEventListener("keydown", (event) => { if (event.key === "Escape") { if (!els.imagePreview.classList.contains("is-hidden")) closeImagePreview(); else if (els.detailDrawer.classList.contains("is-open") && !activeConfirmation) closeDetail(); return; } if (!els.imagePreview.classList.contains("is-hidden") || !els.detailDrawer.classList.contains("is-open") || activeConfirmation) return; if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); void navigateDetail(event.key === "ArrowLeft" ? -1 : 1); } });
+    $("closeDrawer").addEventListener("click", closeDetail); $("closeImagePreview").addEventListener("click", closeImagePreview); els.imagePreviewPrev.addEventListener("click", () => void navigateImagePreview(-1)); els.imagePreviewNext.addEventListener("click", () => void navigateImagePreview(1)); bindImagePreviewGestures(); els.imagePreview.querySelector("[data-close-image-preview]").addEventListener("click", closeImagePreview); els.previewImage.addEventListener("click", () => { if (Date.now() - state.imagePreviewSwipeAt < 500) return; closeImagePreview(); }); els.scrim.addEventListener("click", () => { if (!els.parameterDialog.classList.contains("is-hidden")) return; if (activeConfirmation) activeConfirmation(false); else closeDetail(); }); $("parameterDialogCancel").addEventListener("click", closeToolParameterDialog); $("parameterDialogApply").addEventListener("click", applyToolParameterDialog); els.addProviderButton.addEventListener("click", () => void addProvider()); els.addModelButton.addEventListener("click", () => void addModel()); els.saveSettingsButton.addEventListener("click", () => void saveSettings());
+    document.addEventListener("keydown", (event) => { if (event.key === "Escape") { if (!els.imagePreview.classList.contains("is-hidden")) closeImagePreview(); else if (els.detailDrawer.classList.contains("is-open") && !activeConfirmation) closeDetail(); return; } if (!els.imagePreview.classList.contains("is-hidden")) { if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); void navigateImagePreview(event.key === "ArrowLeft" ? -1 : 1); } return; } if (!els.detailDrawer.classList.contains("is-open") || activeConfirmation) return; if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); void navigateDetail(event.key === "ArrowLeft" ? -1 : 1); } });
   }
 
   async function start() {
