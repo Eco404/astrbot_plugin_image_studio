@@ -229,6 +229,24 @@ class ImageStudioPlugin(Star):
                 "Image Studio: gallery assets",
             ),
             (
+                "gallery/image-sequence",
+                self._api_gallery_image_sequence,
+                ["GET"],
+                "Image Studio: gallery image sequence",
+            ),
+            (
+                "gallery/image/<image_id>",
+                self._api_gallery_image,
+                ["GET"],
+                "Image Studio: gallery image data",
+            ),
+            (
+                "gallery/download/<image_id>",
+                self._api_gallery_image_download,
+                ["GET"],
+                "Image Studio: download gallery image",
+            ),
+            (
                 "gallery/reproduce/<generation_id>",
                 self._api_gallery_reproduce,
                 ["POST"],
@@ -549,6 +567,34 @@ class ImageStudioPlugin(Star):
         return json_response(
             {"images": detail["images"], "references": detail["references"]}
         )
+
+    async def _api_gallery_image_sequence(self) -> Any:
+        filters = {
+            "query": web_request.query.get("query", ""),
+            "provider_id": web_request.query.get("provider_id", ""),
+            "mode": web_request.query.get("mode", ""),
+            "source": web_request.query.get("source", ""),
+        }
+        items = await self.store.gallery_image_sequence(filters)
+        return json_response({"items": items, "total": len(items)})
+
+    async def _api_gallery_image(self, image_id: str) -> Any:
+        detail = str(web_request.query.get("detail", "preview")).strip().lower()
+        if detail not in {"preview", "original"}:
+            return error_response(
+                "图片读取方式仅支持 preview 或 original", status_code=400
+            )
+        image = await self.store.gallery_image_data(image_id, detail=detail)
+        if image is None:
+            return error_response("生成图片不存在", status_code=404)
+        return json_response(image)
+
+    async def _api_gallery_image_download(self, image_id: str) -> Any:
+        image = await self.store.gallery_image_file(image_id)
+        if image is None:
+            return error_response("生成图片不存在", status_code=404)
+        path, mime_type, filename = image
+        return file_response(path, filename=filename, content_type=mime_type)
 
     async def _api_gallery_reproduce(self, generation_id: str) -> Any:
         try:

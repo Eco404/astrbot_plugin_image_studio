@@ -1,7 +1,7 @@
 name: astrbot_plugin_image_studio
 display_name: Image Studio
 desc: 为 AstrBot 提供多 Provider 生图、画廊和可供 Agent 继续处理的图像工具。
-version: 0.5.2
+version: 0.6.1
 author: local
 repo: local
 category: AI 增强

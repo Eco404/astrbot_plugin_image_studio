@@ -446,6 +446,99 @@ def test_gallery_filters_generations_by_invocation_source(tmp_path) -> None:
     asyncio.run(run())
 
 
+def test_gallery_image_sequence_and_individual_assets(tmp_path) -> None:
+    async def run() -> None:
+        from PIL import Image
+
+        output = io.BytesIO()
+        Image.new("RGB", (5, 3), "#4c8074").save(output, "PNG")
+        wide_png = output.getvalue()
+        store = GenerationStore(tmp_path)
+        await store.initialize()
+        older_id = await store.record_success(
+            provider=provider(),
+            request=GenerationRequest(
+                mode="text2img",
+                provider_id="test-provider",
+                prompt="older sequence item",
+                source="webui",
+            ),
+            images=(GeneratedImage(PNG, "image/png"),),
+            elapsed_ms=12,
+            history=HistorySettings(True, 10, 50, False),
+        )
+        newer_id = await store.record_success(
+            provider=provider(),
+            request=GenerationRequest(
+                mode="img2img",
+                provider_id="test-provider",
+                prompt="newer sequence item",
+                source="llm_tool",
+            ),
+            images=(
+                GeneratedImage(wide_png, "image/png"),
+                GeneratedImage(PNG, "image/png"),
+            ),
+            elapsed_ms=12,
+            history=HistorySettings(True, 10, 50, False),
+        )
+        with store._connect() as conn:
+            conn.execute(
+                "UPDATE generations SET created_at = ? WHERE id = ?",
+                (1_700_000_000, older_id),
+            )
+            conn.execute(
+                "UPDATE generations SET created_at = ? WHERE id = ?",
+                (1_800_000_000, newer_id),
+            )
+
+        sequence = await store.gallery_image_sequence({})
+        assert [item["generation_id"] for item in sequence] == [
+            newer_id,
+            newer_id,
+            older_id,
+        ]
+        assert [item["image_index"] for item in sequence] == [0, 1, 0]
+        assert [item["generation_position"] for item in sequence] == [0, 0, 1]
+        assert (sequence[0]["width"], sequence[0]["height"]) == (5, 3)
+        assert re.fullmatch(
+            r"\d{14}_i2i_test-image_01\.png",
+            sequence[0]["download_filename"],
+        )
+
+        filtered = await store.gallery_image_sequence(
+            {"query": "newer", "mode": "img2img", "source": "llm_tool"}
+        )
+        assert [item["image_id"] for item in filtered] == [
+            sequence[0]["image_id"],
+            sequence[1]["image_id"],
+        ]
+        assert await store.gallery_image_sequence({"source": "command"}) == []
+
+        preview = await store.gallery_image_data(
+            sequence[0]["image_id"], detail="preview"
+        )
+        original = await store.gallery_image_data(
+            sequence[0]["image_id"], detail="original"
+        )
+        assert preview is not None and original is not None
+        assert preview["data_url"].startswith("data:image/webp;base64,")
+        assert original["data_url"].startswith("data:image/png;base64,")
+        assert original["size_bytes"] == len(wide_png)
+        assert (original["width"], original["height"]) == (5, 3)
+
+        download = await store.gallery_image_file(sequence[0]["image_id"])
+        assert download is not None
+        path, mime_type, filename = download
+        assert path.read_bytes() == wide_png
+        assert mime_type == "image/png"
+        assert filename == sequence[0]["download_filename"]
+        assert await store.gallery_image_data("invalid", detail="preview") is None
+        assert await store.gallery_image_file("invalid") is None
+
+    asyncio.run(run())
+
+
 def test_identical_images_share_one_content_addressed_asset(tmp_path) -> None:
     async def run() -> None:
         store = GenerationStore(tmp_path)

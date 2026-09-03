@@ -104,6 +104,8 @@ class GenerationStore:
                     path TEXT NOT NULL UNIQUE,
                     mime_type TEXT NOT NULL,
                     size_bytes INTEGER NOT NULL,
+                    width INTEGER NOT NULL DEFAULT 0,
+                    height INTEGER NOT NULL DEFAULT 0,
                     created_at REAL NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS image_thumbnails (
@@ -180,6 +182,28 @@ class GenerationStore:
                         f"ALTER TABLE image_thumbnails ADD COLUMN {column} "
                         "INTEGER NOT NULL DEFAULT 0"
                     )
+            asset_columns = {
+                str(row["name"])
+                for row in conn.execute("PRAGMA table_info(image_assets)").fetchall()
+            }
+            for column in ("width", "height"):
+                if column not in asset_columns:
+                    conn.execute(
+                        f"ALTER TABLE image_assets ADD COLUMN {column} "
+                        "INTEGER NOT NULL DEFAULT 0"
+                    )
+            for row in conn.execute(
+                "SELECT id, path FROM image_assets WHERE width <= 0 OR height <= 0"
+            ).fetchall():
+                path = self.data_dir / str(row["path"])
+                try:
+                    dimensions = _image_dimensions(path.read_bytes())
+                except OSError:
+                    dimensions = (1, 1)
+                conn.execute(
+                    "UPDATE image_assets SET width = ?, height = ? WHERE id = ?",
+                    (*dimensions, str(row["id"])),
+                )
             try:
                 conn.execute(
                     "CREATE VIRTUAL TABLE IF NOT EXISTS generation_search USING fts5("
@@ -487,15 +511,18 @@ class GenerationStore:
             )
         with self._connect() as conn:
             conn.executemany(
-                "INSERT INTO image_assets (id, path, mime_type, size_bytes, created_at) "
-                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET "
-                "path=excluded.path, mime_type=excluded.mime_type, size_bytes=excluded.size_bytes",
+                "INSERT INTO image_assets (id, path, mime_type, size_bytes, width, height, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET "
+                "path=excluded.path, mime_type=excluded.mime_type, size_bytes=excluded.size_bytes, "
+                "width=excluded.width, height=excluded.height",
                 [
                     (
                         asset["id"],
                         asset["path"],
                         asset["mime_type"],
                         asset["size_bytes"],
+                        asset["width"],
+                        asset["height"],
                         now,
                     )
                     for asset in prepared_assets.values()
@@ -736,14 +763,17 @@ class GenerationStore:
             )
             with self._connect() as conn:
                 conn.executemany(
-                    "INSERT INTO image_assets (id, path, mime_type, size_bytes, created_at) "
-                    "VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING",
+                    "INSERT INTO image_assets (id, path, mime_type, size_bytes, width, height, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET "
+                    "width=excluded.width, height=excluded.height",
                     [
                         (
                             asset["id"],
                             asset["path"],
                             asset["mime_type"],
                             asset["size_bytes"],
+                            asset["width"],
+                            asset["height"],
                             created_at,
                         )
                         for asset in assets.values()
@@ -859,7 +889,7 @@ class GenerationStore:
                 f"FROM generations g JOIN generation_images i ON i.generation_id = g.id "
                 f"AND i.ordinal = 0 JOIN image_assets a ON a.id = i.asset_id "
                 f"JOIN image_thumbnails t ON t.asset_id = a.id "
-                f"{clause} ORDER BY g.created_at DESC LIMIT ? OFFSET ?",
+                f"{clause} ORDER BY g.created_at DESC, g.id DESC LIMIT ? OFFSET ?",
                 [*args, limit, offset],
             ).fetchall()
             provider_options = [
@@ -889,6 +919,158 @@ class GenerationStore:
         return await asyncio.to_thread(
             self._generation_detail_sync, generation_id, include_assets
         )
+
+    async def gallery_image_sequence(
+        self, filters: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Return lightweight image cursors in the active gallery order."""
+
+        return await asyncio.to_thread(self._gallery_image_sequence_sync, filters)
+
+    def _gallery_image_sequence_sync(
+        self, filters: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        where: list[str] = []
+        args: list[Any] = []
+        query = str(filters.get("query") or "").strip()[:240]
+        provider_id = str(filters.get("provider_id") or "").strip()[:64]
+        mode = str(filters.get("mode") or "").strip()[:20]
+        source = str(filters.get("source") or "").strip()[:30]
+        if provider_id:
+            where.append("g.provider_id = ?")
+            args.append(provider_id)
+        if mode in {"text2img", "img2img"}:
+            where.append("g.mode = ?")
+            args.append(mode)
+        if source:
+            where.append("g.source = ?")
+            args.append(source)
+        if query:
+            where.append(
+                "(g.original_prompt LIKE ? OR g.final_prompt LIKE ? OR g.provider_name LIKE ? OR g.model LIKE ? "
+                "OR g.platform_name LIKE ? OR g.platform_id LIKE ? OR g.group_id LIKE ? "
+                "OR g.group_name LIKE ? OR g.user_id LIKE ? OR g.user_name LIKE ?)"
+            )
+            token = f"%{query}%"
+            args.extend([token] * 10)
+        clause = f"WHERE {' AND '.join(where)}" if where else ""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT g.id AS generation_id, g.created_at, g.mode, g.provider_id, "
+                "g.model, i.id AS image_id, i.ordinal, a.mime_type, a.size_bytes, "
+                "a.width, a.height, a.path, "
+                "COUNT(*) OVER (PARTITION BY g.id) AS image_count "
+                "FROM generations g JOIN generation_images i ON i.generation_id = g.id "
+                "JOIN image_assets a ON a.id = i.asset_id "
+                f"{clause} ORDER BY g.created_at DESC, g.id DESC, i.ordinal ASC",
+                args,
+            ).fetchall()
+        used_stems: dict[str, set[str]] = {}
+        generation_positions: dict[str, int] = {}
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            generation_id = str(item["generation_id"])
+            if generation_id not in generation_positions:
+                generation_positions[generation_id] = len(generation_positions)
+            used = used_stems.setdefault(generation_id, set())
+            item["download_filename"] = export_image_filename(
+                item,
+                image_index=int(item["ordinal"]) + 1,
+                image_count=int(item["image_count"]),
+                mime_type=str(item.get("mime_type") or ""),
+                suffix=Path(str(item.pop("path", ""))).suffix,
+                used_stems=used,
+            )
+            item["image_index"] = int(item.pop("ordinal"))
+            item["generation_position"] = generation_positions[generation_id]
+            item["width"] = max(1, int(item.get("width") or 1))
+            item["height"] = max(1, int(item.get("height") or 1))
+            items.append(item)
+        return items
+
+    async def gallery_image_data(
+        self, image_id: str, *, detail: str
+    ) -> dict[str, Any] | None:
+        """Load one gallery result as a preview or original data URL."""
+
+        if not _SAFE_ID_RE.fullmatch(image_id):
+            return None
+        return await asyncio.to_thread(self._gallery_image_data_sync, image_id, detail)
+
+    async def gallery_image_file(self, image_id: str) -> tuple[Path, str, str] | None:
+        """Resolve one generated image for an authenticated download."""
+
+        if not _SAFE_ID_RE.fullmatch(image_id):
+            return None
+        return await asyncio.to_thread(self._gallery_image_file_sync, image_id)
+
+    def _gallery_image_file_sync(self, image_id: str) -> tuple[Path, str, str] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT generation_id FROM generation_images WHERE id = ?",
+                (image_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        detail = self._generation_detail_sync(
+            str(row["generation_id"]), include_assets=False
+        )
+        if detail is None:
+            return None
+        image = next(
+            (item for item in detail["images"] if item["id"] == image_id), None
+        )
+        if image is None:
+            return None
+        path = self.data_dir / str(image["path"])
+        if not path.is_file() or not _is_within(path, self.assets_dir):
+            return None
+        return (
+            path,
+            str(image["mime_type"]),
+            str(image["download_filename"]),
+        )
+
+    def _gallery_image_data_sync(
+        self, image_id: str, detail: str
+    ) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT i.id AS image_id, i.generation_id, i.ordinal, a.path, "
+                "a.mime_type, a.size_bytes, a.width, a.height, t.path AS thumbnail_path, "
+                "t.mime_type AS thumbnail_mime_type, t.size_bytes AS thumbnail_size_bytes "
+                "FROM generation_images i JOIN image_assets a ON a.id = i.asset_id "
+                "JOIN image_thumbnails t ON t.asset_id = a.id WHERE i.id = ?",
+                (image_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        item = dict(row)
+        original = self.data_dir / str(item["path"])
+        thumbnail = self.data_dir / str(item["thumbnail_path"])
+        use_original = detail == "original"
+        path = original if use_original else thumbnail
+        mime_type = str(
+            item["mime_type"] if use_original else item["thumbnail_mime_type"]
+        )
+        size_bytes = int(
+            item["size_bytes"] if use_original else item["thumbnail_size_bytes"]
+        )
+        if not path.is_file() or not _is_within(
+            path, self.assets_dir if use_original else self.thumbnails_dir
+        ):
+            return None
+        return {
+            "image_id": str(item["image_id"]),
+            "generation_id": str(item["generation_id"]),
+            "image_index": int(item["ordinal"]),
+            "mime_type": mime_type,
+            "size_bytes": size_bytes,
+            "width": max(1, int(item.get("width") or 1)),
+            "height": max(1, int(item.get("height") or 1)),
+            "data_url": _path_data_url(path, mime_type),
+        }
 
     async def stage_generation_references(
         self, generation_id: str
@@ -1237,11 +1419,14 @@ class GenerationStore:
             current_size = -1
         if current_size != len(data):
             _atomic_write(target, data)
+        width, height = _image_dimensions(data)
         return {
             "id": digest,
             "path": str(relative_path),
             "mime_type": mime_type,
             "size_bytes": len(data),
+            "width": width,
+            "height": height,
         }
 
     def _prepare_thumbnail_sync(
@@ -1525,6 +1710,18 @@ def _path_data_url(path: Path, mime_type: str) -> str:
     except OSError:
         pass
     return ""
+
+
+def _image_dimensions(data: bytes) -> tuple[int, int]:
+    try:
+        from PIL import Image, ImageOps
+
+        with Image.open(io.BytesIO(data)) as image:
+            transposed = ImageOps.exif_transpose(image)
+            width, height = transposed.size
+        return max(1, int(width)), max(1, int(height))
+    except Exception:
+        return 1, 1
 
 
 def _atomic_write(path: Path, data: bytes) -> None:
