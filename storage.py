@@ -22,6 +22,7 @@ from .models import (
     ImageProvider,
     ReferenceImage,
     WorkflowImageAsset,
+    WorkflowImageLoadResult,
 )
 
 _IMAGE_SUFFIXES = {
@@ -562,9 +563,33 @@ class GenerationStore:
     ) -> tuple[GeneratedImage, str] | None:
         """Load an original or lightweight preview from the temporary asset layer."""
 
+        result = await self.load_workflow_image_detailed(
+            asset_id,
+            scope_id=scope_id,
+            detail=detail,
+            preview_max_edge=preview_max_edge,
+            preview_quality=preview_quality,
+            retention_hours=retention_hours,
+        )
+        if not result.ok or result.image is None:
+            return None
+        return result.image, result.internal_path
+
+    async def load_workflow_image_detailed(
+        self,
+        asset_id: str,
+        *,
+        scope_id: str,
+        detail: str,
+        preview_max_edge: int,
+        preview_quality: int,
+        retention_hours: int,
+    ) -> WorkflowImageLoadResult:
+        """Load a scoped workflow asset while preserving its failure reason."""
+
         async with self._lock:
             return await asyncio.to_thread(
-                self._load_workflow_image_sync,
+                self._load_workflow_image_detailed_sync,
                 asset_id,
                 scope_id,
                 detail,
@@ -573,7 +598,7 @@ class GenerationStore:
                 retention_hours,
             )
 
-    def _load_workflow_image_sync(
+    def _load_workflow_image_detailed_sync(
         self,
         asset_id: str,
         scope_id: str,
@@ -581,26 +606,65 @@ class GenerationStore:
         preview_max_edge: int,
         preview_quality: int,
         retention_hours: int,
-    ) -> tuple[GeneratedImage, str] | None:
+    ) -> WorkflowImageLoadResult:
         clean_id = str(asset_id or "").strip().lower()
         normalized_scope = str(scope_id or "").strip()
-        if not _SHA256_RE.fullmatch(clean_id) or not normalized_scope:
-            return None
+        if not _SHA256_RE.fullmatch(clean_id):
+            return WorkflowImageLoadResult(clean_id, "invalid_asset_id")
+        if not normalized_scope:
+            return WorkflowImageLoadResult(clean_id, "access_denied")
         now = time.time()
         retention_seconds = max(1, min(168, int(retention_hours))) * 3600
-        self._delete_expired_leases_sync(now)
         with self._connect() as conn:
             lease = conn.execute(
-                "SELECT hard_expires_at FROM agent_asset_leases "
-                "WHERE asset_id = ? AND scope_id = ? AND expires_at > ? AND hard_expires_at > ?",
-                (clean_id, normalized_scope, now, now),
+                "SELECT expires_at, hard_expires_at FROM agent_asset_leases "
+                "WHERE asset_id = ? AND scope_id = ?",
+                (clean_id, normalized_scope),
             ).fetchone()
             row = conn.execute(
                 "SELECT path, mime_type, size_bytes FROM image_assets WHERE id = ?",
                 (clean_id,),
             ).fetchone()
-            if lease is None or row is None:
-                return None
+        if row is None:
+            return WorkflowImageLoadResult(clean_id, "not_found")
+        if lease is None:
+            return WorkflowImageLoadResult(clean_id, "access_denied")
+        if float(lease["expires_at"]) <= now or float(lease["hard_expires_at"]) <= now:
+            return WorkflowImageLoadResult(clean_id, "expired")
+        original = self.data_dir / str(row["path"])
+        if not original.is_file() or not _is_within(original, self.assets_dir):
+            return WorkflowImageLoadResult(clean_id, "file_missing")
+        try:
+            raw = original.read_bytes()
+        except FileNotFoundError:
+            return WorkflowImageLoadResult(clean_id, "file_missing")
+        if not _image_is_decodable(raw):
+            return WorkflowImageLoadResult(clean_id, "decode_failed")
+        mime_type = detect_mime_type(raw, str(row["mime_type"]))
+        if detail == "original":
+            image = GeneratedImage(data=raw, mime_type=mime_type)
+        else:
+            max_edge = max(256, min(2048, int(preview_max_edge)))
+            quality = max(40, min(95, int(preview_quality)))
+            thumbnail = self._prepare_thumbnail_sync(
+                {
+                    "id": clean_id,
+                    "path": str(row["path"]),
+                    "mime_type": mime_type,
+                    "size_bytes": int(row["size_bytes"]),
+                },
+                max_edge=max_edge,
+                quality=quality,
+            )
+            with self._connect() as conn:
+                self._upsert_thumbnails_sync(conn, [thumbnail])
+            preview_path = self.data_dir / thumbnail["path"]
+            preview_data = preview_path.read_bytes()
+            image = GeneratedImage(
+                data=preview_data,
+                mime_type=detect_mime_type(preview_data, "image/webp"),
+            )
+        with self._connect() as conn:
             conn.execute(
                 "UPDATE agent_asset_leases SET last_accessed_at = ?, expires_at = ? "
                 "WHERE asset_id = ? AND scope_id = ?",
@@ -611,38 +675,11 @@ class GenerationStore:
                     normalized_scope,
                 ),
             )
-        original = self.data_dir / str(row["path"])
-        if not original.is_file() or not _is_within(original, self.assets_dir):
-            return None
-        raw = original.read_bytes()
-        mime_type = detect_mime_type(raw, str(row["mime_type"]))
-        if detail == "original":
-            return GeneratedImage(data=raw, mime_type=mime_type), str(
-                original.resolve(strict=False)
-            )
-
-        max_edge = max(256, min(2048, int(preview_max_edge)))
-        quality = max(40, min(95, int(preview_quality)))
-        thumbnail = self._prepare_thumbnail_sync(
-            {
-                "id": clean_id,
-                "path": str(row["path"]),
-                "mime_type": mime_type,
-                "size_bytes": int(row["size_bytes"]),
-            },
-            max_edge=max_edge,
-            quality=quality,
-        )
-        with self._connect() as conn:
-            self._upsert_thumbnails_sync(conn, [thumbnail])
-        preview_path = self.data_dir / thumbnail["path"]
-        preview_data = preview_path.read_bytes()
-        return (
-            GeneratedImage(
-                data=preview_data,
-                mime_type=detect_mime_type(preview_data, "image/webp"),
-            ),
-            str(original.resolve(strict=False)),
+        return WorkflowImageLoadResult(
+            clean_id,
+            "ok",
+            image=image,
+            internal_path=str(original.resolve(strict=False)),
         )
 
     def _delete_expired_leases_sync(self, now: float) -> int:
@@ -1722,6 +1759,17 @@ def _image_dimensions(data: bytes) -> tuple[int, int]:
         return max(1, int(width)), max(1, int(height))
     except Exception:
         return 1, 1
+
+
+def _image_is_decodable(data: bytes) -> bool:
+    try:
+        from PIL import Image
+
+        with Image.open(io.BytesIO(data)) as image:
+            width, height = image.size
+            return bool(image.format) and width > 0 and height > 0
+    except Exception:
+        return False
 
 
 def _atomic_write(path: Path, data: bytes) -> None:

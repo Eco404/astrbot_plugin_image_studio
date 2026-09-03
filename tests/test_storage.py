@@ -115,6 +115,62 @@ def test_workflow_lease_reuses_canonical_asset_and_shared_preview(tmp_path) -> N
     asyncio.run(run())
 
 
+def test_workflow_asset_lookup_preserves_specific_failure_reasons(tmp_path) -> None:
+    async def run() -> None:
+        store = GenerationStore(tmp_path)
+        await store.initialize()
+        assets = await store.lease_agent_images(
+            (GeneratedImage(PNG, "image/png"),),
+            scope_id="test:private:user-1",
+            create_preview=False,
+            preview_max_edge=320,
+            preview_quality=75,
+            retention_hours=24,
+        )
+        asset_id = assets[0].asset_id
+        lookup = {
+            "scope_id": "test:private:user-1",
+            "detail": "original",
+            "preview_max_edge": 320,
+            "preview_quality": 75,
+            "retention_hours": 24,
+        }
+
+        invalid = await store.load_workflow_image_detailed("bad-id", **lookup)
+        missing = await store.load_workflow_image_detailed(f"{0:064x}", **lookup)
+        denied = await store.load_workflow_image_detailed(
+            asset_id, **{**lookup, "scope_id": "test:private:user-2"}
+        )
+        assert invalid.status == "invalid_asset_id"
+        assert missing.status == "not_found"
+        assert denied.status == "access_denied"
+
+        with store._connect() as conn:
+            conn.execute(
+                "UPDATE agent_asset_leases SET expires_at = 0 WHERE asset_id = ?",
+                (asset_id,),
+            )
+        expired = await store.load_workflow_image_detailed(asset_id, **lookup)
+        assert expired.status == "expired"
+
+        with store._connect() as conn:
+            conn.execute(
+                "UPDATE agent_asset_leases SET expires_at = ?, hard_expires_at = ? "
+                "WHERE asset_id = ?",
+                (time.time() + 3600, time.time() + 7200, asset_id),
+            )
+        asset_path = next(store.assets_dir.rglob("*.png"))
+        asset_path.unlink()
+        file_missing = await store.load_workflow_image_detailed(asset_id, **lookup)
+        assert file_missing.status == "file_missing"
+
+        asset_path.write_bytes(b"not-an-image")
+        decode_failed = await store.load_workflow_image_detailed(asset_id, **lookup)
+        assert decode_failed.status == "decode_failed"
+
+    asyncio.run(run())
+
+
 def test_maintenance_expires_lease_only_assets_and_ignores_legacy_directory(
     tmp_path,
 ) -> None:

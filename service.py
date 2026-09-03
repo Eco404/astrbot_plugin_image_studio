@@ -239,6 +239,9 @@ class ImageGenerationService:
         if is_file_uri(text):
             text = file_uri_to_path(text)
         path = Path(text).expanduser()
+        tool_image_cache_root = (Path(get_astrbot_temp_path()) / "tool_images").resolve(
+            strict=False
+        )
         roots = [
             self.store.data_dir.resolve(strict=False),
             Path(get_astrbot_temp_path()).resolve(strict=False),
@@ -256,6 +259,8 @@ class ImageGenerationService:
             if not any(_within(current, root) for root in roots):
                 escaped_existing_path = True
                 continue
+            if _within(current, tool_image_cache_root):
+                raise ValueError("data/temp/tool_images 仅用于视觉预览，不能作为参考图")
             if current.is_file():
                 resolved = current
                 break

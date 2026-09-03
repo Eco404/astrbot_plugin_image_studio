@@ -32,6 +32,7 @@ from astrbot_plugin_image_studio.models import (
     ImageProvider,
     ReferenceImage,
     WorkflowImageAsset,
+    WorkflowImageLoadResult,
 )
 from astrbot_plugin_image_studio.providers import ProviderError, ProviderExecutor
 from astrbot_plugin_image_studio.service import (
@@ -91,6 +92,18 @@ class FakeAgentAssetStore:
         return (
             GeneratedImage(PNG, "image/png"),
             "/AstrBot/data/temp/image-studio-original-1.png",
+        )
+
+    async def load_workflow_image_detailed(self, asset_id, **kwargs):
+        loaded = await self.load_workflow_image(asset_id, **kwargs)
+        if loaded is None:
+            return WorkflowImageLoadResult(asset_id, "not_found")
+        image, internal_path = loaded
+        return WorkflowImageLoadResult(
+            asset_id,
+            "ok",
+            image=image,
+            internal_path=internal_path,
         )
 
 
@@ -415,17 +428,100 @@ def test_llm_can_view_agent_asset_on_demand() -> None:
     plugin.store = FakeAgentAssetStore()
 
     result = asyncio.run(
-        plugin.image_studio_view_asset(ToolEvent(), asset_id=f"{1:064x}")
+        plugin.image_studio_view_asset(ToolEvent(), asset_ids=[f"{1:064x}"])
     )
     missing = asyncio.run(
-        plugin.image_studio_view_asset(ToolEvent(), asset_id=f"{2:064x}")
+        plugin.image_studio_view_asset(ToolEvent(), asset_ids=[f"{2:064x}"])
     )
 
     assert isinstance(result.content[0], mcp.types.ImageContent)
     assert "asset_id" in result.content[1].text
     assert "original_path" not in result.content[1].text
     assert missing.isError
-    assert "不存在或已超过" in missing.content[0].text
+    payload = json.loads(missing.content[0].text)
+    assert payload["failures"] == [
+        {
+            "index": 0,
+            "asset_id": f"{2:064x}",
+            "reason": "not_found",
+            "message": "没有对应的资产记录",
+            "retryable": False,
+        }
+    ]
+
+
+def test_llm_can_view_multiple_assets_in_input_order() -> None:
+    first_id = f"{1:064x}"
+    second_id = f"{2:064x}"
+
+    class BatchStore:
+        async def load_workflow_image_detailed(self, asset_id, **_kwargs):
+            images = {
+                first_id: GeneratedImage(b"first", "image/png"),
+                second_id: GeneratedImage(b"second", "image/webp"),
+            }
+            image = images.get(asset_id)
+            if image is None:
+                return WorkflowImageLoadResult(asset_id, "not_found")
+            return WorkflowImageLoadResult(asset_id, "ok", image=image)
+
+    plugin = object.__new__(ImageStudioPlugin)
+    plugin._settings = settings()
+    plugin.store = BatchStore()
+
+    result = asyncio.run(
+        plugin.image_studio_view_asset(
+            ToolEvent(), asset_ids=[second_id, first_id], detail="original"
+        )
+    )
+
+    assert not result.isError
+    images = [
+        base64.b64decode(item.data)
+        for item in result.content
+        if isinstance(item, mcp.types.ImageContent)
+    ]
+    assert images == [b"second", b"first"]
+    payload = json.loads(result.content[-1].text.split("。", 1)[0])
+    assert payload["assets"] == [
+        {
+            "index": 0,
+            "asset_id": second_id,
+            "mime_type": "image/webp",
+            "size_bytes": 6,
+        },
+        {
+            "index": 1,
+            "asset_id": first_id,
+            "mime_type": "image/png",
+            "size_bytes": 5,
+        },
+    ]
+
+
+def test_llm_asset_batch_reports_every_failure_without_partial_images() -> None:
+    statuses = ["invalid_asset_id", "expired", "file_missing", "decode_failed"]
+
+    class BatchStore:
+        async def load_workflow_image_detailed(self, asset_id, **_kwargs):
+            index = int(asset_id.rsplit("-", 1)[-1])
+            return WorkflowImageLoadResult(asset_id, statuses[index])
+
+    plugin = object.__new__(ImageStudioPlugin)
+    plugin._settings = settings()
+    plugin.store = BatchStore()
+    result = asyncio.run(
+        plugin.image_studio_view_asset(
+            ToolEvent(), asset_ids=[f"asset-{index}" for index in range(4)]
+        )
+    )
+
+    assert result.isError
+    assert not any(isinstance(item, mcp.types.ImageContent) for item in result.content)
+    payload = json.loads(result.content[0].text)
+    assert [item["index"] for item in payload["failures"]] == [0, 1, 2, 3]
+    assert [item["reason"] for item in payload["failures"]] == statuses
+    assert all(item["retryable"] is False for item in payload["failures"])
 
 
 def test_capability_query_activates_scoped_sender_and_hides_native_sender() -> None:
@@ -438,6 +534,7 @@ def test_capability_query_activates_scoped_sender_and_hides_native_sender() -> N
             self.names = {
                 "image_studio_send_output",
                 "image_studio_generate",
+                "pc_send_current_media",
                 "send_message_to_user",
             }
 
@@ -461,8 +558,119 @@ def test_capability_query_activates_scoped_sender_and_hides_native_sender() -> N
 
     assert not result.isError
     assert "send_message_to_user" not in tool_set.names
+    assert "pc_send_current_media" in tool_set.names
     assert "image_studio_send_output" in tool_set.names
     assert event.get_extra(IMAGE_WORKFLOW_STATE_EXTRA_KEY)["active"] is True
+
+
+def test_successful_generation_hides_competing_private_media_sender() -> None:
+    class FakeService:
+        async def generate(self, **kwargs):
+            provider = settings().providers[0]
+            return GenerationResult(
+                provider,
+                SimpleNamespace(model=provider.model, mode=kwargs["mode"]),
+                (GeneratedImage(PNG, "image/png"),),
+                5,
+            )
+
+    class MutableToolSet:
+        def __init__(self):
+            self.names = {
+                "image_studio_send_output",
+                "image_studio_generate",
+                "pc_send_current_media",
+                "send_message_to_user",
+            }
+
+        def get_tool(self, name):
+            return object() if name in self.names else None
+
+        def remove_tool(self, name):
+            self.names.discard(name)
+
+    plugin = object.__new__(ImageStudioPlugin)
+    plugin._settings = settings()
+    plugin._service = FakeService()
+    plugin.store = FakeAgentAssetStore()
+    event = ToolEvent()
+    tool_set = MutableToolSet()
+    event.set_extra(
+        "provider_request",
+        SimpleNamespace(func_tool=tool_set, extra_user_content_parts=[]),
+    )
+
+    async def run():
+        await plugin.image_studio_get_capabilities(
+            event, query_type="default", mode="text2img"
+        )
+        assert "pc_send_current_media" in tool_set.names
+        return await plugin.image_studio_generate(
+            event, prompt="one tree", mode="text2img"
+        )
+
+    result = asyncio.run(run())
+
+    assert not result.isError
+    assert "pc_send_current_media" not in tool_set.names
+    assert "send_message_to_user" not in tool_set.names
+    assert event.get_extra(IMAGE_WORKFLOW_STATE_EXTRA_KEY)["assets_protected"] is True
+
+
+def test_asset_storage_failure_keeps_other_sender_and_returns_no_preview() -> None:
+    class FakeService:
+        async def generate(self, **kwargs):
+            provider = settings().providers[0]
+            return GenerationResult(
+                provider,
+                SimpleNamespace(model=provider.model, mode=kwargs["mode"]),
+                (GeneratedImage(PNG, "image/png"),),
+                5,
+            )
+
+    class FailingStore:
+        async def lease_agent_images(self, _images, **_kwargs):
+            raise OSError("disk unavailable")
+
+    class MutableToolSet:
+        def __init__(self):
+            self.names = {
+                "image_studio_send_output",
+                "image_studio_generate",
+                "pc_send_current_media",
+            }
+
+        def get_tool(self, name):
+            return object() if name in self.names else None
+
+        def remove_tool(self, name):
+            self.names.discard(name)
+
+    plugin = object.__new__(ImageStudioPlugin)
+    plugin._settings = settings()
+    plugin._service = FakeService()
+    plugin.store = FailingStore()
+    event = ToolEvent()
+    tool_set = MutableToolSet()
+    event.set_extra(
+        "provider_request",
+        SimpleNamespace(func_tool=tool_set, extra_user_content_parts=[]),
+    )
+
+    async def run():
+        await plugin.image_studio_get_capabilities(
+            event, query_type="default", mode="text2img"
+        )
+        return await plugin.image_studio_generate(
+            event, prompt="one tree", mode="text2img"
+        )
+
+    result = asyncio.run(run())
+
+    assert result.isError
+    assert "原图资产保存失败" in result.content[0].text
+    assert not any(isinstance(item, mcp.types.ImageContent) for item in result.content)
+    assert "pc_send_current_media" in tool_set.names
 
 
 def test_image_studio_sender_delivers_leased_asset_to_current_session(tmp_path) -> None:
@@ -950,6 +1158,7 @@ def test_capabilities_only_lists_llm_enabled_models() -> None:
     assert payload["asset_policy"]["return_mode"] == "preview"
     assert payload["asset_policy"]["private_asset_handle"] == "asset_id"
     assert payload["asset_policy"]["delivery_tool"] == "image_studio_send_output"
+    assert "tool_images" in payload["asset_policy"]["temporary_preview_path"]
 
 
 def test_capabilities_excludes_zero_limit_model_from_img2img() -> None:
@@ -1027,6 +1236,9 @@ def test_registered_image_tool_descriptions_contain_routing_contract() -> None:
     }
     assert "required" not in generate.parameters
     assert "当前会话" in view_asset.description
+    assert "ImageContent" not in view_asset.description
+    assert set(view_asset.parameters["properties"]) == {"asset_ids", "detail"}
+    assert "1 至 8" in view_asset.parameters["properties"]["asset_ids"]["description"]
     assert "preview" in view_asset.parameters["properties"]["detail"]["description"]
     assert "required" not in view_asset.parameters
     assert (
@@ -1070,7 +1282,10 @@ def test_agent_workflow_prompt_is_scoped_and_idempotent() -> None:
     assert "先调用 image_studio_get_capabilities" in request.system_prompt
     assert "asset_id" in request.system_prompt
     assert "original_path" not in request.system_prompt
-    assert "中途消息可以包含图片和文字" in request.system_prompt
+    assert "data/temp/tool_images" in request.system_prompt
+    assert "发送、复制、编辑" in request.system_prompt
+    assert "ImageContent" not in request.system_prompt
+    assert "不代表本轮结束" in request.system_prompt
     assert "普通 assistant 文本回复" in request.system_prompt
     assert "llm.response" not in request.system_prompt
     assert "pc_send_current_media" not in request.system_prompt
@@ -1533,6 +1748,31 @@ def test_safe_reference_path_rejects_workspace_escape(tmp_path) -> None:
                 "../outside.png",
                 workspace_root=workspace,
             )
+
+    asyncio.run(run())
+
+
+def test_safe_reference_path_rejects_astrbot_tool_image_cache(
+    tmp_path, monkeypatch
+) -> None:
+    async def run() -> None:
+        astrbot_temp = tmp_path / "astrbot-temp"
+        tool_images = astrbot_temp / "tool_images"
+        tool_images.mkdir(parents=True)
+        cached_preview = tool_images / "call_preview.png"
+        cached_preview.write_bytes(PNG)
+        store = GenerationStore(tmp_path / "plugin-data")
+        await store.initialize()
+        service = ImageGenerationService(
+            settings=settings(), executor=FakeExecutor(), store=store
+        )
+        monkeypatch.setattr(
+            "astrbot_plugin_image_studio.service.get_astrbot_temp_path",
+            lambda: str(astrbot_temp),
+        )
+
+        with pytest.raises(ValueError, match="仅用于视觉预览"):
+            await service.reference_from_safe_path(str(cached_preview))
 
     asyncio.run(run())
 

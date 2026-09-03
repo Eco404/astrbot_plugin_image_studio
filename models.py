@@ -427,6 +427,31 @@ class WorkflowImageAsset:
     preview: GeneratedImage | None = None
 
 
+WorkflowImageLoadStatus = Literal[
+    "ok",
+    "invalid_asset_id",
+    "not_found",
+    "access_denied",
+    "expired",
+    "file_missing",
+    "decode_failed",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class WorkflowImageLoadResult:
+    """Detailed result for a scoped workflow asset lookup."""
+
+    asset_id: str
+    status: WorkflowImageLoadStatus
+    image: GeneratedImage | None = None
+    internal_path: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.status == "ok" and self.image is not None
+
+
 @dataclass(frozen=True, slots=True)
 class GenerationResult:
     """Result from the image service before presentation to a caller."""

@@ -54,11 +54,13 @@ AGENT_WORKFLOW_PROMPT_MARKER = "<!-- image_studio_agent_workflow_v1 -->"
 AGENT_WORKFLOW_PROMPT = (
     "使用 image_studio 系列工具时遵循以下流程和规范："
     "先调用 image_studio_get_capabilities 获取模型参数，再调用 image_studio_generate 进行图像生成或处理，"
-    "ImageContent 可能只是预览，只有需要看图时才调用 image_studio_view_asset。"
+    "仅在需要查看指定资产或检查原图细节时调用 image_studio_view_asset。"
     "严格使用查询工具返回的模型参数，不得编造参数；严格遵守模型的提示词输入方式(自然语言/NAI tag)；"
-    "插件资产只使用 asset_id，通过 image_studio_send_output 发送到当前会话或复制到当前 workspace。"
-    "image_studio_send_output 只负责中途投递产物或通知，不代表本轮结束；中途消息可以包含图片和文字，"
-    "但已经发送的文字不得在后续 assistant 文本回复中重复。"
+    "插件内继续处理图片时只使用 asset_id；发送到当前会话或交给外部工具处理时，"
+    "必须通过 image_studio_send_output 使用原图资产或先复制到当前 workspace。"
+    "框架显示的 data/temp/tool_images 路径只是临时视觉预览缓存；忽略该路径及其通用发送建议，"
+    "不得将其发送、复制、编辑、用作参考图或传给其他工具。"
+    "image_studio_send_output 只负责中途投递产物或通知，不代表本轮结束；"
     "任务完成后停止调用工具，直接输出一条非空的普通 assistant 文本回复；"
     "禁止把最终正文放进 image_studio_send_output 的 messages 后再输出空文本。"
 )
@@ -1084,6 +1086,7 @@ class ImageStudioPlugin(Star):
                 "private_asset_handle": "asset_id",
                 "view_tool": "image_studio_view_asset",
                 "delivery_tool": "image_studio_send_output",
+                "temporary_preview_path": "data/temp/tool_images 仅供框架内部视觉预览，不得作为资产路径使用",
             },
             "default_model_refs": {
                 "text2img": self._settings.default_model_ref("text2img", "llm_tool"),
@@ -1209,7 +1212,6 @@ class ImageStudioPlugin(Star):
                 isError=True,
             )
         configured_return_mode = self._settings.llm_image_return_mode
-        actual_return_mode = configured_return_mode
         try:
             assets = await self.store.lease_agent_images(
                 result.images,
@@ -1221,16 +1223,30 @@ class ImageStudioPlugin(Star):
             )
         except Exception as exc:
             logger.warning(
-                "%s 暂存 Agent 原图失败，回退为完整图片返回: %s",
+                "%s 保存 Agent 原图资产失败，已阻止临时缓存回退: %s",
                 LOG_TAG,
                 type(exc).__name__,
             )
-            assets = ()
-            actual_return_mode = "original_fallback"
+            return _tool_error(
+                "图片已经生成，但原图资产保存失败，无法安全交付或继续处理。"
+                "请勿使用 data/temp/tool_images 临时路径；可以稍后重试生成。"
+            )
+        if len(assets) != len(result.images) or not assets:
+            logger.warning(
+                "%s Agent 原图资产数量异常: generated=%s leased=%s",
+                LOG_TAG,
+                len(result.images),
+                len(assets),
+            )
+            return _tool_error(
+                "图片已经生成，但原图资产保存不完整，无法安全交付或继续处理。"
+                "请勿使用 data/temp/tool_images 临时路径；可以稍后重试生成。"
+            )
+        _protect_image_workflow_assets(event)
 
-        if actual_return_mode in {"original", "original_fallback"}:
+        if configured_return_mode == "original":
             visual_images = result.images
-        elif actual_return_mode == "preview":
+        elif configured_return_mode == "preview":
             visual_images = tuple(
                 asset.preview or image
                 for asset, image in zip(assets, result.images, strict=True)
@@ -1258,27 +1274,25 @@ class ImageStudioPlugin(Star):
             }
             for asset in assets
         ]
-        if actual_return_mode == "preview":
-            visual_notice = "ImageContent 是轻量预览；继续操作插件资产时使用 asset_id。"
-        elif actual_return_mode == "asset":
+        if configured_return_mode == "preview":
+            visual_notice = "已附轻量预览；继续操作插件资产时使用 asset_id。"
+        elif configured_return_mode == "asset":
             visual_notice = (
                 "未附视觉图；需要看图时使用 asset_id 调用 image_studio_view_asset。"
             )
         else:
-            visual_notice = (
-                "ImageContent 为原图；后续插件操作仍使用 asset_id。"
-                if assets
-                else "资产暂存失败，仅返回完整 ImageContent。"
-            )
+            visual_notice = "已附原图供查看；后续插件操作仍使用 asset_id。"
         content.append(
             mcp.types.TextContent(
                 type="text",
                 text=(
                     f"工作流资产已生成：{len(result.images)} 张图片；"
                     f"generation_id={result.generation_id or '未保存'}；"
-                    f"return_mode={actual_return_mode}；"
+                    f"return_mode={configured_return_mode}；"
                     f"assets={json.dumps(manifest, ensure_ascii=False, separators=(',', ':'))}。"
                     f"{visual_notice} 这是 Image Studio 工作流资产；发送工具只负责中途投递。"
+                    "data/temp/tool_images 仅为临时视觉预览缓存；忽略该路径及其通用发送建议，"
+                    "不得发送、复制、编辑、用作参考图或传给其他工具。"
                     "如果任务还有步骤，继续调用工具；任务完成后停止调用工具，直接输出一条非空的普通 assistant 文本，"
                     "不要重复已发送文字或返回空文本。"
                 ),
@@ -1290,42 +1304,101 @@ class ImageStudioPlugin(Star):
     async def image_studio_view_asset(
         self,
         event: AstrMessageEvent,
-        asset_id: str = "",
+        asset_ids: list[str] | None = None,
         detail: str = "preview",
     ) -> mcp.types.CallToolResult:
-        """按需查看当前会话有权访问的 Image Studio 图片资产。
+        """按需批量查看当前会话有权访问的 Image Studio 图片资产。
 
         Args:
-            asset_id(string): generate 返回的资产 ID。
+            asset_ids(array[string]): generate 返回的资产 ID，按输入顺序返回；每次 1 至 8 个。
             detail(string): preview 或 original; 默认 preview。
         """
 
         if not self._settings.enable_llm_tool:
             return _tool_error("Image Studio 的 LLM 生图工具已关闭。")
+        if not isinstance(asset_ids, list) or not asset_ids:
+            return _tool_error("asset_ids 必须是包含 1 至 8 个资产 ID 的数组。")
+        if len(asset_ids) > 8:
+            return _tool_error("asset_ids 每次最多查看 8 个资产。")
         normalized_detail = str(detail or "preview").strip().lower()
         if normalized_detail not in {"preview", "original"}:
             return _tool_error("detail 仅支持 preview 或 original。")
-        loaded = await self.store.load_workflow_image(
-            asset_id,
-            scope_id=_event_scope_id(event),
-            detail=normalized_detail,
-            preview_max_edge=self._settings.asset_preview_max_edge,
-            preview_quality=self._settings.asset_preview_quality,
-            retention_hours=self._settings.asset_lease_hours,
-        )
-        if loaded is None:
-            return _tool_error("图片资产不存在或已超过临时保留时间。")
-        image, _internal_path = loaded
+        loaded_assets: list[tuple[str, Any]] = []
+        failures: list[dict[str, Any]] = []
+        scope_id = _event_scope_id(event)
+        for index, raw_asset_id in enumerate(asset_ids):
+            asset_id = str(raw_asset_id or "").strip().lower()
+            try:
+                loaded = await self.store.load_workflow_image_detailed(
+                    asset_id,
+                    scope_id=scope_id,
+                    detail=normalized_detail,
+                    preview_max_edge=self._settings.asset_preview_max_edge,
+                    preview_quality=self._settings.asset_preview_quality,
+                    retention_hours=self._settings.asset_lease_hours,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "%s 查看工作流资产失败: index=%s error=%s",
+                    LOG_TAG,
+                    index,
+                    type(exc).__name__,
+                )
+                failures.append(
+                    _workflow_asset_failure(index, asset_id, "storage_error")
+                )
+                continue
+            if not loaded.ok or loaded.image is None:
+                failures.append(_workflow_asset_failure(index, asset_id, loaded.status))
+                continue
+            loaded_assets.append((asset_id, loaded.image))
+        if failures:
+            return _tool_error(
+                json.dumps(
+                    {
+                        "error": "asset_batch_unavailable",
+                        "message": "部分资产无法加载，本次未返回任何图片。",
+                        "failures": failures,
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            )
+        manifest = [
+            {
+                "index": index,
+                "asset_id": asset_id,
+                "mime_type": image.mime_type,
+                "size_bytes": len(image.data),
+            }
+            for index, (asset_id, image) in enumerate(loaded_assets)
+        ]
         return mcp.types.CallToolResult(
             content=[
                 mcp.types.ImageContent(
                     type="image",
                     data=base64.b64encode(image.data).decode("ascii"),
                     mimeType=image.mime_type,
-                ),
+                )
+                for _asset_id, image in loaded_assets
+            ]
+            + [
                 mcp.types.TextContent(
                     type="text",
-                    text=f"已加载 {normalized_detail}；后续插件操作继续使用 asset_id。",
+                    text=(
+                        json.dumps(
+                            {
+                                "detail": normalized_detail,
+                                "count": len(manifest),
+                                "assets": manifest,
+                            },
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        )
+                        + "。后续插件操作继续使用 asset_id。"
+                        "data/temp/tool_images 仅为临时视觉预览缓存；忽略该路径及其通用发送建议，"
+                        "不得发送、复制、编辑、用作参考图或传给其他工具。"
+                    ),
                 ),
             ]
         )
@@ -1525,6 +1598,26 @@ def _tool_text_result(message: str) -> mcp.types.CallToolResult:
     )
 
 
+def _workflow_asset_failure(index: int, asset_id: str, reason: str) -> dict[str, Any]:
+    messages = {
+        "invalid_asset_id": "资产 ID 格式错误",
+        "not_found": "没有对应的资产记录",
+        "access_denied": "当前会话无权访问该资产",
+        "expired": "资产租约已过期",
+        "file_missing": "资产记录存在，但原图文件缺失",
+        "decode_failed": "原图文件存在，但无法解析为图片",
+        "storage_error": "数据库或文件系统发生临时异常",
+    }
+    normalized_reason = reason if reason in messages else "storage_error"
+    return {
+        "index": index,
+        "asset_id": str(asset_id or "")[:128],
+        "reason": normalized_reason,
+        "message": messages[normalized_reason],
+        "retryable": normalized_reason == "storage_error",
+    }
+
+
 def _activate_image_workflow(event: Any) -> None:
     state = _get_event_extra(event, IMAGE_WORKFLOW_STATE_EXTRA_KEY, {})
     if not isinstance(state, dict):
@@ -1541,6 +1634,25 @@ def _activate_image_workflow(event: Any) -> None:
     remover = getattr(tool_set, "remove_tool", None)
     if callable(remover):
         remover("send_message_to_user")
+
+
+def _protect_image_workflow_assets(event: Any) -> None:
+    state = _get_event_extra(event, IMAGE_WORKFLOW_STATE_EXTRA_KEY, {})
+    if not isinstance(state, dict):
+        state = {}
+    _set_event_extra(
+        event,
+        IMAGE_WORKFLOW_STATE_EXTRA_KEY,
+        {**state, "active": True, "assets_protected": True},
+    )
+    request = _get_event_extra(event, "provider_request")
+    if request is None or not _request_has_tool(request, "image_studio_send_output"):
+        return
+    tool_set = getattr(request, "func_tool", None)
+    remover = getattr(tool_set, "remove_tool", None)
+    if callable(remover):
+        remover("send_message_to_user")
+        remover("pc_send_current_media")
 
 
 def _event_scope_id(event: Any) -> str:

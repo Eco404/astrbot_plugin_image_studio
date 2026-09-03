@@ -55,7 +55,7 @@ OpenAI Images 会预填尺寸、数量、质量、背景和输出格式；Gemini
 
 ```text
 /image_gen 一张山间湖泊的影棚风格摄影 --provider my-openai --size 1024x1024
-/image_gen 重新绘制这张图片 --mode img2img --ref /path/from/astrbot/temp/tool_images/file.png
+/image_gen 重新绘制这张图片 --mode img2img --ref workspace/input.png
 ```
 
 LLM 工具包括 `image_studio_get_capabilities`、`image_studio_generate`、`image_studio_view_asset` 和 `image_studio_send_output`。每次生成前都必须先查询能力。未指定模型或模型类型的常规请求首先使用 `query_type=default`；`mode` 可以省略，此时同时返回文生图和图生图默认模型，也可以指定 `text2img` 或 `img2img` 只获取对应默认。如果默认模型支持用户明确要求的模式、参考图数量和参数，就直接生成，不再查询全部模型。普通主体、画风、构图和文字描述可以通过提示词表达，不属于模型能力缺口。只有默认模型存在明确能力缺口或不可用、用户要求比较模型，或者指定了模型类型但不知道具体 `model_ref` 时，才使用 `query_type=all`，并尽量携带相同的 `mode`。明确指定模型时使用 `query_type=model` 和完整 `model_ref`。
@@ -72,9 +72,11 @@ LLM 应主动选择 `mode=text2img` 或 `mode=img2img`。文生图不会因为�
 - `仅返回资产信息`：不自动返回 `ImageContent`，速度最快；确实需要观察画面时再调用 `image_studio_view_asset`。
 - `完整原图`：保持原行为，适合必须进行像素级检查的任务，但多模态请求可能明显变慢。
 
-`image_studio_view_asset` 默认只加载轻量预览，也可显式请求完整原图。`asset_id` 必须拥有当前会话的有效租约，不能跨会话读取。查看、发送或复制资产会续期软过期时间，但不能突破最长 7 天的硬期限。由于 AstrBot Core 会在同一 Agent 流程中持续携带已返回的 `ImageContent`，轻量预览仍可能被重复发送，但请求体会比完整原图小得多。Core 自动生成的 `data/temp/tool_images` 路径只是临时视觉缓存，不是稳定的 Image Studio 资产引用。
+`image_studio_view_asset` 接受 1 至 8 个 `asset_id`，按输入顺序批量加载轻量预览或完整原图。任一资产不可用时不会返回部分图片，而会列出每个失败项的索引、资产 ID、具体原因和是否适合重试。`asset_id` 必须拥有当前会话的有效租约，不能跨会话读取。查看、发送或复制资产会续期软过期时间，但不能突破最长 7 天的硬期限。
 
-`image_studio_send_output` 只操作当前会话，`destination=session` 可按顺序投递中途文字、Image Studio 图片资产、workspace 媒体或 HTTP(S) 媒体；`destination=workspace` 只把 Image Studio `asset_id` 复制到当前 local/sandbox workspace，并返回后续 Python、Shell 或其他工具可用的路径。它不接受目标会话或用户 ID。进入 Image Studio 工作流后，插件会尽力从当前请求隐藏 AstrBot 原生 `send_message_to_user`，避免两套发送说明冲突。
+AstrBot Core 自动生成的 `data/temp/tool_images` 路径只负责把临时视觉预览加入模型上下文，不是 Image Studio 资产引用。不得发送、复制、编辑、用作参考图或传给其他工具。插件内继续处理使用 `asset_id`；交给 Python、Shell 或其他插件前，先通过 `image_studio_send_output(destination=workspace)` 取得 workspace 路径。原图资产保存失败时，生图工具会明确报错，不会退回只能依赖临时缓存路径的结果。
+
+`image_studio_send_output` 只操作当前会话，`destination=session` 可按顺序投递中途文字、Image Studio 图片资产、workspace 媒体或 HTTP(S) 媒体；`destination=workspace` 只把 Image Studio `asset_id` 复制到当前 local/sandbox workspace，并返回后续 Python、Shell 或其他工具可用的路径。它不接受目标会话或用户 ID。能力查询后，插件会从当前请求隐藏 AstrBot 原生 `send_message_to_user`；首次成功保存 Image Studio 原图资产后，还会隐藏可能存在的 `pc_send_current_media`。这些操作只影响当前 Agent 请求，下一轮消息会重新构建工具集，且未安装 Private Companion 时不会产生依赖或错误。
 
 `image_studio_generate` 返回的是可继续处理的工作流资产，单次生图成功不代表整个用户任务已经完成。Agent 可以继续多次生图、改图、拼接或制作 GIF。`image_studio_send_output` 只负责投递产物或有意的中途通知，不会终止本轮 Agent；中途消息可以包含图片和文字，但已经发送的文字不应在后续重复。任务完成后应停止调用工具，直接输出一条非空的普通 assistant 文本回复；不能把最终正文塞进发送工具后以空响应结束。
 
