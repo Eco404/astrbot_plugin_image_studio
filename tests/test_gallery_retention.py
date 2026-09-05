@@ -634,3 +634,163 @@ def test_metadata_parser_upgrade_refreshes_cache_without_losing_import(
         assert len(list(store.assets_dir.rglob("*.png"))) == 1
 
     asyncio.run(run())
+
+
+def test_metadata_upgrade_and_import_projection_commit_together(tmp_path, monkeypatch):
+    import astrbot_plugin_image_studio.image_metadata as metadata_module
+
+    async def run():
+        store = GenerationStore(tmp_path)
+        await store.initialize()
+        imported = await store.import_image(picture(), "image.png", {})
+        before = await store.generation_detail(
+            imported["generation_id"], include_assets=False
+        )
+        parse = metadata_module.parse_image_metadata
+        version = metadata_module.PARSER_VERSION + 1
+
+        def upgraded(data):
+            result = parse(data)
+            result["normalized"]["prompt"] = "new prompt"
+            return result
+
+        monkeypatch.setattr(metadata_module, "PARSER_VERSION", version)
+        monkeypatch.setattr(metadata_module, "parse_image_metadata", upgraded)
+        with store._connect() as conn:
+            conn.execute(
+                "CREATE TRIGGER block_projection BEFORE UPDATE OF original_prompt ON generations BEGIN SELECT RAISE(ABORT, 'projection failure'); END"
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="projection failure"):
+            store._backfill_metadata_sync()
+        after = await store.generation_detail(
+            imported["generation_id"], include_assets=False
+        )
+        assert after == before
+        with store._connect() as conn:
+            conn.execute("DROP TRIGGER block_projection")
+        store._backfill_metadata_sync()
+        after = await store.generation_detail(
+            imported["generation_id"], include_assets=False
+        )
+        assert after["original_prompt"] == "new prompt"
+        assert after["images"][0]["metadata"]["parser_version"] == version
+
+    asyncio.run(run())
+
+
+def test_metadata_upgrade_refreshes_import_projection_but_preserves_request_and_manual_values(
+    tmp_path, monkeypatch
+):
+    import astrbot_plugin_image_studio.image_metadata as metadata_module
+
+    async def run():
+        original_version = metadata_module.PARSER_VERSION
+
+        def old_parser(data):
+            return {
+                "format": "unknown",
+                "parser_version": original_version,
+                "raw": {"workflow": "original workflow"},
+                "normalized": {"mode": "unknown"},
+                "warnings": [],
+            }
+
+        monkeypatch.setattr(metadata_module, "parse_image_metadata", old_parser)
+        store = GenerationStore(tmp_path)
+        await store.initialize()
+        generated = await record(store, [picture()])
+        generated_before = await store.generation_detail(
+            generated, include_assets=False
+        )
+        automatic = await store.import_image(picture(), "automatic.png", {})
+        explicit = {
+            "prompt": "",
+            "negative_prompt": "",
+            "model": "confirmed model",
+            "mode": "unknown",
+            "generation_engine": "unknown",
+            "generated_at": None,
+            "parameters": {"steps": 0, "sm": False, "custom": ""},
+        }
+        manual = await store.import_image(picture("blue"), "manual.png", explicit)
+
+        def new_parser(data):
+            return {
+                "format": "comfyui",
+                "parser_version": original_version + 1,
+                "raw": {"workflow": "original workflow"},
+                "normalized": {
+                    "mode": "text2img",
+                    "prompt": "newly resolved composition",
+                    "negative_prompt": "new negative",
+                    "model": "parsed model",
+                    "steps": 30,
+                    "sm": True,
+                    "custom": "parsed value",
+                    "generated_at": 1234,
+                },
+                "warnings": [],
+            }
+
+        monkeypatch.setattr(metadata_module, "PARSER_VERSION", original_version + 1)
+        monkeypatch.setattr(metadata_module, "parse_image_metadata", new_parser)
+        await GenerationStore(tmp_path).initialize()
+        updated = await store.generation_detail(
+            automatic["generation_id"], include_assets=False
+        )
+        assert updated["generation_engine"] == "comfyui"
+        assert updated["model"] == "parsed model"
+        assert updated["original_prompt"] == "newly resolved composition"
+        assert updated["mode"] == "text2img"
+        assert updated["generated_at"] == 1234
+        assert updated["images"][0]["supplemental"]["display_parameters"]["steps"] == 30
+        assert updated["images"][0]["supplemental"]["overrides"] == {}
+        assert (
+            await store.list_generations(
+                {"source": "import", "generation_engine": "comfyui"}
+            )
+        )["total"] == 1
+        corrected = await store.generation_detail(
+            manual["generation_id"], include_assets=False
+        )
+        assert (
+            corrected["original_prompt"] == ""
+            and corrected["model"] == "confirmed model"
+        )
+        assert corrected["mode"] == corrected["generation_engine"] == "unknown"
+        assert corrected["generated_at"] is None
+        supplemental = corrected["images"][0]["supplemental"]
+        assert supplemental["overrides"] == explicit
+        assert supplemental["display_parameters"]["prompt"] == ""
+        assert supplemental["display_parameters"]["negative_prompt"] == ""
+        assert supplemental["display_parameters"]["steps"] == 0
+        assert supplemental["display_parameters"]["sm"] is False
+        assert supplemental["display_parameters"]["custom"] == ""
+        assert supplemental["display_parameters"]["generated_at"] is None
+        assert (
+            corrected["images"][0]["metadata"]["normalized"]["prompt"]
+            == "newly resolved composition"
+        )
+        assert (
+            await store.list_generations(
+                {"source": "import", "query": "newly resolved composition"}
+            )
+        )["total"] == 2
+        generated_after = await store.generation_detail(generated, include_assets=False)
+        for key in (
+            "model",
+            "mode",
+            "provider_kind",
+            "original_prompt",
+            "final_prompt",
+            "generation_engine",
+            "parameters",
+            "supplemental",
+        ):
+            assert generated_after[key] == generated_before[key]
+        with store._connect() as conn:
+            assert (
+                conn.execute("SELECT dev_revision FROM schema_meta").fetchone()[0] == 2
+            )
+
+    asyncio.run(run())

@@ -150,10 +150,10 @@
           <label class="field">模型<input data-import-field="model" value="${escape(data.model)}" /></label>
           <label class="field">模式<select data-import-field="mode">${options({ unknown: "未知模式", text2img: "文生图", img2img: "图生图" }, data.mode || "unknown")}</select></label>
           <label class="field">生成时间<input data-import-field="generated_at" type="datetime-local" value="${escape(data.generated_at || "")}" /></label>
-          <label class="field field-wide">正向提示词<textarea data-import-field="prompt" rows="3">${escape(data.prompt)}</textarea></label>
-          <label class="field field-wide">反向提示词<textarea data-import-field="negative_prompt" rows="2">${escape(data.negative_prompt)}</textarea></label>
+          <label class="field field-wide">正向提示词${promptStatusMarkup(item.parsed?.normalized?.prompt_status)}<textarea data-import-field="prompt" rows="3">${escape(data.prompt)}</textarea></label>
+          <label class="field field-wide">反向提示词${promptStatusMarkup(item.parsed?.normalized?.negative_prompt_status)}<textarea data-import-field="negative_prompt" rows="2">${escape(data.negative_prompt)}</textarea></label>
           <details class="field-wide advanced"><summary>补充参数</summary><textarea data-import-field="parameters" rows="5" spellcheck="false" aria-label="补充参数 JSON">${escape(data.parameters)}</textarea></details>
-        </fieldset><div class="import-card-status ${item.status === "error" ? "is-error" : ""}" role="status">${escape(item.status === "reading" ? "正在识别图片参数…" : item.error || (item.parsed?.format && item.parsed.format !== "unknown" ? `已识别 ${engineLabel(item.parsed.format)}` : "未检测到生图参数，可手动填写"))}</div>${warnings.length ? `<div class="import-warnings">${warnings.map(escape).join("<br>")}</div>` : ""}</article>`;
+        </fieldset>${comfyDetailsMarkup(item.parsed)}<div class="import-card-status ${item.status === "error" ? "is-error" : ""}" role="status">${escape(item.status === "reading" ? "正在识别图片参数…" : item.error || (item.parsed?.format && item.parsed.format !== "unknown" ? `已识别 ${engineLabel(item.parsed.format)}` : "未检测到生图参数，可手动填写"))}</div>${warnings.length ? `<div class="import-warnings">${warnings.map(escape).join("<br>")}</div>` : ""}</article>`;
     }
 
     function renderImports() {
@@ -217,7 +217,7 @@
         if (imports.length >= 100) { showNotice("单次最多选择 100 张图片。", "error"); break; }
         if (file.size > 30 * 1024 * 1024) { showNotice(`${file.name} 超过 30 MB。`, "error"); continue; }
         const importedAt = Date.now() / 1000;
-        const item = { id: `import_${Date.now().toString(36)}_${++importSequence}`, file, url: URL.createObjectURL(file), importedAt, fields: { generation_engine: "unknown", prompt: "", negative_prompt: "", model: "", mode: "unknown", parameters: "{}", generated_at: localDateTime(importedAt) }, status: "reading" };
+        const item = { id: `import_${Date.now().toString(36)}_${++importSequence}`, file, url: URL.createObjectURL(file), importedAt, editedFields: new Set(), fields: { generation_engine: "unknown", prompt: "", negative_prompt: "", model: "", mode: "unknown", parameters: "{}", generated_at: localDateTime(importedAt) }, status: "reading" };
         imports.push(item); added.push(item);
       }
       renderImports();
@@ -245,7 +245,10 @@
             if (value && typeof value === "object") Object.values(value).forEach(checkNumbers);
           };
           checkNumbers(parameters);
-          const overrides = { ...item.fields, parameters, generated_at: item.fields.generated_at ? new Date(item.fields.generated_at).getTime() / 1000 : null };
+          const overrides = {};
+          for (const key of item.editedFields) overrides[key] = key === "parameters" ? parameters : item.fields[key];
+          if (item.editedFields.has("generated_at") || item.parsed?.normalized?.generated_at == null) overrides.generated_at = item.fields.generated_at ? new Date(item.fields.generated_at).getTime() / 1000 : null;
+          if ($("importAsGroup").checked) overrides.model = item.fields.model;
           return { client_id: item.id, filename: item.file.name, overrides };
         });
         if ($("importAsGroup").checked) {
@@ -336,6 +339,26 @@
       }).join("");
     }
 
+    function promptStatusMarkup(status, prefix = "") {
+      const label = { summary: "组合或多阶段文本摘要", partial: "部分解析", missing: "未读取到文本" }[status];
+      return label ? `<span class="comfy-summary-status">${escape(prefix)}${label}</span>` : "";
+    }
+
+    function comfyDetailsMarkup(metadata, withCopy = false) {
+      if (metadata?.format !== "comfyui") return "";
+      const normalized = metadata.normalized || {}; const stages = normalized.stages || [];
+      if (!stages.length) return "";
+      const rows = (values) => withCopy ? parameterRows(values) : Object.entries(values).map(([key, value]) => `<div class="detail-parameter-row"><div class="detail-parameter-label"><span>${escape(key)}</span></div><pre>${escape(serial(value))}</pre></div>`).join("");
+      const outputs = (normalized.outputs || []).map((entry) => `<span>${entry.kind === "save" ? "保存输出" : "预览输出"} #${escape(entry.node_id)}${String(entry.node_id) === String(normalized.selected_output_node) ? " · 摘要分支" : ""} · 阶段 ${(entry.stage_ids || []).map(escape).join("、") || "无"}</span>`).join("");
+      const stageMarkup = stages.map((stage, index) => {
+        const fields = { ...stage }; delete fields.node_id; delete fields.type;
+        for (const key of ["prompt_status", "negative_prompt_status"]) if (fields[key]) fields[key] = ({ exact: "直接文本", summary: "可读摘要，非等价条件", partial: "部分解析", missing: "未读取到文本" })[fields[key]] || fields[key];
+        return `<details class="comfy-stage" data-comfy-stage="${escape(stage.node_id)}"><summary>阶段 ${index + 1} · ${escape(stage.type)} #${escape(stage.node_id)}</summary><div class="detail-parameter-grid">${rows(fields)}</div></details>`;
+      }).join("");
+      const conditions = normalized.condition_nodes && Object.keys(normalized.condition_nodes).length ? `<details class="comfy-conditions"><summary>条件组合结构</summary>${rows({ condition_nodes: normalized.condition_nodes })}</details>` : "";
+      return `<details class="comfy-workflow-info"><summary>采样阶段与条件 · ${stages.length} 个阶段</summary><div class="comfy-output-list">${outputs}</div>${stageMarkup}${conditions}</details>`;
+    }
+
     function detailMetadataMarkup(detail, image) {
       detailCopies = [];
       const metadata = image?.metadata || {};
@@ -347,10 +370,12 @@
       const requestRows = detail.source === "import" ? imported : { prompt: request.prompt, negative_prompt: request.negative_prompt, model: request.model, mode: modeLabel(request.mode), size: request.size, count: request.count, ...(request.parameters || {}) };
       const displayNormalized = { ...normalized }; delete displayNormalized.parameters;
       const metadataRows = { ...displayNormalized, ...(normalized.parameters || {}) };
+      const summaryStatus = metadata.format === "comfyui" ? promptStatusMarkup(normalized.prompt_status, "正向：") + promptStatusMarkup(normalized.negative_prompt_status, "反向：") : "";
+      if (metadata.format === "comfyui") for (const key of ["condition_nodes", "stages", "outputs"]) { delete metadataRows[key]; if (detail.source === "import") delete requestRows[key]; }
       const warnings = [...(metadata.warnings || []), ...(detail.file_state && detail.file_state !== "available" ? [`文件状态：${detail.file_state}`] : [])];
       const raw = metadata.raw || {};
       const rawMarkup = Object.entries(raw).map(([name, value]) => `<details class="metadata-raw-field"><summary>${escape(name)}</summary>${parameterRows({ [name]: value })}</details>`).join("");
-      return `${warnings.length ? `<div class="retention-notice">${warnings.map(escape).join("<br>")}</div>` : ""}<div class="detail-block"><h3>${detail.source === "import" ? "导入信息" : "原始请求"}</h3><div class="detail-parameter-grid">${parameterRows(requestRows)}</div></div>${Object.keys(metadataRows).length ? `<div class="detail-block"><h3>图片生成参数 · ${escape(engineLabel(metadata.format))}</h3><div class="detail-parameter-grid">${parameterRows(metadataRows)}</div></div>` : ""}${rawMarkup ? `<details class="detail-block raw-metadata"><summary>图片原始元数据</summary>${rawMarkup}</details>` : ""}`;
+      return `${warnings.length ? `<div class="retention-notice">${warnings.map(escape).join("<br>")}</div>` : ""}<div class="detail-block"><h3>${detail.source === "import" ? "导入信息" : "原始请求"}</h3><div class="detail-parameter-grid">${parameterRows(requestRows)}</div></div>${Object.keys(metadataRows).length ? `<div class="detail-block"><h3>图片生成参数 · ${escape(engineLabel(metadata.format))}</h3>${summaryStatus}<div class="detail-parameter-grid">${parameterRows(metadataRows)}</div></div>` : ""}${comfyDetailsMarkup(metadata, true)}${rawMarkup ? `<details class="detail-block raw-metadata"><summary>图片原始元数据</summary>${rawMarkup}</details>` : ""}`;
     }
 
     function updateDetailActions(detail) {
@@ -622,7 +647,7 @@
       $("importGrid").addEventListener("input", (event) => {
         const key = event.target.dataset.importField; if (!key) return;
         void discardImportGroup();
-        const item = imports.find((entry) => entry.id === event.target.closest("[data-import-id]").dataset.importId); if (item) item.fields[key] = event.target.value;
+        const item = imports.find((entry) => entry.id === event.target.closest("[data-import-id]").dataset.importId); if (item) { item.fields[key] = event.target.value; item.editedFields.add(key); }
       });
       for (const view of [$("galleryView"), $("importView")]) {
         view.addEventListener("dragover", (event) => { if (!Array.from(event.dataTransfer.types).includes("Files")) return; event.preventDefault(); view.classList.add("is-drop-target"); });

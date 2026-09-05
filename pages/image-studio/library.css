@@ -113,6 +113,15 @@ html { scroll-padding-top: 112px; scroll-padding-bottom: calc(100px + env(safe-a
 .import-card-status { font-size: 12px; color: var(--muted); margin-top: 12px; line-height: 1.5; overflow-wrap: anywhere; }
 .import-card-status.is-error, .studio-modal-error { color: var(--danger); }
 .import-warnings { font-size: 12px; color: var(--warning); line-height: 1.5; margin-top: 8px; overflow-wrap: anywhere; }
+.comfy-workflow-info { margin-top: 14px; padding-block: 10px; border-top: 1px solid var(--line); }
+.comfy-workflow-info summary { cursor: pointer; color: var(--muted); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.comfy-output-list { display: grid; gap: 5px; margin-block: 10px; font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
+.comfy-stage, .comfy-conditions { padding-block: 8px; border-top: 1px solid var(--line); }
+.comfy-stage > .detail-parameter-grid, .comfy-conditions > .detail-parameter-row { margin-top: 10px; }
+.comfy-workflow-info pre { margin: 6px 0 0; padding: 10px; max-height: 220px; overflow: auto; border-radius: 8px; background: var(--surface); color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; }
+.import-card .comfy-workflow-info .detail-parameter-grid { column-count: 1; }
+.comfy-summary-status { color: var(--warning); font-size: 11px; font-weight: 400; }
+.detail-block > .comfy-summary-status { display: block; margin-bottom: 8px; }
 .import-floatingbar button { flex: 0 0 auto; width: auto; }
 .detail-footer { flex: 0 0 auto; display: flex; gap: 8px; align-items: center; justify-content: flex-end; padding: 12px 20px; border-top: 1px solid var(--line); background: var(--topbar-glass); border-radius: 0 0 14px 14px; }
 .drawer-body { flex: 1 1 0; }

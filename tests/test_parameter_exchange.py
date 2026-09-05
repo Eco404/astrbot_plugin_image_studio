@@ -18,6 +18,40 @@ from astrbot_plugin_image_studio.parameter_exchange import (
 )
 
 
+def test_comfyui_import_copy_keeps_condition_structure_and_summary_warning():
+    conditions = {
+        "2:0": {"operation": "text", "texts": ["a mountain"]},
+        "3:0": {"operation": "text", "texts": ["morning sunlight"]},
+        "4:0": {"operation": "combine", "inputs": [{"ref": "2:0"}, {"ref": "3:0"}]},
+    }
+    content = {
+        "format": "image_studio",
+        "version": 1,
+        "generation_engine": "comfyui",
+        "has_request_snapshot": False,
+        "data": {"mode": "text2img", "prompt": "a mountain\nmorning sunlight"},
+        "metadata": {
+            "format": "comfyui",
+            "warnings": ["多个阶段使用不同的正向条件"],
+            "normalized": {
+                "prompt_status": "summary",
+                "condition_nodes": conditions,
+                "stages": [{"node_id": "5", "positive_conditioning": "4:0"}],
+                "outputs": [{"node_id": "7", "kind": "save", "stage_ids": ["5"]}],
+            },
+        },
+        "supplemental": {},
+    }
+    result = resolve_parameters(
+        json.dumps(content), settings(), "nai:nai-diffusion-4-5-full"
+    )
+    assert result["draft"]["prompt"] == content["data"]["prompt"]
+    assert result["unmapped"]["condition_nodes"] == conditions
+    assert result["unmapped"]["outputs"] == content["metadata"]["normalized"]["outputs"]
+    assert any("不等价于原始条件" in warning for warning in result["warnings"])
+    assert "多个阶段使用不同的正向条件" in result["warnings"]
+
+
 def test_fenced_studio_parameters_preserve_large_integer_and_import_data():
     content = json.dumps(
         {

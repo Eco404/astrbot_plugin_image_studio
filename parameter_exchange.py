@@ -299,6 +299,22 @@ def resolve_parameters(
             selected = matches[0]
             selection_reason = "source_unique"
     warnings = list(parsed.get("warnings") or [])
+    if source_format == "comfyui":
+        if isinstance(envelope, dict) and envelope.get("has_request_snapshot") is False:
+            warnings.extend(
+                value
+                for value in (envelope.get("metadata", {}).get("warnings") or [])
+                if isinstance(value, str)
+            )
+        for key, label in (
+            ("prompt_status", "正向"),
+            ("negative_prompt_status", "反向"),
+        ):
+            if normalized.get(key) in {"summary", "partial"}:
+                warnings.append(
+                    f"ComfyUI {label}提示词是组合或多阶段条件的文本摘要，"
+                    "不等价于原始条件；完整结构保留在采样阶段与条件信息中。"
+                )
     if not explicit_mode:
         warnings.append("元数据未确定生成模式，暂按文生图准备草稿，请核对。")
     if selection_reason == "source_unique":
@@ -488,7 +504,14 @@ def resolve_parameters(
         and "negative_prompt" not in normalized
     ):
         draft["negative_prompt"] = selected.get("negative_prompt_default", "")
-    for key in ("loras", "stages", "characters", "character_prompts"):
+    for key in (
+        "loras",
+        "stages",
+        "condition_nodes",
+        "outputs",
+        "characters",
+        "character_prompts",
+    ):
         if normalized.get(key):
             unmapped.setdefault(key, normalized[key])
     if source_format in {"comfyui", "a1111"}:

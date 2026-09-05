@@ -404,7 +404,81 @@ class GenerationStore:
                     (row["id"],),
                 ).fetchall()
                 for item in generation_ids:
-                    self._refresh_search_sync(conn, str(item["generation_id"]))
+                    generation_id = str(item["generation_id"])
+                    self._refresh_import_projection_sync(conn, generation_id)
+                    self._refresh_search_sync(conn, generation_id)
+
+    @staticmethod
+    def _refresh_import_projection_sync(
+        conn: sqlite3.Connection, generation_id: str
+    ) -> None:
+        """Refresh derived import fields without guessing whether old overrides were manual."""
+
+        record = conn.execute(
+            "SELECT source, supplemental_json FROM generations WHERE id = ?",
+            (generation_id,),
+        ).fetchone()
+        if record is None or record["source"] != "import":
+            return
+        record_supplemental = _load_json(record["supplemental_json"])
+        images = conn.execute(
+            "SELECT i.id, i.supplemental_json, m.metadata_json FROM generation_images i "
+            "LEFT JOIN image_metadata m ON m.asset_id = i.asset_id "
+            "WHERE i.generation_id = ? ORDER BY i.ordinal, i.id",
+            (generation_id,),
+        ).fetchall()
+        prepared: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+        for image in images:
+            previous = _load_json(image["supplemental_json"]) or record_supplemental
+            metadata = _load_json(image["metadata_json"])
+            overrides = previous.get("overrides")
+            # An absent override snapshot does not establish which old values were user edits.
+            if (
+                not isinstance(overrides, dict)
+                or int(metadata.get("parser_version", 0)) <= 0
+            ):
+                return
+            try:
+                projected = _import_supplemental(
+                    str(previous.get("original_filename") or ""), overrides, metadata
+                )
+            except (TypeError, ValueError):
+                return
+            prepared.append((str(image["id"]), {**previous, **projected}, metadata))
+        if not prepared:
+            return
+        conn.executemany(
+            "UPDATE generation_images SET supplemental_json = ? WHERE id = ?",
+            [
+                (
+                    json.dumps(supplemental, ensure_ascii=False, separators=(",", ":")),
+                    image_id,
+                )
+                for image_id, supplemental, _ in prepared
+            ],
+        )
+        first = prepared[0][1]
+        modes = {supplemental["mode"] for _, supplemental, _ in prepared}
+        engines = {supplemental["generation_engine"] for _, supplemental, _ in prepared}
+        # Keep the original ordered group manifest for retry idempotency after partial deletion.
+        summary = {**record_supplemental, **first}
+        conn.execute(
+            "UPDATE generations SET model = ?, mode = ?, original_prompt = ?, final_prompt = ?, "
+            "generation_engine = ?, generated_at = ?, supplemental_json = ? WHERE id = ?",
+            (
+                first["model"],
+                first["mode"] if len(modes) == 1 else "unknown",
+                first["prompt"],
+                str(
+                    prepared[0][2].get("normalized", {}).get("prompt")
+                    or first["prompt"]
+                ),
+                first["generation_engine"] if len(engines) == 1 else "mixed",
+                first["generated_at"],
+                json.dumps(summary, ensure_ascii=False, separators=(",", ":")),
+                generation_id,
+            ),
+        )
 
     @staticmethod
     def _refresh_search_sync(conn: sqlite3.Connection, generation_id: str) -> None:
@@ -2714,6 +2788,7 @@ def _import_supplemental(
             "model": model,
             "mode": mode,
             "generation_engine": engine,
+            "generated_at": generated_at,
             "prompt": prompt,
             "negative_prompt": negative,
         },

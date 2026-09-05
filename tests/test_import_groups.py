@@ -442,6 +442,77 @@ def test_distinct_generation_engines_remain_mixed_after_alias_normalization(tmp_
     asyncio.run(run())
 
 
+def test_metadata_upgrade_refreshes_group_projection_and_keeps_manifest_and_manual_overrides(
+    tmp_path, monkeypatch
+):
+    import astrbot_plugin_image_studio.image_metadata as metadata_module
+
+    async def run():
+        store = GenerationStore(tmp_path)
+        await store.initialize()
+        entries = [
+            stage(store, image(seed=1), "one.png", model="confirmed model"),
+            stage(
+                store,
+                image("blue", seed=2),
+                "two.png",
+                model="confirmed model",
+                prompt="",
+                mode="img2img",
+                generation_engine="comfyui",
+                parameters={"seed": 0},
+            ),
+        ]
+        grouped = await store.import_group(entries, import_key="upgraded")
+        await store.set_favorite(grouped["generation_id"], True)
+        before = await store.generation_detail(
+            grouped["generation_id"], include_assets=False
+        )
+        parse = metadata_module.parse_image_metadata
+        upgraded_version = metadata_module.PARSER_VERSION + 1
+
+        def upgraded(data):
+            result = parse(data)
+            result["normalized"].update(
+                prompt=f"resolved {result['normalized']['seed']}",
+                model="new metadata model",
+                mode="text2img",
+                steps=35,
+            )
+            return result
+
+        monkeypatch.setattr(metadata_module, "PARSER_VERSION", upgraded_version)
+        monkeypatch.setattr(metadata_module, "parse_image_metadata", upgraded)
+        await GenerationStore(tmp_path).initialize()
+        after = await store.generation_detail(
+            grouped["generation_id"], include_assets=False
+        )
+        assert after["model"] == "confirmed model"
+        assert after["original_prompt"] == "resolved 1" and after["mode"] == "unknown"
+        assert after["generation_engine"] == "mixed"
+        assert after["created_at"] == before["created_at"] and after["is_favorite"]
+        assert [item["id"] for item in after["images"]] == [
+            item["id"] for item in before["images"]
+        ]
+        assert (
+            after["supplemental"]["group_manifest"]
+            == before["supplemental"]["group_manifest"]
+        )
+        assert after["supplemental"]["is_import_group"] is True
+        assert [item["supplemental"]["prompt"] for item in after["images"]] == [
+            "resolved 1",
+            "",
+        ]
+        assert after["images"][1]["supplemental"]["display_parameters"]["seed"] == 0
+        assert after["images"][1]["supplemental"]["display_parameters"]["steps"] == 35
+        for old, new in zip(before["images"], after["images"], strict=True):
+            assert new["supplemental"]["overrides"] == old["supplemental"]["overrides"]
+            assert new["metadata"]["raw"] == old["metadata"]["raw"]
+        assert (await store.import_group(entries, import_key="upgraded"))["duplicate"]
+
+    asyncio.run(run())
+
+
 def test_import_staging_maintenance_uses_one_hour_grace(tmp_path):
     async def run():
         store = GenerationStore(tmp_path)
