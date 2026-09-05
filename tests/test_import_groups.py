@@ -64,7 +64,7 @@ def test_import_group_preserves_per_image_metadata_and_overrides(tmp_path):
             result["generation_id"], include_assets=False
         )
         assert detail["model"] == "model-a"
-        assert detail["mode"] == "unknown" and detail["generation_engine"] == "mixed"
+        assert detail["mode"] == "unknown" and detail["generation_engine"] == "novelai"
         assert detail["parameters"] == {} and detail["source"] == "import"
         assert detail["original_prompt"] == "first manual"
         assert [
@@ -301,6 +301,143 @@ def test_dev1_upgrade_preserves_single_import_and_metadata(tmp_path):
             )
             == after
         )
+
+    asyncio.run(run())
+
+
+def test_nai_source_aliases_share_filters_and_preserve_raw_import_information(tmp_path):
+    async def run():
+        store = GenerationStore(tmp_path)
+        await store.initialize()
+        entries = [
+            stage(store, image(), "one.png", generation_engine="nai"),
+            stage(store, image("blue"), "two.png", generation_engine="novelai"),
+        ]
+        grouped = await store.import_group(entries, import_key="aliases")
+        single = await store.import_image(
+            image("green"), "single.png", {"generation_engine": "nai"}
+        )
+        group_id, single_id = grouped["generation_id"], single["generation_id"]
+        detail = await store.generation_detail(group_id, include_assets=False)
+        assert detail["generation_engine"] == "novelai"
+        assert {
+            item["supplemental"]["generation_engine"] for item in detail["images"]
+        } == {"novelai"}
+        assert (
+            detail["images"][0]["supplemental"]["overrides"]["generation_engine"]
+            == "nai"
+        )
+        assert detail["images"][0]["metadata"]["raw"]["Software"] == "NovelAI"
+        with store._connect() as conn:
+            assert {
+                row[0]
+                for row in conn.execute("SELECT generation_engine FROM generations")
+            } == {"novelai"}
+            conn.execute(
+                "UPDATE generations SET generation_engine = 'nai' WHERE id = ?",
+                (single_id,),
+            )
+        for alias in ("nai", "novelai", "NovelAI"):
+            gallery = await store.list_generations({"generation_engine": alias})
+            assert gallery["total"] == 2
+            assert gallery["filters"]["generation_engines"] == ["novelai"]
+            assert {item["generation_engine"] for item in gallery["items"]} == {
+                "novelai"
+            }
+            assert (
+                len(await store.gallery_image_sequence({"generation_engine": alias}))
+                == 3
+            )
+
+        # Simulate old group-level and per-image aliases without rewriting user inputs.
+        with store._connect() as conn:
+            conn.execute(
+                "UPDATE generations SET generation_engine = 'mixed' WHERE id = ?",
+                (group_id,),
+            )
+            for row in conn.execute(
+                "SELECT id, supplemental_json FROM generation_images"
+            ).fetchall():
+                supplemental = json.loads(row["supplemental_json"])
+                if supplemental["overrides"]["generation_engine"] == "nai":
+                    supplemental["generation_engine"] = "nai"
+                    supplemental["display_parameters"]["generation_engine"] = "nai"
+                conn.execute(
+                    "UPDATE generation_images SET supplemental_json = ? WHERE id = ?",
+                    (json.dumps(supplemental), row["id"]),
+                )
+            original_supplementals = [
+                tuple(row)
+                for row in conn.execute(
+                    "SELECT id, supplemental_json FROM generation_images ORDER BY id"
+                )
+            ]
+            original_metadata = [
+                tuple(row)
+                for row in conn.execute(
+                    "SELECT asset_id, metadata_json FROM image_metadata ORDER BY asset_id"
+                )
+            ]
+        reopened = GenerationStore(tmp_path)
+        await reopened.initialize()
+        gallery = await reopened.list_generations({"generation_engine": "novelai"})
+        assert gallery["total"] == 2
+        detail = await reopened.generation_detail(group_id, include_assets=False)
+        assert detail["generation_engine"] == "novelai"
+        assert detail["images"][0]["supplemental"]["generation_engine"] == "novelai"
+        assert (
+            detail["images"][0]["supplemental"]["display_parameters"][
+                "generation_engine"
+            ]
+            == "novelai"
+        )
+        assert (
+            detail["images"][0]["supplemental"]["overrides"]["generation_engine"]
+            == "nai"
+        )
+        with reopened._connect() as conn:
+            assert [
+                tuple(row)
+                for row in conn.execute(
+                    "SELECT id, supplemental_json FROM generation_images ORDER BY id"
+                )
+            ] == original_supplementals
+            assert [
+                tuple(row)
+                for row in conn.execute(
+                    "SELECT asset_id, metadata_json FROM image_metadata ORDER BY asset_id"
+                )
+            ] == original_metadata
+            assert (
+                conn.execute("SELECT dev_revision FROM schema_meta").fetchone()[0] == 2
+            )
+
+    asyncio.run(run())
+
+
+def test_distinct_generation_engines_remain_mixed_after_alias_normalization(tmp_path):
+    async def run():
+        store = GenerationStore(tmp_path)
+        await store.initialize()
+        grouped = await store.import_group(
+            [
+                stage(store, image(), "one.png", generation_engine="nai"),
+                stage(store, image("blue"), "two.png", generation_engine="comfyui"),
+            ],
+            import_key="mixed",
+        )
+        await store.initialize()
+        assert (
+            await store.generation_detail(
+                grouped["generation_id"], include_assets=False
+            )
+        )["generation_engine"] == "mixed"
+        assert (await store.list_generations({"generation_engine": "mixed"}))[
+            "total"
+        ] == 1
+        assert (await store.list_generations({"generation_engine": "novelai"}))[
+            "total"
+        ] == 0
 
     asyncio.run(run())
 

@@ -271,6 +271,64 @@ def test_import_inspect_confirm_and_retry_are_consistent(tmp_path) -> None:
     asyncio.run(run())
 
 
+def test_batch_favorite_api_reads_cross_page_state_and_applies_atomic_toggle(tmp_path):
+    async def run():
+        app = await create_app(tmp_path)
+        ids = [app.state.seed_ids[0], app.state.seed_ids[-1]]
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            single = await client.post(
+                PREFIX + "gallery/favorite",
+                json={"generation_id": ids[0], "favorite": True},
+            )
+            assert single.status_code == 200
+            state = await client.post(
+                PREFIX + "gallery/favorite/status", json={"generation_ids": ids}
+            )
+            assert state.status_code == 200 and state.json()["action"] == "favorite"
+            assert state.json()["favorite_count"] == 1
+            toggled = await client.post(
+                PREFIX + "gallery/favorite",
+                json={"generation_ids": ids, "action": "toggle"},
+            )
+            assert toggled.status_code == 200 and toggled.json()["changed_ids"] == [
+                ids[1]
+            ]
+            state = await client.post(
+                PREFIX + "gallery/favorite/status", json={"generation_ids": ids}
+            )
+            assert state.json()["action"] == "unfavorite"
+            rejected = await client.post(
+                PREFIX + "gallery/favorite",
+                json={"generation_ids": [ids[0], "0" * 32], "action": "toggle"},
+            )
+            assert (
+                rejected.status_code == 400 and "0" * 32 in rejected.json()["message"]
+            )
+            assert (
+                await client.post(
+                    PREFIX + "gallery/favorite/status", json={"generation_ids": ids}
+                )
+            ).json()["all_favorite"]
+            toggled = await client.post(
+                PREFIX + "gallery/favorite",
+                json={"generation_ids": ids, "action": "toggle"},
+            )
+            assert toggled.json()["action"] == "unfavorite"
+            report = (await client.get(PREFIX + "storage/health")).json()["retention"]
+            assert (
+                report["record_count"] + report["exempt_record_count"]
+                == report["total_records"]
+            )
+            assert (
+                report["size_bytes"] + report["exempt_size_bytes"]
+                == report["gallery_size_bytes"]
+            )
+
+    asyncio.run(run())
+
+
 def test_gallery_favorite_partial_delete_and_cover_update(tmp_path) -> None:
     async def run() -> None:
         app = await create_app(tmp_path)

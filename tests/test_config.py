@@ -62,6 +62,15 @@ def test_llm_image_asset_policy_is_bounded() -> None:
     assert normalized["asset_policy"]["lease_hours"] == 168
 
 
+def test_history_zero_and_legacy_negative_record_limits_mean_unlimited() -> None:
+    for value in (0, -1, -50, "-1"):
+        normalized, errors = normalize_webui_settings(
+            {"history": {"max_records": value}}
+        )
+        assert errors == []
+        assert normalized["history"]["max_records"] == 0
+
+
 def test_history_can_enable_invocation_identity_snapshots() -> None:
     normalized, errors = normalize_webui_settings(
         {"history": {"record_invocation_identity": True}}

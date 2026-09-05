@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -176,6 +177,27 @@ def detail(*, source: str = "webui", metadata: dict | None = None) -> dict:
     }
 
 
+def image_settings() -> RuntimeSettings:
+    configuration = settings()
+    provider = ImageProvider.from_mapping(
+        {
+            "id": "natural",
+            "name": "Natural",
+            "kind": "openai_images",
+            "base_url": "https://example.test",
+            "models": [
+                {
+                    "id": "natural-image",
+                    "supports_text2img": True,
+                    "supports_img2img": True,
+                    "max_reference_images": 4,
+                }
+            ],
+        }
+    )
+    return replace(configuration, providers=(*configuration.providers, provider))
+
+
 def test_studio_export_roundtrip_preserves_explicit_request_values() -> None:
     original = detail()
     snapshot = copy.deepcopy(original)
@@ -240,7 +262,8 @@ def test_nai_to_other_provider_does_not_confuse_cfg_semantics() -> None:
             settings(duplicate=True),
             '{"tag":"mountain","model":"nai-diffusion-4-5-full"}',
         ),
-        (settings(), '{"tag":"mountain"}'),
+        (settings(duplicate=True), '{"tag":"mountain"}'),
+        (settings(), '{"tag":"mountain","model":"unavailable-model"}'),
     ],
 )
 def test_missing_unknown_or_ambiguous_model_requires_explicit_selection(
@@ -260,6 +283,95 @@ def test_missing_model_does_not_discard_unmapped_parameters() -> None:
     assert result["requires_model_selection"]
     assert result["unmapped"]["steps"] == 99
     assert result["unmapped"]["custom_option"] == {"enabled": False}
+
+
+def test_missing_model_selects_only_unique_compatible_source() -> None:
+    result = resolve_parameters('{"tag":"mountain","cfg":0.3}', settings())
+    assert result["requires_model_selection"] is False
+    assert result["draft"]["model_ref"] == "nai:nai-diffusion-4-5-full"
+    assert result["selection_reason"] == "source_unique"
+    assert any("唯一" in warning for warning in result["warnings"])
+    assert resolve_parameters(
+        '{"Steps":30,"CFG scale":7,"prompt":"scene"}', settings()
+    )["requires_model_selection"]
+
+
+@pytest.mark.parametrize("mode", ["img2img", "i2i", "image2image"])
+def test_paste_explicit_image_mode_selects_supported_model(mode: str) -> None:
+    content = json.dumps(
+        {
+            "format": "image_studio",
+            "version": 1,
+            "generation_engine": "openai_images",
+            "data": {"prompt": "mountain", "mode": mode},
+        }
+    )
+    result = resolve_parameters(content, image_settings())
+    assert result["draft"]["mode"] == "img2img"
+    assert result["draft"]["model_ref"] == "natural:natural-image"
+    assert result["selection_reason"] == "source_unique"
+    assert any("参考图" in warning for warning in result["warnings"])
+    assert not any("未确定生成模式" in warning for warning in result["warnings"])
+
+
+def test_paste_model_ref_and_explicit_mode_override_default_mode() -> None:
+    content = json.dumps(
+        {
+            "format": "image_studio",
+            "version": 1,
+            "data": {
+                "model_ref": "natural:natural-image",
+                "mode": "img2img",
+                "prompt": "mountain",
+            },
+        }
+    )
+    result = resolve_parameters(content, image_settings())
+    assert result["draft"]["mode"] == "img2img"
+    assert result["selection_reason"] == "model_ref"
+    invalid = json.dumps(
+        {
+            "format": "image_studio",
+            "version": 1,
+            "data": {
+                "model_ref": "other:plain-image",
+                "mode": "img2img",
+                "prompt": "mountain",
+            },
+        }
+    )
+    unresolved = resolve_parameters(invalid, settings())
+    assert unresolved["requires_model_selection"]
+    assert unresolved["draft"]["mode"] == "img2img"
+
+
+def test_original_novelai_action_determines_mode_without_interface_hint() -> None:
+    content = json.dumps(
+        {
+            "prompt": "scene",
+            "uc": "bad",
+            "model": "nai-diffusion-4-5-full",
+            "action": "img2img",
+        }
+    )
+    result = resolve_parameters(content, image_settings())
+    assert result["draft"]["mode"] == "img2img"
+    assert result["requires_model_selection"]
+    assert result["selection_reason"] == ""
+
+
+def test_unavailable_explicit_model_reference_never_falls_back_to_source() -> None:
+    content = json.dumps(
+        {
+            "format": "image_studio",
+            "version": 1,
+            "generation_engine": "nai",
+            "data": {"model_ref": "deleted:gone-model", "prompt": "scene"},
+        }
+    )
+    result = resolve_parameters(content, settings())
+    assert result["requires_model_selection"]
+    assert result["draft"]["model_ref"] == ""
 
 
 def test_out_of_range_and_unknown_values_are_retained_without_clamping() -> None:

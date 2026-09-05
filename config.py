@@ -193,7 +193,7 @@ def normalize_webui_settings(value: Any) -> tuple[dict[str, Any], list[str]]:
     history = merged.get("history") if isinstance(merged.get("history"), dict) else {}
     history["enabled"] = _as_bool(history.get("enabled"), True)
     history["max_records"] = max(
-        -1, min(100000, _as_int(history.get("max_records"), 200))
+        0, min(100000, _as_int(history.get("max_records"), 200))
     )
     history["max_megabytes"] = max(
         0, min(10240, _as_int(history.get("max_megabytes"), 2048))

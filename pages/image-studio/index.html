@@ -6,7 +6,8 @@
   <title>Image Studio 生图工作台</title>
   <link rel="stylesheet" href="./vendor/photoswipe/photoswipe.css?v=5.4.4" />
   <link rel="stylesheet" href="./app.css?v=0.7.0" />
-  <link rel="stylesheet" href="./library.css?v=0.7.3" />
+  <link rel="stylesheet" href="./library.css?v=0.7.7" />
+  <link rel="stylesheet" href="./select.css?v=0.7.7" />
 </head>
 <body>
   <main class="app-shell quiet-glass-background">
@@ -25,6 +26,7 @@
     </aside>
 
     <section class="workspace">
+      <div id="pageHeaderAnchor" aria-hidden="true"></div>
       <header class="topbar glass">
         <div><h1 id="pageTitle">生图</h1><p id="pageSubtitle">选择模式和模型后开始创作</p></div>
         <div class="topbar-status" id="providerStatus"></div>
@@ -35,11 +37,11 @@
       </div>
 
       <section class="view is-active" id="generateView">
-        <div class="mode-tabs" role="group" aria-label="生成模式">
+        <div class="generation-mode-row"><div class="mode-tabs" role="group" aria-label="生成模式">
           <button class="segment is-active" data-mode="text2img" type="button">文生图</button>
           <button class="segment" data-mode="img2img" type="button">图生图</button>
-        </div>
-        <div class="model-select-row"><label for="modelChoice">模型</label><select id="modelChoice" aria-label="选择生图模型" disabled><option value="">请先选择模式</option></select><span class="model-provider" id="modelProvider"></span><button class="studio-icon-button" id="pasteParametersButton" type="button" aria-label="从剪贴板读取参数" title="从剪贴板读取参数" data-studio-icon="ClipboardPaste"></button></div>
+        </div><button class="studio-icon-button" id="pasteParametersButton" type="button" aria-label="从剪贴板读取参数" title="从剪贴板读取参数" data-studio-icon="ClipboardPaste"></button></div>
+        <div class="model-select-row"><label for="modelChoice">模型</label><select id="modelChoice" aria-label="选择生图模型" disabled><option value="">请先选择模式</option></select><span class="model-provider" id="modelProvider"></span></div>
         <div class="parameter-import-notice is-hidden" id="parameterImportNotice" role="status"></div>
         <div class="workspace-empty glass" id="workspaceEmpty">请选择模型</div>
         <fieldset id="generatorWorkspace" class="generator-workspace is-hidden" disabled>
@@ -49,8 +51,8 @@
             <div class="field field-wide" id="negativePromptField"><div class="field-label-row"><label for="negativePrompt">反向提示词</label><button class="field-reset-button" id="resetNegativePromptButton" type="button">恢复默认</button></div><textarea id="negativePrompt" rows="2" maxlength="4000" placeholder="可选"></textarea><span class="field-hint" id="negativePromptHint"></span></div>
             <div class="model-parameters field-wide" id="modelParameters"></div>
             <div class="field field-wide is-hidden" id="referenceField">
-              <label for="referenceUpload">参考图</label>
-              <div class="upload-row"><input id="referenceUpload" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple /><span>最多使用当前模型支持的数量</span></div>
+              <label for="referenceChooseButton">参考图</label>
+              <div class="upload-row reference-upload-row"><button class="quiet-button" id="referenceChooseButton" type="button" aria-describedby="referenceCount"><span data-studio-icon="ImagePlus" aria-hidden="true"></span><span>选择图片</span></button><input id="referenceUpload" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden /><span id="referenceCount" role="status" aria-live="polite">0/0 张</span></div>
               <div class="reference-strip" id="referenceStrip"></div>
             </div>
             <details class="advanced field-wide is-hidden" id="advancedParameters">
@@ -72,17 +74,16 @@
 
       <section class="view" id="galleryView">
         <div class="gallery-toolbar">
-          <label class="search-field"><span>搜索</span><input id="gallerySearch" placeholder="提示词、模型或生图服务商" /></label>
+          <div class="search-field"><label for="gallerySearch">搜索</label><div class="search-input-wrap"><input id="gallerySearch" placeholder="提示词、模型或生图服务商" /><button class="studio-icon-button" id="galleryClearSearch" type="button" aria-label="清空搜索" title="清空搜索" data-studio-icon="X" disabled></button></div></div>
           <select id="galleryProvider" aria-label="按生图服务商筛选"><option value="">全部服务商</option></select>
           <select id="galleryMode" aria-label="按模式筛选"><option value="">全部模式</option><option value="text2img">文生图</option><option value="img2img">图生图</option></select>
           <select id="gallerySource" aria-label="按调用来源筛选"><option value="">全部来源</option><option value="webui">WebUI</option><option value="command">指令</option><option value="llm_tool">LLM 工具</option><option value="import">导入</option></select>
-          <select id="galleryEngine" aria-label="按生图来源筛选"><option value="">全部生图来源</option><option value="nai">NAI</option><option value="novelai">NovelAI</option><option value="comfyui">ComfyUI</option><option value="a1111">Stable Diffusion</option><option value="openai_images">OpenAI Images</option><option value="gemini">Gemini</option><option value="custom_json">自定义</option><option value="unknown">未知来源</option></select>
+          <select id="galleryEngine" aria-label="按生图来源筛选"><option value="">全部生图来源</option><option value="novelai">NovelAI</option><option value="comfyui">ComfyUI</option><option value="a1111">Stable Diffusion</option><option value="openai_images">OpenAI Images</option><option value="gemini">Gemini</option><option value="custom_json">自定义</option><option value="unknown">未知来源</option></select>
           <select id="galleryFavorite" aria-label="按收藏筛选"><option value="">全部收藏状态</option><option value="true">已收藏</option><option value="false">未收藏</option></select>
           <button class="quiet-button" id="galleryRefresh" type="button">刷新</button>
         </div>
         <div id="selectionAnchor" aria-hidden="true"></div>
-        <div class="selection-bar gallery-selection-bar glass is-hidden" id="selectionBar"><span id="selectionCount">已选 0 项</span><button class="quiet-button" id="cancelSelectionButton" type="button">取消</button><button class="quiet-button" id="selectAllButton" type="button">全选当前页</button><button class="quiet-button" id="exportButton" type="button">导出</button><button class="danger-button" id="deleteButton" type="button">删除</button></div>
-        <div class="retention-notice is-hidden" id="galleryRetention" role="status"></div>
+        <div class="selection-bar gallery-selection-bar glass is-hidden" id="selectionBar"><span id="selectionCount">已选 0 项</span><button class="quiet-button" id="cancelSelectionButton" type="button">取消</button><button class="quiet-button" id="selectAllButton" type="button">全选当前页</button><button class="quiet-button" id="favoriteSelectionButton" type="button" disabled>收藏</button><button class="quiet-button" id="exportButton" type="button">导出</button><button class="danger-button" id="deleteButton" type="button">删除</button></div>
         <div class="gallery-grid" id="galleryGrid"></div>
         <div class="empty-state is-hidden" id="galleryEmpty">画廊中还没有保留的生成记录。</div>
         <div class="gallery-floatingbar floatingbar">
@@ -127,12 +128,14 @@
             <div class="toggle-row"><label for="retainReferences">保留参考图</label><label class="toggle-control"><input id="retainReferences" type="checkbox" /><span aria-hidden="true"></span></label></div>
             <div class="toggle-row"><label for="recordInvocationIdentity">记录调用来源身份</label><label class="toggle-control"><input id="recordInvocationIdentity" type="checkbox" /><span aria-hidden="true"></span></label></div>
             <p class="field-hint">记录指令或 LLM 工具调用时的平台、群聊和用户身份快照；WebUI 生图不记录聊天身份。</p>
-            <div class="field"><label for="historyRecords">最大记录数（-1 表示不限）</label><input id="historyRecords" type="number" min="-1" max="100000" /></div>
+            <div class="field"><label for="historyRecords">最大记录数（0 表示不限）</label><input id="historyRecords" type="number" min="0" max="100000" /></div>
             <div class="field"><label for="historyMegabytes">最大图片容量 MB（0 表示不限）</label><input id="historyMegabytes" type="number" min="0" max="10240" /></div>
           </section>
           <section class="settings-panel glass">
             <div class="section-heading"><div><h2>存储健康</h2><p>每小时自动检查数据库、租约、资产和预览关系。</p></div><span class="health-status" id="storageHealthStatus">未检查</span></div>
             <div class="storage-health-grid" id="storageHealthGrid"><div><span>最近检查</span><strong id="storageHealthCheckedAt">尚未执行</strong></div><div><span>耗时</span><strong id="storageHealthDuration">-</strong></div><div><span>原图 / 预览</span><strong id="storageHealthAssets">-</strong></div><div><span>有效租约</span><strong id="storageHealthLeases">-</strong></div><div><span>生成记录</span><strong id="storageHealthGenerations">-</strong></div><div><span>物理占用</span><strong id="storageHealthSize">-</strong></div></div>
+            <div class="storage-quota is-hidden" id="storageQuotaRecords"><div class="storage-quota-label"><label for="storageQuotaRecordsProgress">数量限额</label><span id="storageQuotaRecordsLabel"></span></div><progress id="storageQuotaRecordsProgress" value="0" max="1"></progress><span class="storage-quota-exempt" id="storageQuotaRecordsExempt"></span></div>
+            <div class="storage-quota is-hidden" id="storageQuotaBytes"><div class="storage-quota-label"><label for="storageQuotaBytesProgress">容量限额</label><span id="storageQuotaBytesLabel"></span></div><progress id="storageQuotaBytesProgress" value="0" max="1"></progress><span class="storage-quota-exempt" id="storageQuotaBytesExempt"></span></div>
             <p class="maintenance-report" id="storageHealthErrors">暂无异常。</p>
             <div class="section-actions maintenance-actions"><button class="quiet-button" id="runMaintenanceButton" type="button">立即检查</button><button class="quiet-button" id="runDeepMaintenanceButton" type="button">深度检查</button></div>
           </section>
@@ -227,7 +230,8 @@
   <script src="./vendor/photoswipe/photoswipe.umd.min.js?v=5.4.4"></script>
   <script src="./vendor/exifreader/exif-reader.js?v=4.44.1"></script>
   <script src="./vendor/lucide/icons.js?v=0.468.0"></script>
-  <script src="./library.js?v=0.7.3" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./app.js?v=0.7.1" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./select.js?v=0.7.4" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./library.js?v=0.7.7" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./app.js?v=0.7.6" onerror="window.__reportImageStudioPageError(true)"></script>
 </body>
 </html>

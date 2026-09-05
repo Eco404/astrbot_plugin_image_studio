@@ -220,6 +220,12 @@ class ImageStudioPlugin(Star):
                 "Image Studio: favorite record",
             ),
             (
+                "gallery/favorite/status",
+                self._api_gallery_favorite_status,
+                ["POST"],
+                "Image Studio: selected favorite states",
+            ),
+            (
                 "gallery/images/delete",
                 self._api_gallery_delete_images,
                 ["POST"],
@@ -745,6 +751,15 @@ class ImageStudioPlugin(Star):
 
     async def _api_gallery_favorite(self) -> Any:
         body = await web_request.json(default={})
+        if isinstance(body, dict) and "generation_ids" in body:
+            if body.get("action") != "toggle":
+                return error_response("批量收藏操作必须为 toggle", status_code=400)
+            try:
+                return json_response(
+                    await self.store.toggle_favorites(body["generation_ids"])
+                )
+            except ValueError as exc:
+                return error_response(str(exc), status_code=400)
         if not isinstance(body, dict) or not isinstance(body.get("favorite"), bool):
             return error_response("收藏状态必须是布尔值", status_code=400)
         try:
@@ -752,6 +767,17 @@ class ImageStudioPlugin(Star):
                 str(body.get("generation_id") or ""), body["favorite"]
             )
             return json_response(result)
+        except ValueError as exc:
+            return error_response(str(exc), status_code=400)
+
+    async def _api_gallery_favorite_status(self) -> Any:
+        body = await web_request.json(default={})
+        if not isinstance(body, dict):
+            return error_response("请求体必须是 JSON 对象", status_code=400)
+        try:
+            return json_response(
+                await self.store.favorite_status(body.get("generation_ids"))
+            )
         except ValueError as exc:
             return error_response(str(exc), status_code=400)
 

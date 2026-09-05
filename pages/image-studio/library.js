@@ -1,7 +1,7 @@
 (function () {
   "use strict";
 
-  const ENGINES = { nai: "NAI", novelai: "NovelAI", comfyui: "ComfyUI", a1111: "Stable Diffusion", openai_images: "OpenAI Images", gemini: "Gemini", custom_json: "自定义", unknown: "未知来源" };
+  const ENGINES = { novelai: "NovelAI", comfyui: "ComfyUI", a1111: "Stable Diffusion", openai_images: "OpenAI Images", gemini: "Gemini", custom_json: "自定义", unknown: "未知来源" };
   const own = (value, key) => Object.prototype.hasOwnProperty.call(value || {}, key);
   const serial = (value) => typeof value === "string" ? value : JSON.stringify(value, null, 2);
   const $ = (id) => document.getElementById(id);
@@ -16,10 +16,12 @@
   }
 
   function decodeComment(value) {
-    if (!Array.isArray(value)) return typeof value === "string" ? value : "";
-    const bytes = Uint8Array.from(value);
+    if (typeof value === "string") return value.replace(/\0+$/, "");
+    if (!Array.isArray(value) && !ArrayBuffer.isView(value)) return "";
+    if (Array.isArray(value) && value.every((item) => typeof item === "string")) return value.join("").replace(/\0+$/, "");
+    const bytes = value instanceof Uint8Array ? value : Uint8Array.from(value);
     const signature = String.fromCharCode(...bytes.slice(0, 8));
-    const payload = bytes.slice(8);
+    const payload = /^(UNICODE\0|ASCII\0\0\0|JIS\0\0\0\0\0)/.test(signature) ? bytes.slice(8) : bytes;
     if (signature.startsWith("UNICODE")) {
       const sample = payload.slice(0, 128);
       let evenZeros = 0, oddZeros = 0;
@@ -38,7 +40,7 @@
     for (const [name, tag] of Object.entries(tags.pngText || {})) {
       if (typeof tag.value === "string") raw[name] = tag.value;
     }
-    for (const name of ["Software", "ImageDescription", "UserComment", "DateTimeOriginal"]) {
+    for (const name of ["Software", "ImageDescription", "Make", "Model", "Artist", "Copyright", "UserComment", "DateTime", "DateTimeOriginal", "DateTimeDigitized", "OffsetTime", "OffsetTimeOriginal", "OffsetTimeDigitized", "SubSecTime", "SubSecTimeOriginal", "SubSecTimeDigitized"]) {
       const tag = tags.exif?.[name];
       if (!tag) continue;
       if (name === "UserComment") raw[name] = decodeComment(tag.value);
@@ -60,6 +62,12 @@
     let modalPending = false;
     let detailCopies = [];
     let favoritePending = false;
+    let batchFavoritePending = false;
+    let selectionFavoriteKey = "";
+    let selectionFavoriteRevision = 0;
+    let selectionFavoriteTimer = 0;
+    let selectionFavoriteAction = "favorite";
+    let selectionFavoriteReady = false;
     let resizeTimer = null;
     let detailTrigger = null;
     let galleryColumns = 0;
@@ -67,8 +75,8 @@
     let selectionScrollFrame = 0;
 
     function modeLabel(mode) { return ({ text2img: "文生图", img2img: "图生图" })[mode] || "未知模式"; }
-    function engineLabel(engine) { return engine === "mixed" ? "混合来源" : ENGINES[engine] || engine || "未知来源"; }
-    function engineOf(detail) { return detail.generation_engine || (detail.provider_kind === "nai_direct" ? "nai" : "unknown"); }
+    function engineLabel(engine) { return engine === "nai" ? ENGINES.novelai : engine === "mixed" ? "混合来源" : ENGINES[engine] || engine || "未知来源"; }
+    function engineOf(detail) { const engine = detail.generation_engine || (detail.provider_kind === "nai_direct" ? "novelai" : "unknown"); return engine === "nai" ? "novelai" : engine; }
     function options(values, selected) { return Object.entries(values).map(([value, label]) => `<option value="${escape(value)}" ${String(selected ?? "") === value ? "selected" : ""}>${escape(label)}</option>`).join(""); }
     function setCommandLabel(id, label) { const button = $(id); const span = button.querySelector("span"); if (span) span.textContent = label; else button.textContent = label; button.setAttribute("aria-label", label); button.title = label; }
 
@@ -103,6 +111,7 @@
       return new Promise((resolve) => {
         const close = (result) => {
           if (modalPending) return;
+          window.ImageStudioSelect?.close();
           modalClose = null; $("studioModalRoot").classList.add("is-hidden");
           hooks.syncPageScrollLock(); previousFocus?.focus?.({ preventScroll: true }); resolve(result);
         };
@@ -124,6 +133,7 @@
         }
         renderIcons($("studioModal"));
         options.onOpen?.();
+        window.ImageStudioSelect?.refresh($("studioModal"));
         (options.focus ? $(options.focus) : $("studioModalFooter").querySelector("button"))?.focus();
       });
     }
@@ -152,6 +162,7 @@
       const focusField = focused?.dataset?.importField;
       const selection = focusField && typeof focused.selectionStart === "number" ? [focused.selectionStart, focused.selectionEnd] : null;
       $("importGrid").innerHTML = imports.map(importCard).join("");
+      window.ImageStudioSelect?.refresh($("importGrid"));
       if (focusId && focusField) {
         const restored = $("importGrid").querySelector(`[data-import-id="${focusId}"] [data-import-field="${focusField}"]`);
         restored?.focus({ preventScroll: true }); if (selection && restored?.setSelectionRange) restored.setSelectionRange(...selection);
@@ -189,7 +200,7 @@
         const parsed = await apiPost("imports/inspect", { metadata: raw, width: item.width, height: item.height });
         item.parsed = parsed;
         const normalized = parsed.normalized || {};
-        item.fields = { generation_engine: normalized.generation_engine || (own(ENGINES, parsed.format) ? parsed.format : "unknown"), prompt: normalized.prompt ?? "", negative_prompt: normalized.negative_prompt ?? "", model: normalized.model ?? "", mode: normalized.mode || "unknown", parameters: JSON.stringify(normalized.parameters || {}, null, 2), generated_at: "" };
+        item.fields = { generation_engine: normalized.generation_engine || (own(ENGINES, parsed.format) ? parsed.format : "unknown"), prompt: normalized.prompt ?? "", negative_prompt: normalized.negative_prompt ?? "", model: normalized.model ?? "", mode: normalized.mode || "unknown", parameters: JSON.stringify(normalized.parameters || {}, null, 2), generated_at: localDateTime(normalized.generated_at ?? item.importedAt) };
         item.status = "ready";
       } catch (error) { item.status = "error"; item.error = errorMessage(error, "图片参数识别失败，可手动填写后导入"); }
       if (imports.includes(item)) renderImports();
@@ -205,12 +216,20 @@
       for (const file of accepted) {
         if (imports.length >= 100) { showNotice("单次最多选择 100 张图片。", "error"); break; }
         if (file.size > 30 * 1024 * 1024) { showNotice(`${file.name} 超过 30 MB。`, "error"); continue; }
-        const item = { id: `import_${Date.now().toString(36)}_${++importSequence}`, file, url: URL.createObjectURL(file), fields: { generation_engine: "unknown", prompt: "", negative_prompt: "", model: "", mode: "unknown", parameters: "{}", generated_at: "" }, status: "reading" };
+        const importedAt = Date.now() / 1000;
+        const item = { id: `import_${Date.now().toString(36)}_${++importSequence}`, file, url: URL.createObjectURL(file), importedAt, fields: { generation_engine: "unknown", prompt: "", negative_prompt: "", model: "", mode: "unknown", parameters: "{}", generated_at: localDateTime(importedAt) }, status: "reading" };
         imports.push(item); added.push(item);
       }
       renderImports();
       // Bound decoder work so a large drop does not freeze a phone browser.
       for (let index = 0; index < added.length; index += 3) await Promise.all(added.slice(index, index + 3).map(inspectFile));
+    }
+
+    function localDateTime(timestamp) {
+      const date = new Date(Number(timestamp) * 1000);
+      if (!Number.isFinite(date.getTime())) return "";
+      const pad = (value) => String(value).padStart(2, "0");
+      return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
     }
 
     async function confirmImports() {
@@ -356,6 +375,7 @@
       $("detailReproduce").disabled = !detail;
       $("detailDelete").disabled = !detail || !(detail.images || []).length;
       $("detailCopy").disabled = !detail;
+      window.ImageStudioSelect?.refresh($("detailCopyFormat"));
     }
 
     async function copyDetailFormat(download = false) {
@@ -386,6 +406,51 @@
         await hooks.loadGallery();
       } catch (error) { showNotice(errorMessage(error, "收藏状态更新失败"), "error"); }
       finally { favoritePending = false; updateDetailActions(state.detailData); }
+    }
+
+    function renderSelectionFavorite() {
+      const button = $("favoriteSelectionButton");
+      const remove = selectionFavoriteReady && selectionFavoriteAction === "unfavorite";
+      setCommandLabel("favoriteSelectionButton", remove ? "取消收藏" : "收藏");
+      button.classList.toggle("is-favorite", remove);
+      button.disabled = !state.selectedIds.size || !selectionFavoriteReady || batchFavoritePending;
+      button.setAttribute("aria-busy", String(batchFavoritePending));
+    }
+
+    function selectionChanged(force = false) {
+      const ids = Array.from(state.selectedIds).sort(); const key = JSON.stringify(ids);
+      if (!force && key === selectionFavoriteKey) return;
+      selectionFavoriteKey = key; selectionFavoriteReady = false;
+      const revision = ++selectionFavoriteRevision;
+      window.clearTimeout(selectionFavoriteTimer); renderSelectionFavorite();
+      if (!ids.length || batchFavoritePending) return;
+      selectionFavoriteTimer = window.setTimeout(async () => {
+        try {
+          const result = await apiPost("gallery/favorite/status", { generation_ids: ids });
+          if (revision !== selectionFavoriteRevision) return;
+          selectionFavoriteAction = result.all_favorite ? "unfavorite" : "favorite";
+          selectionFavoriteReady = true; renderSelectionFavorite();
+        } catch (error) {
+          if (revision === selectionFavoriteRevision) showNotice(errorMessage(error, "所选记录的收藏状态读取失败，请刷新画廊后重试。"), "error");
+        }
+      }, 100);
+    }
+
+    async function toggleSelectedFavorites() {
+      const ids = Array.from(state.selectedIds);
+      if (!ids.length || batchFavoritePending || !selectionFavoriteReady) return;
+      batchFavoritePending = true; ++selectionFavoriteRevision;
+      window.clearTimeout(selectionFavoriteTimer); renderSelectionFavorite();
+      try {
+        const result = await apiPost("gallery/favorite", { generation_ids: ids, action: "toggle" });
+        const changed = new Map((result.items || []).map((item) => [item.id, item]));
+        for (const item of state.galleryItems) if (changed.has(item.id)) Object.assign(item, changed.get(item.id));
+        if (state.detailData && changed.has(state.detailId)) { Object.assign(state.detailData, changed.get(state.detailId)); updateDetailActions(state.detailData); }
+        await hooks.loadGallery();
+        const count = result.changed_ids?.length || 0;
+        showNotice(result.action === "unfavorite" ? `已取消收藏 ${count} 条记录，保持当前勾选。` : `已收藏 ${count} 条记录，保持当前勾选。`, "success");
+      } catch (error) { showNotice(errorMessage(error, "批量收藏操作失败"), "error"); }
+      finally { batchFavoritePending = false; selectionChanged(true); }
     }
 
     async function deleteDetailImages() {
@@ -436,7 +501,7 @@
       const warnings = result.warnings || [];
       const unmapped = result.unmapped || {};
       const notice = $("parameterImportNotice");
-      notice.innerHTML = `${warnings.map((warning) => `<p>${escape(warning)}</p>`).join("")}${Object.keys(unmapped).length ? `<details open><summary>未映射参数</summary><pre>${escape(serial(unmapped))}</pre></details>` : ""}`;
+      notice.innerHTML = `<button class="studio-icon-button" data-dismiss-parameter-notice type="button" aria-label="关闭参数提示" title="关闭参数提示">${icon("X")}</button>${warnings.map((warning) => `<p>${escape(warning)}</p>`).join("")}${Object.keys(unmapped).length ? `<details><summary>未映射参数</summary><pre>${escape(serial(unmapped))}</pre></details>` : ""}`;
       notice.classList.toggle("is-hidden", !warnings.length && !Object.keys(unmapped).length);
       showNotice("参数已填入，尚未执行生成。", "success");
     }
@@ -458,22 +523,18 @@
 
     function galleryPageSize() { const columns = currentColumns(); galleryColumns = columns; return Math.min(60, Math.ceil(24 / columns) * columns); }
 
-    function renderGalleryCard(item) {
+    function renderGalleryCard(item, index = 0) {
       const warning = !!item.cleanup_warning;
       const selected = state.selectedIds.has(item.id);
       return `<article class="gallery-card ${item.is_favorite ? "is-favorite" : ""} ${warning ? "has-cleanup-warning" : ""} ${selected ? "is-selected" : ""}" data-gallery-id="${escape(item.id)}" tabindex="0" role="button" aria-label="查看 ${escape(item.model || item.provider_name || "图片")}">
-        <div class="gallery-image-wrap">${item.thumbnail_data_url ? `<img src="${escape(item.thumbnail_data_url)}" alt="${escape(item.prompt_preview)}" loading="lazy" />` : `<div class="gallery-missing-image">${icon("Image")}<span>图片不可用</span></div>`}
+        <div class="gallery-image-wrap">${item.thumbnail_data_url ? `<img src="${escape(item.thumbnail_data_url)}" alt="${escape(item.prompt_preview)}" loading="${index < Math.max(1, galleryColumns) * 2 ? "eager" : "lazy"}" decoding="async" />` : `<div class="gallery-missing-image">${icon("Image")}<span>图片不可用</span></div>`}
           <label class="gallery-selection" title="选择生成记录"><input type="checkbox" data-select-id="${escape(item.id)}" aria-label="选择生成记录" ${selected ? "checked" : ""} /><span>${icon("Check")}</span></label>
           <span class="gallery-source-label">${escape(engineLabel(item.generation_engine))}</span>${Number(item.image_count) > 1 ? `<span class="gallery-image-count" title="${Number(item.image_count)} 张图片">${icon("Image")}<span>${Number(item.image_count)}</span></span>` : ""}${item.is_favorite ? `<span class="gallery-favorite" title="已收藏" aria-label="已收藏">${icon("Star")}</span>` : ""}
         </div><div class="gallery-info"><strong>${escape(item.model || item.provider_name || engineLabel(item.generation_engine))}</strong><p>${escape(item.prompt_preview || "无提示词")}</p><div class="gallery-meta"><span>${modeLabel(item.mode)}</span><span>${formatDate(item.created_at)}</span></div>${warning ? '<span class="cleanup-warning-label">清理候选</span>' : ""}${item.file_state && item.file_state !== "available" ? '<span class="cleanup-warning-label">文件需检查</span>' : ""}</div></article>`;
     }
 
     function galleryRendered(payload) {
-      const notice = $("galleryRetention");
-      const retention = payload.retention || {};
-      notice.textContent = retention.near_limit ? (retention.message || "历史容量接近保留上限，清理候选记录可能被自动删除。") : "";
-      notice.classList.toggle("is-hidden", !retention.near_limit);
-      $("galleryGrid").querySelectorAll("[data-gallery-id]").forEach((card) => card.addEventListener("keydown", (event) => { if (event.target !== card) return; if (["Enter", " "].includes(event.key)) { event.preventDefault(); detailTrigger = card; void hooks.openDetail(card.dataset.galleryId); } }));
+      selectionChanged(true);
       syncFloatingBars();
     }
 
@@ -487,6 +548,21 @@
 
     function syncSelectionHeader() {
       const title = document.querySelector(".topbar");
+      const brand = document.querySelector(".sidebar");
+      const mobile = window.matchMedia("(max-width: 900px)").matches;
+      let brandShift = 0;
+      let brandProgress = 0;
+      if (mobile) {
+        const top = parseFloat(getComputedStyle(title).top) || 0;
+        const gap = parseFloat(getComputedStyle(document.querySelector(".app-shell")).rowGap) || 0;
+        const distance = brand.offsetHeight + gap;
+        brandShift = Math.max(0, Math.min(distance, top + distance - $("pageHeaderAnchor").getBoundingClientRect().top));
+        brandProgress = brandShift / Math.max(1, distance);
+      }
+      brand.style.setProperty("--brand-header-offset", `${-brandShift}px`);
+      brand.style.setProperty("--brand-header-opacity", String(1 - brandProgress));
+      brand.style.setProperty("--brand-header-blur", `${brandProgress * 8}px`);
+      brand.classList.toggle("is-brand-replaced", mobile);
       const active = state.view === "gallery" && !$("selectionBar").classList.contains("is-hidden");
       let shift = 0;
       let progress = 0;
@@ -513,11 +589,12 @@
 
     function bind() {
       renderIcons();
+      $("galleryGrid").addEventListener("keydown", (event) => { const card = event.target.closest("[data-gallery-id]"); if (event.target !== card) return; if (["Enter", " "].includes(event.key)) { event.preventDefault(); detailTrigger = card; void hooks.openDetail(card.dataset.galleryId); } });
       window.addEventListener("scroll", scheduleSelectionHeader, { passive: true });
       window.addEventListener("resize", scheduleSelectionHeader, { passive: true });
       if (window.ResizeObserver) {
         const observer = new ResizeObserver(scheduleSelectionHeader);
-        for (const element of [document.querySelector(".topbar"), document.querySelector(".gallery-toolbar"), $("selectionBar")]) observer.observe(element);
+        for (const element of [document.querySelector(".sidebar"), document.querySelector(".topbar"), document.querySelector(".gallery-toolbar"), $("selectionBar")]) observer.observe(element);
       }
       for (const [view, name] of Object.entries({ generate: "Sparkles", gallery: "Image", import: "FolderInput", settings: "Settings2" })) {
         const item = document.querySelector(`.nav-item[data-view="${view}"] .nav-icon`); item.className = "nav-icon"; item.innerHTML = icon(name);
@@ -525,8 +602,16 @@
       for (const [id, name, label] of [["galleryRefresh", "RefreshCw", "刷新画廊"], ["galleryPrev", "ChevronLeft", "上一页"], ["galleryNext", "ChevronRight", "下一页"], ["exportButton", "Download", "导出"], ["selectAllButton", "CheckCheck", "全选当前页"], ["cancelSelectionButton", "X", "取消选择"], ["deleteButton", "Trash2", "删除所选记录"], ["saveSettingsButton", "Check", "保存全部设置"], ["confirmImportButton", "Upload", "确认导入"], ["cancelImportButton", "X", "取消导入"]]) {
         const button = $(id); button.innerHTML = `${icon(name)}<span>${label}</span>`; button.setAttribute("aria-label", label); button.title = label; button.classList.add("responsive-command");
       }
+      $("favoriteSelectionButton").innerHTML = `${icon("Star")}<span>收藏</span>`;
+      $("favoriteSelectionButton").classList.add("responsive-command");
+      $("favoriteSelectionButton").addEventListener("click", () => void toggleSelectedFavorites());
+      renderSelectionFavorite();
+      $("gallerySearch").addEventListener("input", () => { $("galleryClearSearch").disabled = !$("gallerySearch").value; });
+      $("galleryClearSearch").addEventListener("click", () => { $("gallerySearch").value = ""; $("galleryClearSearch").disabled = true; $("gallerySearch").focus(); void hooks.loadGallery(0); });
+      $("parameterImportNotice").addEventListener("click", (event) => { if (event.target.closest("[data-dismiss-parameter-notice]")) $("parameterImportNotice").classList.add("is-hidden"); });
       const formatWrapper = document.createElement("label"); formatWrapper.className = "copy-format-picker"; formatWrapper.title = "选择参数格式"; formatWrapper.innerHTML = icon("FileJson");
-      $("detailCopyFormat").before(formatWrapper); formatWrapper.appendChild($("detailCopyFormat"));
+      const formatControl = $("detailCopyFormat").closest(".studio-select") || $("detailCopyFormat");
+      formatControl.before(formatWrapper); formatWrapper.appendChild(formatControl);
       $("chooseImportFiles").addEventListener("click", () => $("importFiles").click());
       $("importFiles").addEventListener("change", (event) => { void addImportFiles(event.target.files); event.target.value = ""; });
       $("importDropzone").addEventListener("click", () => $("importFiles").click());
@@ -572,7 +657,7 @@
         if (event.key !== "Tab") return;
         const modal = modalClose ? $("studioModal") : !$("confirmDialog").classList.contains("is-hidden") ? $("confirmDialog") : !$("parameterDialog").classList.contains("is-hidden") ? $("parameterDialog") : !$("imagePreview").classList.contains("is-hidden") ? $("imagePreview") : $("detailDrawer").classList.contains("is-open") ? $("detailDrawer") : null;
         if (!modal) return;
-        const focusable = Array.from(modal.querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href], [tabindex="0"]')).filter((item) => item.getClientRects().length);
+        const focusable = Array.from(modal.querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href], [tabindex="0"]')).filter((item) => !item.matches(".studio-select-native") && item.getClientRects().length);
         if (!focusable.length) { event.preventDefault(); modal.focus(); return; }
         const first = focusable[0], last = focusable[focusable.length - 1];
         if (event.shiftKey && (document.activeElement === first || !modal.contains(document.activeElement))) { event.preventDefault(); last.focus(); }
@@ -581,7 +666,7 @@
       window.addEventListener("beforeunload", () => imports.forEach((item) => URL.revokeObjectURL(item.url)));
     }
 
-    return { bind, modeLabel, engineLabel, galleryPageSize, renderGalleryCard, galleryRendered, syncFloatingBars, detailMetadataMarkup, updateDetailActions, copyText, resolveParameters, setCommandLabel, modalOpen: () => !!modalClose };
+    return { bind, modeLabel, engineLabel, galleryPageSize, renderGalleryCard, galleryRendered, selectionChanged, syncFloatingBars, detailMetadataMarkup, updateDetailActions, copyText, resolveParameters, setCommandLabel, modalOpen: () => !!modalClose };
   };
   window.ImageStudioMetadata = { extractMetadata, decodeComment };
 })();

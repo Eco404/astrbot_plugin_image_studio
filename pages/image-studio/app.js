@@ -11,6 +11,8 @@
   let settingsLoadPromise = null;
   let settingsBaseline = "";
   let settingsSaving = false;
+  let storageRetention = null;
+  let referencesUploading = false;
   let eventsBound = false;
   let galleryRequestRevision = 0;
   let detailRequestRevision = 0;
@@ -88,6 +90,7 @@
   }
 
   function switchView(view) {
+    window.ImageStudioSelect?.close();
     state.view = view;
     document.querySelectorAll(".nav-item").forEach((button) => button.classList.toggle("is-active", button.dataset.view === view));
     document.querySelectorAll(".view").forEach((item) => item.classList.toggle("is-active", item.id === `${view}View`));
@@ -96,6 +99,7 @@
     library.syncFloatingBars();
     if (view === "gallery") void loadGallery();
     if (view === "settings") { void loadSettings(); void loadStorageHealth(); }
+    window.ImageStudioSelect?.refresh();
   }
 
   function collectModelParameters() {
@@ -159,6 +163,7 @@
     els.negativePromptHint.textContent = supportsNegative ? "当前模型会将此字段作为专用反向提示词发送。" : "";
     els.providerStatus.textContent = model && provider ? `${model.name} · ${provider.name}` : "未选择模型";
     renderReferences();
+    window.ImageStudioSelect?.refresh($("generateView"));
   }
 
   function renderModelWorkspace() {
@@ -207,6 +212,7 @@
       const matched = (descriptor.choices || []).find((choice) => typeof choice.fill === "string" && choice.fill === targetInput.value);
       const custom = (descriptor.choices || []).find((choice) => choice.value === "custom");
       presetInput.value = matched?.value || custom?.value || ""; state.parameterValues[name] = presetInput.value;
+      window.ImageStudioSelect?.refresh(presetInput);
     });
   }
 
@@ -236,6 +242,12 @@
   }
 
   function renderReferences() {
+    const maximum = referenceLimitForModel(selectedModel());
+    const disabled = referencesUploading || state.mode !== "img2img" || state.references.length >= maximum;
+    $("referenceCount").textContent = `${state.references.length}/${maximum} 张`;
+    $("referenceChooseButton").disabled = disabled;
+    $("referenceChooseButton").setAttribute("aria-busy", String(referencesUploading));
+    els.referenceUpload.disabled = disabled;
     els.referenceStrip.innerHTML = state.references.map((item, index) => `<div class="reference-item"><img src="${item.preview_data_url}" alt="参考图 ${index + 1}" /><button type="button" data-reference-index="${index}" aria-label="移除参考图"><span aria-hidden="true">×</span></button></div>`).join("");
     els.referenceStrip.querySelectorAll("[data-reference-index]").forEach((button) => button.addEventListener("click", () => { state.references.splice(Number(button.dataset.referenceIndex), 1); renderReferences(); }));
   }
@@ -254,20 +266,31 @@
   }
 
   async function uploadReferences(files) {
+    if (referencesUploading || state.mode !== "img2img") return;
     const model = selectedModel();
     const maximum = referenceLimitForModel(model);
     const available = Math.max(0, maximum - state.references.length);
-    if (available <= 0) { showNotice("当前模型没有可用的参考图名额。", "error"); return; }
-    const client = await bridge();
-    for (const file of Array.from(files).slice(0, available)) {
-      const uploaded = await client.upload("studio/reference/upload", file);
-      state.references.push(uploaded);
+    const chosen = Array.from(files).slice(0, available);
+    if (!chosen.length) return;
+    const targetReferences = state.references;
+    const isCurrent = () => state.references === targetReferences && state.selectedModelRef === model.model_ref && state.mode === "img2img" && state.references.length < referenceLimitForModel(selectedModel());
+    referencesUploading = true; renderReferences();
+    try {
+      const client = await bridge();
+      for (const file of chosen) {
+        if (!isCurrent()) break;
+        const uploaded = await client.upload("studio/reference/upload", file);
+        if (!isCurrent()) break;
+        state.references.push(uploaded); renderReferences();
+      }
+    } finally {
+      referencesUploading = false; renderReferences();
     }
-    renderReferences();
   }
 
   async function generate(event) {
     event.preventDefault(); setError(els.generationError, "");
+    if (referencesUploading) { setError(els.generationError, "请等待参考图上传完成。"); return; }
     let parameters = {};
     if (els.parameters.value.trim()) {
       try { parameters = JSON.parse(els.parameters.value); } catch { setError(els.generationError, "高级参数必须是合法 JSON"); return; }
@@ -320,17 +343,42 @@
   }
 
   function renderGallery(payload) {
-    const currentProvider = els.galleryProvider.value; els.galleryProvider.innerHTML = '<option value="">全部服务商</option>' + (payload.filters?.providers || []).map((item) => `<option value="${escape(item.id)}">${escape(item.name)}</option>`).join(""); els.galleryProvider.value = currentProvider;
-    els.galleryEmpty.classList.toggle("is-hidden", state.galleryItems.length > 0); els.galleryGrid.innerHTML = state.galleryItems.map(library.renderGalleryCard).join("");
-    els.galleryGrid.querySelectorAll("[data-gallery-id]").forEach((card) => card.addEventListener("click", (event) => { if (event.target.closest(".gallery-selection")) return; void openDetail(card.dataset.galleryId); }));
-    els.galleryGrid.querySelectorAll("[data-select-id]").forEach((input) => input.addEventListener("change", () => { input.checked ? state.selectedIds.add(input.dataset.selectId) : state.selectedIds.delete(input.dataset.selectId); updateSelection(); }));
+    const currentProvider = els.galleryProvider.value;
+    const options = '<option value="">全部服务商</option>' + (payload.filters?.providers || []).map((item) => `<option value="${escape(item.id)}">${escape(item.name)}</option>`).join("");
+    if (els.galleryProvider.innerHTML !== options) els.galleryProvider.innerHTML = options;
+    els.galleryProvider.value = currentProvider;
+    els.galleryEmpty.classList.toggle("is-hidden", state.galleryItems.length > 0);
+    const existing = new Map(Array.from(els.galleryGrid.children, (card) => [card.dataset.galleryId, card]));
+    const wanted = new Set(state.galleryItems.map((item) => item.id));
+    for (const [id, card] of existing) if (!wanted.has(id)) card.remove();
+    // Unchanged records keep their decoded images, focus and hover state across refreshes.
+    state.galleryItems.forEach((item, index) => {
+      const signature = JSON.stringify(item);
+      let card = existing.get(item.id);
+      if (!card || card.gallerySignature !== signature) {
+        const template = document.createElement("template");
+        template.innerHTML = library.renderGalleryCard(item, index);
+        const updated = template.content.firstElementChild;
+        const oldImage = card?.querySelector(".gallery-image-wrap > img");
+        const newImage = updated.querySelector(".gallery-image-wrap > img");
+        if (oldImage && newImage && oldImage.getAttribute("src") === newImage.getAttribute("src")) {
+          oldImage.alt = newImage.alt; newImage.replaceWith(oldImage);
+        }
+        if (card) card.replaceWith(updated);
+        card = updated; card.gallerySignature = signature;
+      }
+      card.classList.toggle("is-selected", state.selectedIds.has(item.id));
+      card.querySelector("[data-select-id]").checked = state.selectedIds.has(item.id);
+      if (els.galleryGrid.children[index] !== card) els.galleryGrid.insertBefore(card, els.galleryGrid.children[index] || null);
+    });
     const limit = Math.max(1, Number(payload.limit || state.galleryLimit)); const total = Math.max(0, Number(payload.total || state.galleryTotal)); const totalPages = Math.max(1, Math.ceil(total / limit));
     els.galleryPagination.classList.toggle("is-hidden", totalPages <= 1); els.galleryPageLabel.textContent = `第 ${state.galleryPage + 1} / ${totalPages} 页 · 共 ${total} 条`; els.galleryPrev.disabled = state.galleryPage <= 0; els.galleryNext.disabled = state.galleryPage >= totalPages - 1;
     updateSelection();
     library.galleryRendered(payload);
+    window.ImageStudioSelect?.refresh();
   }
 
-  function updateSelection() { els.selectionBar.classList.toggle("is-hidden", state.selectedIds.size === 0); els.selectionCount.textContent = `已选 ${state.selectedIds.size} 项`; library.syncFloatingBars(); }
+  function updateSelection() { els.selectionBar.classList.toggle("is-hidden", state.selectedIds.size === 0); els.selectionCount.textContent = `已选 ${state.selectedIds.size} 项`; els.galleryGrid.querySelectorAll("[data-gallery-id]").forEach((card) => card.classList.toggle("is-selected", state.selectedIds.has(card.dataset.galleryId))); library.selectionChanged(); library.syncFloatingBars(); }
   function clearGallerySelection() { state.selectedIds.clear(); els.galleryGrid.querySelectorAll("[data-select-id]").forEach((input) => { input.checked = false; }); updateSelection(); }
 
   function requestParameters(detail) {
@@ -837,6 +885,7 @@
   function populateDefaultModelSelect(select, models, selectedRef) {
     select.innerHTML = `<option value="">未设置</option>${models.map((model) => `<option value="${escape(model.model_ref)}">${escape(model.name)} · ${escape(model.provider_name)}</option>`).join("")}`;
     select.value = models.some((model) => model.model_ref === selectedRef) ? selectedRef : "";
+    window.ImageStudioSelect?.refresh(select);
   }
 
   function syncAgentImageSettings() { els.agentPreviewMaxEdge.disabled = false; els.agentPreviewQuality.disabled = false; }
@@ -851,6 +900,26 @@
     els.storageHealthAssets.textContent = `${Number(stats.assets || 0)} / ${Number(stats.thumbnails || 0)}`;
     els.storageHealthLeases.textContent = String(Number(stats.active_leases || 0)); els.storageHealthGenerations.textContent = String(Number(stats.generations || 0)); els.storageHealthSize.textContent = formatBytes(stats.size_bytes || 0);
     els.storageHealthErrors.textContent = errors.length ? errors.join("；") : "暂无异常。";
+    if (report?.retention) storageRetention = report.retention;
+    renderStorageQuotas();
+  }
+
+  function renderStorageQuotas() {
+    const retention = storageRetention;
+    for (const [id, used, limit, exempt, unit] of [
+      ["storageQuotaRecords", retention?.record_count, state.settings ? Number(els.historyRecords.value) : retention?.limit_records, retention?.exempt_record_count, "records"],
+      ["storageQuotaBytes", retention?.size_bytes, state.settings ? Number(els.historyMegabytes.value) * 1024 * 1024 : retention?.limit_bytes, retention?.exempt_size_bytes, "bytes"],
+    ]) {
+      const container = $(id); container.classList.toggle("is-hidden", !retention || !(limit > 0));
+      if (!retention || !(limit > 0)) continue;
+      const current = Math.max(0, Number(used) || 0); const ratio = current / limit;
+      const format = (value) => unit === "records" ? `${Number(value || 0).toLocaleString()} 条` : formatBytes(value);
+      container.dataset.status = ratio > 1 ? "over" : ratio >= .9 ? "warning" : "normal";
+      $(id + "Label").textContent = `${format(current)} / ${format(limit)} · ${(ratio * 100).toFixed(1)}%`;
+      const progress = $(id + "Progress"); progress.max = limit; progress.value = Math.min(current, limit);
+      progress.setAttribute("aria-valuetext", `${format(current)}，限额 ${format(limit)}${ratio > 1 ? "，已超出限额" : ""}`);
+      $(id + "Exempt").textContent = `限额外（豁免）：${format(exempt)}`;
+    }
   }
 
   async function loadStorageHealth() { try { renderStorageHealth(await apiGet("storage/health")); } catch (error) { els.storageHealthStatus.textContent = "读取失败"; els.storageHealthErrors.textContent = errorMessage(error, "存储状态读取失败"); } }
@@ -858,7 +927,7 @@
   async function runStorageMaintenance(deep) {
     if (deep && !await confirmAction("深度检查会重新计算全部原图哈希，历史较多时可能耗时较长。继续执行？")) return;
     els.runMaintenanceButton.disabled = true; els.runDeepMaintenanceButton.disabled = true; els.storageHealthStatus.textContent = "检查中";
-    try { const report = await apiPost("storage/maintenance", { deep: !!deep }); renderStorageHealth(report); showNotice(deep ? "存储深度检查已完成。" : "存储检查已完成。", report.status === "error" ? "error" : "success"); }
+    try { const report = await apiPost("storage/maintenance", { deep: !!deep }); renderStorageHealth(report); await loadStorageHealth(); showNotice(deep ? "存储深度检查已完成。" : "存储检查已完成。", report.status === "error" ? "error" : "success"); }
     catch (error) { showNotice(errorMessage(error, "存储检查失败"), "error"); await loadStorageHealth(); }
     finally { els.runMaintenanceButton.disabled = false; els.runDeepMaintenanceButton.disabled = false; }
   }
@@ -885,6 +954,7 @@
         if (!payload.webui.providers.some((item) => item.id === state.selectedSettingsProviderId)) state.selectedSettingsProviderId = payload.webui.providers[0]?.id || "";
         state.selectedSettingsModelId = "";
         renderSettingsProviders();
+        window.ImageStudioSelect?.refresh($("settingsView"));
         settingsBaseline = settingsFingerprint(settingsDraft()); updateSettingsDirty();
         const warnings = Array.isArray(payload.validation_errors) ? payload.validation_errors.filter(Boolean) : [];
         setError(els.settingsError, warnings.length ? `配置提示：${warnings.join("；")}` : "");
@@ -971,6 +1041,7 @@
     els.providerForm.querySelectorAll("[data-provider-field]").forEach((input) => input.addEventListener("input", () => updateProviderField(input))); els.providerForm.querySelectorAll("[data-provider-field]").forEach((input) => input.addEventListener("change", () => updateProviderField(input)));
     $("removeProviderButton")?.addEventListener("click", async () => { if (!await confirmAction("删除此生图服务商？历史记录不会删除。")) return; state.settings.webui.providers = state.settings.webui.providers.filter((item) => item.id !== provider.id); state.selectedSettingsProviderId = state.settings.webui.providers[0]?.id || ""; renderSettingsProviders(); showNotice("已从设置草稿中删除，保存全部设置后生效。", "success"); });
     $("discoverModelsButton")?.addEventListener("click", () => void discoverProviderModels(provider));
+    window.ImageStudioSelect?.refresh(els.providerForm);
   }
   function field(key, label, value, type = "text") { return `<div class="field"><label>${label}</label><input data-provider-field="${key}" type="${type}" value="${escape(value)}" /></div>`; }
   function textAreaField(key, label, value) { return `<div class="field field-wide"><label>${label}</label><textarea data-provider-field="${key}" rows="3">${escape(value)}</textarea></div>`; }
@@ -996,6 +1067,7 @@
     els.modelForm.innerHTML = state.modelEditorTab === "tool" ? `${tabs}${renderToolConfiguration(model)}` : `${tabs}${renderModelConfiguration(provider, model)}`;
     els.modelForm.querySelectorAll("[data-model-tab]").forEach((button) => button.addEventListener("click", () => { state.modelEditorTab = button.dataset.modelTab; renderModelEditor(); }));
     bindModelConfiguration(provider, model);
+    window.ImageStudioSelect?.refresh(els.modelForm);
   }
   function renderModelConfiguration(provider, model) {
     const schemaText = JSON.stringify(model.parameters || modelPreset(provider.kind), null, 2);
@@ -1071,6 +1143,7 @@
     const choiceDescriptions = policy.choice_descriptions;
     els.toolParameterChoices.value = choiceDescriptions && typeof choiceDescriptions === "object" && !Array.isArray(choiceDescriptions) && Object.keys(choiceDescriptions).length ? JSON.stringify(choiceDescriptions, null, 2) : "";
     els.parameterDialog.classList.remove("is-hidden"); els.scrim.classList.remove("is-hidden"); syncPageScrollLock();
+    window.ImageStudioSelect?.refresh(els.parameterDialog);
   }
   function closeToolParameterDialog() { state.editingToolParameter = ""; state.editingToolDefaultChoices = []; els.parameterDialog.classList.add("is-hidden"); if (!els.detailDrawer.classList.contains("is-open")) els.scrim.classList.add("is-hidden"); syncPageScrollLock(); }
   function applyToolParameterDialog() {
@@ -1140,6 +1213,7 @@
         settingsBaseline = settingsFingerprint({ base: server.base, studio: server.webui });
       }
       setError(els.settingsError, ""); showNotice("设置已保存并生效。", "success");
+      await loadStorageHealth();
     } catch (error) {
       const message = errorMessage(error, "设置保存失败"); setError(els.settingsError, message); showNotice(message, "error");
     } finally { settingsSaving = false; els.saveSettingsButton.disabled = false; library.setCommandLabel("saveSettingsButton", "保存全部设置"); updateSettingsDirty(); }
@@ -1169,6 +1243,7 @@
   function updateSettingsDirty() {
     const dirty = !!state.settings && !!settingsBaseline && (settingsFingerprint(settingsDraft()) !== settingsBaseline || !!$("settingsView").querySelector("input:invalid, textarea:invalid, select:invalid"));
     els.saveSettingsButton.classList.toggle("is-dirty", dirty); $("settingsDirtyStatus").textContent = dirty ? "有未保存的更改" : state.settings ? "已保存" : "";
+    renderStorageQuotas();
   }
 
   function dataUrlToFile(dataUrl, name) { const [head, encoded] = dataUrl.split(",", 2); const type = (head.match(/data:([^;]+)/) || [])[1] || "image/png"; const bytes = Uint8Array.from(atob(encoded), (char) => char.charCodeAt(0)); return new File([bytes], name, { type }); }
@@ -1181,6 +1256,8 @@
     if (eventsBound) return;
     eventsBound = true;
     library.bind();
+    els.galleryGrid.addEventListener("click", (event) => { const card = event.target.closest("[data-gallery-id]"); if (card && !event.target.closest(".gallery-selection")) void openDetail(card.dataset.galleryId); });
+    els.galleryGrid.addEventListener("change", (event) => { const input = event.target.closest("[data-select-id]"); if (!input) return; input.checked ? state.selectedIds.add(input.dataset.selectId) : state.selectedIds.delete(input.dataset.selectId); updateSelection(); });
     ["input", "change", "click"].forEach((name) => $("settingsView").addEventListener(name, () => window.setTimeout(updateSettingsDirty, 0)));
     $("parameterDialogApply").addEventListener("click", () => window.setTimeout(updateSettingsDirty, 0));
     document.querySelectorAll(".nav-item").forEach((button) => button.addEventListener("click", () => switchView(button.dataset.view)));
@@ -1190,11 +1267,12 @@
     els.runMaintenanceButton.addEventListener("click", () => void runStorageMaintenance(false)); els.runDeepMaintenanceButton.addEventListener("click", () => void runStorageMaintenance(true));
     els.modelChoice.addEventListener("change", () => applyGenerationSelection(state.mode, els.modelChoice.value));
     els.resetNegativePromptButton.addEventListener("click", () => { els.negativePrompt.value = selectedModel()?.negative_prompt_default || ""; els.negativePrompt.focus(); });
-    els.referenceUpload.addEventListener("change", async () => { try { await uploadReferences(els.referenceUpload.files); } catch (error) { setError(els.generationError, errorMessage(error, "上传参考图失败")); } finally { els.referenceUpload.value = ""; } });
+    $("referenceChooseButton").addEventListener("click", () => els.referenceUpload.click());
+    els.referenceUpload.addEventListener("change", async () => { setError(els.generationError, ""); try { await uploadReferences(els.referenceUpload.files); } catch (error) { setError(els.generationError, errorMessage(error, "上传参考图失败")); } finally { els.referenceUpload.value = ""; } });
     els.generationForm.addEventListener("submit", generate); $("galleryRefresh").addEventListener("click", () => void loadGallery()); els.galleryPrev.addEventListener("click", () => void loadGallery(state.galleryPage - 1)); els.galleryNext.addEventListener("click", () => void loadGallery(state.galleryPage + 1)); els.gallerySearch.addEventListener("change", () => void loadGallery(0)); els.galleryProvider.addEventListener("change", () => void loadGallery(0)); els.galleryMode.addEventListener("change", () => void loadGallery(0)); els.gallerySource.addEventListener("change", () => void loadGallery(0));
     $("cancelSelectionButton").addEventListener("click", clearGallerySelection); $("selectAllButton").addEventListener("click", () => { state.galleryItems.forEach((item) => state.selectedIds.add(item.id)); els.galleryGrid.querySelectorAll("[data-select-id]").forEach((input) => { input.checked = true; }); updateSelection(); }); $("exportButton").addEventListener("click", () => void exportSelected()); $("deleteButton").addEventListener("click", () => void deleteSelected());
     $("closeDrawer").addEventListener("click", closeDetail); $("closeImagePreview").addEventListener("click", closeImagePreview); els.imagePreviewPrev.addEventListener("click", () => void navigateImagePreview(-1)); els.imagePreviewNext.addEventListener("click", () => void navigateImagePreview(1)); bindImagePreviewGestures(); els.imagePreview.querySelector("[data-close-image-preview]").addEventListener("click", closeImagePreview); els.previewImage.addEventListener("click", () => { if (Date.now() - state.imagePreviewSwipeAt < 500) return; closeImagePreview(); }); els.scrim.addEventListener("click", () => { if (!els.parameterDialog.classList.contains("is-hidden")) return; if (activeConfirmation) activeConfirmation(false); else closeDetail(); }); $("parameterDialogCancel").addEventListener("click", closeToolParameterDialog); $("parameterDialogApply").addEventListener("click", applyToolParameterDialog); els.addProviderButton.addEventListener("click", () => void addProvider()); els.addModelButton.addEventListener("click", () => void addModel()); els.saveSettingsButton.addEventListener("click", () => void saveSettings());
-    document.addEventListener("keydown", (event) => { if (mobileImageViewer || library.modalOpen()) return; if (event.key === "Escape") { if (!els.parameterDialog.classList.contains("is-hidden")) closeToolParameterDialog(); else if (!els.imagePreview.classList.contains("is-hidden")) closeImagePreview(); else if (els.detailDrawer.classList.contains("is-open") && !activeConfirmation) closeDetail(); return; } if (event.target.closest("input,textarea,select,[contenteditable=true]")) return; if (!els.imagePreview.classList.contains("is-hidden")) { if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); void navigateImagePreview(event.key === "ArrowLeft" ? -1 : 1); } return; } if (!els.detailDrawer.classList.contains("is-open") || activeConfirmation) return; if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); void navigateDetail(event.key === "ArrowLeft" ? -1 : 1); } });
+    document.addEventListener("keydown", (event) => { if (mobileImageViewer || library.modalOpen()) return; if (event.key === "Escape") { if (!els.parameterDialog.classList.contains("is-hidden")) closeToolParameterDialog(); else if (!els.imagePreview.classList.contains("is-hidden")) closeImagePreview(); else if (els.detailDrawer.classList.contains("is-open") && !activeConfirmation) closeDetail(); return; } if (event.target.closest('input,textarea,select,[role="combobox"],[contenteditable=true]')) return; if (!els.imagePreview.classList.contains("is-hidden")) { if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); void navigateImagePreview(event.key === "ArrowLeft" ? -1 : 1); } return; } if (!els.detailDrawer.classList.contains("is-open") || activeConfirmation) return; if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); void navigateDetail(event.key === "ArrowLeft" ? -1 : 1); } });
   }
 
   const library = window.ImageStudioLibrary({ state, escape, apiGet, apiPost, bridge, showNotice, errorMessage, formatDate, formatBytes, sourceLabel, syncPageScrollLock, switchView, requestParameters, loadGallery, clearGallerySelection, openDetail, closeDetail, reproduce, applyDraft, useDataUrlAsReference });

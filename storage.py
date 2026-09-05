@@ -295,8 +295,23 @@ class GenerationStore:
                 pass
             conn.execute(
                 "UPDATE generations SET generation_engine = CASE provider_kind "
-                "WHEN 'nai_direct' THEN 'nai' WHEN '' THEN 'unknown' ELSE provider_kind END "
+                "WHEN 'nai_direct' THEN 'novelai' WHEN '' THEN 'unknown' ELSE provider_kind END "
                 "WHERE generation_engine = 'unknown' AND source != 'import'"
+            )
+            # Only the indexed display source changes; original requests and embedded metadata stay intact.
+            conn.execute(
+                "UPDATE generations SET generation_engine = 'novelai' "
+                "WHERE lower(trim(generation_engine)) IN ('nai', 'novelai') "
+                "AND generation_engine != 'novelai'"
+            )
+            conn.execute(
+                "UPDATE generations SET generation_engine = 'novelai' "
+                "WHERE generation_engine = 'mixed' AND EXISTS ("
+                "SELECT 1 FROM generation_images i WHERE i.generation_id = generations.id) "
+                "AND NOT EXISTS (SELECT 1 FROM generation_images i "
+                "WHERE i.generation_id = generations.id AND "
+                "lower(trim(COALESCE(json_extract(i.supplemental_json, '$.generation_engine'), 'unknown'))) "
+                "NOT IN ('nai', 'novelai'))"
             )
             finish_development_schema(conn)
         self._backfill_metadata_sync()
@@ -1082,7 +1097,7 @@ class GenerationStore:
                 conn.execute(
                     "UPDATE generations SET generation_engine = ? WHERE id = ?",
                     (
-                        "nai" if provider.kind == "nai_direct" else provider.kind,
+                        "novelai" if provider.kind == "nai_direct" else provider.kind,
                         generation_id,
                     ),
                 )
@@ -1480,8 +1495,12 @@ class GenerationStore:
             where.append("g.source = ?")
             args.append(source)
         if filters.get("generation_engine"):
-            where.append("g.generation_engine = ?")
-            args.append(str(filters["generation_engine"])[:80])
+            engine = _canonical_engine(filters["generation_engine"])
+            if engine == "novelai":
+                where.append("lower(trim(g.generation_engine)) IN ('nai', 'novelai')")
+            else:
+                where.append("g.generation_engine = ?")
+                args.append(engine[:80])
         if filters.get("favorite") in (True, 1, "1", "true"):
             where.append("g.is_favorite = 1")
         if query:
@@ -1527,12 +1546,14 @@ class GenerationStore:
                     "SELECT provider_id AS id, MAX(provider_name) AS name FROM generations WHERE provider_id != '' GROUP BY provider_id ORDER BY name"
                 ).fetchall()
             ]
-            engines = [
-                str(row[0])
-                for row in conn.execute(
-                    "SELECT DISTINCT generation_engine FROM generations ORDER BY generation_engine"
-                ).fetchall()
-            ]
+            engines = sorted(
+                {
+                    _canonical_engine(row[0])
+                    for row in conn.execute(
+                        "SELECT DISTINCT generation_engine FROM generations ORDER BY generation_engine"
+                    ).fetchall()
+                }
+            )
         items = [self._gallery_item(dict(row)) for row in rows]
         return {
             "items": items,
@@ -1766,7 +1787,10 @@ class GenerationStore:
             ).fetchall()
         result = dict(row)
         result["parameters"] = _load_json(result.pop("parameters_json", "{}"))
-        result["supplemental"] = _load_json(result.pop("supplemental_json", "{}"))
+        result["supplemental"] = _canonical_supplemental(
+            _load_json(result.pop("supplemental_json", "{}"))
+        )
+        result["generation_engine"] = _canonical_engine(result["generation_engine"])
         result["is_favorite"] = bool(result["is_favorite"])
         result.pop("search_text", None)
         result.pop("import_key", None)
@@ -1835,6 +1859,71 @@ class GenerationStore:
             "id": generation_id,
             "is_favorite": favorite,
             "cleanup_protected_until": protected,
+        }
+
+    async def favorite_status(self, generation_ids: list[str]) -> dict[str, Any]:
+        """Read favorite states for a selection spanning gallery pages."""
+
+        ids = _validate_generation_selection(generation_ids)
+        async with self._lock:
+            return await asyncio.to_thread(self._favorite_status_sync, ids)
+
+    def _favorite_status_sync(self, generation_ids: list[str]) -> dict[str, Any]:
+        with self._connect() as conn:
+            return _favorite_summary(self._selected_favorite_rows(conn, generation_ids))
+
+    @staticmethod
+    def _selected_favorite_rows(
+        conn: sqlite3.Connection, generation_ids: list[str]
+    ) -> list[dict[str, Any]]:
+        placeholders = ",".join("?" for _ in generation_ids)
+        rows = {
+            str(row["id"]): dict(row)
+            for row in conn.execute(
+                "SELECT id, is_favorite, cleanup_protected_until, source FROM generations "
+                f"WHERE id IN ({placeholders})",
+                generation_ids,
+            ).fetchall()
+        }
+        missing = [
+            identifier for identifier in generation_ids if identifier not in rows
+        ]
+        if missing:
+            raise ValueError("以下生成记录不存在或已被删除：" + ", ".join(missing))
+        return [rows[identifier] for identifier in generation_ids]
+
+    async def toggle_favorites(self, generation_ids: list[str]) -> dict[str, Any]:
+        """Favorite missing selections, or unfavorite when all are already favorites."""
+
+        ids = _validate_generation_selection(generation_ids)
+        async with self._lock:
+            return await asyncio.to_thread(self._toggle_favorites_sync, ids)
+
+    def _toggle_favorites_sync(self, generation_ids: list[str]) -> dict[str, Any]:
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = self._selected_favorite_rows(conn, generation_ids)
+            favorite = not all(bool(row["is_favorite"]) for row in rows)
+            changed_ids: list[str] = []
+            protected_until = time.time() + 24 * 3600
+            for row in rows:
+                if bool(row["is_favorite"]) == favorite:
+                    continue
+                protected = (
+                    protected_until
+                    if not favorite and row["source"] != "import"
+                    else 0.0
+                )
+                conn.execute(
+                    "UPDATE generations SET is_favorite = ?, cleanup_protected_until = ? WHERE id = ?",
+                    (int(favorite), protected, row["id"]),
+                )
+                row.update(is_favorite=int(favorite), cleanup_protected_until=protected)
+                changed_ids.append(str(row["id"]))
+        return {
+            **_favorite_summary(rows),
+            "action": "favorite" if favorite else "unfavorite",
+            "changed_ids": changed_ids,
         }
 
     async def delete_images(
@@ -2074,7 +2163,7 @@ class GenerationStore:
             "id": row["id"],
             "created_at": row["created_at"],
             "source": row["source"],
-            "generation_engine": row["generation_engine"],
+            "generation_engine": _canonical_engine(row["generation_engine"]),
             "is_favorite": bool(row["is_favorite"]),
             "cleanup_protected_until": row["cleanup_protected_until"],
             "generated_at": row["generated_at"],
@@ -2109,7 +2198,9 @@ class GenerationStore:
             "height": row.get("height", 1),
             "file_state": row.get("file_state", "available"),
             "metadata": _load_json(row.get("metadata_json") or "{}"),
-            "supplemental": _load_json(row.get("supplemental_json") or "{}"),
+            "supplemental": _canonical_supplemental(
+                _load_json(row.get("supplemental_json") or "{}")
+            ),
             "data_url": preview,
             # Keep summaries lightweight while allowing the carousel to render
             # every result before original assets arrive.
@@ -2161,7 +2252,8 @@ class GenerationStore:
     async def retention_status(self, history: HistorySettings) -> dict[str, Any]:
         """Return global quota accounting and the same candidates used by cleanup."""
 
-        return await asyncio.to_thread(self._retention_status_sync, history)
+        async with self._lock:
+            return await asyncio.to_thread(self._retention_status_sync, history)
 
     def _retention_status_sync(self, history: HistorySettings) -> dict[str, Any]:
         now = time.time()
@@ -2188,19 +2280,22 @@ class GenerationStore:
             ]
             exempt = conn.execute(
                 "SELECT SUM(CASE WHEN source = 'import' THEN 1 ELSE 0 END), "
-                "SUM(CASE WHEN is_favorite = 1 THEN 1 ELSE 0 END) FROM generations"
+                "SUM(CASE WHEN is_favorite = 1 THEN 1 ELSE 0 END), "
+                "SUM(CASE WHEN source = 'import' OR is_favorite = 1 THEN 1 ELSE 0 END) FROM generations"
             ).fetchone()
-        size_bytes = self._history_asset_bytes_sync()
+        usage = self._history_asset_usage_sync()
+        size_bytes = usage["counted_size_bytes"]
+        limit_records = max(0, history.max_records)
         limit_bytes = max(0, history.max_megabytes) * 1024 * 1024
-        near = (history.max_records >= 0 and count >= history.max_records * 0.9) or (
+        near = (limit_records > 0 and count >= limit_records * 0.9) or (
             limit_bytes > 0 and size_bytes >= limit_bytes * 0.9
         )
-        over = (history.max_records >= 0 and count > history.max_records) or (
+        over = (limit_records > 0 and count > limit_records) or (
             limit_bytes > 0 and size_bytes > limit_bytes
         )
         return {
             "record_count": count,
-            "limit_records": history.max_records,
+            "limit_records": limit_records,
             "size_bytes": size_bytes,
             "limit_bytes": limit_bytes,
             "near_limit": bool(near),
@@ -2209,6 +2304,10 @@ class GenerationStore:
             "protected_records": protected,
             "imported_records": int(exempt[0] or 0),
             "favorite_records": int(exempt[1] or 0),
+            "exempt_record_count": int(exempt[2] or 0),
+            "exempt_size_bytes": usage["exempt_size_bytes"],
+            "total_records": count + int(exempt[2] or 0),
+            "gallery_size_bytes": size_bytes + usage["exempt_size_bytes"],
             "total_size_bytes": self._storage_stats_sync()["size_bytes"],
         }
 
@@ -2298,24 +2397,26 @@ class GenerationStore:
     def _history_asset_bytes_sync(self) -> int:
         """Count automatic-history assets once, excluding imported/favorite shares."""
 
+        return self._history_asset_usage_sync()["counted_size_bytes"]
+
+    def _history_asset_usage_sync(self) -> dict[str, int]:
+        """Assign each gallery asset to counted or exempt ownership exactly once."""
+
         with self._connect() as conn:
             row = conn.execute(
                 "WITH links AS ("
                 "SELECT asset_id, generation_id FROM generation_images UNION "
                 "SELECT asset_id, generation_id FROM generation_references WHERE asset_id IS NOT NULL"
-                "), history_assets AS ("
-                "SELECT DISTINCT l.asset_id FROM links l JOIN generations g ON g.id = l.generation_id "
-                "WHERE g.source != 'import' AND g.is_favorite = 0 "
-                "AND NOT EXISTS (SELECT 1 FROM links shared JOIN generations protected "
-                "ON protected.id = shared.generation_id WHERE shared.asset_id = l.asset_id "
-                "AND (protected.source = 'import' OR protected.is_favorite = 1))"
+                "), ownership AS ("
+                "SELECT l.asset_id, MAX(CASE WHEN g.source = 'import' OR g.is_favorite = 1 THEN 1 ELSE 0 END) AS exempt "
+                "FROM links l JOIN generations g ON g.id = l.generation_id GROUP BY l.asset_id"
                 ") SELECT "
-                "COALESCE((SELECT SUM(a.size_bytes) FROM image_assets a "
-                "JOIN history_assets h ON h.asset_id = a.id), 0) + "
-                "COALESCE((SELECT SUM(t.size_bytes) FROM image_thumbnails t "
-                "JOIN history_assets h ON h.asset_id = t.asset_id), 0)"
+                "COALESCE(SUM(CASE WHEN o.exempt = 0 THEN a.size_bytes + COALESCE(t.size_bytes, 0) ELSE 0 END), 0), "
+                "COALESCE(SUM(CASE WHEN o.exempt = 1 THEN a.size_bytes + COALESCE(t.size_bytes, 0) ELSE 0 END), 0) "
+                "FROM ownership o JOIN image_assets a ON a.id = o.asset_id "
+                "LEFT JOIN image_thumbnails t ON t.asset_id = a.id"
             ).fetchone()
-        return int(row[0])
+        return {"counted_size_bytes": int(row[0]), "exempt_size_bytes": int(row[1])}
 
     def _asset_count_sync(self) -> int:
         with self._connect() as conn:
@@ -2487,6 +2588,36 @@ def image_data_url(data: bytes, mime_type: str) -> str:
     return f"data:{mime_type};base64,{base64.b64encode(data).decode('ascii')}"
 
 
+def _validate_generation_selection(generation_ids: Any) -> list[str]:
+    if not isinstance(generation_ids, list) or not 1 <= len(generation_ids) <= 1000:
+        raise ValueError("请选择 1 至 1000 条生成记录")
+    if any(
+        not isinstance(item, str) or not _SAFE_ID_RE.fullmatch(item)
+        for item in generation_ids
+    ):
+        raise ValueError("所选生成记录 ID 无效")
+    return list(dict.fromkeys(generation_ids))
+
+
+def _favorite_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    favorite_count = sum(bool(row["is_favorite"]) for row in rows)
+    all_favorite = favorite_count == len(rows)
+    return {
+        "selected_count": len(rows),
+        "favorite_count": favorite_count,
+        "all_favorite": all_favorite,
+        "action": "unfavorite" if all_favorite else "favorite",
+        "items": [
+            {
+                "id": row["id"],
+                "is_favorite": bool(row["is_favorite"]),
+                "cleanup_protected_until": float(row["cleanup_protected_until"]),
+            }
+            for row in rows
+        ],
+    }
+
+
 def _validate_import_content(data: bytes) -> None:
     from PIL import Image
 
@@ -2517,6 +2648,24 @@ def _validate_import_overrides(overrides: Any) -> None:
         raise ValueError("导入补充信息必须是有效 JSON") from exc
 
 
+def _canonical_engine(value: Any) -> str:
+    engine = str(value or "unknown").strip()
+    return "novelai" if engine.lower() in {"nai", "novelai"} else engine
+
+
+def _canonical_supplemental(value: dict[str, Any]) -> dict[str, Any]:
+    result = dict(value)
+    if "generation_engine" in result:
+        result["generation_engine"] = _canonical_engine(result["generation_engine"])
+    display = result.get("display_parameters")
+    if isinstance(display, dict) and "generation_engine" in display:
+        result["display_parameters"] = {
+            **display,
+            "generation_engine": _canonical_engine(display["generation_engine"]),
+        }
+    return result
+
+
 def _import_supplemental(
     filename: str, overrides: dict[str, Any], metadata: dict[str, Any]
 ) -> dict[str, Any]:
@@ -2524,7 +2673,7 @@ def _import_supplemental(
     mode = str(overrides.get("mode") or normalized.get("mode") or "unknown")
     if mode not in {"text2img", "img2img", "unknown"}:
         raise ValueError("导入图片模式无效")
-    engine = str(
+    engine = _canonical_engine(
         overrides.get("generation_engine")
         or normalized.get("generation_engine")
         or metadata.get("format")
@@ -2564,6 +2713,7 @@ def _import_supplemental(
             **(overrides.get("parameters") or {}),
             "model": model,
             "mode": mode,
+            "generation_engine": engine,
             "prompt": prompt,
             "negative_prompt": negative,
         },

@@ -38,6 +38,8 @@ REQUIRED_ARCHIVE_FILES = RUNTIME_FILES + (
     "pages/image-studio/app.css",
     "pages/image-studio/library.js",
     "pages/image-studio/library.css",
+    "pages/image-studio/select.js",
+    "pages/image-studio/select.css",
     "pages/image-studio/vendor/photoswipe/photoswipe.umd.min.js",
     "pages/image-studio/vendor/photoswipe/photoswipe.css",
     "pages/image-studio/vendor/photoswipe/LICENSE",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ from PIL import Image, PngImagePlugin
 
 from astrbot_plugin_image_studio.image_metadata import (
     MAX_METADATA_BYTES,
+    PARSER_VERSION,
     parse_image_metadata,
     parse_metadata_fields,
     parse_parameter_text,
@@ -250,6 +252,163 @@ def test_parameter_text_workflow_and_a1111_json() -> None:
     assert result["normalized"]["width"] == 1440
 
 
+@pytest.mark.parametrize("image_format", ["WEBP", "JPEG"])
+def test_converted_comfyui_exif_labels_keep_original_workflow(
+    image_format: str,
+) -> None:
+    graph = api_graph()
+    prompt = json.dumps(graph, ensure_ascii=False, indent=1)
+    workflow = '{ "nodes": [], "links": [], "extra": { "seed": 18446744073709551615 } }'
+    exif = Image.Exif()
+    exif[305] = "PNG2WebP-AI-Metadata-Converter"
+    exif[270] = "Workflow: " + workflow
+    exif[271] = "Prompt: " + prompt
+    output = io.BytesIO()
+    Image.new("RGB", (24, 32), "white").save(output, image_format, exif=exif)
+    result = parse_image_metadata(output.getvalue())
+    assert result["format"] == "comfyui"
+    assert result["parser_version"] == PARSER_VERSION == 3
+    assert result["raw"]["ImageDescription"] == "Workflow: " + workflow
+    assert result["raw"]["Make"] == "Prompt: " + prompt
+    assert result["raw"]["workflow"] == workflow
+    assert result["raw"]["prompt"] == prompt
+    assert result["normalized"]["seed"] == "18446744073709551615"
+    assert result["normalized"]["model"] == "example.safetensors"
+
+
+@pytest.mark.parametrize(
+    "tag", ["UserComment", "ImageDescription", "Artist", "Make", "Model"]
+)
+def test_nested_exif_metadata_preserves_json_member_text(tag: str) -> None:
+    graph_text = json.dumps(api_graph(), indent=1)
+    workflow_text = (
+        '{ "nodes": [], "links": [], "extra": { "seed": 18446744073709551615 } }'
+    )
+    payload = (
+        '{"metadata":{"workflow":' + workflow_text + ',"prompt":' + graph_text + "}}"
+    )
+    result = parse_metadata_fields({tag: payload})
+    assert result["format"] == "comfyui"
+    assert result["raw"][tag] == payload
+    assert result["raw"]["prompt"] == graph_text
+    assert result["raw"]["workflow"] == workflow_text
+    assert result["normalized"]["seed"] == "18446744073709551615"
+
+
+def test_embedded_text_does_not_overwrite_native_parameter_keys() -> None:
+    native = json.dumps(api_graph())
+    other = api_graph()
+    other["5"]["inputs"]["seed"] = 1
+    result = parse_metadata_fields(
+        {"prompt": native, "Make": "Prompt: " + json.dumps(other)}
+    )
+    assert result["raw"]["prompt"] == native
+    assert result["normalized"]["seed"] == "18446744073709551615"
+    unknown = parse_metadata_fields(
+        {
+            "Make": "Camera Maker",
+            "Model": "Example Camera",
+            "ImageDescription": "Prompt: a landscape photograph",
+        }
+    )
+    assert unknown["format"] == "unknown"
+    assert unknown["normalized"] == {"mode": "unknown"}
+
+
+def test_original_exif_creation_time_wins_and_preserves_timezone_and_subseconds() -> (
+    None
+):
+    result = parse_metadata_fields(
+        {
+            "DateTimeOriginal": "2026:09:05 19:20:30",
+            "OffsetTimeOriginal": "+08:00",
+            "SubSecTimeOriginal": "1234",
+            "DateTimeDigitized": "2026:09:06 12:00:00",
+            "Creation Time": "2026-09-07T00:00:00Z",
+            "DateTime": "2026:09:08 12:00:00",
+        }
+    )
+    normalized = result["normalized"]
+    expected = datetime(2026, 9, 5, 11, 20, 30, 123400, tzinfo=timezone.utc).timestamp()
+    assert normalized["generated_at"] == expected
+    assert normalized["generated_at_source"] == "DateTimeOriginal"
+    assert "generated_at_timezone_assumed" not in normalized
+    assert result["warnings"] == []
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("Creation Time", "Sat, 05 Sep 2026 11:20:30 GMT"),
+        ("CreationTime", "2026-09-05T19:20:30+08:00"),
+        ("DateTimeDigitized", "2026-09-05T11:20:30Z"),
+        ("date:create", "2026-09-05T11:20:30+00:00"),
+    ],
+)
+def test_embedded_creation_dates_accept_standard_formats(
+    field: str, value: str
+) -> None:
+    result = parse_metadata_fields({field: value})
+    assert (
+        result["normalized"]["generated_at"]
+        == datetime(2026, 9, 5, 11, 20, 30, tzinfo=timezone.utc).timestamp()
+    )
+    assert result["normalized"]["generated_at_source"] == field
+
+
+def test_invalid_creation_date_falls_back_and_timezone_assumption_is_visible() -> None:
+    result = parse_metadata_fields(
+        {
+            "DateTimeOriginal": "0000:00:00 00:00:00",
+            "Creation Time": "2026-09-05 11:20:30",
+        }
+    )
+    assert result["normalized"]["generated_at_source"] == "Creation Time"
+    assert result["normalized"]["generated_at_timezone_assumed"] is True
+    assert any(
+        "DateTimeOriginal" in warning and "无效" in warning
+        for warning in result["warnings"]
+    )
+    assert any("UTC" in warning for warning in result["warnings"])
+    no_timestamp = parse_metadata_fields(
+        {
+            "Generation time": "3.9996",
+            "lastModified": 1700000000000,
+            "DateTimeOriginal": "invalid",
+        }
+    )
+    assert "generated_at" not in no_timestamp["normalized"]
+
+
+def test_png_creation_time_and_webp_exif_timestamp_are_extracted_from_file() -> None:
+    result = parse_image_metadata(
+        encoded_image(fields={"Creation Time": "2026-09-05T11:20:30Z"})
+    )
+    expected = datetime(2026, 9, 5, 11, 20, 30, tzinfo=timezone.utc).timestamp()
+    assert result["normalized"]["generated_at"] == expected
+    exif = Image.Exif()
+    exif[36867] = "2026:09:05 19:20:30"
+    exif[36881] = "+08:00"
+    output = io.BytesIO()
+    Image.new("RGB", (24, 32), "white").save(output, "WEBP", exif=exif)
+    result = parse_image_metadata(output.getvalue())
+    assert result["normalized"]["generated_at"] == expected
+    assert result["raw"]["OffsetTimeOriginal"] == "+08:00"
+
+
+def test_exif_modification_time_does_not_become_creation_time() -> None:
+    result = parse_metadata_fields(
+        {
+            "DateTime": "2026:09:05 19:20:30",
+            "OffsetTime": "+08:00",
+            "SubSecTime": "125",
+        }
+    )
+    assert "generated_at" not in result["normalized"]
+    assert result["raw"]["DateTime"] == "2026:09:05 19:20:30"
+    assert result["warnings"] == []
+
+
 @pytest.mark.parametrize(
     "name,format,seed",
     [
@@ -257,6 +416,7 @@ def test_parameter_text_workflow_and_a1111_json() -> None:
         ("Anima_00001_.png", "comfyui", 457663653203480),
         ("7F7066F37BF383F6E36E4F7F335CCCF6.png", "comfyui", 957843645410562),
         ("Stable Diffusion 149299935.webp", "a1111", 2629817595),
+        ("149037466_p0.webp", "comfyui", 457663653203480),
     ],
 )
 def test_available_user_samples(name: str, format: str, seed: int) -> None:

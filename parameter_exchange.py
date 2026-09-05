@@ -218,9 +218,28 @@ def resolve_parameters(
         source.get("parameters", {}), dict
     ):
         raise ValueError("请求及 parameters 必须是对象")
-    mode = source.get("mode") or normalized.get("mode") or "unknown"
-    if mode not in {"text2img", "img2img"}:
-        mode = "text2img"
+    mode_aliases = {
+        "text2img": "text2img",
+        "txt2img": "text2img",
+        "t2i": "text2img",
+        "generate": "text2img",
+        "img2img": "img2img",
+        "image2image": "img2img",
+        "i2i": "img2img",
+    }
+    explicit_mode = next(
+        (
+            mode_aliases[str(value).strip().lower()]
+            for value in (
+                source.get("mode"),
+                normalized.get("mode"),
+                source.get("action"),
+            )
+            if str(value).strip().lower() in mode_aliases
+        ),
+        "",
+    )
+    mode = explicit_mode or "text2img"
     requested_model = str(source.get("model") or normalized.get("model") or "")
     requested_ref = str(source.get("model_ref") or "")
     if not requested_ref and source.get("provider_id") and requested_model:
@@ -236,12 +255,15 @@ def resolve_parameters(
         for provider, model in settings.models_for_mode(mode)
     ]
     selected = next((m for m in candidates if m["model_ref"] == model_ref), None)
+    selection_reason = "user_choice" if selected else ""
     if model_ref and selected is None:
         raise ValueError("所选模型已停用、不存在或不支持该生成模式")
     if not selected:
         selected = next(
             (m for m in candidates if m["model_ref"] == requested_ref), None
         )
+        if selected:
+            selection_reason = "model_ref"
     if not selected and requested_model:
         matches = [m for m in candidates if m["id"] == requested_model]
         if not matches and source_format in {"novelai", "nai"}:
@@ -257,9 +279,30 @@ def resolve_parameters(
                 ]
         if len(matches) == 1:
             selected = matches[0]
+            selection_reason = "model"
+    if not selected and not requested_model and not requested_ref:
+        family = {
+            "nai": "nai_direct",
+            "novelai": "nai_direct",
+            "openai_images": "openai_images",
+            "gemini": "gemini",
+        }.get(source_format)
+        provider_id = str(source.get("provider_id") or "")
+        matches = [
+            item
+            for item in candidates
+            if family
+            and item["provider_kind"] == family
+            and (not provider_id or item["provider_id"] == provider_id)
+        ]
+        if len(matches) == 1:
+            selected = matches[0]
+            selection_reason = "source_unique"
     warnings = list(parsed.get("warnings") or [])
-    if (source.get("mode") or normalized.get("mode")) not in {"text2img", "img2img"}:
+    if not explicit_mode:
         warnings.append("元数据未确定生成模式，暂按文生图准备草稿，请核对。")
+    if selection_reason == "source_unique":
+        warnings.append("参数未指定型号，已选择当前来源唯一可用的模型，请核对。")
     if mode == "img2img":
         warnings.append("参数文本不包含原始参考图，请补充参考图后生成。")
     draft = {
@@ -280,6 +323,7 @@ def resolve_parameters(
             "draft": draft,
             "candidates": candidates,
             "requires_model_selection": True,
+            "selection_reason": "",
             "warnings": warnings,
             "unmapped": {
                 **{
@@ -342,6 +386,7 @@ def resolve_parameters(
                     "parameters",
                     "prompt",
                     "negative_prompt",
+                    "action",
                 }
             }
         )
@@ -463,6 +508,7 @@ def resolve_parameters(
         "draft": draft,
         "candidates": candidates,
         "requires_model_selection": False,
+        "selection_reason": selection_reason,
         "warnings": list(dict.fromkeys(warnings)),
         "unmapped": unmapped,
     }

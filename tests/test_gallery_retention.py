@@ -75,7 +75,8 @@ def test_import_preserves_metadata_and_separates_request_snapshot(tmp_path):
         )
         assert generated_detail["original_prompt"] == "user prompt"
         assert generated_detail["final_prompt"] == "actual prompt"
-        assert generated_detail["generation_engine"] == "nai"
+        assert generated_detail["generation_engine"] == "novelai"
+        assert generated_detail["provider_kind"] == "nai_direct"
         imported = await store.import_image(
             raw,
             "原图.png",
@@ -136,7 +137,8 @@ def test_quota_excludes_imports_favorites_and_shared_assets(tmp_path):
         assert (await store.retention_status(HistorySettings(True, 1, 0, False)))[
             "size_bytes"
         ] == 0
-        store._cleanup_sync(HistorySettings(True, 0, 0, False))
+        await record(store, [green])
+        store._cleanup_sync(HistorySettings(True, 1, 0, False))
         assert await store.generation_detail(ordinary) is None
         assert await store.generation_detail(favorite) is not None
         assert await store.generation_detail(imported["generation_id"]) is not None
@@ -159,14 +161,17 @@ def test_unfavorite_grace_is_persistent_and_not_extended_by_retries(tmp_path):
         ] == result["cleanup_protected_until"]
         store = GenerationStore(tmp_path)
         await store.initialize()
-        settings = HistorySettings(True, 0, 0, False)
+        other_protected = await record(store, [picture("green")])
+        await store.set_favorite(other_protected, True)
+        await store.set_favorite(other_protected, False)
+        settings = HistorySettings(True, 1, 0, False)
         store._cleanup_sync(settings)
         assert await store.generation_detail(ordinary) is None
         assert await store.generation_detail(protected) is not None
         status = await store.retention_status(settings)
         assert (
             status["over_limit"]
-            and status["protected_records"] == 1
+            and status["protected_records"] == 2
             and status["candidate_ids"] == []
         )
         with store._connect() as conn:
@@ -278,6 +283,150 @@ def test_database_development_versions_are_explicit_and_unknown_are_rejected(tmp
             conn.execute("PRAGMA user_version = 2")
         with pytest.raises(RuntimeError, match="正式版本"):
             await GenerationStore(tmp_path).initialize()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("limit", [0, -1])
+def test_zero_record_limit_preserves_history_without_quota_warnings(tmp_path, limit):
+    async def run():
+        store = GenerationStore(tmp_path)
+        await store.initialize()
+        for color in ("red", "blue", "green"):
+            await record(store, [picture(color)])
+        settings = HistorySettings(True, limit, 0, False)
+        saved = await store.record_success(
+            provider=ImageProvider.from_mapping({"id": "test", "kind": "nai_direct"}),
+            request=GenerationRequest(
+                mode="text2img", provider_id="test", prompt="new result"
+            ),
+            images=(GeneratedImage(picture("yellow"), "image/png"),),
+            elapsed_ms=1,
+            history=settings,
+        )
+        assert saved
+        store._cleanup_sync(settings)
+        status = await store.retention_status(settings)
+        assert status["record_count"] == 4
+        assert status["limit_records"] == 0 and status["limit_bytes"] == 0
+        assert not status["near_limit"] and not status["over_limit"]
+        assert status["candidate_ids"] == []
+        assert (await store.list_generations({}))["total"] == 4
+
+    asyncio.run(run())
+
+
+def test_quota_usage_splits_exempt_records_and_unique_assets(tmp_path):
+    async def run():
+        store = GenerationStore(tmp_path)
+        await store.initialize()
+        counted = await record(store, [picture("red")])
+        await record(store, [picture("blue")])
+        favorite = await record(store, [picture("green")])
+        imported = await store.import_image(picture("blue"), "import.png", {})
+        await store.set_favorite(favorite, True)
+        await store.set_favorite(imported["generation_id"], True)
+        await store.lease_agent_images(
+            (GeneratedImage(picture("purple"), "image/png"),),
+            scope_id="session",
+            create_preview=True,
+            preview_max_edge=768,
+            preview_quality=80,
+            retention_hours=24,
+        )
+        counted_asset = (await store.generation_detail(counted, include_assets=False))[
+            "images"
+        ][0]["sha256"]
+        with store._connect() as conn:
+            counted_bytes = conn.execute(
+                "SELECT a.size_bytes + t.size_bytes FROM image_assets a JOIN image_thumbnails t ON t.asset_id = a.id WHERE a.id = ?",
+                (counted_asset,),
+            ).fetchone()[0]
+        status = await store.retention_status(HistorySettings(True, 0, 0, False))
+        assert status["record_count"] == 2
+        assert status["exempt_record_count"] == 2
+        assert status["imported_records"] == 1 and status["favorite_records"] == 2
+        assert status["total_records"] == 4
+        assert status["size_bytes"] == counted_bytes
+        assert status["exempt_size_bytes"] > 0
+        assert (
+            status["gallery_size_bytes"]
+            == status["size_bytes"] + status["exempt_size_bytes"]
+        )
+        assert status["total_size_bytes"] > status["gallery_size_bytes"]
+
+    asyncio.run(run())
+
+
+def test_batch_favorites_toggle_only_selected_and_unfavorite_grace(tmp_path):
+    async def run():
+        store = GenerationStore(tmp_path)
+        await store.initialize()
+        first = await record(store, [picture("red")])
+        second = await record(store, [picture("blue")])
+        unselected = await record(store, [picture("green")])
+        imported = (await store.import_image(picture("yellow"), "import.png", {}))[
+            "generation_id"
+        ]
+        await store.set_favorite(first, True)
+        ids = [first, second, imported]
+        state = await store.favorite_status(ids)
+        assert state["action"] == "favorite" and not state["all_favorite"]
+        assert state["favorite_count"] == 1 and state["selected_count"] == 3
+        changed = await store.toggle_favorites(ids)
+        assert changed["action"] == "favorite" and changed["all_favorite"]
+        assert changed["changed_ids"] == [second, imported]
+        assert (await store.generation_detail(unselected))["is_favorite"] is False
+        assert (await store.favorite_status(ids))["action"] == "unfavorite"
+        changed = await store.toggle_favorites(ids)
+        assert changed["action"] == "unfavorite" and not changed["all_favorite"]
+        assert changed["changed_ids"] == ids
+        assert changed["items"][0]["cleanup_protected_until"] > time.time() + 23 * 3600
+        assert (
+            changed["items"][1]["cleanup_protected_until"]
+            == changed["items"][0]["cleanup_protected_until"]
+        )
+        assert changed["items"][2]["cleanup_protected_until"] == 0
+
+    asyncio.run(run())
+
+
+def test_batch_favorites_rejects_missing_and_invalid_ids_without_partial_changes(
+    tmp_path,
+):
+    async def run():
+        store = GenerationStore(tmp_path)
+        await store.initialize()
+        identifier = await record(store, [picture()])
+        missing = "0" * 32
+        for method in (store.favorite_status, store.toggle_favorites):
+            with pytest.raises(ValueError, match=missing):
+                await method([identifier, missing])
+            for invalid in ([], [identifier, "bad"], identifier, [identifier] * 1001):
+                with pytest.raises(ValueError):
+                    await method(invalid)
+        assert not (await store.generation_detail(identifier))["is_favorite"]
+        assert (await store.toggle_favorites([identifier, identifier]))[
+            "changed_ids"
+        ] == [identifier]
+
+    asyncio.run(run())
+
+
+def test_batch_favorite_transaction_failure_rolls_back_all_selected(tmp_path):
+    async def run():
+        store = GenerationStore(tmp_path)
+        await store.initialize()
+        first = await record(store, [picture()])
+        second = await record(store, [picture("blue")])
+        with store._connect() as conn:
+            conn.execute(
+                f"CREATE TRIGGER block_favorite BEFORE UPDATE OF is_favorite ON generations WHEN NEW.id = '{second}' BEGIN SELECT RAISE(ABORT, 'test update failure'); END"
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="test update failure"):
+            await store.toggle_favorites([first, second])
+        status = await store.favorite_status([first, second])
+        assert status["favorite_count"] == 0
 
     asyncio.run(run())
 
@@ -441,13 +590,14 @@ def test_metadata_parser_upgrade_refreshes_cache_without_losing_import(
             imported["generation_id"], include_assets=False
         )
         parse = metadata_module.parse_image_metadata
+        next_version = metadata_module.PARSER_VERSION + 1
 
         def upgraded(data):
             result = parse(data)
             result["normalized"]["new_field"] = "upgraded-search"
             return result
 
-        monkeypatch.setattr(metadata_module, "PARSER_VERSION", 2)
+        monkeypatch.setattr(metadata_module, "PARSER_VERSION", next_version)
         monkeypatch.setattr(metadata_module, "parse_image_metadata", upgraded)
         await store.run_maintenance(
             HistorySettings(False, 0, 0, False),
@@ -457,7 +607,7 @@ def test_metadata_parser_upgrade_refreshes_cache_without_losing_import(
         after = await store.generation_detail(
             imported["generation_id"], include_assets=False
         )
-        assert after["images"][0]["metadata"]["parser_version"] == 2
+        assert after["images"][0]["metadata"]["parser_version"] == next_version
         assert (
             after["images"][0]["metadata"]["raw"]
             == before["images"][0]["metadata"]["raw"]
@@ -470,7 +620,7 @@ def test_metadata_parser_upgrade_refreshes_cache_without_losing_import(
         def failed(data):
             raise ValueError("test metadata failure")
 
-        monkeypatch.setattr(metadata_module, "PARSER_VERSION", 3)
+        monkeypatch.setattr(metadata_module, "PARSER_VERSION", next_version + 1)
         monkeypatch.setattr(metadata_module, "parse_image_metadata", failed)
         await store.run_maintenance(
             HistorySettings(False, 0, 0, False),
