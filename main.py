@@ -37,6 +37,8 @@ from .config import (
     save_studio_settings,
 )
 from .models import ImageProvider, InvocationSource, ReferenceImage
+from .image_metadata import parse_metadata_fields
+from .parameter_exchange import export_parameters, resolve_parameters
 from .providers import ProviderError, ProviderExecutor
 from .service import ImageGenerationService
 from .storage import (
@@ -95,6 +97,7 @@ class ImageStudioPlugin(Star):
         self._settings_lock = asyncio.Lock()
         self._maintenance_task: asyncio.Task[None] | None = None
         self._exports: dict[str, tuple[Path, float]] = {}
+        self._imports: dict[str, dict[str, Any]] = {}
         self._studio_settings, studio_errors = load_studio_settings(Path(self.data_dir))
         self._settings, runtime_errors = runtime_settings(config, self._studio_settings)
         self._settings_errors = [*studio_errors, *runtime_errors]
@@ -146,6 +149,7 @@ class ImageStudioPlugin(Star):
             await self._session.close()
         self._session = None
         self._service = None
+        self._imports.clear()
 
     async def _maintenance_loop(self) -> None:
         while True:
@@ -163,6 +167,48 @@ class ImageStudioPlugin(Star):
 
     def _register_web_apis(self) -> None:
         routes = (
+            (
+                "imports/inspect",
+                self._api_import_inspect,
+                ["POST"],
+                "Image Studio: inspect image metadata",
+            ),
+            (
+                "imports/prepare",
+                self._api_import_prepare,
+                ["POST"],
+                "Image Studio: prepare imports",
+            ),
+            (
+                "imports/upload/<upload_id>",
+                self._api_import_upload,
+                ["POST"],
+                "Image Studio: import image",
+            ),
+            (
+                "studio/parameters/resolve",
+                self._api_resolve_parameters,
+                ["POST"],
+                "Image Studio: resolve parameters",
+            ),
+            (
+                "gallery/parameters/<generation_id>",
+                self._api_gallery_parameters,
+                ["GET"],
+                "Image Studio: export parameters",
+            ),
+            (
+                "gallery/favorite",
+                self._api_gallery_favorite,
+                ["POST"],
+                "Image Studio: favorite record",
+            ),
+            (
+                "gallery/images/delete",
+                self._api_gallery_delete_images,
+                ["POST"],
+                "Image Studio: delete selected images",
+            ),
             (
                 "studio/bootstrap",
                 self._api_bootstrap,
@@ -389,7 +435,174 @@ class ImageStudioPlugin(Star):
         return json_response({"settings_revision": self._settings.revision})
 
     async def _api_storage_health(self) -> Any:
-        return json_response(await self.store.maintenance_report())
+        report = await self.store.maintenance_report()
+        report["retention"] = await self.store.retention_status(self._settings.history)
+        return json_response(report)
+
+    async def _api_import_inspect(self) -> Any:
+        body = await web_request.json(default={})
+        if not isinstance(body, dict) or not isinstance(body.get("metadata"), dict):
+            return error_response("元数据必须是对象", status_code=400)
+        try:
+            if len(json.dumps(body, ensure_ascii=False)) > 4 * 1024 * 1024:
+                raise ValueError("元数据不能超过 4 MB")
+            width = max(0, min(65535, int(body.get("width") or 0)))
+            height = max(0, min(65535, int(body.get("height") or 0)))
+            result = await asyncio.to_thread(
+                parse_metadata_fields, body["metadata"], width=width, height=height
+            )
+            return json_response(result)
+        except (ValueError, TypeError, OverflowError) as exc:
+            return error_response(str(exc), status_code=400)
+
+    async def _api_import_prepare(self) -> Any:
+        body = await web_request.json(default={})
+        items = body.get("items") if isinstance(body, dict) else None
+        if not isinstance(items, list) or not 1 <= len(items) <= 100:
+            return error_response("每批请选择 1 至 100 张图片", status_code=400)
+        now = time.time()
+        self._imports = {
+            key: value
+            for key, value in self._imports.items()
+            if now - value["created_at"] < 3600
+        }
+        pending: list[tuple[str, dict[str, Any]]] = []
+        seen: set[str] = set()
+        for item in items:
+            if not isinstance(item, dict):
+                return error_response("导入项目格式错误", status_code=400)
+            client_id = str(item.get("client_id") or "")
+            overrides = item.get("overrides", {})
+            if (
+                not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", client_id)
+                or client_id in seen
+            ):
+                return error_response("导入图片标识无效或重复", status_code=400)
+            if (
+                not isinstance(overrides, dict)
+                or len(json.dumps(overrides, ensure_ascii=False)) > 1024 * 1024
+            ):
+                return error_response("补充参数必须是小于 1 MB 的对象", status_code=400)
+            if not isinstance(overrides.get("parameters", {}), dict):
+                return error_response("补充参数 parameters 必须是对象", status_code=400)
+            seen.add(client_id)
+            pending.append(
+                (
+                    uuid.uuid4().hex,
+                    {
+                        "client_id": client_id,
+                        "created_at": now,
+                        "filename": str(item.get("filename") or "import.png")[:240],
+                        "overrides": copy.deepcopy(overrides),
+                    },
+                )
+            )
+        if len(self._imports) + len(pending) > 500:
+            return error_response(
+                "待上传项目过多，请完成已有上传后重试", status_code=429
+            )
+        self._imports.update(pending)
+        return json_response(
+            {
+                "items": [
+                    {
+                        "client_id": item["client_id"],
+                        "upload_endpoint": f"imports/upload/{token}",
+                    }
+                    for token, item in pending
+                ]
+            }
+        )
+
+    async def _api_import_upload(self, upload_id: str) -> Any:
+        item = self._imports.get(upload_id)
+        if item is None or time.time() - item["created_at"] >= 3600:
+            self._imports.pop(upload_id, None)
+            return error_response("导入准备已过期，请重试上传", status_code=410)
+        files = await web_request.files()
+        upload = files.get("file")
+        if upload is None:
+            return error_response("缺少图片文件", status_code=400)
+        limit = 30 * 1024 * 1024
+        if upload.content_length is not None and upload.content_length > limit:
+            return error_response("导入图片不能超过 30 MB", status_code=400)
+        raw = await upload.read(limit + 1)
+        if not raw or len(raw) > limit:
+            return error_response("图片为空或超过 30 MB", status_code=400)
+        try:
+            result = await self.store.import_image(
+                raw,
+                item["filename"],
+                item["overrides"],
+                import_key=item["client_id"],
+                preview_max_edge=self._settings.asset_preview_max_edge,
+                preview_quality=self._settings.asset_preview_quality,
+            )
+        except ValueError as exc:
+            return error_response(str(exc), status_code=400)
+        except OSError:
+            return error_response(
+                "图片保存失败，请检查数据目录及磁盘空间后重试", status_code=500
+            )
+        self._imports.pop(upload_id, None)
+        return json_response(result)
+
+    async def _api_resolve_parameters(self) -> Any:
+        body = await web_request.json(default={})
+        if not isinstance(body, dict) or not isinstance(body.get("content"), str):
+            return error_response("请粘贴参数文本", status_code=400)
+        if len(body["content"]) > 4 * 1024 * 1024:
+            return error_response("参数文本不能超过 4 MB", status_code=400)
+        try:
+            result = await asyncio.to_thread(
+                resolve_parameters,
+                body["content"],
+                self._settings,
+                str(body.get("model_ref") or ""),
+            )
+            return json_response(result)
+        except ValueError as exc:
+            return error_response(str(exc), status_code=400)
+
+    async def _api_gallery_parameters(self, generation_id: str) -> Any:
+        detail = await self.store.generation_detail(generation_id, include_assets=False)
+        if detail is None:
+            return error_response("生成记录不存在", status_code=404)
+        try:
+            result = export_parameters(
+                detail,
+                str(web_request.query.get("image_id") or ""),
+                str(web_request.query.get("format") or "studio"),
+            )
+            return json_response(result)
+        except ValueError as exc:
+            return error_response(str(exc), status_code=400)
+
+    async def _api_gallery_favorite(self) -> Any:
+        body = await web_request.json(default={})
+        if not isinstance(body, dict) or not isinstance(body.get("favorite"), bool):
+            return error_response("收藏状态必须是布尔值", status_code=400)
+        try:
+            result = await self.store.set_favorite(
+                str(body.get("generation_id") or ""), body["favorite"]
+            )
+            return json_response(result)
+        except ValueError as exc:
+            return error_response(str(exc), status_code=400)
+
+    async def _api_gallery_delete_images(self) -> Any:
+        body = await web_request.json(default={})
+        if not isinstance(body, dict) or not isinstance(body.get("image_ids"), list):
+            return error_response("请选择需要删除的图片", status_code=400)
+        if not 1 <= len(body["image_ids"]) <= 100:
+            return error_response("请选择 1 至 100 张图片", status_code=400)
+        try:
+            result = await self.store.delete_images(
+                str(body.get("generation_id") or ""), body["image_ids"]
+            )
+            return json_response(result)
+        except ValueError as exc:
+            return error_response(str(exc), status_code=400)
 
     async def _api_storage_maintenance(self) -> Any:
         body = await web_request.json(default={})
@@ -544,10 +757,18 @@ class ImageStudioPlugin(Star):
             "provider_id": web_request.query.get("provider_id", ""),
             "mode": web_request.query.get("mode", ""),
             "source": web_request.query.get("source", ""),
+            "generation_engine": web_request.query.get("generation_engine", ""),
+            "favorite": web_request.query.get("favorite", ""),
             "limit": web_request.query.get("limit", 24),
             "offset": web_request.query.get("offset", 0),
         }
-        return json_response(await self.store.list_generations(filters))
+        payload = await self.store.list_generations(filters)
+        retention = await self.store.retention_status(self._settings.history)
+        candidates = set(retention.get("candidate_ids", []))
+        for item in payload["items"]:
+            item["cleanup_warning"] = item["id"] in candidates
+        payload["retention"] = retention
+        return json_response(payload)
 
     async def _api_gallery_detail(self, generation_id: str) -> Any:
         include_assets = str(web_request.query.get("assets", "1")).lower() not in {
@@ -576,6 +797,8 @@ class ImageStudioPlugin(Star):
             "provider_id": web_request.query.get("provider_id", ""),
             "mode": web_request.query.get("mode", ""),
             "source": web_request.query.get("source", ""),
+            "generation_engine": web_request.query.get("generation_engine", ""),
+            "favorite": web_request.query.get("favorite", ""),
         }
         items = await self.store.gallery_image_sequence(filters)
         return json_response({"items": items, "total": len(items)})

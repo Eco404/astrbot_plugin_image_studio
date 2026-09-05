@@ -325,6 +325,19 @@ class ImageGenerationService:
         detail = await self.store.generation_detail(generation_id, include_assets=False)
         if detail is None:
             raise ValueError("历史生成记录不存在")
+        if detail.get("source") == "import":
+            from .parameter_exchange import export_parameters, resolve_parameters
+
+            copied = export_parameters(detail)
+            resolved = resolve_parameters(copied["content"], self.settings)
+            return {
+                **resolved["draft"],
+                "candidates": resolved["candidates"],
+                "requires_model_selection": resolved["requires_model_selection"],
+                "warnings": resolved["warnings"],
+                "unmapped": resolved["unmapped"],
+                "notice": "导入参数已准备，请核对模型和无法映射的字段。",
+            }
         parameters = (
             detail.get("parameters")
             if isinstance(detail.get("parameters"), dict)
