@@ -93,7 +93,7 @@ def export_parameters(
             content["model"] = request["model"]
             if "negative_prompt" in request:
                 content["negative"] = request["negative_prompt"]
-            content["artist"] = ""
+            content.setdefault("artist", "")
         else:
             raise ValueError("当前图片没有可转换的 NAI 参数")
     elif format_name == "novelai":
@@ -172,11 +172,21 @@ def resolve_parameters(
     source_format = parsed.get("format", "unknown")
     source = copy.deepcopy(parsed.get("request") or {})
     # An Image Studio export carries exact request intent; imported exports retain provenance.
-    try:
-        envelope = json.loads(content)
-    except (ValueError, TypeError):
-        envelope = None
+    envelope = parsed.get("envelope")
     if isinstance(envelope, dict) and envelope.get("format") == "image_studio":
+        for key in ("data", "metadata", "supplemental"):
+            if key in envelope and not isinstance(envelope[key], dict):
+                raise ValueError(f"{key} 必须是对象")
+        supplemental = envelope.get("supplemental", {})
+        for key in ("overrides", "display_parameters"):
+            if key in supplemental and not isinstance(supplemental[key], dict):
+                raise ValueError(f"supplemental.{key} 必须是对象")
+        if not isinstance(
+            supplemental.get("overrides", {}).get("parameters", {}), dict
+        ):
+            raise ValueError("人工补充 parameters 必须是对象")
+        if not isinstance(envelope.get("metadata", {}).get("normalized", {}), dict):
+            raise ValueError("metadata.normalized 必须是对象")
         source = copy.deepcopy(envelope.get("data") or {})
         source_format = envelope.get("generation_engine") or source_format
         if envelope.get("has_request_snapshot") is False:

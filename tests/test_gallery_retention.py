@@ -379,3 +379,108 @@ def test_rejected_import_has_no_orphan_assets(tmp_path):
         assert (await store.list_generations({}))["total"] == 0
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("format_name", ["BMP", "TIFF"])
+def test_import_rejects_unsupported_actual_format_even_with_png_filename(
+    tmp_path, format_name
+):
+    async def run():
+        store = GenerationStore(tmp_path)
+        await store.initialize()
+        output = io.BytesIO()
+        Image.new("RGB", (8, 8), "red").save(output, format_name)
+        with pytest.raises(ValueError, match="仅支持"):
+            await store.import_image(output.getvalue(), "claimed.png", {})
+        assert (await store.list_generations({}))["total"] == 0
+        assert not list(store.assets_dir.rglob("*.*"))
+
+    asyncio.run(run())
+
+
+def test_import_pixel_limit_is_checked_even_when_metadata_is_cached(
+    tmp_path, monkeypatch
+):
+    import astrbot_plugin_image_studio.image_metadata as metadata_module
+
+    async def run():
+        store = GenerationStore(tmp_path)
+        await store.initialize()
+        data = picture()
+        generation = await record(store, [data])
+        detail = await store.generation_detail(generation, include_assets=False)
+        assert detail["images"][0]["metadata"]["parser_version"] > 0
+        monkeypatch.setattr(metadata_module, "MAX_PIXELS", 100)
+        with pytest.raises(ValueError, match="像素限制"):
+            await store.import_image(data, "cached.png", {})
+        assert (await store.list_generations({"source": "import"}))["total"] == 0
+        assert await store.generation_detail(generation) is not None
+
+    asyncio.run(run())
+
+
+def test_metadata_parser_upgrade_refreshes_cache_without_losing_import(
+    tmp_path, monkeypatch
+):
+    import astrbot_plugin_image_studio.image_metadata as metadata_module
+
+    async def run():
+        store = GenerationStore(tmp_path)
+        await store.initialize()
+        imported = await store.import_image(
+            picture(
+                metadata={
+                    "Software": "NovelAI",
+                    "Comment": {"prompt": "mountain", "uc": "blur", "seed": 123},
+                }
+            ),
+            "image.png",
+            {},
+        )
+        before = await store.generation_detail(
+            imported["generation_id"], include_assets=False
+        )
+        parse = metadata_module.parse_image_metadata
+
+        def upgraded(data):
+            result = parse(data)
+            result["normalized"]["new_field"] = "upgraded-search"
+            return result
+
+        monkeypatch.setattr(metadata_module, "PARSER_VERSION", 2)
+        monkeypatch.setattr(metadata_module, "parse_image_metadata", upgraded)
+        await store.run_maintenance(
+            HistorySettings(False, 0, 0, False),
+            preview_max_edge=768,
+            preview_quality=80,
+        )
+        after = await store.generation_detail(
+            imported["generation_id"], include_assets=False
+        )
+        assert after["images"][0]["metadata"]["parser_version"] == 2
+        assert (
+            after["images"][0]["metadata"]["raw"]
+            == before["images"][0]["metadata"]["raw"]
+        )
+        assert (await store.list_generations({"query": "upgraded-search"}))[
+            "total"
+        ] == 1
+        assert len(list(store.assets_dir.rglob("*.png"))) == 1
+
+        def failed(data):
+            raise ValueError("test metadata failure")
+
+        monkeypatch.setattr(metadata_module, "PARSER_VERSION", 3)
+        monkeypatch.setattr(metadata_module, "parse_image_metadata", failed)
+        await store.run_maintenance(
+            HistorySettings(False, 0, 0, False),
+            preview_max_edge=768,
+            preview_quality=80,
+        )
+        unchanged = await store.generation_detail(
+            imported["generation_id"], include_assets=False
+        )
+        assert unchanged["images"][0]["metadata"] == after["images"][0]["metadata"]
+        assert len(list(store.assets_dir.rglob("*.png"))) == 1
+
+    asyncio.run(run())

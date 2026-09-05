@@ -326,8 +326,11 @@ def _workflow_graph(workflow: dict, result: dict) -> dict:
     nodes = workflow.get("nodes")
     if not isinstance(nodes, list) or len(nodes) > MAX_NODES:
         raise ValueError("ComfyUI 工作流节点无效或超过 2048 个")
+    workflow_links = workflow.get("links", [])
+    if not isinstance(workflow_links, list):
+        raise ValueError("ComfyUI 工作流 links 必须是数组")
     links = {}
-    for link in workflow.get("links", []):
+    for link in workflow_links:
         if isinstance(link, list) and len(link) >= 6:
             links[str(link[0])] = [str(link[1]), link[2]]
     widget_names = {
@@ -355,13 +358,21 @@ def _workflow_graph(workflow: dict, result: dict) -> dict:
         if not isinstance(node, dict) or "id" not in node:
             continue
         kind = node.get("type", "")
+        if not isinstance(kind, str):
+            raise ValueError("ComfyUI 节点 type 必须是字符串")
+        input_entries = node.get("inputs", [])
+        if not isinstance(input_entries, list):
+            raise ValueError("ComfyUI 节点 inputs 必须是数组")
         inputs = {}
         widgets = node.get("widgets_values", [])
         if isinstance(widgets, list):
             inputs.update(zip(widget_names.get(kind, ()), widgets))
-        for entry in node.get("inputs", []):
+        for entry in input_entries:
             if isinstance(entry, dict) and str(entry.get("link")) in links:
-                inputs[entry.get("name", "")] = links[str(entry["link"])]
+                name = entry.get("name", "")
+                if not isinstance(name, str):
+                    raise ValueError("ComfyUI 节点输入 name 必须是字符串")
+                inputs[name] = links[str(entry["link"])]
         graph[str(node["id"])] = {"class_type": kind, "inputs": inputs}
     _warning(
         result,
@@ -627,6 +638,7 @@ def parse_parameter_text(content: str) -> dict:
         request = _safe(obj["data"])
         result = parse_metadata_fields({"image_studio": content})
         result["request"] = request
+        result["envelope"] = _safe(obj)
         parameters = request.get("parameters", {})
         if not isinstance(parameters, dict):
             parameters = {}

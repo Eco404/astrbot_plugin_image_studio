@@ -17,6 +17,41 @@ from astrbot_plugin_image_studio.parameter_exchange import (
 )
 
 
+def test_fenced_studio_parameters_preserve_large_integer_and_import_data():
+    content = json.dumps(
+        {
+            "format": "image_studio",
+            "version": 1,
+            "generation_engine": "nai",
+            "has_request_snapshot": False,
+            "data": {
+                "model_ref": "nai:nai-diffusion-4-5-full",
+                "parameters": {"seed": 9007199254740993},
+            },
+            "metadata": {"normalized": {"steps": 20, "cfg_rescale": 0}},
+            "supplemental": {
+                "overrides": {
+                    "negative_prompt": "",
+                    "parameters": {"artist": "manual artist"},
+                }
+            },
+        }
+    )
+    direct = resolve_parameters(content, settings())
+    fenced = resolve_parameters(f"```json\n{content}\n```", settings())
+    assert direct == fenced
+    assert direct["unmapped"]["seed"] == "9007199254740993"
+    assert direct["draft"]["parameters"]["cfg"] == 0
+    assert direct["draft"]["parameters"]["artist"] == "manual artist"
+
+
+@pytest.mark.parametrize("key", ["metadata", "supplemental", "data"])
+def test_malformed_studio_envelope_has_clear_error(key):
+    envelope = {"format": "image_studio", "version": 1, "data": {}, key: [1]}
+    with pytest.raises(ValueError):
+        resolve_parameters(json.dumps(envelope), settings())
+
+
 def settings(*, duplicate: bool = False, empty: bool = False) -> RuntimeSettings:
     nai_schema = {
         "style": {

@@ -5,7 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Image Studio 生图工作台</title>
   <link rel="stylesheet" href="./vendor/photoswipe/photoswipe.css?v=5.4.4" />
-  <link rel="stylesheet" href="./app.css?v=0.6.1" />
+  <link rel="stylesheet" href="./app.css?v=0.7.0" />
+  <link rel="stylesheet" href="./library.css?v=0.7.0" />
 </head>
 <body>
   <main class="app-shell quiet-glass-background">
@@ -17,6 +18,7 @@
       <nav class="nav-list">
         <button class="nav-item is-active" data-view="generate" type="button" aria-label="生图" title="生图"><span class="nav-icon" aria-hidden="true">✦</span><span>生图</span></button>
         <button class="nav-item" data-view="gallery" type="button" aria-label="画廊" title="画廊"><span class="nav-icon nav-icon-gallery" aria-hidden="true"><span></span></span><span>画廊</span></button>
+        <button class="nav-item" data-view="import" type="button" aria-label="导入" title="导入"><span class="nav-icon" data-studio-icon="FolderInput" aria-hidden="true"></span><span>导入</span></button>
         <button class="nav-item" data-view="settings" type="button" aria-label="设置" title="设置"><span class="nav-icon nav-icon-settings" aria-hidden="true">⚙︎</span><span>设置</span></button>
       </nav>
       <div class="sidebar-footer" id="runtimeStatus">正在读取配置</div>
@@ -37,7 +39,8 @@
           <button class="segment is-active" data-mode="text2img" type="button">文生图</button>
           <button class="segment" data-mode="img2img" type="button">图生图</button>
         </div>
-        <div class="model-select-row"><label for="modelChoice">模型</label><select id="modelChoice" aria-label="选择生图模型" disabled><option value="">请先选择模式</option></select><span class="model-provider" id="modelProvider"></span></div>
+        <div class="model-select-row"><label for="modelChoice">模型</label><select id="modelChoice" aria-label="选择生图模型" disabled><option value="">请先选择模式</option></select><span class="model-provider" id="modelProvider"></span><button class="studio-icon-button" id="pasteParametersButton" type="button" aria-label="从剪贴板读取参数" title="从剪贴板读取参数" data-studio-icon="ClipboardPaste"></button></div>
+        <div class="parameter-import-notice is-hidden" id="parameterImportNotice" role="status"></div>
         <div class="workspace-empty glass" id="workspaceEmpty">请选择模型</div>
         <fieldset id="generatorWorkspace" class="generator-workspace is-hidden" disabled>
         <div class="generator-layout">
@@ -72,13 +75,25 @@
           <label class="search-field"><span>搜索</span><input id="gallerySearch" placeholder="提示词、模型或生图服务商" /></label>
           <select id="galleryProvider" aria-label="按生图服务商筛选"><option value="">全部服务商</option></select>
           <select id="galleryMode" aria-label="按模式筛选"><option value="">全部模式</option><option value="text2img">文生图</option><option value="img2img">图生图</option></select>
-          <select id="gallerySource" aria-label="按调用来源筛选"><option value="">全部来源</option><option value="webui">WebUI</option><option value="command">指令</option><option value="llm_tool">LLM 工具</option></select>
+          <select id="gallerySource" aria-label="按调用来源筛选"><option value="">全部来源</option><option value="webui">WebUI</option><option value="command">指令</option><option value="llm_tool">LLM 工具</option><option value="import">导入</option></select>
+          <select id="galleryEngine" aria-label="按生图来源筛选"><option value="">全部生图来源</option><option value="nai">NAI</option><option value="novelai">NovelAI</option><option value="comfyui">ComfyUI</option><option value="a1111">Stable Diffusion</option><option value="openai_images">OpenAI Images</option><option value="gemini">Gemini</option><option value="custom_json">自定义</option><option value="unknown">未知来源</option></select>
+          <select id="galleryFavorite" aria-label="按收藏筛选"><option value="">全部收藏状态</option><option value="true">已收藏</option><option value="false">未收藏</option></select>
           <button class="quiet-button" id="galleryRefresh" type="button">刷新</button>
         </div>
-        <div class="selection-bar glass is-hidden" id="selectionBar"><span id="selectionCount">已选 0 项</span><button class="quiet-button" id="cancelSelectionButton" type="button">取消</button><button class="quiet-button" id="selectAllButton" type="button">全选当前页</button><button class="quiet-button" id="exportButton" type="button">导出</button><button class="danger-button" id="deleteButton" type="button">删除</button></div>
+        <div class="retention-notice is-hidden" id="galleryRetention" role="status"></div>
         <div class="gallery-grid" id="galleryGrid"></div>
         <div class="empty-state is-hidden" id="galleryEmpty">画廊中还没有保留的生成记录。</div>
+        <div class="gallery-floatingbar floatingbar">
+        <div class="selection-bar is-hidden" id="selectionBar"><span id="selectionCount">已选 0 项</span><button class="quiet-button" id="cancelSelectionButton" type="button">取消</button><button class="quiet-button" id="selectAllButton" type="button">全选当前页</button><button class="quiet-button" id="exportButton" type="button">导出</button><button class="danger-button" id="deleteButton" type="button">删除</button></div>
         <div class="gallery-pagination is-hidden" id="galleryPagination" aria-label="画廊分页"><button class="quiet-button" id="galleryPrev" type="button">上一页</button><span id="galleryPageLabel" aria-live="polite">第 1 / 1 页</span><button class="quiet-button" id="galleryNext" type="button">下一页</button></div>
+        </div>
+      </section>
+
+      <section class="view" id="importView">
+        <div class="import-toolbar"><button class="primary-button" id="chooseImportFiles" type="button"><span data-studio-icon="ImagePlus" aria-hidden="true"></span>选择图片</button><span id="importSummary" role="status">尚未选择图片</span><input id="importFiles" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden /></div>
+        <div class="import-dropzone" id="importDropzone"><span data-studio-icon="Upload" aria-hidden="true"></span><span>拖入图片或选择文件</span></div>
+        <div class="import-grid" id="importGrid"></div>
+        <div class="import-floatingbar floatingbar"><span id="importProgress" role="status"></span><button class="quiet-button" id="cancelImportButton" type="button">取消</button><button class="primary-button" id="confirmImportButton" type="button" disabled>确认导入</button></div>
       </section>
 
       <section class="view" id="settingsView">
@@ -129,7 +144,7 @@
           <div class="section-heading"><div><h2>模型配置</h2><p>同一服务商可以配置多个模型，每个模型独立声明模式、参考图和参数。</p></div><div class="section-actions"><input id="newModelChoice" list="newModelChoices" aria-label="选择或输入模型 ID" placeholder="选择或输入模型 ID" autocomplete="off" /><datalist id="newModelChoices"></datalist><button class="primary-button" id="addModelButton" type="button">新增模型</button></div></div>
           <div class="model-settings-layout"><div class="model-list" id="settingsModelList"></div><form id="modelForm" class="model-editor"></form></div>
         </section>
-        <div class="settings-savebar"><span class="inline-error" id="settingsError" role="alert"></span><button class="primary-button" id="saveSettingsButton" type="button">保存全部设置</button></div>
+        <div class="settings-savebar floatingbar"><span class="inline-error" id="settingsError" role="alert"></span><span id="settingsDirtyStatus" role="status"></span><button class="primary-button" id="saveSettingsButton" type="button">保存全部设置</button></div>
       </section>
     </section>
   </main>
@@ -137,8 +152,10 @@
   <aside class="detail-drawer" id="detailDrawer" role="dialog" aria-modal="true" aria-label="生成详情" aria-hidden="true" tabindex="-1">
     <div class="drawer-head"><div><h2>生成详情</h2><p id="detailDate"></p></div><button class="icon-button" id="closeDrawer" type="button" aria-label="关闭详情"><span aria-hidden="true">×</span></button></div>
     <div class="drawer-body" id="drawerBody"></div>
+    <div class="detail-footer" id="detailFooter"><button class="studio-icon-button" id="detailFavorite" type="button" aria-label="收藏生成记录" title="收藏生成记录" data-studio-icon="Star"></button><button class="quiet-button detail-command" id="detailReproduce" type="button"><span data-studio-icon="RefreshCw" aria-hidden="true"></span><span>复现参数</span></button><div class="copy-format-control"><select id="detailCopyFormat" aria-label="复制参数格式"></select><button class="studio-icon-button" id="detailCopy" type="button" aria-label="复制完整参数" title="复制完整参数" data-studio-icon="Copy"></button></div><button class="studio-icon-button" id="detailWorkflowDownload" type="button" aria-label="下载工作流" title="下载工作流" data-studio-icon="Download" hidden></button><button class="quiet-button detail-command" id="detailUseReference" type="button" aria-label="将当前成图用作新参考图" title="将当前成图用作新参考图"><span data-studio-icon="ImagePlus" aria-hidden="true"></span><span>用作参考图</span></button><button class="studio-icon-button is-danger" id="detailDelete" type="button" aria-label="删除图片" title="删除图片" data-studio-icon="Trash2"></button></div>
   </aside>
   <div class="scrim is-hidden" id="scrim"></div>
+  <div class="studio-modal-root is-hidden" id="studioModalRoot"><div class="studio-modal-scrim"></div><section class="studio-modal glass" id="studioModal" role="dialog" aria-modal="true" aria-labelledby="studioModalTitle" tabindex="-1"><header><h2 id="studioModalTitle"></h2><button class="studio-icon-button" id="studioModalClose" type="button" aria-label="关闭窗口" title="关闭窗口" data-studio-icon="X"></button></header><div class="studio-modal-body" id="studioModalBody"></div><div class="studio-modal-error" id="studioModalError" role="alert"></div><footer id="studioModalFooter"></footer></section></div>
   <div class="image-preview is-hidden" id="imagePreview" role="dialog" aria-modal="true" aria-labelledby="imagePreviewTitle">
     <div class="image-preview__backdrop" data-close-image-preview></div>
     <section class="image-preview__panel">
@@ -207,6 +224,9 @@
   </script>
   <script src="/api/plugin/page/bridge-sdk.js"></script>
   <script src="./vendor/photoswipe/photoswipe.umd.min.js?v=5.4.4"></script>
-  <script src="./app.js?v=0.6.1" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./vendor/exifreader/exif-reader.js?v=4.44.1"></script>
+  <script src="./vendor/lucide/icons.js?v=0.468.0"></script>
+  <script src="./library.js?v=0.7.0" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./app.js?v=0.7.0" onerror="window.__reportImageStudioPageError(true)"></script>
 </body>
 </html>

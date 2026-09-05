@@ -9,6 +9,8 @@
   };
   let activeConfirmation = null;
   let settingsLoadPromise = null;
+  let settingsBaseline = "";
+  let settingsSaving = false;
   let eventsBound = false;
   let galleryRequestRevision = 0;
   let detailRequestRevision = 0;
@@ -55,10 +57,10 @@
   function selectedModel() { return state.models.find((item) => item.model_ref === state.selectedModelRef) || null; }
   function selectedProvider() { const model = selectedModel(); return state.providers.find((item) => item.id === (model?.provider_id || state.selectedProviderId)) || null; }
   function text(value) { return value === null || value === undefined ? "" : String(value); }
-  function escape(value) { const div = document.createElement("div"); div.textContent = text(value); return div.innerHTML; }
+  function escape(value) { const div = document.createElement("div"); div.textContent = text(value); return div.innerHTML.replaceAll('"', "&quot;").replaceAll("'", "&#39;"); }
   function formatDate(value) { return new Date(Number(value) * 1000).toLocaleString(); }
   function formatBytes(value) { const bytes = Number(value || 0); return bytes > 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.max(0, Math.round(bytes / 1024))} KB`; }
-  function sourceLabel(value) { return ({ webui: "WebUI", command: "指令", llm_tool: "LLM 工具" })[value] || value || "未知"; }
+  function sourceLabel(value) { return ({ webui: "WebUI", command: "指令", llm_tool: "LLM 工具", import: "导入" })[value] || value || "未知"; }
   function invocationSourceLabel(source) { if (!source || !Object.values(source).some((value) => value)) return "未记录"; return { 场景: source.context_type === "group" ? "群聊" : source.context_type === "private" ? "私聊" : source.context_type, 平台: source.platform_name, 平台实例: source.platform_id, 群ID: source.group_id, 群名称: source.group_name, 用户ID: source.user_id, 用户昵称: source.user_name }; }
   function setError(target, message) { target.textContent = message || ""; }
   function errorMessage(error, fallback) {
@@ -79,6 +81,7 @@
       || !els.imagePreview.classList.contains("is-hidden")
       || !!mobileImageViewer
       || !els.parameterDialog.classList.contains("is-hidden")
+      || !$('studioModalRoot').classList.contains("is-hidden")
       || !$('confirmDialog').classList.contains("is-hidden");
     document.documentElement.classList.toggle("modal-open", locked);
     document.body.classList.toggle("modal-open", locked);
@@ -88,7 +91,7 @@
     state.view = view;
     document.querySelectorAll(".nav-item").forEach((button) => button.classList.toggle("is-active", button.dataset.view === view));
     document.querySelectorAll(".view").forEach((item) => item.classList.toggle("is-active", item.id === `${view}View`));
-    const labels = { generate: ["生图", "选择模式和模型后开始创作"], gallery: ["画廊", "搜索、筛选、复现或导出历史生成记录"], settings: ["设置", "管理运行策略、历史、生图服务商和模型"], };
+    const labels = { generate: ["生图", "选择模式和模型后开始创作"], gallery: ["画廊", "搜索、筛选、复现或导出历史生成记录"], import: ["导入", "图片与生成参数"], settings: ["设置", "管理运行策略、历史、生图服务商和模型"], };
     els.pageTitle.textContent = labels[view][0]; els.pageSubtitle.textContent = labels[view][1];
     if (view === "gallery") void loadGallery();
     if (view === "settings") { void loadSettings(); void loadStorageHealth(); }
@@ -99,7 +102,8 @@
     els.modelParameters.querySelectorAll("[data-model-parameter]").forEach((input) => {
       if (input.dataset.uiOnly === "true") return;
       const key = input.dataset.modelParameter;
-      if (input.type === "checkbox") values[key] = input.checked;
+      if (input.dataset.nullValue === "true") values[key] = null;
+      else if (input.type === "checkbox") values[key] = input.checked;
       else if (input.dataset.parameterType === "number") values[key] = input.value === "" ? "" : Number(input.value);
       else if (input.dataset.parameterType === "json") { try { values[key] = input.value.trim() ? JSON.parse(input.value) : {}; } catch { values[key] = input.value; } }
       else values[key] = input.value;
@@ -111,7 +115,7 @@
     const type = String(descriptor.type || "text").toLowerCase();
     const label = escape(name);
     const description = escape(descriptor.description || descriptor.label || name);
-    let value = state.parameterValues[name] ?? descriptor.default ?? "";
+    let value = Object.prototype.hasOwnProperty.call(state.parameterValues, name) ? state.parameterValues[name] : descriptor.default ?? "";
     const requestKey = escape(descriptor.request_key || name);
     if (type === "preset" && Array.isArray(descriptor.choices)) {
       const options = descriptor.choices.map((choice) => `<option value="${escape(choice.value)}" ${String(choice.value) === String(value) ? "selected" : ""}>${escape(choice.label || choice.value)}</option>`).join("");
@@ -291,6 +295,7 @@
   }
 
   async function loadGallery(page = state.galleryPage) {
+    if (state.view === "gallery") state.galleryLimit = library.galleryPageSize();
     const requestedPage = Math.max(0, Number.isFinite(Number(page)) ? Math.floor(Number(page)) : 0);
     const revision = ++galleryRequestRevision;
     try {
@@ -301,7 +306,7 @@
       const totalPages = Math.max(1, Math.ceil(total / limit));
       if (total > 0 && requestedPage >= totalPages) { state.galleryPage = totalPages - 1; return await loadGallery(state.galleryPage); }
       state.galleryPage = Math.min(requestedPage, totalPages - 1); state.galleryLimit = limit; state.galleryTotal = total;
-      state.galleryItems = payload.items || []; state.selectedIds.clear(); renderGallery(payload);
+      state.galleryItems = payload.items || []; renderGallery(payload);
       return true;
     } catch (error) {
       showNotice(errorMessage(error, "画廊加载失败"), "error");
@@ -310,25 +315,26 @@
   }
 
   function galleryFilters() {
-    return { query: els.gallerySearch.value, provider_id: els.galleryProvider.value, mode: els.galleryMode.value, source: els.gallerySource.value };
+    return { query: els.gallerySearch.value, provider_id: els.galleryProvider.value, mode: els.galleryMode.value, source: els.gallerySource.value, generation_engine: $("galleryEngine").value, favorite: $("galleryFavorite").value };
   }
 
   function renderGallery(payload) {
     const currentProvider = els.galleryProvider.value; els.galleryProvider.innerHTML = '<option value="">全部服务商</option>' + (payload.filters?.providers || []).map((item) => `<option value="${escape(item.id)}">${escape(item.name)}</option>`).join(""); els.galleryProvider.value = currentProvider;
-    els.galleryEmpty.classList.toggle("is-hidden", state.galleryItems.length > 0); els.galleryGrid.innerHTML = state.galleryItems.map((item) => `<article class="gallery-card" data-gallery-id="${item.id}"><div class="gallery-image-wrap"><img src="${item.thumbnail_data_url}" alt="${escape(item.prompt_preview)}" /><input type="checkbox" data-select-id="${item.id}" aria-label="选择生成记录" /></div><div class="gallery-info"><strong>${escape(item.provider_name)} · ${escape(item.model)}</strong><p>${escape(item.prompt_preview)}</p><div class="gallery-meta"><span>${item.mode === "img2img" ? "图生图" : "文生图"}</span><span>${formatDate(item.created_at)}</span></div></div></article>`).join("");
-    els.galleryGrid.querySelectorAll("[data-gallery-id]").forEach((card) => card.addEventListener("click", (event) => { if (event.target.matches("input")) return; void openDetail(card.dataset.galleryId); }));
+    els.galleryEmpty.classList.toggle("is-hidden", state.galleryItems.length > 0); els.galleryGrid.innerHTML = state.galleryItems.map(library.renderGalleryCard).join("");
+    els.galleryGrid.querySelectorAll("[data-gallery-id]").forEach((card) => card.addEventListener("click", (event) => { if (event.target.closest(".gallery-selection")) return; void openDetail(card.dataset.galleryId); }));
     els.galleryGrid.querySelectorAll("[data-select-id]").forEach((input) => input.addEventListener("change", () => { input.checked ? state.selectedIds.add(input.dataset.selectId) : state.selectedIds.delete(input.dataset.selectId); updateSelection(); }));
     const limit = Math.max(1, Number(payload.limit || state.galleryLimit)); const total = Math.max(0, Number(payload.total || state.galleryTotal)); const totalPages = Math.max(1, Math.ceil(total / limit));
     els.galleryPagination.classList.toggle("is-hidden", totalPages <= 1); els.galleryPageLabel.textContent = `第 ${state.galleryPage + 1} / ${totalPages} 页 · 共 ${total} 条`; els.galleryPrev.disabled = state.galleryPage <= 0; els.galleryNext.disabled = state.galleryPage >= totalPages - 1;
     updateSelection();
+    library.galleryRendered(payload);
   }
 
-  function updateSelection() { els.selectionBar.classList.toggle("is-hidden", state.selectedIds.size === 0); els.selectionCount.textContent = `已选 ${state.selectedIds.size} 项`; }
+  function updateSelection() { els.selectionBar.classList.toggle("is-hidden", state.selectedIds.size === 0); els.selectionCount.textContent = `已选 ${state.selectedIds.size} 项`; library.syncFloatingBars(); }
   function clearGallerySelection() { state.selectedIds.clear(); els.galleryGrid.querySelectorAll("[data-select-id]").forEach((input) => { input.checked = false; }); updateSelection(); }
 
   function requestParameters(detail) {
     const parameters = detail?.parameters && typeof detail.parameters === "object" ? detail.parameters : {};
-    return { mode: detail?.mode || "", model: detail?.model || "", prompt: detail?.original_prompt || "", negative_prompt: parameters.negative_prompt || "", size: parameters.size || "", count: parameters.count || 1, parameters: parameters.parameters || {} };
+    return { mode: detail?.mode || "", model: detail?.model || "", prompt: detail?.original_prompt ?? "", negative_prompt: parameters.negative_prompt ?? "", size: parameters.size ?? "", count: parameters.count ?? 1, parameters: parameters.parameters || {} };
   }
 
   function detailDisplayImages(detail, fallbackThumbnail = "") {
@@ -378,7 +384,8 @@
     const dots = displayImages.length > 1 ? `<div class="detail-carousel-dots" aria-label="本次生成图片位置">${displayImages.map((_item, index) => `<button class="detail-carousel-dot ${index === imageIndex ? "is-active" : ""}" data-detail-dot="${index}" type="button" aria-label="查看本次生成的第 ${index + 1} 张图片" aria-current="${index === imageIndex ? "true" : "false"}"></button>`).join("")}</div>` : "";
     const imageMarkup = currentImageUrl ? `<img class="detail-image-backdrop" src="${escape(currentImageUrl)}" alt="" aria-hidden="true" /><img class="detail-image" src="${escape(currentImageUrl)}" alt="生成结果 ${imageIndex + 1}" data-detail-image="${imageIndex}" />` : '<div class="detail-image-pending">正在读取图片…</div>';
     const carousel = currentImage ? `<div class="detail-images"><div class="detail-image-frame">${imageMarkup}<button class="detail-carousel-nav is-previous" data-detail-nav="-1" type="button" aria-label="查看上一张图片" ${canPrevious ? "" : "disabled"}><span aria-hidden="true">‹</span></button><button class="detail-carousel-nav is-next" data-detail-nav="1" type="button" aria-label="查看下一张图片" ${canNext ? "" : "disabled"}><span aria-hidden="true">›</span></button>${dots}</div></div>` : '<div class="detail-loading">正在读取生成图片…</div>';
-    els.drawerBody.innerHTML = `${carousel}<div class="detail-block"><h3>提示词</h3><pre>${escape(detail.original_prompt)}</pre></div><div class="detail-block"><h3>请求参数</h3><pre>${escape(JSON.stringify(requestParameters(detail), null, 2))}</pre></div><div class="detail-block"><h3>信息</h3><pre>${escape(JSON.stringify({ 服务商: detail.provider_name, 模型: detail.model, 模式: detail.mode === "img2img" ? "图生图" : "文生图", 来源: sourceLabel(detail.source), 调用来源身份: sourceIdentity, 生成时间: formatDate(detail.created_at), 图片数量: images.length, 文件大小: formatBytes(totalBytes), 耗时毫秒: detail.elapsed_ms }, null, 2))}</pre></div><div class="detail-block"><h3>参考图</h3><div class="detail-references" data-detail-references>${detailReferenceMarkup(refs)}</div></div><div class="detail-block detail-actions"><button class="primary-button" data-reproduce="${detail.id}" type="button">复现参数</button><button class="quiet-button" data-copy-request="${detail.id}" type="button">复制请求参数</button>${currentImage?.data_url && state.detailAssetsLoaded ? ' <button class="quiet-button" data-output-reference="1" type="button">将当前成图用作新参考图</button>' : '<span class="field-hint" data-detail-assets-placeholder>高清图片仍在加载，请稍候。</span>'}</div>`;
+    els.drawerBody.innerHTML = `${carousel}${library.detailMetadataMarkup(detail, currentImage)}<div class="detail-block"><h3>信息</h3><pre>${escape(JSON.stringify({ 服务商: detail.provider_name, 模型: detail.model, 模式: library.modeLabel(detail.mode), 生图来源: library.engineLabel(detail.generation_engine), 来源: sourceLabel(detail.source), 调用来源身份: sourceIdentity, 记录时间: formatDate(detail.created_at), 图片数量: images.length, 文件大小: formatBytes(totalBytes), 耗时毫秒: detail.elapsed_ms }, null, 2))}</pre></div><div class="detail-block"><h3>参考图</h3><div class="detail-references" data-detail-references>${detailReferenceMarkup(refs)}</div></div>`;
+    library.updateDetailActions(detail);
     const imageFrame = els.drawerBody.querySelector(".detail-image-frame");
     let lastSwipeAt = 0;
     if (imageFrame) {
@@ -427,6 +434,7 @@
       }));
       state.detailAssetsLoaded = true;
       state.detailData = { ...summary, ...assets, images: mergedImages };
+      library.updateDetailActions(state.detailData);
       if (state.imagePreviewContext?.type === "detail" && state.imagePreviewContext.generationId === id) {
         const previewItems = normalizePreviewItems(detailDisplayImages(state.detailData, fallbackThumbnail), "", "");
         if (previewItems.length) {
@@ -487,6 +495,7 @@
   async function openDetail(id, requestedImageIndex = 0, options = {}) {
     const revision = ++detailRequestRevision;
     state.detailId = id; state.detailData = null; state.detailAssetsLoaded = false; state.detailRequestedImageIndex = requestedImageIndex === "last" ? -1 : Math.max(0, Number(requestedImageIndex) || 0);
+    library.updateDetailActions(null);
     const card = state.galleryItems.find((item) => String(item.id) === String(id));
     state.detailFallbackThumbnail = card?.thumbnail_data_url || "";
     els.detailDrawer.classList.add("is-open"); els.detailDrawer.setAttribute("aria-hidden", "false"); els.scrim.classList.remove("is-hidden"); syncPageScrollLock(); if (options.focus !== false) els.detailDrawer.focus();
@@ -801,17 +810,27 @@
 
   async function reproduce(id) {
     try {
-      const draft = await apiPost(`gallery/reproduce/${id}`, {}); state.mode = draft.mode || "text2img"; state.selectedProviderId = draft.provider_id || ""; state.references = draft.references || [];
-      state.selectedModelRef = draft.model_ref || (draft.provider_id && draft.model ? `${draft.provider_id}:${draft.model}` : "");
-      const rawParameterValues = { ...(draft.parameters || {}), size: draft.size || "", count: draft.count || 1 };
-      state.parameterValues = rawParameterValues; state.parameterCarry = { ...rawParameterValues }; state.negativePromptCarry = draft.negative_prompt || ""; state.hasNegativePromptCarry = !!selectedModel()?.supports_negative_prompt;
-      els.prompt.value = draft.prompt || ""; els.negativePrompt.value = draft.negative_prompt || "";
-      document.querySelectorAll(".segment").forEach((button) => button.classList.toggle("is-active", button.dataset.mode === state.mode)); renderModelChoices();
-      const model = selectedModel();
-      if (model) { state.parameterValues = parameterValuesForModel(model, rawParameterValues); renderModelWorkspace(); }
-      closeDetail(); switchView("generate");
-      if (draft.notice) setError(els.generationError, draft.notice);
+      if (state.detailData?.source === "import") {
+        const payload = await apiGet(`gallery/parameters/${id}`, { image_id: state.detailData.images?.[state.detailImageIndex]?.id, format: "studio" });
+        await library.resolveParameters(typeof payload.content === "string" ? payload.content : JSON.stringify(payload.content));
+      } else applyDraft(await apiPost(`gallery/reproduce/${id}`, {}));
     } catch (error) { showNotice(errorMessage(error, "复现参数读取失败"), "error"); }
+  }
+
+  function applyDraft(draft) {
+    state.mode = draft.mode === "img2img" ? "img2img" : "text2img"; state.selectedProviderId = draft.provider_id || ""; state.references = draft.references || [];
+    state.selectedModelRef = draft.model_ref || (draft.provider_id && draft.model ? `${draft.provider_id}:${draft.model}` : "");
+    const rawParameterValues = { ...(draft.parameters || {}) };
+    if (Object.prototype.hasOwnProperty.call(draft, "size")) rawParameterValues.size = draft.size;
+    if (Object.prototype.hasOwnProperty.call(draft, "count")) rawParameterValues.count = draft.count;
+    state.parameterValues = rawParameterValues; state.parameterCarry = { ...rawParameterValues }; state.negativePromptCarry = draft.negative_prompt ?? ""; state.hasNegativePromptCarry = !!selectedModel()?.supports_negative_prompt;
+    els.prompt.value = draft.prompt ?? ""; els.negativePrompt.value = draft.negative_prompt ?? "";
+    document.querySelectorAll(".segment").forEach((button) => button.classList.toggle("is-active", button.dataset.mode === state.mode)); renderModelChoices();
+    const model = selectedModel();
+    if (model) { state.parameterValues = parameterValuesForModel(model, rawParameterValues); renderModelWorkspace(); }
+    els.modelParameters.querySelectorAll("[data-model-parameter]").forEach((input) => { if (state.parameterValues[input.dataset.modelParameter] === null) { input.dataset.nullValue = "true"; input.addEventListener("input", () => { delete input.dataset.nullValue; }, { once: true }); } });
+    closeDetail(); switchView("generate"); renderReferences();
+    if (draft.notice) setError(els.generationError, draft.notice);
   }
 
   function populateDefaultModelSelect(select, models, selectedRef) {
@@ -843,14 +862,16 @@
     finally { els.runMaintenanceButton.disabled = false; els.runDeepMaintenanceButton.disabled = false; }
   }
 
-  async function loadSettings() {
+  async function loadSettings(force = false, suppliedPayload = null) {
+    if (state.settings && !force) return true;
     if (settingsLoadPromise) return settingsLoadPromise;
     els.addProviderButton.disabled = true; els.addModelButton.disabled = true; els.saveSettingsButton.disabled = true;
     setError(els.settingsError, "正在读取设置…");
     settingsLoadPromise = (async () => {
       try {
-        const payload = await apiGet("settings/get");
+        const payload = suppliedPayload || await apiGet("settings/get");
         if (!payload?.base || !payload?.webui || !Array.isArray(payload.webui.providers)) throw new Error("设置接口返回的数据格式无效");
+        normalizeSettingsModelDefaults(payload);
         state.settings = payload;
         els.settingTool.checked = !!payload.base.enable_llm_tool;
         const llmPolicy = payload.webui.llm_policy || {}; const assetPolicy = payload.webui.asset_policy || {}; els.agentImageReturnMode.value = ["asset", "preview", "original"].includes(llmPolicy.image_return_mode) ? llmPolicy.image_return_mode : "preview"; els.agentPreviewMaxEdge.value = Number(assetPolicy.preview_max_edge || 768); els.agentPreviewQuality.value = Number(assetPolicy.preview_quality || 80); els.agentAssetRetentionHours.value = Number(assetPolicy.lease_hours || 24); syncAgentImageSettings();
@@ -863,6 +884,7 @@
         if (!payload.webui.providers.some((item) => item.id === state.selectedSettingsProviderId)) state.selectedSettingsProviderId = payload.webui.providers[0]?.id || "";
         state.selectedSettingsModelId = "";
         renderSettingsProviders();
+        settingsBaseline = settingsFingerprint(settingsDraft()); updateSettingsDirty();
         const warnings = Array.isArray(payload.validation_errors) ? payload.validation_errors.filter(Boolean) : [];
         setError(els.settingsError, warnings.length ? `配置提示：${warnings.join("；")}` : "");
         return true;
@@ -934,6 +956,7 @@
     els.settingsProviderList.querySelectorAll("[data-settings-provider]").forEach((button) => button.addEventListener("click", () => { state.selectedSettingsProviderId = button.dataset.settingsProvider; state.selectedSettingsModelId = ""; renderSettingsProviders(); }));
     renderProviderEditor();
     renderModelEditor();
+    updateSettingsDirty();
   }
   function renderProviderEditor() {
     const provider = currentSettingsProvider(); if (!provider) { els.providerForm.innerHTML = '<div class="provider-empty">选择或新增生图服务商后编辑详细配置。</div>'; return; }
@@ -1098,28 +1121,67 @@
     state.selectedSettingsModelId = requestedId; renderModelEditor(); showNotice("已新增模型，请填写能力和参数 schema。", "success");
   }
   async function saveSettings() {
+    if (settingsSaving) return;
     if (!state.settings && !await loadSettings()) return;
-    setError(els.settingsError, "正在保存设置…"); els.saveSettingsButton.disabled = true; els.saveSettingsButton.textContent = "保存中…";
-    const webui = state.settings.webui; webui.history = { enabled: els.historyEnabled.checked, retain_reference_images: els.retainReferences.checked, record_invocation_identity: els.recordInvocationIdentity.checked, max_records: Number(els.historyRecords.value), max_megabytes: Number(els.historyMegabytes.value) };
-    webui.llm_policy = { ...(webui.llm_policy || {}), image_return_mode: els.agentImageReturnMode.value }; webui.asset_policy = { preview_max_edge: Number(els.agentPreviewMaxEdge.value), preview_quality: Number(els.agentPreviewQuality.value), lease_hours: Number(els.agentAssetRetentionHours.value) };
-    webui.generation_defaults = { page: { text2img_model_ref: els.settingPageDefaultTextModel.value, img2img_model_ref: els.settingPageDefaultImageModel.value }, tool: { text2img_model_ref: els.settingToolDefaultTextModel.value, img2img_model_ref: els.settingToolDefaultImageModel.value } };
+    const invalid = $("settingsView").querySelector("input:invalid, textarea:invalid, select:invalid");
+    if (invalid) { invalid.reportValidity(); setError(els.settingsError, "请先修正无效的设置项。"); return; }
+    settingsSaving = true; setError(els.settingsError, "正在保存设置…"); els.saveSettingsButton.disabled = true; library.setCommandLabel("saveSettingsButton", "保存中…");
+    const draft = settingsDraft(); const submitted = settingsFingerprint(draft); const webui = draft.studio;
     try {
-      await apiPost("settings/save", { settings_revision: webui.revision ?? webui.ui.settings_revision, base: { enable_llm_tool: els.settingTool.checked }, studio: webui });
-      await bootstrap(); await loadSettings(); setError(els.settingsError, ""); showNotice("设置已保存并生效。", "success");
+      await apiPost("settings/save", { settings_revision: webui.revision ?? webui.ui?.settings_revision, ...draft });
+      const server = await apiGet("settings/get");
+      normalizeSettingsModelDefaults(server);
+      await bootstrap();
+      if (settingsFingerprint(settingsDraft()) === submitted) {
+        await loadSettings(true, server);
+      } else {
+        state.settings.webui.revision = server.webui.revision;
+        settingsBaseline = settingsFingerprint({ base: server.base, studio: server.webui });
+      }
+      setError(els.settingsError, ""); showNotice("设置已保存并生效。", "success");
     } catch (error) {
       const message = errorMessage(error, "设置保存失败"); setError(els.settingsError, message); showNotice(message, "error");
-    } finally { els.saveSettingsButton.disabled = false; els.saveSettingsButton.textContent = "保存全部设置"; }
+    } finally { settingsSaving = false; els.saveSettingsButton.disabled = false; library.setCommandLabel("saveSettingsButton", "保存全部设置"); updateSettingsDirty(); }
+  }
+
+  function settingsDraft() {
+    if (!state.settings) return null;
+    const webui = JSON.parse(JSON.stringify(state.settings.webui));
+    webui.history = { ...(webui.history || {}), enabled: els.historyEnabled.checked, retain_reference_images: els.retainReferences.checked, record_invocation_identity: els.recordInvocationIdentity.checked, max_records: Number(els.historyRecords.value), max_megabytes: Number(els.historyMegabytes.value) };
+    webui.llm_policy = { ...(webui.llm_policy || {}), image_return_mode: els.agentImageReturnMode.value };
+    webui.asset_policy = { ...(webui.asset_policy || {}), preview_max_edge: Number(els.agentPreviewMaxEdge.value), preview_quality: Number(els.agentPreviewQuality.value), lease_hours: Number(els.agentAssetRetentionHours.value) };
+    webui.generation_defaults = { page: { text2img_model_ref: els.settingPageDefaultTextModel.value, img2img_model_ref: els.settingPageDefaultImageModel.value }, tool: { text2img_model_ref: els.settingToolDefaultTextModel.value, img2img_model_ref: els.settingToolDefaultImageModel.value } };
+    return { base: { enable_llm_tool: els.settingTool.checked }, studio: webui };
+  }
+
+  function normalizeSettingsModelDefaults(payload) {
+    (payload.webui?.providers || []).forEach((provider) => (provider.models || []).forEach((model) => ensureToolConfig(model, provider)));
+  }
+
+  function settingsFingerprint(value) {
+    const copy = value ? JSON.parse(JSON.stringify(value)) : value;
+    if (copy?.studio) { delete copy.studio.revision; if (copy.studio.ui) delete copy.studio.ui.settings_revision; }
+    const normalize = (item) => Array.isArray(item) ? item.map(normalize) : item && typeof item === "object" ? Object.fromEntries(Object.keys(item).sort().map((key) => [key, normalize(item[key])])) : item;
+    return JSON.stringify(normalize(copy));
+  }
+
+  function updateSettingsDirty() {
+    const dirty = !!state.settings && !!settingsBaseline && (settingsFingerprint(settingsDraft()) !== settingsBaseline || !!$("settingsView").querySelector("input:invalid, textarea:invalid, select:invalid"));
+    els.saveSettingsButton.classList.toggle("is-dirty", dirty); $("settingsDirtyStatus").textContent = dirty ? "有未保存的更改" : state.settings ? "已保存" : "";
   }
 
   function dataUrlToFile(dataUrl, name) { const [head, encoded] = dataUrl.split(",", 2); const type = (head.match(/data:([^;]+)/) || [])[1] || "image/png"; const bytes = Uint8Array.from(atob(encoded), (char) => char.charCodeAt(0)); return new File([bytes], name, { type }); }
   async function exportSelected() { try { const result = await apiPost("gallery/export", { ids: Array.from(state.selectedIds) }); const client = await bridge(); await client.download(result.download_endpoint, {}, result.filename); showNotice("导出文件已开始下载。", "success"); } catch (error) { showNotice(errorMessage(error, "画廊导出失败"), "error"); } }
-  async function deleteSelected() { if (!await confirmAction(`永久删除 ${state.selectedIds.size} 条生成记录及其结果图？`)) return; try { await apiPost("gallery/delete", { ids: Array.from(state.selectedIds) }); await loadGallery(); showNotice("所选生成记录已删除。", "success"); } catch (error) { showNotice(errorMessage(error, "生成记录删除失败"), "error"); } }
+  async function deleteSelected() { if (!await confirmAction(`永久删除 ${state.selectedIds.size} 条生成记录及其结果图？`)) return; try { await apiPost("gallery/delete", { ids: Array.from(state.selectedIds) }); clearGallerySelection(); await loadGallery(); showNotice("所选生成记录已删除。", "success"); } catch (error) { showNotice(errorMessage(error, "生成记录删除失败"), "error"); } }
   async function useDataUrlAsReference(dataUrl, name) { try { const client = await bridge(); const uploaded = await client.upload("studio/reference/upload", dataUrlToFile(dataUrl, name)); state.references = [uploaded]; state.mode = "img2img"; document.querySelectorAll(".segment").forEach((button) => button.classList.toggle("is-active", button.dataset.mode === "img2img")); renderModelChoices(); renderReferences(); closeDetail(); switchView("generate"); setError(els.generationError, "已将当前成图作为新的图生图参考图。它不会被当作历史原始参考图。"); } catch (error) { setError(els.generationError, errorMessage(error, "添加参考图失败")); } }
   function confirmAction(message) { return new Promise((resolve) => { const dialog = $("confirmDialog"); const cancel = $("confirmCancel"); const accept = $("confirmAccept"); $("confirmMessage").textContent = message; dialog.classList.remove("is-hidden"); els.scrim.classList.remove("is-hidden"); syncPageScrollLock(); accept.focus(); const onKeydown = (event) => { if (event.key === "Escape") finish(false); }; const finish = (value) => { dialog.classList.add("is-hidden"); if (!els.detailDrawer.classList.contains("is-open")) els.scrim.classList.add("is-hidden"); syncPageScrollLock(); cancel.removeEventListener("click", onCancel); accept.removeEventListener("click", onAccept); document.removeEventListener("keydown", onKeydown); activeConfirmation = null; resolve(value); }; const onCancel = () => finish(false); const onAccept = () => finish(true); activeConfirmation = finish; cancel.addEventListener("click", onCancel); accept.addEventListener("click", onAccept); document.addEventListener("keydown", onKeydown); }); }
 
   function bindEvents() {
     if (eventsBound) return;
     eventsBound = true;
+    library.bind();
+    ["input", "change", "click"].forEach((name) => $("settingsView").addEventListener(name, () => window.setTimeout(updateSettingsDirty, 0)));
+    $("parameterDialogApply").addEventListener("click", () => window.setTimeout(updateSettingsDirty, 0));
     document.querySelectorAll(".nav-item").forEach((button) => button.addEventListener("click", () => switchView(button.dataset.view)));
     document.querySelectorAll(".segment").forEach((button) => button.addEventListener("click", () => applyGenerationSelection(button.dataset.mode, state.defaultModelRefs[button.dataset.mode] || "")));
     document.querySelectorAll("[data-default-scope]").forEach((button) => button.addEventListener("click", () => { document.querySelectorAll("[data-default-scope]").forEach((item) => item.classList.toggle("is-active", item === button)); document.querySelectorAll("[data-default-panel]").forEach((panel) => panel.classList.toggle("is-hidden", panel.dataset.defaultPanel !== button.dataset.defaultScope)); }));
@@ -1131,8 +1193,10 @@
     els.generationForm.addEventListener("submit", generate); $("galleryRefresh").addEventListener("click", () => void loadGallery()); els.galleryPrev.addEventListener("click", () => void loadGallery(state.galleryPage - 1)); els.galleryNext.addEventListener("click", () => void loadGallery(state.galleryPage + 1)); els.gallerySearch.addEventListener("change", () => void loadGallery(0)); els.galleryProvider.addEventListener("change", () => void loadGallery(0)); els.galleryMode.addEventListener("change", () => void loadGallery(0)); els.gallerySource.addEventListener("change", () => void loadGallery(0));
     $("cancelSelectionButton").addEventListener("click", clearGallerySelection); $("selectAllButton").addEventListener("click", () => { state.galleryItems.forEach((item) => state.selectedIds.add(item.id)); els.galleryGrid.querySelectorAll("[data-select-id]").forEach((input) => { input.checked = true; }); updateSelection(); }); $("exportButton").addEventListener("click", () => void exportSelected()); $("deleteButton").addEventListener("click", () => void deleteSelected());
     $("closeDrawer").addEventListener("click", closeDetail); $("closeImagePreview").addEventListener("click", closeImagePreview); els.imagePreviewPrev.addEventListener("click", () => void navigateImagePreview(-1)); els.imagePreviewNext.addEventListener("click", () => void navigateImagePreview(1)); bindImagePreviewGestures(); els.imagePreview.querySelector("[data-close-image-preview]").addEventListener("click", closeImagePreview); els.previewImage.addEventListener("click", () => { if (Date.now() - state.imagePreviewSwipeAt < 500) return; closeImagePreview(); }); els.scrim.addEventListener("click", () => { if (!els.parameterDialog.classList.contains("is-hidden")) return; if (activeConfirmation) activeConfirmation(false); else closeDetail(); }); $("parameterDialogCancel").addEventListener("click", closeToolParameterDialog); $("parameterDialogApply").addEventListener("click", applyToolParameterDialog); els.addProviderButton.addEventListener("click", () => void addProvider()); els.addModelButton.addEventListener("click", () => void addModel()); els.saveSettingsButton.addEventListener("click", () => void saveSettings());
-    document.addEventListener("keydown", (event) => { if (mobileImageViewer) return; if (event.key === "Escape") { if (!els.imagePreview.classList.contains("is-hidden")) closeImagePreview(); else if (els.detailDrawer.classList.contains("is-open") && !activeConfirmation) closeDetail(); return; } if (!els.imagePreview.classList.contains("is-hidden")) { if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); void navigateImagePreview(event.key === "ArrowLeft" ? -1 : 1); } return; } if (!els.detailDrawer.classList.contains("is-open") || activeConfirmation) return; if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); void navigateDetail(event.key === "ArrowLeft" ? -1 : 1); } });
+    document.addEventListener("keydown", (event) => { if (mobileImageViewer || library.modalOpen()) return; if (event.key === "Escape") { if (!els.parameterDialog.classList.contains("is-hidden")) closeToolParameterDialog(); else if (!els.imagePreview.classList.contains("is-hidden")) closeImagePreview(); else if (els.detailDrawer.classList.contains("is-open") && !activeConfirmation) closeDetail(); return; } if (event.target.closest("input,textarea,select,[contenteditable=true]")) return; if (!els.imagePreview.classList.contains("is-hidden")) { if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); void navigateImagePreview(event.key === "ArrowLeft" ? -1 : 1); } return; } if (!els.detailDrawer.classList.contains("is-open") || activeConfirmation) return; if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); void navigateDetail(event.key === "ArrowLeft" ? -1 : 1); } });
   }
+
+  const library = window.ImageStudioLibrary({ state, escape, apiGet, apiPost, bridge, showNotice, errorMessage, formatDate, formatBytes, sourceLabel, syncPageScrollLock, switchView, requestParameters, loadGallery, clearGallerySelection, openDetail, closeDetail, reproduce, applyDraft, useDataUrlAsReference });
 
   async function start() {
     bindEvents();

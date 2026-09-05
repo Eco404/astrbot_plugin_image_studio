@@ -277,7 +277,7 @@ class GenerationStore:
     def _metadata_for_asset_sync(
         self, asset_id: str, data: bytes, *, strict: bool = False
     ) -> dict[str, Any]:
-        from .image_metadata import parse_image_metadata
+        from .image_metadata import PARSER_VERSION, parse_image_metadata
 
         with self._connect() as conn:
             row = conn.execute(
@@ -286,7 +286,7 @@ class GenerationStore:
             ).fetchone()
         if row is not None:
             cached = _load_json(str(row["metadata_json"]))
-            if int(cached.get("parser_version", 0)) > 0:
+            if int(cached.get("parser_version", 0)) >= PARSER_VERSION:
                 return cached
         try:
             return parse_image_metadata(data)
@@ -325,10 +325,13 @@ class GenerationStore:
     def _backfill_metadata_sync(self) -> None:
         """Parse old asset metadata outside the schema migration transaction."""
 
+        from .image_metadata import PARSER_VERSION
+
         with self._connect() as conn:
             rows = conn.execute(
                 "SELECT a.id, a.path FROM image_assets a LEFT JOIN image_metadata m "
-                "ON m.asset_id = a.id WHERE m.asset_id IS NULL OR m.parser_version = 0"
+                "ON m.asset_id = a.id WHERE m.asset_id IS NULL OR m.parser_version < ?",
+                (PARSER_VERSION,),
             ).fetchall()
         for row in rows:
             path = self.data_dir / str(row["path"])
@@ -1077,8 +1080,18 @@ class GenerationStore:
 
         if not data or len(data) > 30 * 1024 * 1024:
             raise ValueError("导入图片不能为空且不能超过 30 MB")
-        if not _image_is_decodable(data):
-            raise ValueError("无法读取导入图片")
+        from PIL import Image
+
+        from .image_metadata import MAX_PIXELS
+
+        try:
+            with Image.open(io.BytesIO(data)) as image:
+                if image.format not in {"PNG", "JPEG", "WEBP", "GIF"}:
+                    raise ValueError("导入仅支持 PNG、JPEG、WebP 或 GIF 图片")
+                if image.width * image.height > MAX_PIXELS:
+                    raise ValueError("导入图片超过 6400 万像素限制")
+        except (OSError, Image.DecompressionBombError) as exc:
+            raise ValueError("无法读取导入图片或图片尺寸超出限制") from exc
         if not isinstance(overrides, dict):
             raise ValueError("导入补充信息必须为对象")
         if "parameters" in overrides and not isinstance(overrides["parameters"], dict):
