@@ -93,6 +93,7 @@
     document.querySelectorAll(".view").forEach((item) => item.classList.toggle("is-active", item.id === `${view}View`));
     const labels = { generate: ["生图", "选择模式和模型后开始创作"], gallery: ["画廊", "搜索、筛选、复现或导出历史生成记录"], import: ["导入", "图片与生成参数"], settings: ["设置", "管理运行策略、历史、生图服务商和模型"], };
     els.pageTitle.textContent = labels[view][0]; els.pageSubtitle.textContent = labels[view][1];
+    library.syncFloatingBars();
     if (view === "gallery") void loadGallery();
     if (view === "settings") { void loadSettings(); void loadStorageHealth(); }
   }

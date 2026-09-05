@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import time
 import uuid
 from pathlib import Path
@@ -80,7 +81,7 @@ IMAGE_WORKFLOW_CONTINUATION_PROMPT = (
     PLUGIN_NAME,
     "local",
     "多 Provider 生图、画廊与 Agent 可读图片工具。",
-    "0.5.1",
+    "0.6.1",
 )
 class ImageStudioPlugin(Star):
     """Own Image Studio configuration, generation, gallery, and tool APIs."""
@@ -98,6 +99,7 @@ class ImageStudioPlugin(Star):
         self._maintenance_task: asyncio.Task[None] | None = None
         self._exports: dict[str, tuple[Path, float]] = {}
         self._imports: dict[str, dict[str, Any]] = {}
+        self._import_groups: dict[str, dict[str, Any]] = {}
         self._studio_settings, studio_errors = load_studio_settings(Path(self.data_dir))
         self._settings, runtime_errors = runtime_settings(config, self._studio_settings)
         self._settings_errors = [*studio_errors, *runtime_errors]
@@ -150,11 +152,13 @@ class ImageStudioPlugin(Star):
         self._session = None
         self._service = None
         self._imports.clear()
+        self._import_groups.clear()
 
     async def _maintenance_loop(self) -> None:
         while True:
             await asyncio.sleep(3600)
             try:
+                await self._expire_import_groups()
                 await self.store.run_maintenance(
                     self._settings.history,
                     preview_max_edge=self._settings.asset_preview_max_edge,
@@ -178,6 +182,18 @@ class ImageStudioPlugin(Star):
                 self._api_import_prepare,
                 ["POST"],
                 "Image Studio: prepare imports",
+            ),
+            (
+                "imports/group/<group_id>/commit",
+                self._api_import_group_commit,
+                ["POST"],
+                "Image Studio: commit image group",
+            ),
+            (
+                "imports/group/<group_id>/cancel",
+                self._api_import_group_cancel,
+                ["POST"],
+                "Image Studio: cancel image group",
             ),
             (
                 "imports/upload/<upload_id>",
@@ -460,6 +476,12 @@ class ImageStudioPlugin(Star):
         items = body.get("items") if isinstance(body, dict) else None
         if not isinstance(items, list) or not 1 <= len(items) <= 100:
             return error_response("每批请选择 1 至 100 张图片", status_code=400)
+        as_group = body.get("as_group", False)
+        if not isinstance(as_group, bool):
+            return error_response("图组选项必须是布尔值", status_code=400)
+        if as_group and len(items) < 2:
+            return error_response("图组至少需要两张图片", status_code=400)
+        await self._expire_import_groups()
         now = time.time()
         self._imports = {
             key: value
@@ -501,16 +523,54 @@ class ImageStudioPlugin(Star):
             return error_response(
                 "待上传项目过多，请完成已有上传后重试", status_code=429
             )
+        group_response: dict[str, Any] = {}
+        if as_group:
+            models = [item["overrides"].get("model") for _, item in pending]
+            if any(not isinstance(model, str) or not model.strip() for model in models):
+                return error_response(
+                    "作为图组导入时，每张图片都必须填写模型", status_code=400
+                )
+            if len({model.strip() for model in models}) != 1:
+                details = "；".join(
+                    f"{item['filename']}：{model.strip()}"
+                    for (_, item), model in zip(pending, models)
+                )
+                return error_response(
+                    f"图组中的模型必须相同，当前模型不一致：{details}", status_code=400
+                )
+            group_id = uuid.uuid4().hex
+            directory = self.store.imports_dir / group_id
+            await asyncio.to_thread(directory.mkdir, parents=True, exist_ok=False)
+            for ordinal, (token, item) in enumerate(pending):
+                item.update(
+                    group_id=group_id,
+                    path=directory / f"{ordinal:03d}-{token}.image",
+                    uploaded=False,
+                )
+                item["overrides"]["model"] = item["overrides"]["model"].strip()
+            self._import_groups[group_id] = {
+                "created_at": now,
+                "directory": directory,
+                "items": pending,
+                "lock": asyncio.Lock(),
+                "result": None,
+            }
+            group_response = {
+                "group_id": group_id,
+                "commit_endpoint": f"imports/group/{group_id}/commit",
+                "cancel_endpoint": f"imports/group/{group_id}/cancel",
+            }
         self._imports.update(pending)
         return json_response(
             {
+                **group_response,
                 "items": [
                     {
                         "client_id": item["client_id"],
                         "upload_endpoint": f"imports/upload/{token}",
                     }
                     for token, item in pending
-                ]
+                ],
             }
         )
 
@@ -529,6 +589,37 @@ class ImageStudioPlugin(Star):
         raw = await upload.read(limit + 1)
         if not raw or len(raw) > limit:
             return error_response("图片为空或超过 30 MB", status_code=400)
+        if item.get("group_id"):
+            group = self._import_groups.get(item["group_id"])
+            if group is None:
+                return error_response("图组上传已过期或取消，请重试", status_code=410)
+            async with group["lock"]:
+                if self._import_groups.get(item["group_id"]) is not group:
+                    return error_response("图组上传已取消，请重试", status_code=410)
+                if group["result"] is not None:
+                    return json_response(
+                        {
+                            "uploaded": True,
+                            "group_id": item["group_id"],
+                            "committed": True,
+                        }
+                    )
+                try:
+                    await self.store.stage_import_file(item["path"], raw)
+                    item["uploaded"] = True
+                    return json_response(
+                        {
+                            "uploaded": True,
+                            "group_id": item["group_id"],
+                            "client_id": item["client_id"],
+                        }
+                    )
+                except ValueError as exc:
+                    return error_response(str(exc), status_code=400)
+                except OSError:
+                    return error_response(
+                        "图组图片暂存失败，请检查磁盘空间后重试", status_code=500
+                    )
         try:
             result = await self.store.import_image(
                 raw,
@@ -546,6 +637,80 @@ class ImageStudioPlugin(Star):
             )
         self._imports.pop(upload_id, None)
         return json_response(result)
+
+    async def _expire_import_groups(self) -> None:
+        now = time.time()
+        for group_id, group in list(self._import_groups.items()):
+            if now - group["created_at"] >= 3600:
+                async with group["lock"]:
+                    await self._discard_import_group(group_id, group)
+
+    async def _discard_import_group(self, group_id: str, group: dict[str, Any]) -> None:
+        """Remove only this server-created import staging directory."""
+        directory = group["directory"]
+        if (
+            directory.parent.resolve() != self.store.imports_dir.resolve()
+            or directory.name != group_id
+        ):
+            raise ValueError("图组暂存路径无效")
+        if directory.exists():
+            try:
+                await asyncio.to_thread(shutil.rmtree, directory)
+            except FileNotFoundError:
+                pass
+        for token, _ in group["items"]:
+            self._imports.pop(token, None)
+        self._import_groups.pop(group_id, None)
+
+    async def _api_import_group_cancel(self, group_id: str) -> Any:
+        group = self._import_groups.get(group_id)
+        if group is not None:
+            async with group["lock"]:
+                await self._discard_import_group(group_id, group)
+        return json_response({"cancelled": True})
+
+    async def _api_import_group_commit(self, group_id: str) -> Any:
+        group = self._import_groups.get(group_id)
+        if group is None:
+            return error_response("图组上传已过期或取消，请重试", status_code=410)
+        async with group["lock"]:
+            if (
+                self._import_groups.get(group_id) is not group
+                or time.time() - group["created_at"] >= 3600
+            ):
+                return error_response("图组上传已过期或取消，请重试", status_code=410)
+            if group["result"] is not None:
+                return json_response(group["result"])
+            missing = [
+                item["filename"] for _, item in group["items"] if not item["uploaded"]
+            ]
+            if missing:
+                return error_response(
+                    f"图组尚有图片未上传：{'、'.join(missing)}", status_code=400
+                )
+            try:
+                result = await self.store.import_group(
+                    [item for _, item in group["items"]],
+                    import_key=f"group:{group_id}",
+                    preview_max_edge=self._settings.asset_preview_max_edge,
+                    preview_quality=self._settings.asset_preview_quality,
+                )
+            except ValueError as exc:
+                return error_response(str(exc), status_code=400)
+            except OSError:
+                return error_response(
+                    "图组保存失败，请检查磁盘空间后重试", status_code=500
+                )
+            group["result"] = result
+            for token, _ in group["items"]:
+                self._imports.pop(token, None)
+            group["items"] = []
+            # A lost response can retry the commit, without keeping another copy of the images.
+            try:
+                await asyncio.to_thread(shutil.rmtree, group["directory"])
+            except OSError:
+                logger.warning("%s 图组已保存，暂存目录将由维护任务清理", LOG_TAG)
+            return json_response(result)
 
     async def _api_resolve_parameters(self) -> Any:
         body = await web_request.json(default={})
@@ -823,7 +988,11 @@ class ImageStudioPlugin(Star):
 
     async def _api_gallery_reproduce(self, generation_id: str) -> Any:
         try:
-            plan = await self._service_or_raise().reproduction_plan(generation_id)
+            body = await web_request.json(default={})
+            image_id = str(body.get("image_id") or "") if isinstance(body, dict) else ""
+            plan = await self._service_or_raise().reproduction_plan(
+                generation_id, image_id
+            )
         except ValueError as exc:
             return error_response(str(exc), status_code=404)
         return json_response(plan)

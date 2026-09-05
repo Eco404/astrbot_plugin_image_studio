@@ -49,6 +49,7 @@ class GenerationStore:
         self.assets_dir = self.history_dir / "assets"
         self.thumbnails_dir = self.history_dir / "thumbnails"
         self.staging_dir = self.data_dir / "staging_references"
+        self.imports_dir = self.data_dir / "import_staging"
         self.exports_dir = self.data_dir / "exports"
         self.delivery_dir = self.data_dir / "delivery_staging"
         self.db_path = self.data_dir / "history.sqlite3"
@@ -75,6 +76,7 @@ class GenerationStore:
             self.assets_dir,
             self.thumbnails_dir,
             self.staging_dir,
+            self.imports_dir,
             self.exports_dir,
             self.delivery_dir,
         ):
@@ -209,6 +211,43 @@ class GenerationStore:
                 "CREATE INDEX IF NOT EXISTS idx_generations_engine "
                 "ON generations(generation_engine)"
             )
+            image_columns = {
+                str(row["name"])
+                for row in conn.execute(
+                    "PRAGMA table_info(generation_images)"
+                ).fetchall()
+            }
+            if "supplemental_json" not in image_columns:
+                conn.execute(
+                    "ALTER TABLE generation_images ADD COLUMN supplemental_json "
+                    "TEXT NOT NULL DEFAULT '{}'"
+                )
+                for row in conn.execute(
+                    "SELECT id, supplemental_json, model, mode, original_prompt, "
+                    "generation_engine, generated_at FROM generations WHERE source = 'import'"
+                ).fetchall():
+                    supplemental = _load_json(row["supplemental_json"])
+                    supplemental.update(
+                        {
+                            "model": row["model"],
+                            "mode": row["mode"],
+                            "prompt": row["original_prompt"],
+                            "negative_prompt": supplemental.get(
+                                "display_parameters", {}
+                            ).get("negative_prompt", ""),
+                            "generation_engine": row["generation_engine"],
+                            "generated_at": row["generated_at"],
+                        }
+                    )
+                    conn.execute(
+                        "UPDATE generation_images SET supplemental_json = ? WHERE generation_id = ?",
+                        (
+                            json.dumps(
+                                supplemental, ensure_ascii=False, separators=(",", ":")
+                            ),
+                            row["id"],
+                        ),
+                    )
             thumbnail_columns = {
                 str(row["name"])
                 for row in conn.execute(
@@ -365,11 +404,12 @@ class GenerationStore:
             _load_json(row["supplemental_json"]),
         ]
         for item in conn.execute(
-            "SELECT m.metadata_json FROM generation_images i JOIN image_metadata m "
+            "SELECT m.metadata_json, i.supplemental_json FROM generation_images i LEFT JOIN image_metadata m "
             "ON m.asset_id = i.asset_id WHERE i.generation_id = ? ORDER BY i.ordinal",
             (generation_id,),
         ).fetchall():
             values.append(_load_json(item["metadata_json"]).get("normalized", {}))
+            values.append(_load_json(item["supplemental_json"]))
         # Only normalized fields are searchable; entire workflow graphs stay out.
         conn.execute(
             "UPDATE generations SET search_text = ? WHERE id = ?",
@@ -1078,24 +1118,8 @@ class GenerationStore:
     ) -> dict[str, Any]:
         """Archive one image independently of automatic generation retention."""
 
-        if not data or len(data) > 30 * 1024 * 1024:
-            raise ValueError("导入图片不能为空且不能超过 30 MB")
-        from PIL import Image
-
-        from .image_metadata import MAX_PIXELS
-
-        try:
-            with Image.open(io.BytesIO(data)) as image:
-                if image.format not in {"PNG", "JPEG", "WEBP", "GIF"}:
-                    raise ValueError("导入仅支持 PNG、JPEG、WebP 或 GIF 图片")
-                if image.width * image.height > MAX_PIXELS:
-                    raise ValueError("导入图片超过 6400 万像素限制")
-        except (OSError, Image.DecompressionBombError) as exc:
-            raise ValueError("无法读取导入图片或图片尺寸超出限制") from exc
-        if not isinstance(overrides, dict):
-            raise ValueError("导入补充信息必须为对象")
-        if "parameters" in overrides and not isinstance(overrides["parameters"], dict):
-            raise ValueError("导入参数必须为 JSON 对象")
+        _validate_import_content(data)
+        _validate_import_overrides(overrides)
         async with self._lock:
             return await asyncio.to_thread(
                 self._import_image_sync,
@@ -1121,61 +1145,42 @@ class GenerationStore:
             duplicate = None
             if import_key:
                 duplicate = conn.execute(
-                    "SELECT g.id, i.asset_id FROM generations g LEFT JOIN generation_images i "
+                    "SELECT g.id, g.supplemental_json, i.asset_id FROM generations g LEFT JOIN generation_images i "
                     "ON i.generation_id = g.id WHERE g.import_key = ?",
                     (import_key,),
                 ).fetchone()
-                if duplicate is not None and duplicate["asset_id"] != digest:
+                if duplicate is not None and (
+                    duplicate["asset_id"] != digest
+                    or _load_json(duplicate["supplemental_json"]).get("is_import_group")
+                ):
                     raise ValueError(
                         "导入请求标识已用于另一张图片，请重新选择文件后重试"
                     )
             if duplicate is None:
-                duplicate = conn.execute(
-                    "SELECT g.id FROM generations g JOIN generation_images i "
+                possible = conn.execute(
+                    "SELECT g.id, g.supplemental_json FROM generations g JOIN generation_images i "
                     "ON i.generation_id = g.id WHERE g.source = 'import' "
-                    "AND i.asset_id = ? ORDER BY g.created_at, g.id LIMIT 1",
+                    "AND i.asset_id = ? AND (SELECT COUNT(*) FROM generation_images siblings "
+                    "WHERE siblings.generation_id = g.id) = 1 ORDER BY g.created_at, g.id",
                     (digest,),
-                ).fetchone()
+                ).fetchall()
+                duplicate = next(
+                    (
+                        row
+                        for row in possible
+                        if not _load_json(row["supplemental_json"]).get(
+                            "is_import_group"
+                        )
+                    ),
+                    None,
+                )
             if duplicate is not None:
                 return {"generation_id": str(duplicate["id"]), "duplicate": True}
         metadata = self._metadata_for_asset_sync(digest, data, strict=True)
         normalized = metadata.get("normalized", {})
         generation_id = uuid.uuid4().hex
         created_at = time.time()
-        engine = str(
-            overrides.get("generation_engine")
-            or normalized.get("generation_engine")
-            or metadata.get("format")
-            or "unknown"
-        )[:80]
-        mode = str(overrides.get("mode") or normalized.get("mode") or "unknown")
-        if mode not in {"text2img", "img2img", "unknown"}:
-            raise ValueError("导入图片模式无效")
-        prompt = str(overrides.get("prompt", normalized.get("prompt") or ""))
-        negative = str(
-            overrides.get("negative_prompt", normalized.get("negative_prompt") or "")
-        )
-        model = str(overrides.get("model", normalized.get("model") or ""))[:240]
-        generated_at = overrides.get("generated_at", normalized.get("generated_at"))
-        if generated_at not in (None, ""):
-            try:
-                generated_at = float(generated_at)
-                if not 0 <= generated_at < 253402300800:
-                    raise ValueError
-            except (ValueError, TypeError):
-                raise ValueError("原始生成时间无效") from None
-        else:
-            generated_at = None
-        supplemental = {
-            "original_filename": str(filename or "")[:512],
-            "overrides": overrides,
-        }
-        # Imported values are observations or user additions, never an original request.
-        supplemental["display_parameters"] = {
-            **normalized,
-            **(overrides.get("parameters") or {}),
-            "negative_prompt": negative,
-        }
+        supplemental = _import_supplemental(filename, overrides, metadata)
         try:
             asset = self._prepare_asset_sync(data, "")
             thumbnail = self._prepare_thumbnail_sync(
@@ -1206,12 +1211,12 @@ class GenerationStore:
                     (
                         generation_id,
                         created_at,
-                        mode,
-                        model,
-                        prompt,
-                        str(normalized.get("prompt") or prompt),
-                        engine,
-                        generated_at,
+                        supplemental["mode"],
+                        supplemental["model"],
+                        supplemental["prompt"],
+                        str(normalized.get("prompt") or supplemental["prompt"]),
+                        supplemental["generation_engine"],
+                        supplemental["generated_at"],
                         json.dumps(
                             supplemental, ensure_ascii=False, separators=(",", ":")
                         ),
@@ -1219,8 +1224,231 @@ class GenerationStore:
                     ),
                 )
                 conn.execute(
-                    "INSERT INTO generation_images (id, generation_id, ordinal, asset_id) VALUES (?, ?, 0, ?)",
-                    (uuid.uuid4().hex, generation_id, digest),
+                    "INSERT INTO generation_images (id, generation_id, ordinal, asset_id, supplemental_json) VALUES (?, ?, 0, ?, ?)",
+                    (
+                        uuid.uuid4().hex,
+                        generation_id,
+                        digest,
+                        json.dumps(
+                            supplemental, ensure_ascii=False, separators=(",", ":")
+                        ),
+                    ),
+                )
+                self._refresh_search_sync(conn, generation_id)
+        except Exception:
+            self._cleanup_orphaned_asset_files_sync()
+            self._cleanup_orphaned_thumbnails_sync()
+            raise
+        return {"generation_id": generation_id, "duplicate": False}
+
+    async def stage_import_file(self, path: Path, data: bytes) -> None:
+        """Validate and stage an import while excluding concurrent maintenance."""
+
+        async with self._lock:
+            await asyncio.to_thread(self._stage_import_file_sync, path, data)
+
+    def _stage_import_file_sync(self, path: Path, data: bytes) -> None:
+        if not isinstance(path, Path) or not _is_within(path, self.imports_dir):
+            raise ValueError("待导入图片路径不属于导入暂存目录")
+        if path.resolve() == self.imports_dir.resolve():
+            raise ValueError("待导入图片路径必须是文件路径")
+        _validate_import_content(data)
+        self._metadata_for_asset_sync(
+            hashlib.sha256(data).hexdigest(), data, strict=True
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write(path, data)
+
+    async def import_group(
+        self,
+        entries: list[dict[str, Any]],
+        *,
+        import_key: str,
+        preview_max_edge: int = 768,
+        preview_quality: int = 80,
+    ) -> dict[str, Any]:
+        """Atomically archive an ordered group of staged images of the same model."""
+
+        if not isinstance(entries, list) or not 1 <= len(entries) <= 100:
+            raise ValueError("每个图组需要 1 至 100 张图片")
+        if (
+            not isinstance(import_key, str)
+            or not import_key.strip()
+            or len(import_key) > 160
+        ):
+            raise ValueError("图组导入请求标识无效")
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._import_group_sync,
+                entries,
+                import_key.strip(),
+                preview_max_edge,
+                preview_quality,
+            )
+
+    def _read_import_file_sync(self, path: Any) -> bytes:
+        if not isinstance(path, (str, Path)):
+            raise ValueError("待导入图片路径无效")
+        source = Path(path)
+        if not _is_within(source, self.imports_dir) or not source.is_file():
+            raise ValueError("待导入图片不存在或不属于导入暂存目录")
+        with source.open("rb") as stream:
+            data = stream.read(30 * 1024 * 1024 + 1)
+        _validate_import_content(data)
+        return data
+
+    def _import_group_sync(
+        self,
+        entries: list[dict[str, Any]],
+        import_key: str,
+        preview_max_edge: int,
+        preview_quality: int,
+    ) -> dict[str, Any]:
+        prepared: list[dict[str, Any]] = []
+        errors: list[str] = []
+        # First pass retains metadata only, so a large batch never holds every image in RAM.
+        for index, entry in enumerate(entries):
+            if not isinstance(entry, dict):
+                errors.append(f"第 {index + 1} 张：导入项目必须是对象")
+                continue
+            filename = str(entry.get("filename") or f"第 {index + 1} 张图片")[:512]
+            try:
+                overrides = entry.get("overrides", {})
+                _validate_import_overrides(overrides)
+                data = self._read_import_file_sync(entry.get("path"))
+                digest = hashlib.sha256(data).hexdigest()
+                metadata = self._metadata_for_asset_sync(digest, data, strict=True)
+                supplemental = _import_supplemental(filename, overrides, metadata)
+                prepared.append(
+                    {
+                        "path": entry["path"],
+                        "digest": digest,
+                        "metadata": metadata,
+                        "supplemental": supplemental,
+                    }
+                )
+                del data
+            except (ValueError, OSError) as exc:
+                errors.append(f"第 {index + 1} 张（{filename}）：{exc}")
+        if errors:
+            raise ValueError("图组导入失败：" + "；".join(errors))
+        models = {item["supplemental"]["model"] for item in prepared}
+        if "" in models or len(models) != 1:
+            descriptions = [
+                f"第 {index + 1} 张（{item['supplemental']['original_filename']}）："
+                f"{item['supplemental']['model'] or '未填写模型'}"
+                for index, item in enumerate(prepared)
+            ]
+            raise ValueError(
+                "图组中的模型必须全部填写且完全相同。" + "；".join(descriptions)
+            )
+        manifest = [item["digest"] for item in prepared]
+        with self._connect() as conn:
+            duplicate = conn.execute(
+                "SELECT id, supplemental_json FROM generations WHERE import_key = ?",
+                (import_key,),
+            ).fetchone()
+        if duplicate is not None:
+            original = _load_json(duplicate["supplemental_json"])
+            if (
+                not original.get("is_import_group")
+                or original.get("group_manifest") != manifest
+            ):
+                raise ValueError(
+                    "导入请求标识已用于其他图片或顺序不同的图组，请重新准备导入"
+                )
+            return {"generation_id": str(duplicate["id"]), "duplicate": True}
+
+        generation_id = uuid.uuid4().hex
+        created_at = time.time()
+        first = prepared[0]["supplemental"]
+        modes = {item["supplemental"]["mode"] for item in prepared}
+        engines = {item["supplemental"]["generation_engine"] for item in prepared}
+        group_supplemental = {
+            **first,
+            "is_import_group": True,
+            "group_manifest": manifest,
+        }
+        assets: dict[str, dict[str, Any]] = {}
+        thumbnails: dict[str, dict[str, Any]] = {}
+        try:
+            for item in prepared:
+                if item["digest"] in assets:
+                    continue
+                data = self._read_import_file_sync(item["path"])
+                if hashlib.sha256(data).hexdigest() != item["digest"]:
+                    raise ValueError("待导入图片在准备过程中发生变化，请重新上传")
+                asset = self._prepare_asset_sync(data, "")
+                assets[asset["id"]] = asset
+                thumbnails[asset["id"]] = self._prepare_thumbnail_sync(
+                    asset,
+                    max_edge=preview_max_edge,
+                    quality=preview_quality,
+                )
+                del data
+            with self._connect() as conn:
+                conn.executemany(
+                    "INSERT INTO image_assets (id, path, mime_type, size_bytes, width, height, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET file_state='available'",
+                    [
+                        (
+                            a["id"],
+                            a["path"],
+                            a["mime_type"],
+                            a["size_bytes"],
+                            a["width"],
+                            a["height"],
+                            created_at,
+                        )
+                        for a in assets.values()
+                    ],
+                )
+                self._upsert_thumbnails_sync(conn, thumbnails.values())
+                self._save_metadata_sync(
+                    conn, {item["digest"]: item["metadata"] for item in prepared}
+                )
+                conn.execute(
+                    "INSERT INTO generations (id, created_at, source, status, mode, provider_id, "
+                    "provider_name, provider_kind, model, original_prompt, final_prompt, parameters_json, "
+                    "elapsed_ms, generation_engine, generated_at, supplemental_json, import_key) "
+                    "VALUES (?, ?, 'import', 'succeeded', ?, '', '', '', ?, ?, ?, '{}', 0, ?, ?, ?, ?)",
+                    (
+                        generation_id,
+                        created_at,
+                        first["mode"] if len(modes) == 1 else "unknown",
+                        first["model"],
+                        first["prompt"],
+                        str(
+                            prepared[0]["metadata"].get("normalized", {}).get("prompt")
+                            or first["prompt"]
+                        ),
+                        first["generation_engine"] if len(engines) == 1 else "mixed",
+                        first["generated_at"],
+                        json.dumps(
+                            group_supplemental,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
+                        import_key,
+                    ),
+                )
+                conn.executemany(
+                    "INSERT INTO generation_images (id, generation_id, ordinal, asset_id, supplemental_json) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    [
+                        (
+                            uuid.uuid4().hex,
+                            generation_id,
+                            ordinal,
+                            item["digest"],
+                            json.dumps(
+                                item["supplemental"],
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            ),
+                        )
+                        for ordinal, item in enumerate(prepared)
+                    ],
                 )
                 self._refresh_search_sync(conn, generation_id)
         except Exception:
@@ -1341,7 +1569,8 @@ class GenerationStore:
         clause, args = self._gallery_filters(filters)
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT g.id AS generation_id, g.created_at, g.mode, g.provider_id, "
+                "SELECT g.id AS generation_id, g.created_at, "
+                "COALESCE(json_extract(i.supplemental_json, '$.mode'), g.mode) AS mode, g.provider_id, "
                 "g.model, i.id AS image_id, i.ordinal, a.mime_type, a.size_bytes, "
                 "a.width, a.height, a.path, a.file_state, "
                 "COUNT(*) OVER (PARTITION BY g.id) AS image_count "
@@ -1559,8 +1788,10 @@ class GenerationStore:
         ]
         used_stems: set[str] = set()
         for image_index, image in enumerate(result["images"], start=1):
+            if result["source"] == "import" and not image["supplemental"]:
+                image["supplemental"] = result["supplemental"]
             image["download_filename"] = export_image_filename(
-                result,
+                {**result, "mode": image["supplemental"].get("mode", result["mode"])},
                 image_index=image_index,
                 image_count=len(result["images"]),
                 mime_type=str(image.get("mime_type") or ""),
@@ -1756,7 +1987,12 @@ class GenerationStore:
                     path = self.data_dir / image["path"]
                     if path.is_file() and _is_within(path, self.assets_dir):
                         image_filename = export_image_filename(
-                            detail,
+                            {
+                                **detail,
+                                "mode": image.get("supplemental", {}).get(
+                                    "mode", detail["mode"]
+                                ),
+                            },
                             image_index=image_index,
                             image_count=len(images),
                             mime_type=image["mime_type"],
@@ -1770,6 +2006,25 @@ class GenerationStore:
                             for key, value in detail.items()
                             if key not in {"images", "references"}
                         }
+                        supplemental = image.get("supplemental") or {}
+                        if detail["source"] == "import" and supplemental:
+                            metadata.update(
+                                {
+                                    "model": supplemental.get("model", detail["model"]),
+                                    "mode": supplemental.get("mode", detail["mode"]),
+                                    "generation_engine": supplemental.get(
+                                        "generation_engine", detail["generation_engine"]
+                                    ),
+                                    "original_prompt": supplemental.get(
+                                        "prompt", detail["original_prompt"]
+                                    ),
+                                    "final_prompt": image.get("metadata", {})
+                                    .get("normalized", {})
+                                    .get("prompt", supplemental.get("prompt", "")),
+                                    "generated_at": supplemental.get("generated_at"),
+                                    "supplemental": supplemental,
+                                }
+                            )
                         metadata["image"] = {
                             "id": image["id"],
                             "filename": image_filename,
@@ -1779,6 +2034,7 @@ class GenerationStore:
                             "metadata": image.get("metadata", {}),
                             "width": image.get("width"),
                             "height": image.get("height"),
+                            "supplemental": supplemental,
                         }
                         archive.writestr(
                             f"{stem}.json",
@@ -1853,6 +2109,7 @@ class GenerationStore:
             "height": row.get("height", 1),
             "file_state": row.get("file_state", "available"),
             "metadata": _load_json(row.get("metadata_json") or "{}"),
+            "supplemental": _load_json(row.get("supplemental_json") or "{}"),
             "data_url": preview,
             # Keep summaries lightweight while allowing the carousel to render
             # every result before original assets arrive.
@@ -2183,6 +2440,7 @@ class GenerationStore:
         removed = 0
         for root, cutoff in (
             (self.staging_dir, now - 24 * 3600),
+            (self.imports_dir, now - 3600),
             (self.exports_dir, now - 3600),
             (self.delivery_dir, now - 3600),
         ):
@@ -2227,6 +2485,89 @@ def image_data_url(data: bytes, mime_type: str) -> str:
     """Encode an image for the authenticated plugin iframe."""
 
     return f"data:{mime_type};base64,{base64.b64encode(data).decode('ascii')}"
+
+
+def _validate_import_content(data: bytes) -> None:
+    from PIL import Image
+
+    from .image_metadata import MAX_PIXELS
+
+    if not data or len(data) > 30 * 1024 * 1024:
+        raise ValueError("导入图片不能为空且不能超过 30 MB")
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            if image.format not in {"PNG", "JPEG", "WEBP", "GIF"}:
+                raise ValueError("导入仅支持 PNG、JPEG、WebP 或 GIF 图片")
+            if image.width * image.height > MAX_PIXELS:
+                raise ValueError("导入图片超过 6400 万像素限制")
+    except (OSError, Image.DecompressionBombError) as exc:
+        raise ValueError("无法读取导入图片或图片尺寸超出限制") from exc
+
+
+def _validate_import_overrides(overrides: Any) -> None:
+    if not isinstance(overrides, dict):
+        raise ValueError("导入补充信息必须为对象")
+    if "parameters" in overrides and not isinstance(overrides["parameters"], dict):
+        raise ValueError("导入参数必须为 JSON 对象")
+    try:
+        encoded = json.dumps(overrides, ensure_ascii=False, allow_nan=False)
+        if len(encoded.encode("utf-8")) > 1024 * 1024:
+            raise ValueError("导入补充信息不能超过 1 MB")
+    except (TypeError, RecursionError) as exc:
+        raise ValueError("导入补充信息必须是有效 JSON") from exc
+
+
+def _import_supplemental(
+    filename: str, overrides: dict[str, Any], metadata: dict[str, Any]
+) -> dict[str, Any]:
+    normalized = metadata.get("normalized", {})
+    mode = str(overrides.get("mode") or normalized.get("mode") or "unknown")
+    if mode not in {"text2img", "img2img", "unknown"}:
+        raise ValueError("导入图片模式无效")
+    engine = str(
+        overrides.get("generation_engine")
+        or normalized.get("generation_engine")
+        or metadata.get("format")
+        or "unknown"
+    )[:80]
+    model_value = overrides.get("model", normalized.get("model") or "")
+    if not isinstance(model_value, str):
+        raise ValueError("导入模型名称必须是字符串")
+    model = model_value.strip()
+    if len(model) > 240:
+        raise ValueError("导入模型名称不能超过 240 个字符")
+    prompt = str(overrides.get("prompt", normalized.get("prompt") or ""))
+    negative = str(
+        overrides.get("negative_prompt", normalized.get("negative_prompt") or "")
+    )
+    generated_at = overrides.get("generated_at", normalized.get("generated_at"))
+    if generated_at not in (None, ""):
+        try:
+            generated_at = float(generated_at)
+            if not 0 <= generated_at < 253402300800:
+                raise ValueError
+        except (ValueError, TypeError):
+            raise ValueError("原始生成时间无效") from None
+    else:
+        generated_at = None
+    return {
+        "original_filename": str(filename or "")[:512],
+        "overrides": overrides,
+        "model": model,
+        "mode": mode,
+        "prompt": prompt,
+        "negative_prompt": negative,
+        "generation_engine": engine,
+        "generated_at": generated_at,
+        "display_parameters": {
+            **normalized,
+            **(overrides.get("parameters") or {}),
+            "model": model,
+            "mode": mode,
+            "prompt": prompt,
+            "negative_prompt": negative,
+        },
+    }
 
 
 def _path_data_url(path: Path, mime_type: str) -> str:

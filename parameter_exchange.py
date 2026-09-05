@@ -44,6 +44,14 @@ def export_parameters(
         image = images[0]
     if image is None:
         raise ValueError("所选图片不属于当前生成记录或已被删除")
+    if detail.get("source") == "import" and image.get("supplemental"):
+        supplemental = image["supplemental"]
+        detail = {**detail, "supplemental": supplemental}
+        for key in ("model", "mode", "generation_engine", "generated_at"):
+            if key in supplemental:
+                detail[key] = supplemental[key]
+        if "prompt" in supplemental:
+            detail["original_prompt"] = supplemental["prompt"]
     metadata = image.get("metadata") or {}
     raw = metadata.get("raw") or {}
     normalized = metadata.get("normalized") or {}

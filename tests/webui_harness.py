@@ -300,7 +300,7 @@ async def create_app(data_dir: Path, seed: bool = True) -> FastAPI:
         plugin.config, plugin._studio_settings
     )
     plugin._settings_lock = asyncio.Lock()
-    plugin._imports, plugin._exports = {}, {}
+    plugin._imports, plugin._exports, plugin._import_groups = {}, {}, {}
     plugin._session, plugin._maintenance_task = None, None
     plugin._service = ImageGenerationService(
         settings=plugin._settings, executor=FakeExecutor(), store=plugin.store

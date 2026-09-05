@@ -319,7 +319,9 @@ class ImageGenerationService:
             mime_type=mime_type,
         )
 
-    async def reproduction_plan(self, generation_id: str) -> dict[str, Any]:
+    async def reproduction_plan(
+        self, generation_id: str, image_id: str = ""
+    ) -> dict[str, Any]:
         """Return a reproducible draft and stage retained references when available."""
 
         detail = await self.store.generation_detail(generation_id, include_assets=False)
@@ -328,7 +330,7 @@ class ImageGenerationService:
         if detail.get("source") == "import":
             from .parameter_exchange import export_parameters, resolve_parameters
 
-            copied = export_parameters(detail)
+            copied = export_parameters(detail, image_id)
             resolved = resolve_parameters(copied["content"], self.settings)
             return {
                 **resolved["draft"],

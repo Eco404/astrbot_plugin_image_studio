@@ -6,8 +6,8 @@ import sqlite3
 
 RELEASE_VERSION = 0
 TARGET_VERSION = 1
-DEV_REVISION = 1
-DATABASE_VERSION = "1-dev.1"
+DEV_REVISION = 2
+DATABASE_VERSION = "1-dev.2"
 
 
 def check_database_version(conn: sqlite3.Connection) -> None:
@@ -23,7 +23,10 @@ def check_database_version(conn: sqlite3.Connection) -> None:
         rows = conn.execute(
             "SELECT target_version, dev_revision FROM schema_meta"
         ).fetchall()
-        if len(rows) != 1 or tuple(rows[0]) != (TARGET_VERSION, DEV_REVISION):
+        if len(rows) != 1 or tuple(rows[0]) not in {
+            (TARGET_VERSION, 1),
+            (TARGET_VERSION, DEV_REVISION),
+        }:
             raise RuntimeError("不支持的图库数据库开发修订，请使用对应开发版本")
 
 

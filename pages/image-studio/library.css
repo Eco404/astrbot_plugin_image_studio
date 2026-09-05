@@ -1,12 +1,15 @@
 :root {
+  --gallery-sticky-top: 12px;
   --warning: #946526;
   --warning-soft: rgba(172, 123, 56, .15);
   --warning-shadow: 0 5px 18px rgba(172, 123, 56, .16), inset 0 0 0 1px rgba(172, 123, 56, .3);
+  --favorite-shadow: 0 0 0 1px rgba(184, 153, 91, .28), 0 0 14px 2px rgba(184, 153, 91, .16), var(--shadow);
 }
 :root[data-theme="dark"] {
   --warning: #d0a361;
   --warning-soft: rgba(190, 139, 66, .17);
   --warning-shadow: 0 5px 18px rgba(190, 139, 66, .13), inset 0 0 0 1px rgba(208, 163, 97, .4);
+  --favorite-shadow: 0 0 0 1px rgba(213, 182, 119, .32), 0 0 14px 2px rgba(213, 182, 119, .18), var(--shadow);
 }
 [hidden] { display: none !important; }
 html { scroll-padding-top: 112px; scroll-padding-bottom: calc(100px + env(safe-area-inset-bottom)); }
@@ -27,9 +30,13 @@ html { scroll-padding-top: 112px; scroll-padding-bottom: calc(100px + env(safe-a
 .floatingbar { position: fixed; z-index: 3; bottom: max(16px, env(safe-area-inset-bottom)); left: 256px; right: 20px; display: flex; align-items: center; justify-content: flex-end; gap: 10px; min-height: 58px; max-width: calc(100vw - 276px); padding: 9px 12px; border-radius: 12px; background: var(--topbar-glass); box-shadow: var(--shadow); backdrop-filter: blur(22px); }
 #galleryView, #settingsView, #importView { padding-bottom: calc(100px + env(safe-area-inset-bottom)); }
 .gallery-floatingbar { flex-wrap: wrap; justify-content: center; }
-.gallery-floatingbar .gallery-pagination, .gallery-floatingbar .selection-bar { margin: 0; padding: 0; background: transparent; box-shadow: none; }
-.gallery-floatingbar .selection-bar { flex: 1 1 auto; }
+.gallery-floatingbar .gallery-pagination { margin: 0; padding: 0; background: transparent; box-shadow: none; }
 .gallery-floatingbar .gallery-pagination { flex: 0 1 auto; }
+.topbar, .gallery-selection-bar { top: max(var(--gallery-sticky-top), env(safe-area-inset-top)); }
+.topbar { transition-property: background-color, border-color, box-shadow; }
+#selectionAnchor { height: 0; overflow-anchor: none; }
+.selection-bar.gallery-selection-bar { position: sticky; z-index: 3; min-height: 58px; margin: 0 0 10px; padding: 9px 12px; background: var(--topbar-glass); animation: none; transition: none; }
+.topbar.is-selection-replaced { transform: translateY(var(--selection-title-offset, 0px)); opacity: var(--selection-title-opacity, 1); filter: blur(var(--selection-title-blur, 0px)); transition: none; animation: none; }
 .gallery-pagination span { min-width: 140px; }
 .gallery-pagination button { min-width: 40px; }
 .gallery-toolbar .search-field { flex: 2 1 240px; }
@@ -39,10 +46,13 @@ html { scroll-padding-top: 112px; scroll-padding-bottom: calc(100px + env(safe-a
 .retention-notice, .parameter-import-notice { margin: 10px 0; padding: 10px 12px; color: var(--warning); background: var(--warning-soft); border-radius: 8px; font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
 .parameter-import-notice p { margin: 0 0 6px; }
 .parameter-import-notice pre { max-height: 220px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.gallery-card.is-favorite, .gallery-card.is-favorite:hover { box-shadow: var(--favorite-shadow); }
 .gallery-card.has-cleanup-warning, .gallery-card.has-cleanup-warning:hover { box-shadow: var(--warning-shadow); }
 .gallery-card.is-selected { outline: 2px solid var(--accent); outline-offset: 2px; }
 .gallery-source-label { position: absolute; top: 10px; right: 10px; max-width: calc(100% - 70px); padding: 4px 7px; border-radius: 7px; color: var(--text); background: var(--topbar-glass); backdrop-filter: blur(10px); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .gallery-favorite { position: absolute; bottom: 10px; right: 10px; color: var(--warning); background: var(--topbar-glass); display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; }
+.gallery-image-count { position: absolute; bottom: 10px; left: 10px; display: inline-flex; align-items: center; gap: 5px; padding: 4px 7px; border-radius: 7px; color: var(--text); background: var(--topbar-glass); font-size: 11px; pointer-events: none; }
+.gallery-image-count svg { width: 14px; height: 14px; }
 .gallery-selection { position: absolute; display: grid; place-items: center; top: 0; left: 0; width: 44px; height: 44px; cursor: pointer; }
 .gallery-card .gallery-selection input[type="checkbox"] { position: absolute; inset: 0; width: 44px; height: 44px; opacity: 0; margin: 0; cursor: pointer; }
 .gallery-selection > span { display: grid; place-items: center; width: 24px; height: 24px; border: 1px solid var(--line); border-radius: 50%; background: var(--topbar-glass); color: transparent; pointer-events: none; }
@@ -55,6 +65,9 @@ html { scroll-padding-top: 112px; scroll-padding-bottom: calc(100px + env(safe-a
 #settingsDirtyStatus { flex: 0 1 auto; color: var(--warning); font-size: 12px; white-space: nowrap; }
 #saveSettingsButton.is-dirty { color: var(--warning); background: var(--warning-soft); box-shadow: var(--warning-shadow); }
 .import-toolbar { display: flex; gap: 14px; align-items: center; margin-bottom: 16px; }
+.import-toolbar { flex-wrap: wrap; }
+.import-group-option { display: inline-flex; align-items: center; gap: 10px; margin-left: auto; color: var(--text); font-size: 12px; }
+.import-group-option .toggle-control { min-width: 44px; min-height: 44px; align-items: center; justify-content: center; }
 .import-toolbar > button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; width: auto; }
 #importSummary, #importProgress { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 #importProgress { flex: 1 1 auto; min-width: 0; }
@@ -109,11 +122,10 @@ html { scroll-padding-top: 112px; scroll-padding-bottom: calc(100px + env(safe-a
   .detail-footer { gap: 5px; padding-inline: 12px; }
 }
 @media (max-width: 900px) {
+  :root { --gallery-sticky-top: 8px; }
   .floatingbar { left: 12px; right: 12px; max-width: calc(100vw - 24px); }
   .import-grid { grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
   .gallery-floatingbar { justify-content: space-between; }
-  .gallery-floatingbar .selection-bar { flex-basis: 100%; }
-  #galleryView.has-selection { padding-bottom: calc(145px + env(safe-area-inset-bottom)); }
   .brand { min-width: 0; }
   .nav-list { gap: 2px; }
 }

@@ -55,6 +55,7 @@
     let imports = [];
     let importing = false;
     let importSequence = 0;
+    let importGroupDraft = null;
     let modalClose = null;
     let modalPending = false;
     let detailCopies = [];
@@ -63,9 +64,10 @@
     let detailTrigger = null;
     let galleryColumns = 0;
     let detailIdentity = "";
+    let selectionScrollFrame = 0;
 
     function modeLabel(mode) { return ({ text2img: "文生图", img2img: "图生图" })[mode] || "未知模式"; }
-    function engineLabel(engine) { return ENGINES[engine] || engine || "未知来源"; }
+    function engineLabel(engine) { return engine === "mixed" ? "混合来源" : ENGINES[engine] || engine || "未知来源"; }
     function engineOf(detail) { return detail.generation_engine || (detail.provider_kind === "nai_direct" ? "nai" : "unknown"); }
     function options(values, selected) { return Object.entries(values).map(([value, label]) => `<option value="${escape(value)}" ${String(selected ?? "") === value ? "selected" : ""}>${escape(label)}</option>`).join(""); }
     function setCommandLabel(id, label) { const button = $(id); const span = button.querySelector("span"); if (span) span.textContent = label; else button.textContent = label; button.setAttribute("aria-label", label); button.title = label; }
@@ -158,17 +160,22 @@
       $("importSummary").textContent = imports.length ? `已选择 ${imports.length} 张图片` : "尚未选择图片";
       $("confirmImportButton").disabled = importing || !imports.length || imports.some((item) => item.status === "reading");
       $("cancelImportButton").disabled = importing; $("chooseImportFiles").disabled = importing;
+      $("importGroupOption").classList.toggle("is-hidden", imports.length < 2);
+      $("importAsGroup").disabled = importing || imports.length < 2;
+      if (imports.length < 2) $("importAsGroup").checked = false;
       setCommandLabel("confirmImportButton", importing ? "正在导入…" : "确认导入");
     }
 
     function removeImport(id) {
       if (importing) return;
       const item = imports.find((entry) => entry.id === id); if (!item) return;
+      void discardImportGroup();
       URL.revokeObjectURL(item.url); imports = imports.filter((entry) => entry !== item); renderImports();
     }
 
     function clearImports() {
       if (importing) return;
+      void discardImportGroup();
       imports.forEach((item) => URL.revokeObjectURL(item.url)); imports = [];
       $("importProgress").textContent = ""; renderImports();
     }
@@ -192,6 +199,7 @@
       if (importing) return;
       const accepted = Array.from(files).filter((file) => /^image\/(png|jpeg|webp|gif)$/.test(file.type) || /\.(png|jpe?g|webp|gif)$/i.test(file.name));
       if (!accepted.length) { showNotice("请选择 PNG、JPEG、WebP 或 GIF 图片。", "error"); return; }
+      await discardImportGroup();
       hooks.switchView("import");
       const added = [];
       for (const file of accepted) {
@@ -221,10 +229,22 @@
           const overrides = { ...item.fields, parameters, generated_at: item.fields.generated_at ? new Date(item.fields.generated_at).getTime() / 1000 : null };
           return { client_id: item.id, filename: item.file.name, overrides };
         });
+        if ($("importAsGroup").checked) {
+          const missing = preparedItems.filter((item) => !String(item.overrides.model || "").trim());
+          if (missing.length) throw new Error(`作为图组导入时，请先填写这些图片的模型：${missing.map((item) => item.filename).join("、")}`);
+          if (new Set(preparedItems.map((item) => String(item.overrides.model).trim())).size !== 1) throw new Error(`图组中的模型必须相同，当前模型不一致：${preparedItems.map((item) => `${item.filename}：${item.overrides.model}`).join("；")}`);
+        }
       } catch (error) { showNotice(error.message, "error"); return; }
       importing = true; renderImports();
+      if ($("importAsGroup").checked) {
+        try { await confirmImportGroup(preparedItems); }
+        catch (error) { $("importProgress").textContent = errorMessage(error, "图组导入失败，请重试"); }
+        finally { importing = false; renderImports(); }
+        return;
+      }
       let succeeded = 0; let duplicates = 0;
       try {
+        await discardImportGroup();
         const prepared = await apiPost("imports/prepare", { items: preparedItems });
         const client = await bridge(); const pending = imports.slice();
         for (let index = 0; index < pending.length; index++) {
@@ -244,6 +264,49 @@
       finally { importing = false; renderImports(); }
     }
 
+    async function discardImportGroup() {
+      const draft = importGroupDraft; importGroupDraft = null;
+      if (draft) await apiPost(draft.prepared.cancel_endpoint, {}).catch(() => {});
+    }
+
+    async function confirmImportGroup(items) {
+      const signature = JSON.stringify(items);
+      if (importGroupDraft?.signature !== signature) {
+        await discardImportGroup();
+        const prepared = await apiPost("imports/prepare", { items, as_group: true });
+        importGroupDraft = { signature, prepared, uploaded: new Set() };
+      }
+      const draft = importGroupDraft;
+      const client = await bridge();
+      for (let index = 0; index < imports.length; index++) {
+        const item = imports[index];
+        if (draft.uploaded.has(item.id)) continue;
+        const ticket = draft.prepared.items.find((entry) => entry.client_id === item.id);
+        $("importProgress").textContent = `正在上传图组 ${index + 1} / ${imports.length}`;
+        try {
+          await client.upload(ticket.upload_endpoint, item.file);
+          draft.uploaded.add(item.id); item.status = "ready"; item.error = "已上传，等待图组入库";
+        } catch (error) {
+          item.status = "error"; item.error = errorMessage(error, "上传失败，请重试"); renderImports();
+          if (/过期|取消/.test(item.error)) await discardImportGroup();
+          throw error;
+        }
+        renderImports();
+      }
+      $("importProgress").textContent = "正在保存图组…";
+      try {
+        await apiPost(draft.prepared.commit_endpoint, {});
+      } catch (error) {
+        if (/过期|取消/.test(errorMessage(error, ""))) await discardImportGroup();
+        throw error;
+      }
+      const count = imports.length;
+      imports.forEach((item) => URL.revokeObjectURL(item.url)); imports = [];
+      importGroupDraft = null;
+      $("importProgress").textContent = `已导入 1 个图组，共 ${count} 张图片`;
+      showNotice(`已导入图组，共 ${count} 张图片。`, "success");
+    }
+
     function parameterRows(values, prefix = "") {
       if (!values || typeof values !== "object") return "";
       return Object.entries(values).map(([key, value]) => {
@@ -259,8 +322,8 @@
       const metadata = image?.metadata || {};
       const normalized = metadata.normalized || {};
       const request = hooks.requestParameters(detail);
-      const supplemental = detail.supplemental || {};
-      const imported = { ...(supplemental.display_parameters || {}), ...(supplemental.overrides || {}), ...(supplemental.overrides?.parameters || {}), prompt: detail.original_prompt, model: detail.model, mode: detail.mode };
+      const supplemental = image?.supplemental && Object.keys(image.supplemental).length ? image.supplemental : detail.supplemental || {};
+      const imported = { ...(supplemental.display_parameters || {}), ...(supplemental.overrides || {}), ...(supplemental.overrides?.parameters || {}), prompt: supplemental.prompt ?? detail.original_prompt, model: supplemental.model ?? detail.model, mode: supplemental.mode ?? detail.mode };
       delete imported.parameters;
       const requestRows = detail.source === "import" ? imported : { prompt: request.prompt, negative_prompt: request.negative_prompt, model: request.model, mode: modeLabel(request.mode), size: request.size, count: request.count, ...(request.parameters || {}) };
       const displayNormalized = { ...normalized }; delete displayNormalized.parameters;
@@ -275,7 +338,7 @@
       const identity = `${detail?.id || ""}:${state.detailImageIndex}`;
       const changed = detailIdentity !== identity; detailIdentity = identity;
       const image = detail?.images?.[state.detailImageIndex];
-      const engine = engineOf(detail || {});
+      const engine = image?.supplemental?.generation_engine || engineOf(detail || {});
       const formats = { studio: "Image Studio 参数" };
       if (["nai", "novelai"].includes(engine) || image?.metadata?.format === "novelai") { formats.nai = "NAI 请求参数"; formats.novelai = "NovelAI 图片参数"; }
       if (image?.metadata?.raw?.workflow) formats.workflow = "ComfyUI 工作流";
@@ -398,10 +461,10 @@
     function renderGalleryCard(item) {
       const warning = !!item.cleanup_warning;
       const selected = state.selectedIds.has(item.id);
-      return `<article class="gallery-card ${warning ? "has-cleanup-warning" : ""} ${selected ? "is-selected" : ""}" data-gallery-id="${escape(item.id)}" tabindex="0" role="button" aria-label="查看 ${escape(item.model || item.provider_name || "图片")}">
+      return `<article class="gallery-card ${item.is_favorite ? "is-favorite" : ""} ${warning ? "has-cleanup-warning" : ""} ${selected ? "is-selected" : ""}" data-gallery-id="${escape(item.id)}" tabindex="0" role="button" aria-label="查看 ${escape(item.model || item.provider_name || "图片")}">
         <div class="gallery-image-wrap">${item.thumbnail_data_url ? `<img src="${escape(item.thumbnail_data_url)}" alt="${escape(item.prompt_preview)}" loading="lazy" />` : `<div class="gallery-missing-image">${icon("Image")}<span>图片不可用</span></div>`}
           <label class="gallery-selection" title="选择生成记录"><input type="checkbox" data-select-id="${escape(item.id)}" aria-label="选择生成记录" ${selected ? "checked" : ""} /><span>${icon("Check")}</span></label>
-          <span class="gallery-source-label">${escape(engineLabel(item.generation_engine))}</span>${item.is_favorite ? `<span class="gallery-favorite" title="已收藏" aria-label="已收藏">${icon("Star")}</span>` : ""}
+          <span class="gallery-source-label">${escape(engineLabel(item.generation_engine))}</span>${Number(item.image_count) > 1 ? `<span class="gallery-image-count" title="${Number(item.image_count)} 张图片">${icon("Image")}<span>${Number(item.image_count)}</span></span>` : ""}${item.is_favorite ? `<span class="gallery-favorite" title="已收藏" aria-label="已收藏">${icon("Star")}</span>` : ""}
         </div><div class="gallery-info"><strong>${escape(item.model || item.provider_name || engineLabel(item.generation_engine))}</strong><p>${escape(item.prompt_preview || "无提示词")}</p><div class="gallery-meta"><span>${modeLabel(item.mode)}</span><span>${formatDate(item.created_at)}</span></div>${warning ? '<span class="cleanup-warning-label">清理候选</span>' : ""}${item.file_state && item.file_state !== "available" ? '<span class="cleanup-warning-label">文件需检查</span>' : ""}</div></article>`;
     }
 
@@ -416,13 +479,46 @@
 
     function syncFloatingBars() {
       const galleryBar = document.querySelector(".gallery-floatingbar");
-      galleryBar.classList.toggle("is-hidden", $("selectionBar").classList.contains("is-hidden") && $("galleryPagination").classList.contains("is-hidden"));
+      galleryBar.classList.toggle("is-hidden", $("galleryPagination").classList.contains("is-hidden"));
       $("galleryView").classList.toggle("has-selection", state.selectedIds.size > 0);
       $("galleryGrid").querySelectorAll("[data-gallery-id]").forEach((card) => card.classList.toggle("is-selected", state.selectedIds.has(card.dataset.galleryId)));
+      syncSelectionHeader();
+    }
+
+    function syncSelectionHeader() {
+      const title = document.querySelector(".topbar");
+      const active = state.view === "gallery" && !$("selectionBar").classList.contains("is-hidden");
+      let shift = 0;
+      let progress = 0;
+      if (active) {
+        // The anchor stays in normal flow after the action bar becomes sticky.
+        const top = parseFloat(getComputedStyle(title).top) || 0;
+        const distance = title.offsetHeight + 10;
+        shift = Math.max(0, Math.min(distance, top + distance - $("selectionAnchor").getBoundingClientRect().top));
+        progress = shift / distance;
+      }
+      title.style.setProperty("--selection-title-offset", `${-shift}px`);
+      title.style.setProperty("--selection-title-opacity", String(1 - progress));
+      title.style.setProperty("--selection-title-blur", `${progress * 8}px`);
+      title.classList.toggle("is-selection-replaced", active);
+    }
+
+    function scheduleSelectionHeader() {
+      if (selectionScrollFrame) return;
+      selectionScrollFrame = window.requestAnimationFrame(() => {
+        selectionScrollFrame = 0;
+        syncSelectionHeader();
+      });
     }
 
     function bind() {
       renderIcons();
+      window.addEventListener("scroll", scheduleSelectionHeader, { passive: true });
+      window.addEventListener("resize", scheduleSelectionHeader, { passive: true });
+      if (window.ResizeObserver) {
+        const observer = new ResizeObserver(scheduleSelectionHeader);
+        for (const element of [document.querySelector(".topbar"), document.querySelector(".gallery-toolbar"), $("selectionBar")]) observer.observe(element);
+      }
       for (const [view, name] of Object.entries({ generate: "Sparkles", gallery: "Image", import: "FolderInput", settings: "Settings2" })) {
         const item = document.querySelector(`.nav-item[data-view="${view}"] .nav-icon`); item.className = "nav-icon"; item.innerHTML = icon(name);
       }
@@ -436,9 +532,11 @@
       $("importDropzone").addEventListener("click", () => $("importFiles").click());
       $("confirmImportButton").addEventListener("click", () => void confirmImports());
       $("cancelImportButton").addEventListener("click", clearImports);
+      $("importAsGroup").addEventListener("change", () => { void discardImportGroup(); });
       $("importGrid").addEventListener("click", (event) => { const button = event.target.closest("[data-remove-import]"); if (button) removeImport(button.dataset.removeImport); });
       $("importGrid").addEventListener("input", (event) => {
         const key = event.target.dataset.importField; if (!key) return;
+        void discardImportGroup();
         const item = imports.find((entry) => entry.id === event.target.closest("[data-import-id]").dataset.importId); if (item) item.fields[key] = event.target.value;
       });
       for (const view of [$("galleryView"), $("importView")]) {

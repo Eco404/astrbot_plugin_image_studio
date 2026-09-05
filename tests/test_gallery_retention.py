@@ -267,7 +267,7 @@ def test_database_development_versions_are_explicit_and_unknown_are_rejected(tmp
             assert conn.execute("PRAGMA user_version").fetchone()[0] == 0
             assert conn.execute(
                 "SELECT target_version, dev_revision FROM schema_meta"
-            ).fetchone() == (1, 1)
+            ).fetchone() == (1, 2)
             conn.execute("UPDATE schema_meta SET dev_revision = 99")
         with pytest.raises(RuntimeError, match="开发修订"):
             await GenerationStore(tmp_path).initialize()

@@ -13,6 +13,164 @@ from astrbot_plugin_image_studio.tests.webui_harness import create_app, fixture_
 PREFIX = "/astrbot_plugin_image_studio/"
 
 
+def group_items(models=("nai-diffusion-4-5-full", " nai-diffusion-4-5-full ")):
+    return [
+        {
+            "client_id": f"group-item-{i}",
+            "filename": f"group-{i}.png",
+            "overrides": {
+                "model": model,
+                "prompt": f"manual group prompt {i}",
+                "negative_prompt": f"negative {i}",
+                "mode": "text2img",
+                "parameters": {"seed": 50 + i},
+            },
+        }
+        for i, model in enumerate(models)
+    ]
+
+
+@pytest.mark.parametrize("models", [("a", "b"), ("", ""), ("a", " ")])
+def test_group_prepare_requires_one_nonempty_model(tmp_path, models):
+    async def run():
+        app = await create_app(tmp_path, seed=False)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            result = await client.post(
+                PREFIX + "imports/prepare",
+                json={"as_group": True, "items": group_items(models)},
+            )
+            assert result.status_code == 400
+            assert "模型" in result.json()["message"]
+            assert app.state.plugin._imports == {}
+            assert app.state.plugin._import_groups == {}
+            assert list(app.state.plugin.store.imports_dir.iterdir()) == []
+
+    asyncio.run(run())
+
+
+def test_group_upload_commit_retry_and_individual_parameters(tmp_path):
+    async def run():
+        app = await create_app(tmp_path, seed=False)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            prepared = (
+                await client.post(
+                    PREFIX + "imports/prepare",
+                    json={"as_group": True, "items": group_items()},
+                )
+            ).json()
+            endpoints = [PREFIX + item["upload_endpoint"] for item in prepared["items"]]
+            first = await client.post(
+                endpoints[0],
+                files={
+                    "file": ("first.png", fixture_image(0, novelai=True), "image/png")
+                },
+            )
+            assert first.status_code == 200
+            assert (await client.get(PREFIX + "gallery/list")).json()["total"] == 0
+            incomplete = await client.post(
+                PREFIX + prepared["commit_endpoint"], json={}
+            )
+            assert (
+                incomplete.status_code == 400
+                and "group-1.png" in incomplete.json()["message"]
+            )
+            malformed = await client.post(
+                endpoints[1],
+                files={"file": ("invalid.png", b"not an image", "image/png")},
+            )
+            assert malformed.status_code == 400
+            assert (await client.get(PREFIX + "gallery/list")).json()["total"] == 0
+            second = await client.post(
+                endpoints[1],
+                files={
+                    "file": ("second.png", fixture_image(1, novelai=True), "image/png")
+                },
+            )
+            assert second.status_code == 200
+            group = app.state.plugin._import_groups[prepared["group_id"]]
+            group["items"][1][1]["overrides"]["model"] = "different"
+            assert (
+                await client.post(PREFIX + prepared["commit_endpoint"], json={})
+            ).status_code == 400
+            assert (await client.get(PREFIX + "gallery/list")).json()["total"] == 0
+            group["items"][1][1]["overrides"]["model"] = "nai-diffusion-4-5-full"
+            result = await client.post(PREFIX + prepared["commit_endpoint"], json={})
+            assert result.status_code == 200, result.text
+            generation_id = result.json()["generation_id"]
+            assert not group["directory"].exists()
+            assert (
+                await client.post(PREFIX + prepared["commit_endpoint"], json={})
+            ).json() == result.json()
+            detail = (
+                await client.get(
+                    PREFIX + f"gallery/detail/{generation_id}", params={"assets": 0}
+                )
+            ).json()
+            assert len(detail["images"]) == 2
+            assert (await client.get(PREFIX + "gallery/list")).json()["total"] == 1
+            for index, image in enumerate(detail["images"]):
+                copied = (
+                    await client.get(
+                        PREFIX + f"gallery/parameters/{generation_id}",
+                        params={"image_id": image["id"], "format": "studio"},
+                    )
+                ).json()
+                content = json.loads(copied["content"])
+                assert content["data"]["prompt"] == f"manual group prompt {index}"
+                assert content["data"]["parameters"]["seed"] == 50 + index
+                assert content["data"]["negative_prompt"] == f"negative {index}"
+                draft = (
+                    await client.post(
+                        PREFIX + f"gallery/reproduce/{generation_id}",
+                        json={"image_id": image["id"]},
+                    )
+                ).json()
+                assert draft["prompt"] == f"manual group prompt {index}"
+            await client.post(PREFIX + prepared["cancel_endpoint"], json={})
+            assert (await client.get(PREFIX + "gallery/list")).json()["total"] == 1
+
+    asyncio.run(run())
+
+
+def test_cancel_and_expiry_remove_only_pending_group_files(tmp_path):
+    async def run():
+        app = await create_app(tmp_path, seed=False)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            for expired in (False, True):
+                prepared = (
+                    await client.post(
+                        PREFIX + "imports/prepare",
+                        json={"as_group": True, "items": group_items()},
+                    )
+                ).json()
+                upload = PREFIX + prepared["items"][0]["upload_endpoint"]
+                await client.post(
+                    upload, files={"file": ("first.png", fixture_image(), "image/png")}
+                )
+                group = app.state.plugin._import_groups[prepared["group_id"]]
+                assert group["directory"].exists()
+                if expired:
+                    group["created_at"] -= 7200
+                    await app.state.plugin._expire_import_groups()
+                else:
+                    assert (
+                        await client.post(PREFIX + prepared["cancel_endpoint"], json={})
+                    ).status_code == 200
+                assert not group["directory"].exists()
+                assert (
+                    await client.post(PREFIX + prepared["commit_endpoint"], json={})
+                ).status_code == 410
+                assert (await client.get(PREFIX + "gallery/list")).json()["total"] == 0
+
+    asyncio.run(run())
+
+
 async def prepare(
     client: httpx.AsyncClient, identifier: str, overrides: dict | None = None
 ) -> str:
