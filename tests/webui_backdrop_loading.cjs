@@ -210,7 +210,7 @@ async function pendingDecodeDuringDrag(page, inner, surface, test) {
         const originals = await api(page, "get", `gallery/assets/${groupId}`);
         await page.goto(base); const frame = page.frameLocator("#studio"); await frame.locator("#modelChoice:not(:disabled)").waitFor();
         const inner = page.frames().find((item) => item.url().includes("/ui/"));
-        await inner.evaluate((theme) => { document.documentElement.dataset.theme = theme; const Original = window.PhotoSwipe; window.PhotoSwipe = class extends Original { constructor(options) { super(options); window.__testViewer = this; } }; }, test.theme);
+        await inner.evaluate(async (theme) => { await window.ImageStudioAppearance?.ready; window.ImageStudioAppearance.set({ preference: theme }); const Original = window.PhotoSwipe; window.PhotoSwipe = class extends Original { constructor(options) { super(options); window.__testViewer = this; } }; }, test.theme);
         await frame.locator('[data-view="gallery"]').click();
         await frame.locator("#gallerySearch").fill(marker); await frame.locator("#gallerySearch").press("Tab");
         await inner.waitForFunction((id) => { const cards = Array.from(document.querySelectorAll("[data-gallery-id]")); return cards.length === 1 && cards[0].dataset.galleryId === id; }, groupId);

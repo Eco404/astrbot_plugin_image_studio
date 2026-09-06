@@ -174,7 +174,7 @@ async function checkSelectionHeader(page, frame, inner, test) {
         await page.goto(base);
         const frame = page.frameLocator("#studio"); await frame.locator("#runtimeStatus").filter({ hasText: "已加载" }).waitFor({ state: "attached" });
         const inner = page.frames().find((item) => item.url().includes("/ui/"));
-        await inner.evaluate((mode) => { document.documentElement.dataset.theme = mode; }, theme);
+        await inner.evaluate(async (mode) => { await window.ImageStudioAppearance?.ready; window.ImageStudioAppearance.set({ preference: mode }); }, theme);
         await frame.locator("#pageHeaderAnchor").waitFor({ state: "attached" });
         for (const view of ["generate", "gallery", "import", "settings"]) {
           if (view === "import") { await openView(frame, inner, view); await stageImport(inner); }

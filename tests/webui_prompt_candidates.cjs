@@ -206,7 +206,7 @@ async function verifyGroup(page, frame, inner, fixture, name) {
       const page = await browser.newPage({ viewport: { width, height: width < 600 ? 844 : 1000 }, hasTouch: width < 600 });
       page.setDefaultTimeout(12000); const errors = []; page.on("pageerror", (error) => errors.push(error.message));
       await page.goto(base); const frame = page.frameLocator("#studio"); await frame.locator("#runtimeStatus").filter({ hasText: "已加载" }).waitFor({ state: "attached" });
-      const inner = page.frames().find((item) => item.url().includes("/ui/")); await inner.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
+      const inner = page.frames().find((item) => item.url().includes("/ui/")); await inner.evaluate(async (value) => { await window.ImageStudioAppearance?.ready; window.ImageStudioAppearance.set({ preference: value }); }, theme);
       await frame.locator('[data-view="import"]').click();
       await verifySingle(page, frame, inner, fixture, name);
       await verifyMultiple(page, frame, inner, fixture, name);

@@ -4,6 +4,10 @@
     visibility: hidden;
   }
 
+  .detail-image-frame.is-detail-swiping.is-detail-handoff > .detail-image {
+    visibility: visible;
+  }
+
   .detail-swipe-overlay {
     position: absolute;
     z-index: 2;

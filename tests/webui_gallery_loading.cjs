@@ -32,7 +32,7 @@ const output = fs.mkdtempSync(path.join(os.tmpdir(), "image-studio-gallery-loadi
       await page.reload();
       const frame = page.frames().find(item => item.url().includes("/ui/"));
       await frame.locator("#runtimeStatus").filter({ hasText: "已加载" }).waitFor({ state: "attached" });
-      await frame.evaluate(theme => { document.documentElement.dataset.theme = theme; }, test.theme);
+      await frame.evaluate(async theme => { await window.ImageStudioAppearance?.ready; window.ImageStudioAppearance.set({ preference: theme }); }, test.theme);
       await frame.locator('[data-view="gallery"]').click();
       await frame.locator(".gallery-card").first().waitFor();
       await frame.evaluate(async () => Promise.all(document.getAnimations().map(animation => animation.finished.catch(() => {}))));

@@ -69,7 +69,7 @@ async function geometry(frame) {
       await page.goto(base);
       const frame = page.frames().find(item => item.url().includes("/ui/"));
       await frame.locator("#runtimeStatus").filter({ hasText: "已加载" }).waitFor({ state: "attached" });
-      await frame.evaluate(theme => { document.documentElement.dataset.theme = theme; }, test.theme);
+      await frame.evaluate(async theme => { await window.ImageStudioAppearance?.ready; window.ImageStudioAppearance.set({ preference: theme }); }, test.theme);
       await frame.locator('[data-view="gallery"]').click();
       await frame.locator(".gallery-selection input").first().check();
       await frame.evaluate(async () => {

@@ -250,10 +250,11 @@
         const restored = $("importGrid").querySelector(`[data-import-id="${focusId}"] [data-import-field="${focusField}"]`);
         restored?.focus({ preventScroll: true }); if (selection && restored?.setSelectionRange) restored.setSelectionRange(...selection);
       }
-      $("importDropzone").classList.toggle("is-hidden", imports.length > 0);
+      $("importDropzone").classList.toggle("is-compact", imports.length > 0);
+      $("importDropzoneLabel").textContent = imports.length ? "继续添加图片" : "添加图片";
       $("importSummary").textContent = importAddJobs ? `正在校验图片… 已选择 ${imports.length} 张` : imports.length ? `已选择 ${imports.length} 张图片` : "尚未选择图片";
       $("confirmImportButton").disabled = importing || importAddJobs > 0 || !imports.length || imports.some((item) => item.status === "reading");
-      $("cancelImportButton").disabled = importing; $("chooseImportFiles").disabled = importing;
+      $("cancelImportButton").disabled = importing; $("importDropzone").disabled = importing; $("importFiles").disabled = importing;
       $("importGroupOption").classList.toggle("is-hidden", imports.length < 2);
       $("importAsGroup").disabled = importing || imports.length < 2;
       if (imports.length < 2) $("importAsGroup").checked = false;
@@ -808,7 +809,7 @@
       for (const [view, name] of Object.entries({ generate: "Sparkles", gallery: "Image", import: "FolderInput", settings: "Settings2" })) {
         const item = document.querySelector(`.nav-item[data-view="${view}"] .nav-icon`); item.className = "nav-icon"; item.innerHTML = icon(name);
       }
-      for (const [id, name, label] of [["galleryRefresh", "RefreshCw", "刷新画廊"], ["galleryPrev", "ChevronLeft", "上一页"], ["galleryNext", "ChevronRight", "下一页"], ["exportButton", "Download", "导出"], ["selectAllButton", "CheckCheck", "全选当前页"], ["cancelSelectionButton", "X", "取消选择"], ["deleteButton", "Trash2", "删除所选记录"], ["saveSettingsButton", "Check", "保存全部设置"], ["confirmImportButton", "Upload", "确认导入"], ["cancelImportButton", "X", "取消导入"]]) {
+      for (const [id, name, label] of [["galleryPrev", "ChevronLeft", "上一页"], ["galleryNext", "ChevronRight", "下一页"], ["exportButton", "Download", "导出"], ["selectAllButton", "CheckCheck", "全选当前页"], ["cancelSelectionButton", "X", "取消选择"], ["deleteButton", "Trash2", "删除所选记录"], ["saveSettingsButton", "Check", "保存全部设置"], ["confirmImportButton", "Upload", "确认导入"], ["cancelImportButton", "X", "取消导入"]]) {
         const button = $(id); button.innerHTML = `${icon(name)}<span>${label}</span>`; button.setAttribute("aria-label", label); button.title = label; button.classList.add("responsive-command");
       }
       $("favoriteSelectionButton").innerHTML = `${icon("Star")}<span>收藏</span>`;
@@ -821,7 +822,6 @@
       const formatWrapper = document.createElement("label"); formatWrapper.className = "copy-format-picker"; formatWrapper.title = "选择参数格式"; formatWrapper.innerHTML = icon("FileJson");
       const formatControl = $("detailCopyFormat").closest(".studio-select") || $("detailCopyFormat");
       formatControl.before(formatWrapper); formatWrapper.appendChild(formatControl);
-      $("chooseImportFiles").addEventListener("click", () => $("importFiles").click());
       $("importFiles").addEventListener("change", (event) => { void addImportFiles(event.target.files); event.target.value = ""; });
       $("importDropzone").addEventListener("click", () => $("importFiles").click());
       $("confirmImportButton").addEventListener("click", () => void confirmImports());
@@ -843,7 +843,12 @@
         view.addEventListener("drop", (event) => { event.preventDefault(); view.classList.remove("is-drop-target"); void addImportFiles(event.dataTransfer.files); });
       }
       $("galleryEngine").addEventListener("change", () => { hooks.clearGallerySelection(); void hooks.loadGallery(0); });
-      $("galleryFavorite").addEventListener("change", () => { hooks.clearGallerySelection(); void hooks.loadGallery(0); });
+      $("galleryFavorite").addEventListener("click", () => {
+        const button = $("galleryFavorite"); const selected = button.value !== "true";
+        button.value = selected ? "true" : ""; button.setAttribute("aria-pressed", String(selected)); button.classList.toggle("is-active", selected);
+        button.title = selected ? "取消收藏筛选" : "仅查看已收藏";
+        hooks.clearGallerySelection(); void hooks.loadGallery(0);
+      });
       $("pasteParametersButton").addEventListener("click", () => void readClipboardParameters());
       $("detailFavorite").addEventListener("click", () => void toggleFavorite());
       $("detailCopy").addEventListener("click", () => void copyDetailFormat());

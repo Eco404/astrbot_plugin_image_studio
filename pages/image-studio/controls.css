@@ -1,0 +1,138 @@
+:root {
+  --control-edge: color-mix(in srgb, var(--text) 8%, transparent);
+  --control-highlight: rgba(255, 255, 255, .44);
+  --control-depth: rgba(29, 42, 36, .11);
+  --control-shadow: inset 0 0 0 1px var(--control-edge),
+    inset 0 1px 0 var(--control-highlight), 0 1px 2px var(--control-depth);
+  --segment-frame-shadow: 0 1px 3px var(--control-depth), inset 0 0 0 1px var(--line);
+}
+
+:root[data-theme="dark"] {
+  --control-edge: color-mix(in srgb, var(--text) 9%, transparent);
+  --control-highlight: rgba(255, 255, 255, .045);
+  --control-depth: rgba(0, 0, 0, .24);
+}
+
+/* Keep existing selection and overlay shadows ahead of this quiet baseline. */
+:where(button, a.primary-button, a.quiet-button, a.danger-button) {
+  box-shadow: var(--control-shadow);
+}
+
+.nav-item,
+.nav-icon { box-shadow: none; }
+
+.mode-tabs,
+.model-tabs,
+.appearance-modes {
+  gap: 3px;
+  padding: 3px;
+  border: 0;
+  border-radius: 9px;
+  background: var(--surface);
+  box-shadow: none;
+}
+
+.segment,
+.model-tab,
+.appearance-modes label > span {
+  min-height: 34px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  box-shadow: none;
+}
+
+.segment.is-active,
+.model-tab.is-active,
+.appearance-modes input:checked + span {
+  background: var(--glass);
+  color: var(--accent-strong);
+  font-weight: 700;
+  box-shadow: var(--segment-frame-shadow);
+}
+
+/* The filmstrip button is a touch target, not another visible frame. */
+.detail-filmstrip-thumb { box-shadow: none; }
+.detail-filmstrip-preview { box-shadow: var(--control-shadow); }
+
+.parameter-copy,
+.parameter-copy:hover,
+.parameter-copy:active {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.model-settings > .section-heading { flex-wrap: wrap; }
+.model-settings > .section-heading > :first-child { flex: 1 1 300px; min-width: 0; }
+.model-settings .section-actions { flex: 0 1 340px; width: auto; max-width: 100%; min-width: 0; }
+.model-settings .section-actions > .studio-select,
+.model-settings .section-actions > input { flex: 1 1 0; width: auto; min-width: 0; }
+#addModelButton { flex: 0 0 auto; width: auto; min-width: calc(4em + 26px); white-space: nowrap; }
+
+.gallery-toolbar > .gallery-tool-button {
+  display: inline-grid;
+  flex: 0 0 44px;
+  width: 44px;
+  min-width: 44px;
+  max-width: 44px;
+  height: 44px;
+  min-height: 44px;
+  max-height: 44px;
+  aspect-ratio: 1;
+  place-items: center;
+  padding: 0;
+  border-radius: 50%;
+}
+
+.gallery-tool-button svg { width: 19px; height: 19px; }
+.gallery-tool-button.is-active,
+.gallery-tool-button[aria-pressed="true"] {
+  color: var(--warning);
+  background: var(--warning-soft);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--warning) 32%, transparent),
+    0 1px 2px var(--control-depth);
+}
+.gallery-tool-button[aria-pressed="true"] svg { fill: currentColor; }
+.gallery-tool-button:hover:not(:disabled):not([aria-pressed="true"]) { background: var(--surface-hover); }
+.gallery-tool-button:active:not(:disabled) { transform: translateY(1px); }
+.gallery-tool-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.gallery-tool-button:disabled { opacity: .45; cursor: not-allowed; }
+
+button.import-dropzone {
+  width: 100%;
+  min-width: 0;
+  margin: 0 0 16px;
+  padding: 24px;
+  text-align: center;
+  overflow-wrap: anywhere;
+  transition: background-color var(--motion-fast) ease, border-color var(--motion-fast) ease;
+}
+button.import-dropzone > [data-studio-icon] { display: grid; place-items: center; }
+button.import-dropzone:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--line));
+  background: var(--surface-hover);
+  color: var(--text);
+}
+button.import-dropzone:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+button.import-dropzone:disabled { opacity: .55; cursor: not-allowed; }
+button.import-dropzone.is-compact {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 76px;
+  padding: 16px;
+}
+button.import-dropzone.is-compact > [data-studio-icon] { flex: 0 0 24px; }
+
+@media (max-width: 540px) {
+  /* The transparent select trigger shares its visible wrapper's surface. */
+  .copy-format-picker { box-shadow: var(--control-shadow); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  button.import-dropzone { transition: none; }
+  .gallery-tool-button:active:not(:disabled) { transform: none; }
+}

@@ -17,6 +17,7 @@ import yaml
 RUNTIME_FILES = (
     "__init__.py",
     "main.py",
+    "appearance.py",
     "config.py",
     "database_schema.py",
     "image_metadata.py",
@@ -36,6 +37,9 @@ REQUIRED_ARCHIVE_FILES = RUNTIME_FILES + (
     "pages/image-studio/index.html",
     "pages/image-studio/app.js",
     "pages/image-studio/app.css",
+    "pages/image-studio/appearance.js",
+    "pages/image-studio/appearance.css",
+    "pages/image-studio/controls.css",
     "pages/image-studio/library.js",
     "pages/image-studio/hash.js",
     "pages/image-studio/backdrop.js",

@@ -102,10 +102,12 @@ async function verifyDetail(page, frame, inner, groupId, summary, originals, tes
   const scrollHistory = [];
   const recordScroll = async (step) => { scrollHistory.push({ step, scroll: (await paint(inner)).scroll }); };
   try {
+    // Neighbor previews are prepared on opening, so hold decoding before prefetch starts.
+    await gate(inner, previews[1]);
     await frame.locator(`[data-gallery-id="${groupId}"] .gallery-info`).click(); await frame.locator(".detail-filmstrip").waitFor(); await mainSource(inner, previews[0]);
     await inner.evaluate(() => { window.__paintFrame = document.querySelector('.detail-image-frame'); window.__paintMain = window.__paintFrame.querySelector(':scope > .detail-image[data-detail-image]'); window.__paintHolder = window.__paintFrame.querySelector(':scope > .detail-image-background'); window.__paintBackdrop = window.__paintHolder.querySelector(':scope > .detail-image-backdrop:not(.detail-backdrop-previous)'); window.__paintSampling = true; requestAnimationFrame(window.__samplePaint); });
     await recordScroll("initial");
-    await gate(inner, previews[1]); await clickThumbnail(page, frame, 1);
+    await clickThumbnail(page, frame, 1);
     await inner.waitForFunction((src) => window.__paintPending.some((entry) => entry.src === src), previews[1]); await frames(inner, 4);
     const held = await paint(inner); assert.equal(held.src, previews[0], "old foreground must remain while new preview decodes"); assert.equal(held.opacity, 1); assert.ok(held.sameMain && held.sameFrame && held.sameHolder && held.sameBackdrop);
     await recordScroll("preview held");
@@ -175,7 +177,7 @@ async function verifyViewer(page, frame, inner, originals, test) {
       const page = await browser.newPage({ viewport: { width: test.width, height: test.width <= 540 ? 844 : 1000 }, hasTouch: test.width <= 540 }); page.setDefaultTimeout(12000); const errors = []; page.on("pageerror", (error) => errors.push(error.message));
       await page.goto(base); const frame = page.frameLocator("#studio"); await frame.locator("#runtimeStatus").filter({ hasText: "已加载" }).waitFor({ state: "attached" });
       const groupId = await seed(page, files); const summary = await api(page, "get", `gallery/detail/${groupId}?assets=0`); const assets = await api(page, "get", `gallery/assets/${groupId}`); const originals = assets.images.map((image) => image.data_url);
-      const inner = page.frames().find((item) => item.url().includes("/ui/")); await inner.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, test.theme); await installPaintProbe(inner);
+      const inner = page.frames().find((item) => item.url().includes("/ui/")); await inner.evaluate(async (theme) => { await window.ImageStudioAppearance?.ready; window.ImageStudioAppearance.set({ preference: theme }); }, test.theme); await installPaintProbe(inner);
       await frame.locator('[data-view="gallery"]').click(); await frame.locator("#gallerySearch").fill(marker); await frame.locator("#gallerySearch").press("Tab"); await frame.locator(`[data-gallery-id="${groupId}"]`).waitFor();
       await verifyDetail(page, frame, inner, groupId, summary, originals, test); await verifyViewer(page, frame, inner, originals, test);
       const invalid = await inner.evaluate(() => { window.__paintSampling = false; return window.__paintSamples.filter((sample) => sample.scope !== "gesture" && (sample.tag !== "IMG" || !sample.hasSource || sample.width < 2 || sample.height < 2 || sample.opacity < .999)); });

@@ -4,7 +4,36 @@
   const bindings = new WeakMap();
   const mobile = window.matchMedia("(max-width: 540px)");
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+  const velocityWindow = 100;
+  const flickVelocity = 0.4;
+  const flickDistance = 24;
   let suppressClickUntil = 0;
+
+  function sampleMovement(active, x, time) {
+    const previous = active.samples[active.samples.length - 1];
+    active.minX = Math.min(active.minX, x);
+    active.maxX = Math.max(active.maxX, x);
+    active.samples.push({ x, time: Math.max(time, previous.time) });
+    const cutoff = time - velocityWindow;
+    while (active.samples.length > 2 && active.samples[1].time <= cutoff) active.samples.shift();
+  }
+
+  function releaseVelocity(active) {
+    const samples = active.samples;
+    const end = samples[samples.length - 1];
+    const start = samples[0];
+    const cutoff = end.time - velocityWindow;
+    let x = start.x;
+    let time = start.time;
+    if (time < cutoff && samples[1].time > time) {
+      const next = samples[1];
+      const ratio = Math.min(1, (cutoff - time) / (next.time - time));
+      x += (next.x - x) * ratio;
+      time = cutoff;
+    }
+    const duration = end.time - time;
+    return duration >= 8 ? (end.x - x) / duration : 0;
+  }
 
   function bind(frame, hooks) {
     if (!(frame instanceof HTMLElement)) return () => {};
@@ -32,7 +61,7 @@
       overlay?.remove();
       overlay = null;
       track = null;
-      frame.classList.remove("is-detail-swiping");
+      frame.classList.remove("is-detail-swiping", "is-detail-handoff");
     }
 
     function finish(committed = false, direction = 0) {
@@ -88,6 +117,22 @@
       frame.append(overlay);
       frame.classList.add("is-detail-swiping");
       frame.dispatchEvent(new CustomEvent("detail-swipe-start"));
+      active.pending = new Map();
+      if (hooks?.prepareNeighbor) {
+        for (const direction of [-1, 1]) {
+          const promise = Promise.resolve().then(() => hooks.prepareNeighbor(direction)).then((value) => {
+            if (disposed || gesture !== active || !track || !value?.src) return value;
+            const key = direction < 0 ? "previous" : "next";
+            if (!active[key]) track.append(pane(value.src, direction));
+            active[key] = value;
+            if (phase === "dragging") paint(active);
+            return value;
+          });
+          // Speculative failures are shown only if this direction is committed.
+          promise.catch(() => {});
+          active.pending.set(direction, promise);
+        }
+      }
     }
 
     function paint(active) {
@@ -131,8 +176,17 @@
       if (!active || phase !== "dragging") return;
       setPhase("settling");
       suppressClick();
-      const adjacent = direction > 0 ? active.next : active.previous;
-      await animateTo(commit && adjacent ? -direction * active.width : 0, commit && adjacent ? 220 : 180);
+      let adjacent = direction > 0 ? active.next : active.previous;
+      if (commit && active.pending?.has(direction)) {
+        try { adjacent = await active.pending.get(direction); }
+        catch (error) {
+          if (!disposed && gesture === active) frame.dispatchEvent(new CustomEvent("detail-swipe-error", { detail: { error } }));
+          commit = false;
+        }
+      }
+      if (disposed || gesture !== active || !frame.isConnected) return;
+      commit = commit && !!adjacent;
+      await animateTo(commit ? -direction * active.width : 0, commit ? 220 : 180);
       if (disposed || gesture !== active || !frame.isConnected) return;
       if (!commit || !mobile.matches) {
         finish();
@@ -140,12 +194,22 @@
       }
       setPhase("navigating");
       try {
-        await hooks?.navigate?.(direction);
+        const navigated = await hooks?.navigate?.(direction, adjacent);
+        if (navigated === false) {
+          await animateTo(0, 180);
+          if (!disposed && gesture === active) finish();
+          return;
+        }
       } catch (error) {
         if (!disposed) frame.dispatchEvent(new CustomEvent("detail-swipe-error", { detail: { error } }));
         if (!disposed && gesture === active) finish();
         return;
       }
+      if (disposed || gesture !== active || !frame.isConnected) return;
+      setPhase("handoff");
+      // Rasterize the new main image beneath the landed pane before exposing its layer.
+      frame.classList.add("is-detail-handoff");
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
       suppressClick();
       if (!disposed && gesture === active) finish(true, direction);
     }
@@ -170,6 +234,8 @@
         id: touch.identifier, x: touch.clientX, y: touch.clientY,
         dx: 0, dy: 0, width: frame.clientWidth, height: frame.clientHeight,
         previous: null, next: null,
+        samples: [{ x: touch.clientX, time: event.timeStamp }],
+        minX: touch.clientX, maxX: touch.clientX,
       };
       setPhase("tracking");
     }
@@ -182,6 +248,7 @@
       if (!touch) { cancel(); return; }
       active.dx = touch.clientX - active.x;
       active.dy = touch.clientY - active.y;
+      sampleMovement(active, touch.clientX, event.timeStamp);
       if (phase === "tracking") {
         if (Math.abs(active.dy) >= 8 && Math.abs(active.dy) >= Math.abs(active.dx) * 0.9) {
           cancel(true);
@@ -210,8 +277,18 @@
       if (!touch) { cancel(); return; }
       active.dx = touch.clientX - active.x;
       active.dy = touch.clientY - active.y;
+      // Include release time so a paused finger cannot retain an earlier flick velocity.
+      sampleMovement(active, touch.clientX, event.timeStamp);
       const threshold = Math.max(48, Math.min(80, active.width * 0.2));
-      const commit = Math.abs(active.dx) >= threshold && Math.abs(active.dx) >= Math.abs(active.dy) * 1.15;
+      const velocity = releaseVelocity(active);
+      const direction = Math.sign(active.dx);
+      // Tolerate release jitter without treating an intentional drag back as a flick.
+      const reversedDistance = direction < 0 ? touch.clientX - active.minX : active.maxX - touch.clientX;
+      const flick = Math.abs(active.dx) >= flickDistance
+        && Math.abs(velocity) >= flickVelocity
+        && Math.sign(velocity) === direction && reversedDistance <= 6;
+      const commit = (Math.abs(active.dx) >= threshold || flick)
+        && Math.abs(active.dx) >= Math.abs(active.dy) * 1.15;
       if (event.cancelable) event.preventDefault();
       void settle(commit, active.dx < 0 ? 1 : -1);
     }

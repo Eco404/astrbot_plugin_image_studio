@@ -27,7 +27,7 @@ async function settle(frame) {
       await page.goto(base);
       const frame = page.frames().find(item => item.url().includes("/ui/"));
       await frame.locator("#runtimeStatus").filter({ hasText: "已加载" }).waitFor({ state: "attached" });
-      await frame.evaluate(theme => { document.documentElement.dataset.theme = theme; }, test.theme);
+      await frame.evaluate(async theme => { await window.ImageStudioAppearance?.ready; window.ImageStudioAppearance.set({ preference: theme }); }, test.theme);
       await frame.locator('[data-mode="img2img"]').click();
       const button = frame.locator("#referenceChooseButton");
       const count = frame.locator("#referenceCount");

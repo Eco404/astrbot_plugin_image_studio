@@ -111,7 +111,7 @@ async function verifyStages(scope, name) {
       await page.addInitScript(() => { try { Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async (content) => { window.__copiedParameters = content; } } }); } catch {} });
       await page.goto(base);
       const frame = page.frameLocator("#studio"); await frame.locator("#runtimeStatus").filter({ hasText: "已加载" }).waitFor({ state: "attached" });
-      const inner = page.frames().find((item) => item.url().includes("/ui/")); await inner.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
+      const inner = page.frames().find((item) => item.url().includes("/ui/")); await inner.evaluate(async (value) => { await window.ImageStudioAppearance?.ready; window.ImageStudioAppearance.set({ preference: value }); }, theme);
       await frame.locator('[data-view="import"]').click();
       const inspectReplies = []; const uploads = []; let submitted; let committed;
       page.on("request", (request) => { if (request.url().includes("/imports/prepare")) submitted = request.postDataJSON(); });

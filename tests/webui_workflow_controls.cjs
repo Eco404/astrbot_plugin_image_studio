@@ -161,7 +161,8 @@ async function testGalleryOverlays(page, frame, inner, name) {
   });
   for (const item of styles) {
     assert.match(item.blur, /blur\(14px\)/, `${name} ${item.selector}: missing shared background blur`);
-    assert.ok(item.alpha > 20 && item.alpha < 245, `${name} ${item.selector}: overlay should remain translucent, alpha ${item.alpha}`);
+    if (item.selector === ".gallery-selection > span") assert.equal(item.alpha, 255, `${name}: checked selection must use the unmodified opaque theme color`);
+    else assert.ok(item.alpha > 20 && item.alpha < 245, `${name} ${item.selector}: overlay should remain translucent, alpha ${item.alpha}`);
   }
   await inner.locator(`[data-gallery-id="${multi.id}"]`).evaluate((element) => element.scrollIntoView({ block: "center" }));
   await capture(page, inner, `${name}-gallery-overlays-checked`);
@@ -261,7 +262,7 @@ async function testQuota(page, frame, inner, name) {
       const frame = page.frameLocator("#studio");
       await frame.locator("#runtimeStatus").filter({ hasText: "已加载" }).waitFor({ state: "attached" });
       const inner = page.frames().find((item) => item.url().includes("/ui/"));
-      await inner.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, test.theme);
+      await inner.evaluate(async (theme) => { await window.ImageStudioAppearance?.ready; window.ImageStudioAppearance.set({ preference: theme }); }, test.theme);
       await testSelectionActions(page, frame, inner, test.name);
       await testDetailLoading(page, frame, inner, test.name);
       await testGalleryOverlays(page, frame, inner, test.name);

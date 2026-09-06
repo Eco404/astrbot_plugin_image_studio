@@ -4,11 +4,14 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Image Studio 生图工作台</title>
+  <script src="./appearance.js?v=0.7.26"></script>
   <link rel="stylesheet" href="./vendor/photoswipe/photoswipe.css?v=5.4.4" />
-  <link rel="stylesheet" href="./app.css?v=0.7.18" />
-  <link rel="stylesheet" href="./library.css?v=0.7.18" />
-  <link rel="stylesheet" href="./detail-swipe.css?v=0.7.18" />
+  <link rel="stylesheet" href="./app.css?v=0.7.21" />
+  <link rel="stylesheet" href="./library.css?v=0.7.21" />
+  <link rel="stylesheet" href="./detail-swipe.css?v=0.7.21" />
   <link rel="stylesheet" href="./select.css?v=0.7.7" />
+  <link rel="stylesheet" href="./appearance.css?v=0.7.26" />
+  <link rel="stylesheet" href="./controls.css?v=0.7.22" />
 </head>
 <body>
   <main class="app-shell quiet-glass-background">
@@ -80,8 +83,8 @@
           <select id="galleryMode" aria-label="按模式筛选"><option value="">全部模式</option><option value="text2img">文生图</option><option value="img2img">图生图</option></select>
           <select id="gallerySource" aria-label="按调用来源筛选"><option value="">全部来源</option><option value="webui">WebUI</option><option value="command">指令</option><option value="llm_tool">LLM 工具</option><option value="import">导入</option></select>
           <select id="galleryEngine" aria-label="按生图来源筛选"><option value="">全部生图来源</option><option value="novelai">NovelAI</option><option value="comfyui">ComfyUI</option><option value="a1111">Stable Diffusion</option><option value="openai_images">OpenAI Images</option><option value="gemini">Gemini</option><option value="custom_json">自定义</option><option value="unknown">未知来源</option></select>
-          <select id="galleryFavorite" aria-label="按收藏筛选"><option value="">全部收藏状态</option><option value="true">已收藏</option><option value="false">未收藏</option></select>
-          <button class="quiet-button" id="galleryRefresh" type="button">刷新</button>
+          <button class="studio-icon-button gallery-tool-button" id="galleryFavorite" type="button" value="" aria-label="仅查看已收藏" aria-pressed="false" title="仅查看已收藏" data-studio-icon="Star"></button>
+          <button class="studio-icon-button gallery-tool-button" id="galleryRefresh" type="button" aria-label="刷新画廊" title="刷新画廊" data-studio-icon="RefreshCw"></button>
         </div>
         <div id="selectionAnchor" aria-hidden="true"></div>
         <div class="selection-bar gallery-selection-bar glass is-hidden" id="selectionBar"><span id="selectionCount">已选 0 项</span><button class="quiet-button" id="cancelSelectionButton" type="button">取消</button><button class="quiet-button" id="selectAllButton" type="button">全选当前页</button><button class="quiet-button" id="favoriteSelectionButton" type="button" disabled>收藏</button><button class="quiet-button" id="exportButton" type="button">导出</button><button class="danger-button" id="deleteButton" type="button">删除</button></div>
@@ -94,20 +97,21 @@
 
       <section class="view" id="importView">
         <div class="import-toolbar">
-          <button class="primary-button" id="chooseImportFiles" type="button"><span data-studio-icon="ImagePlus" aria-hidden="true"></span>选择图片</button><span id="importSummary" role="status">尚未选择图片</span>
+          <span id="importSummary" role="status">尚未选择图片</span>
           <div class="import-options">
             <div class="import-group-option is-hidden" id="importGroupOption"><span id="importGroupLabel">作为图组导入</span><label class="toggle-control"><input id="importAsGroup" type="checkbox" aria-labelledby="importGroupLabel" /><span aria-hidden="true"></span></label></div>
             <div class="import-group-option is-hidden" id="importMergeOption"><span id="importMergeLabel">合并到已有图组</span><label class="toggle-control"><input id="importMergeExisting" type="checkbox" aria-labelledby="importMergeLabel" /><span aria-hidden="true"></span></label></div>
           </div>
           <input id="importFiles" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden />
         </div>
-        <div class="import-dropzone" id="importDropzone"><span data-studio-icon="Upload" aria-hidden="true"></span><span>拖入图片或选择文件</span></div>
+        <button class="import-dropzone" id="importDropzone" type="button" aria-label="添加待导入图片"><span data-studio-icon="Upload" aria-hidden="true"></span><span id="importDropzoneLabel">添加图片</span></button>
         <div class="import-grid" id="importGrid"></div>
         <div class="import-floatingbar floatingbar"><span id="importProgress" role="status"></span><button class="quiet-button" id="cancelImportButton" type="button">取消</button><button class="primary-button" id="confirmImportButton" type="button" disabled>确认导入</button></div>
       </section>
 
       <section class="view" id="settingsView">
         <div class="settings-layout">
+          <section class="settings-panel glass" id="appearanceSettings" aria-label="主题设置"></section>
           <section class="settings-panel glass">
             <div class="section-heading"><div><h2>运行</h2><p>控制 Agent 是否可以使用 Image Studio 生图工具。</p></div></div>
             <div class="toggle-row"><label for="settingTool">启用 LLM 生图工具</label><label class="toggle-control"><input id="settingTool" type="checkbox" /><span aria-hidden="true"></span></label></div>
@@ -237,13 +241,13 @@
   <script src="/api/plugin/page/bridge-sdk.js"></script>
   <script src="./vendor/photoswipe/photoswipe.umd.min.js?v=5.4.4"></script>
   <script src="./vendor/exifreader/exif-reader.js?v=4.44.1"></script>
-  <script src="./vendor/lucide/icons.js?v=0.468.0"></script>
+  <script src="./vendor/lucide/icons.js?v=0.468.0-studio2"></script>
   <script src="./vendor/js-sha256/sha256.min.js?v=0.11.1"></script>
   <script src="./hash.js?v=0.7.11" onerror="window.__reportImageStudioPageError(true)"></script>
   <script src="./select.js?v=0.7.4" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./library.js?v=0.7.18" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./detail-swipe.js?v=0.7.18" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./backdrop.js?v=0.7.18" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./app.js?v=0.7.18" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./library.js?v=0.7.21" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./detail-swipe.js?v=0.7.21" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./backdrop.js?v=0.7.21" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./app.js?v=0.7.21" onerror="window.__reportImageStudioPageError(true)"></script>
 </body>
 </html>

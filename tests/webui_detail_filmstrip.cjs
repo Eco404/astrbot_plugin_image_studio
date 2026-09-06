@@ -204,7 +204,8 @@ async function verifyViewerReturn(page, frame, inner, test) {
   if (test.width <= 540) {
     await frame.locator('[data-detail-image]').click(); await inner.waitForFunction(() => window.__testViewer?.opener.isOpen);
     await inner.evaluate(() => window.__testViewer.goTo(window.__testViewer.currIndex + 4));
-    await inner.waitForFunction(() => document.querySelector('[data-detail-dot="4"][aria-current="true"]'));
+    await inner.waitForFunction(() => window.__testViewer.currSlide.data.image_index === 4);
+    await selected(frame, 0);
     await inner.evaluate(() => window.__testViewer.close()); await frame.locator(".pswp--open").waitFor({ state: "detached" }); await selected(frame, 4);
   } else {
     await frame.locator('[data-detail-image]').click(); await frame.locator("#imagePreview:not(.is-hidden)").waitFor();
@@ -216,13 +217,11 @@ async function verifyViewerReturn(page, frame, inner, test) {
 
 async function verifyCrossGroup(page, frame, inner, singleId, shortId, test) {
   await frame.locator('[data-detail-dot][aria-current="true"]').press("End"); await selected(frame, 22);
-  const singleResponse = page.waitForResponse((response) => response.url().includes(`/gallery/detail/${singleId}`));
   if (test.width <= 540) await swipe(page, inner, ".detail-image-frame"); else await frame.locator('[data-detail-nav="1"]').click();
-  await singleResponse; await frame.locator('[data-detail-image]').waitFor();
+  await inner.waitForFunction((id) => { const frame = document.querySelector(".detail-image-frame"); return frame?.dataset.generationId === id && !frame.dataset.detailSwipeState && frame.getAttribute("aria-busy") !== "true"; }, singleId); await frame.locator('[data-detail-image]').waitFor();
   assert.equal(await frame.locator(".detail-filmstrip").count(), 0, "single-image record must hide the filmstrip");
-  const shortResponse = page.waitForResponse((response) => response.url().includes(`/gallery/detail/${shortId}`));
   if (test.width <= 540) await swipe(page, inner, ".detail-image-frame"); else await frame.locator('[data-detail-nav="1"]').click();
-  await shortResponse; await frame.locator(".detail-filmstrip").waitFor(); assert.equal(await frame.locator(".detail-filmstrip-thumb").count(), 2);
+  await inner.waitForFunction((id) => { const frame = document.querySelector(".detail-image-frame"); return frame?.dataset.generationId === id && !frame.dataset.detailSwipeState && frame.getAttribute("aria-busy") !== "true"; }, shortId); await frame.locator(".detail-filmstrip").waitFor(); assert.equal(await frame.locator(".detail-filmstrip-thumb").count(), 2);
   await selected(frame, 0); await capture(page, inner, `${test.name}-adjacent-group-filmstrip`);
 }
 
@@ -239,7 +238,7 @@ async function verifyCrossGroup(page, frame, inner, singleId, shortId, test) {
       const shortId = await seed(page, files.slice(24)); const singleId = await seed(page, files.slice(23, 24)); const groupId = await seed(page, files.slice(0, 23));
       const summary = await api(page, "get", `gallery/detail/${groupId}?assets=0`);
       const inner = page.frames().find((item) => item.url().includes("/ui/"));
-      await inner.evaluate((theme) => { document.documentElement.dataset.theme = theme; const Original = window.PhotoSwipe; window.PhotoSwipe = class extends Original { constructor(options) { super(options); window.__testViewer = this; } }; }, theme);
+      await inner.evaluate(async (theme) => { await window.ImageStudioAppearance?.ready; window.ImageStudioAppearance.set({ preference: theme }); const Original = window.PhotoSwipe; window.PhotoSwipe = class extends Original { constructor(options) { super(options); window.__testViewer = this; } }; }, theme);
       await frame.locator('[data-view="gallery"]').click();
       await frame.locator("#gallerySearch").fill(marker); await frame.locator("#gallerySearch").press("Tab");
       await inner.waitForFunction((ids) => { const cards = Array.from(document.querySelectorAll("[data-gallery-id]")); return cards.length === ids.length && cards.every((card) => ids.includes(card.dataset.galleryId)); }, [groupId, singleId, shortId]);

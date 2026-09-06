@@ -30,7 +30,7 @@ const output = fs.mkdtempSync(path.join(os.tmpdir(), "image-studio-import-groups
       await page.goto(base);
       const frame = page.frames().find(item => item.url().includes("/ui/"));
       await frame.locator("#runtimeStatus").filter({ hasText: "已加载" }).waitFor({ state: "attached" });
-      await frame.evaluate(theme => { document.documentElement.dataset.theme = theme; }, test.theme);
+      await frame.evaluate(async theme => { await window.ImageStudioAppearance?.ready; window.ImageStudioAppearance.set({ preference: theme }); }, test.theme);
       const before = await (await page.request.get(prefix + "gallery/list?limit=60")).json();
       const originals = before.items.filter(item => item.source !== "import").slice(0, 2);
       const buffers = [];

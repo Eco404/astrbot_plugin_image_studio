@@ -62,8 +62,8 @@ async function swipe(page, inner, direction) {
       page.setDefaultTimeout(12000); const errors = []; page.on("pageerror", (error) => errors.push(error.message));
       await page.goto(base); const frame = page.frameLocator("#studio"); await frame.locator("#modelChoice:not(:disabled)").waitFor();
       const inner = page.frames().find((item) => item.url().includes("/ui/"));
-      await inner.evaluate((theme) => {
-        document.documentElement.dataset.theme = theme;
+      await inner.evaluate(async (theme) => {
+        await window.ImageStudioAppearance?.ready; window.ImageStudioAppearance.set({ preference: theme });
         const Original = window.PhotoSwipe;
         window.PhotoSwipe = class extends Original { constructor(options) { super(options); window.__testViewer = this; } };
       }, test.theme);
@@ -73,8 +73,8 @@ async function swipe(page, inner, direction) {
       await frame.locator(".gallery-card .gallery-info").first().click(); await openViewer(frame, inner); await waitLoaded(inner, 0);
       assert.equal(await frame.locator(".image-studio-controls-visible").count(), 0, "download button should start hidden");
       await inner.waitForFunction(() => document.querySelector(".image-studio-viewer-backdrop:not(.image-studio-viewer-backdrop-previous)")?.naturalWidth > 1);
-      const backdrop = await inner.locator(".image-studio-viewer-backdrop:not(.image-studio-viewer-backdrop-previous)").evaluate((image) => ({ width: image.naturalWidth, fit: getComputedStyle(image).objectFit, filter: getComputedStyle(image).filter }));
-      assert.ok(backdrop.width > 1); assert.equal(backdrop.fit, "cover"); assert.match(backdrop.filter, /blur\(24px\)/);
+      const backdrop = await inner.locator(".image-studio-viewer-backdrop:not(.image-studio-viewer-backdrop-previous)").evaluate((image) => ({ width: image.naturalWidth, fit: getComputedStyle(image).objectFit, filter: getComputedStyle(image).filter, holderFilter: getComputedStyle(image.parentElement).filter, holderClass: image.parentElement.className }));
+      assert.ok(backdrop.width > 1); assert.equal(backdrop.fit, "cover"); assert.equal(backdrop.filter, "none"); assert.match(backdrop.holderFilter, /blur\(24px\)/); assert.equal(backdrop.holderClass, "image-studio-viewer-background");
       assert.equal(await inner.locator(".pswp__bg").evaluate((element) => Number(getComputedStyle(element).opacity)), 1, "viewer background must obscure the underlying dialog");
       await screenshot(page, inner, `${test.width}-${test.theme}-initial-background`);
 
@@ -146,11 +146,12 @@ async function swipe(page, inner, direction) {
       assert.equal(await frame.locator(".image-studio-image-status").isVisible(), false, "a late preview failure must not hide a successful original");
       await page.unroute("**/gallery/image/*", latePreview);
 
-      let releaseOld; const oldGate = new Promise((resolve) => { releaseOld = resolve; }); let held = 0;
+      let releaseOld; const oldGate = new Promise((resolve) => { releaseOld = resolve; });
       const oldImageId = await inner.evaluate(() => window.__testViewer.options.dataSource[1].image_id);
-      const stale = async (route) => { const url = new URL(route.request().url()); if (url.pathname.endsWith(`/${oldImageId}`) && url.searchParams.get("detail") === "original") { held++; await oldGate; } await route.continue(); };
+      const oldRequest = page.waitForRequest((request) => { const url = new URL(request.url()); return url.pathname.endsWith(`/${oldImageId}`) && url.searchParams.get("detail") === "original"; });
+      const stale = async (route) => { const url = new URL(route.request().url()); if (url.pathname.endsWith(`/${oldImageId}`) && url.searchParams.get("detail") === "original") await oldGate; await route.continue(); };
       await page.route("**/gallery/image/*", stale); await inner.evaluate(() => window.__testViewer.goTo(1));
-      await page.waitForTimeout(100); assert.ok(held > 0);
+      await oldRequest;
       await inner.evaluate(() => window.__testViewer.close()); await frame.locator(".pswp--open").waitFor({ state: "detached" }); await frame.locator("#closeDrawer").click();
       await inner.evaluate(() => window.scrollTo(0, 0));
       const filtered = page.waitForResponse((response) => response.url().includes("/gallery/list") && new URL(response.url()).searchParams.get("source") === "command");

@@ -287,7 +287,7 @@ async function verify(page, frame, inner, groupId, summary, assets, name, engine
           const summary = await api(page, "get", `gallery/detail/${groupId}?assets=0`);
           const assets = await api(page, "get", `gallery/assets/${groupId}`);
           const inner = page.frames().find((item) => item.url().includes("/ui/"));
-          await inner.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, test.theme);
+          await inner.evaluate(async (theme) => { await window.ImageStudioAppearance?.ready; window.ImageStudioAppearance.set({ preference: theme }); }, test.theme);
           await installProbe(inner);
           await frame.locator('[data-view="gallery"]').click();
           await frame.locator("#gallerySearch").fill(marker); await frame.locator("#gallerySearch").press("Tab");

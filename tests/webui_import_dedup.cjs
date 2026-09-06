@@ -187,7 +187,7 @@ async function lostResponse(page, frame, name, traffic) {
       page.setDefaultTimeout(12000); const errors = []; page.on("pageerror", (error) => errors.push(error.message));
       await page.goto(base); assert.equal(await page.locator("#studio").count(), 1);
       const frame = page.frameLocator("#studio"); await frame.locator("#runtimeStatus").filter({ hasText: "已加载" }).waitFor({ state: "attached" });
-      const inner = page.frames().find((item) => item.url().includes("/ui/")); await inner.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, test.theme);
+      const inner = page.frames().find((item) => item.url().includes("/ui/")); await inner.evaluate(async (theme) => { await window.ImageStudioAppearance?.ready; window.ImageStudioAppearance.set({ preference: theme }); }, test.theme);
       const traffic = { prepare: 0, upload: 0, check: 0, targets: 0 };
       page.on("request", (request) => { for (const [key, suffix] of [["prepare", "/imports/prepare"], ["upload", "/imports/upload/"], ["check", "/imports/check"], ["targets", "/imports/merge-targets"]]) if (request.url().includes(suffix)) traffic[key]++; });
       await frame.locator('[data-view="import"]').click(); await localDedup(page, frame, inner, name);

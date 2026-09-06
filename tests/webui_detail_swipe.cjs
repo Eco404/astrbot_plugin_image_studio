@@ -167,12 +167,71 @@ async function verifyRollback(page, inner, client, test) {
     const before = await bounds(inner);
     await move(client, start, cancelled ? -75 : -25); await frames(inner);
     assert.equal(await inner.locator(".detail-swipe-overlay").count(), 1);
+    if (!cancelled) await page.waitForTimeout(160);
     await client.send("Input.dispatchTouchEvent", { type: cancelled ? "touchCancel" : "touchEnd", touchPoints: [] });
     await waitClean(inner); await selected(inner, 1);
     unchangedBackdrop(before.backdrop, (await bounds(inner)).backdrop, "rolled back backdrop");
     assert.equal(await inner.locator(".detail-backdrop-previous").count(), 0, "rollback must not trigger an image background transition");
     await page.screenshot({ path: path.join(output, `${test.name}-${cancelled ? "cancel" : "short"}-rollback.png`) });
   }
+}
+
+async function timedDrag(inner, samples) {
+  await inner.locator("#drawerBody").evaluate((element) => { element.scrollTop = 0; });
+  await inner.evaluate((samples) => {
+    const frame = document.querySelector(".detail-image-frame");
+    const rect = frame.getBoundingClientRect();
+    const x = rect.x + rect.width / 2; const y = rect.y + rect.height / 2;
+    const origin = performance.now();
+    const dispatch = (type, sample) => {
+      const touch = new Touch({ identifier: 73, target: frame, clientX: x + sample.x, clientY: y + (sample.y || 0) });
+      const ended = type === "touchend";
+      const event = new TouchEvent(type, { bubbles: true, cancelable: true, touches: ended ? [] : [touch], targetTouches: ended ? [] : [touch], changedTouches: [touch] });
+      Object.defineProperty(event, "timeStamp", { value: origin + sample.time });
+      frame.dispatchEvent(event);
+    };
+    dispatch("touchstart", { x: 0, time: 0 });
+    for (const sample of samples.slice(0, -1)) dispatch("touchmove", sample);
+    dispatch("touchend", samples[samples.length - 1]);
+  }, samples);
+  await waitClean(inner);
+  await inner.waitForFunction(() => {
+    const backdrop = document.querySelector(".detail-image-backdrop:not(.detail-backdrop-previous)");
+    const thumbnail = document.querySelector('[data-detail-dot][aria-current="true"] img');
+    return (!thumbnail || backdrop?.src === thumbnail.src) && backdrop?.dataset.backdropState === "idle";
+  });
+}
+
+async function verifyVelocity(inner) {
+  // Fixed event timestamps keep release-speed assertions independent of CI rendering load.
+  const quick = (direction) => [{ x: direction * 14, time: 20 }, { x: direction * 34, time: 55 }, { x: direction * 34, time: 70 }];
+  await timedDrag(inner, quick(-1)); await selected(inner, 2);
+  await timedDrag(inner, quick(1)); await selected(inner, 1);
+  await timedDrag(inner, [{ x: -14, time: 20 }, { x: -36, time: 55 }, { x: -34, time: 65 }, { x: -34, time: 70 }]); await selected(inner, 2);
+  await timedDrag(inner, quick(1)); await selected(inner, 1);
+  const rollbacks = [
+    [{ x: -14, time: 100 }, { x: -34, time: 240 }, { x: -34, time: 270 }],
+    [{ x: -14, time: 20 }, { x: -34, time: 55 }, { x: -34, time: 250 }],
+    [{ x: -12, time: 15 }, { x: -18, time: 25 }, { x: -18, time: 35 }],
+    [{ x: -15, time: 15 }, { x: -47, time: 45 }, { x: -32, time: 60 }, { x: -32, time: 70 }],
+    [{ x: -14, y: -25, time: 20 }, { x: -34, y: -65, time: 55 }, { x: -34, y: -65, time: 70 }],
+  ];
+  for (const samples of rollbacks) { await timedDrag(inner, samples); await selected(inner, 1); }
+}
+
+async function verifyBoundaries(inner, groupId, adjacentId) {
+  const quick = (direction) => [{ x: direction * 14, time: 20 }, { x: direction * 34, time: 55 }, { x: direction * 34, time: 70 }];
+  await timedDrag(inner, quick(1)); await selected(inner, 0);
+  assert.equal(await inner.locator(".detail-image-frame").getAttribute("data-generation-id"), groupId, "swiping past the first gallery item must stay in place");
+  await timedDrag(inner, quick(-1)); await selected(inner, 1);
+  await timedDrag(inner, quick(-1)); await selected(inner, 2);
+  await timedDrag(inner, quick(-1));
+  await inner.waitForFunction((id) => document.querySelector(".detail-image-frame")?.dataset.generationId === id, adjacentId);
+  assert.match(await inner.locator("#drawerBody").textContent(), /frame 3/);
+  await timedDrag(inner, quick(-1));
+  assert.equal(await inner.locator(".detail-image-frame").getAttribute("data-generation-id"), adjacentId, "swiping past the last gallery item must stay in place");
+  await timedDrag(inner, quick(1)); await selected(inner, 2);
+  assert.equal(await inner.locator(".detail-image-frame").getAttribute("data-generation-id"), groupId, "reverse swipe must return to the previous group's last image");
 }
 
 async function verifyOtherGestures(page, inner, client) {
@@ -230,7 +289,7 @@ async function verifyBackwards(page, inner, client, test) {
         await page.goto(base); const frame = page.frameLocator("#studio");
         await frame.locator("#modelChoice:not(:disabled)").waitFor();
         const inner = page.frames().find((item) => item.url().includes("/ui/"));
-        await inner.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, test.theme);
+        await inner.evaluate(async (theme) => { await window.ImageStudioAppearance?.ready; window.ImageStudioAppearance.set({ preference: theme }); }, test.theme);
         await frame.locator('[data-view="gallery"]').click();
         await frame.locator("#gallerySearch").fill(marker); await frame.locator("#gallerySearch").press("Tab");
         await inner.waitForFunction((ids) => { const cards = Array.from(document.querySelectorAll("[data-gallery-id]")); return cards.length === ids.length && cards.every((card) => ids.includes(card.dataset.galleryId)); }, [groupId, adjacentId]);
@@ -241,9 +300,11 @@ async function verifyBackwards(page, inner, client, test) {
         release(); await frame.locator("#detailUseReference:not(:disabled)").waitFor(); await selected(inner, 1);
         await verifyRollback(page, inner, client, test);
         await verifyOtherGestures(page, inner, client);
+        await verifyVelocity(inner);
         await verifyBackwards(page, inner, client, test);
+        await verifyBoundaries(inner, groupId, adjacentId);
         const end = await bounds(inner); assert.ok(end.scrollWidth <= end.pageWidth + 1); assert.deepEqual(errors, []);
-        console.log(`${test.name}: foreground follows real drag, background stays fixed then crossfades after commit; delayed originals, rollback, cancel, vertical/multitouch exclusion passed`);
+        console.log(`${test.name}: foreground follows real drag, background stays fixed then crossfades after commit; quick flick, slow drag, held release, reversal, delayed originals, rollback, cancel, vertical/multitouch exclusion passed`);
       } finally { release(); await page.unroute(routePattern, delay); await client.detach(); await page.close(); }
     }
     console.log(`Detail swipe screenshots: ${output}`);

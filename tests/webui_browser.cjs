@@ -32,7 +32,7 @@ async function opened(browser, test) {
   const frame = page.frameLocator("#studio");
   await frame.locator("#runtimeStatus").filter({ hasText: "已加载" }).waitFor({ state: "attached" });
   const inner = page.frames().find(item => item.url().includes("/ui/"));
-  await inner.evaluate(theme => { document.documentElement.dataset.theme = theme; }, test.theme);
+  await inner.evaluate(async theme => { await window.ImageStudioAppearance?.ready; window.ImageStudioAppearance.set({ preference: theme }); }, test.theme);
   return { page, frame, inner, errors };
 }
 

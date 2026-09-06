@@ -31,6 +31,12 @@ from astrbot.core.workspace import (
 )
 from starlette.background import BackgroundTask
 
+from .appearance import (
+    APPEARANCE_COOKIE,
+    decode_appearance_cookie,
+    encode_appearance_cookie,
+    normalize_appearance,
+)
 from .config import (
     load_studio_settings,
     normalize_webui_settings,
@@ -172,6 +178,18 @@ class ImageStudioPlugin(Star):
 
     def _register_web_apis(self) -> None:
         routes = (
+            (
+                "appearance",
+                self._api_get_appearance,
+                ["GET"],
+                "Image Studio: browser appearance",
+            ),
+            (
+                "appearance",
+                self._api_set_appearance,
+                ["POST"],
+                "Image Studio: save browser appearance cookie",
+            ),
             (
                 "imports/inspect",
                 self._api_import_inspect,
@@ -369,6 +387,29 @@ class ImageStudioPlugin(Star):
         if self._service is None:
             raise RuntimeError("Image Studio 正在初始化，请稍后重试")
         return self._service
+
+    async def _api_get_appearance(self) -> Any:
+        response = json_response(
+            decode_appearance_cookie(web_request.cookies.get(APPEARANCE_COOKIE))
+        )
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    async def _api_set_appearance(self) -> Any:
+        settings = normalize_appearance(await web_request.json(default={}))
+        response = json_response(settings)
+        response.headers["Cache-Control"] = "no-store"
+        # The host prefixes plugin API URLs; a namespaced root cookie also works
+        # behind a reverse proxy without granting the opaque iframe cookie access.
+        response.set_cookie(
+            APPEARANCE_COOKIE,
+            encode_appearance_cookie(settings),
+            max_age=365 * 24 * 60 * 60,
+            httponly=True,
+            samesite="lax",
+            path="/",
+        )
+        return response
 
     async def _api_bootstrap(self) -> Any:
         return json_response(

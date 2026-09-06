@@ -19,6 +19,8 @@
   let detailFilmstripScrollFrame = 0;
   let detailBackdropSource = "";
   let detailImagePaintRevision = 0;
+  let detailNavigationSession = null;
+  let detailAssetsTimer = 0;
   const decodedDisplayImages = new Map();
   let mobileImageViewer = null;
   let mobileImageSequence = [];
@@ -338,6 +340,7 @@
       if (total > 0 && requestedPage >= totalPages) { state.galleryPage = totalPages - 1; return await loadGallery(state.galleryPage); }
       state.galleryPage = Math.min(requestedPage, totalPages - 1); state.galleryLimit = limit; state.galleryTotal = total;
       state.galleryItems = payload.items || []; renderGallery(payload);
+      if (detailNavigationSession?.active) refreshDetailSequence(detailNavigationSession);
       return true;
     } catch (error) {
       showNotice(errorMessage(error, "画廊加载失败"), "error");
@@ -416,10 +419,147 @@
   }
 
   function hasAdjacentGalleryRecord(direction) {
+    const sequence = detailNavigationSession?.sequence;
+    if (sequence) {
+      const position = detailSequencePosition(detailNavigationSession);
+      return position >= 0 && sequence.some((item, index) => (direction < 0 ? index < position : index > position) && String(item.generation_id) !== String(state.detailId));
+    }
     const index = state.galleryItems.findIndex((item) => String(item.id) === String(state.detailId));
     if (index < 0) return false;
     if (direction < 0) return index > 0 || state.galleryPage > 0;
     return index < state.galleryItems.length - 1 || (state.galleryPage * state.galleryLimit) + index < state.galleryTotal - 1;
+  }
+
+  function currentDetailSession(session) {
+    return !!session?.active && session === detailNavigationSession && els.detailDrawer.classList.contains("is-open");
+  }
+
+  function detailSequencePosition(session) {
+    const imageId = state.detailData?.images?.[state.detailImageIndex]?.id;
+    if (!imageId || !session?.sequence) return -1;
+    return session.sequence.findIndex((item) => String(item.generation_id) === String(state.detailId) && String(item.image_id) === String(imageId));
+  }
+
+  function stopDetailNavigation() {
+    if (detailNavigationSession) detailNavigationSession.active = false;
+    detailNavigationSession = null;
+    window.clearTimeout(detailAssetsTimer); detailAssetsTimer = 0;
+  }
+
+  function createDetailNavigation() {
+    stopDetailNavigation();
+    return detailNavigationSession = { active: true, filters: galleryFilters(), sequence: null, sequencePromise: null, epoch: 0, summaries: new Map(), loads: new Map() };
+  }
+
+  function updateDetailNavigationButtons() {
+    const count = state.detailData?.images?.length || 0;
+    const previous = els.drawerBody.querySelector('[data-detail-nav="-1"]');
+    const next = els.drawerBody.querySelector('[data-detail-nav="1"]');
+    if (previous) previous.disabled = state.detailImageIndex <= 0 && !hasAdjacentGalleryRecord(-1);
+    if (next) next.disabled = state.detailImageIndex >= count - 1 && !hasAdjacentGalleryRecord(1);
+  }
+
+  function refreshDetailSequence(session) {
+    session.epoch++; session.filters = galleryFilters(); session.sequence = null; session.sequencePromise = null;
+    session.summaries.clear(); session.loads.clear();
+    void warmDetailNeighbors(session);
+  }
+
+  async function ensureDetailSequence(session) {
+    if (!currentDetailSession(session)) return [];
+    if (session.sequence) return session.sequence;
+    if (session.sequencePromise) return session.sequencePromise;
+    const epoch = session.epoch;
+    const promise = apiGet("gallery/image-sequence", session.filters).then((payload) => {
+      if (!currentDetailSession(session) || epoch !== session.epoch) return [];
+      session.sequence = Array.isArray(payload.items) ? payload.items : [];
+      updateDetailNavigationButtons(); return session.sequence;
+    }).finally(() => { if (session.sequencePromise === promise) session.sequencePromise = null; });
+    session.sequencePromise = promise;
+    return promise;
+  }
+
+  function detailNeighborCursor(direction, session = detailNavigationSession) {
+    const sequence = session?.sequence;
+    if (sequence) {
+      const position = detailSequencePosition(session);
+      return position >= 0 ? sequence[position + direction] || null : null;
+    }
+    const index = state.detailImageIndex + direction;
+    const image = state.detailData?.images?.[index];
+    return image ? { generation_id: state.detailId, image_id: image.id, image_index: index } : null;
+  }
+
+  function cachedDetailNeighbor(direction) {
+    const cursor = detailNeighborCursor(direction);
+    if (!cursor) return null;
+    const detail = String(cursor.generation_id) === String(state.detailId) ? state.detailData : detailNavigationSession?.summaries.get(String(cursor.generation_id));
+    const image = detail?.images?.find((item) => String(item.id) === String(cursor.image_id));
+    const src = image?.thumbnail_data_url || image?.data_url;
+    return src ? { src, cursor } : null;
+  }
+
+  async function prepareDetailTarget(cursor, session) {
+    if (!cursor || !currentDetailSession(session)) return null;
+    const epoch = session.epoch;
+    const id = String(cursor.generation_id);
+    let detail = String(state.detailId) === id ? state.detailData : session.summaries.get(id);
+    if (!detail) {
+      if (!session.loads.has(id)) {
+        const promise = apiGet(`gallery/detail/${id}`, { assets: "0" }).then((summary) => {
+          if (currentDetailSession(session) && epoch === session.epoch) {
+            session.summaries.set(id, summary);
+            while (session.summaries.size > 3) session.summaries.delete(session.summaries.keys().next().value);
+          }
+          return summary;
+        }).finally(() => { if (session.loads.get(id) === promise) session.loads.delete(id); });
+        session.loads.set(id, promise);
+      }
+      detail = await session.loads.get(id);
+    }
+    if (!currentDetailSession(session) || epoch !== session.epoch) return null;
+    const index = detail.images?.findIndex((item) => String(item.id) === String(cursor.image_id));
+    if (!(index >= 0)) throw new Error("目标图片已删除或不再可用，请刷新画廊后重试。");
+    const image = detail.images[index];
+    let src = image.thumbnail_data_url || image.data_url;
+    if (!src) {
+      const preview = await apiGet(`gallery/image/${cursor.image_id}`, { detail: "preview" });
+      src = preview.data_url;
+      if (currentDetailSession(session) && epoch === session.epoch) image.thumbnail_data_url = src;
+    }
+    if (!src) throw new Error("目标图片的预览暂时不可用。");
+    await decodeDisplayImage(src);
+    return currentDetailSession(session) && epoch === session.epoch ? { src, cursor, detail, index } : null;
+  }
+
+  async function prepareDetailNeighbor(direction, session = detailNavigationSession) {
+    await ensureDetailSequence(session);
+    return prepareDetailTarget(detailNeighborCursor(direction, session), session);
+  }
+
+  async function warmDetailNeighbors(session = detailNavigationSession) {
+    if (!currentDetailSession(session) || !state.detailData || mobileImageViewer || mobileViewerOpening) return;
+    try {
+      await ensureDetailSequence(session);
+      if (!currentDetailSession(session) || mobileImageViewer || mobileViewerOpening) return;
+      await Promise.all([-1, 1].map((direction) => prepareDetailTarget(detailNeighborCursor(direction, session), session).catch(() => null)));
+    } catch { /* A failed speculative read is retried and explained only on navigation. */ }
+  }
+
+  function scheduleDetailAssets(id, summary, fallbackThumbnail) {
+    window.clearTimeout(detailAssetsTimer);
+    const revision = detailRequestRevision;
+    const run = () => {
+      detailAssetsTimer = 0;
+      if (revision !== detailRequestRevision || String(state.detailId) !== String(id)) return;
+      if (mobileViewerSession?.active) return;
+      const frame = els.drawerBody.querySelector(".detail-image-frame");
+      if (frame?.dataset.detailSwipeState || state.detailNavigating) {
+        detailAssetsTimer = window.setTimeout(run, 160); return;
+      }
+      void loadDetailAssets(id, summary, fallbackThumbnail);
+    };
+    detailAssetsTimer = window.setTimeout(run, 160);
   }
 
   function centerDetailFilmstrip(strip, smooth = false) {
@@ -466,10 +606,18 @@
     const image = frame.querySelector("[data-detail-image]");
     const target = item.data_url;
     const preview = decodedDisplayImages.get(target)?.ready ? target : item.thumbnail_data_url || target;
-    const current = () => frame.isConnected && frame.dataset.generationId === String(state.detailId) && revision === detailImagePaintRevision;
-    const publish = (source) => {
+    const current = () => frame.isConnected && frame.dataset.generationId === String(state.detailId) && revision === detailImagePaintRevision && (!mobileViewerSession?.active || mobileViewerSession.preparingDetail);
+    const publish = async (source) => {
       if (!current()) return false;
-      if (image.getAttribute("src") !== source) image.src = source;
+      const previousSource = image.getAttribute("src");
+      if (previousSource !== source) image.src = source;
+      // A decoded candidate does not guarantee Safari has selected it on the mounted image.
+      try { await image.decode(); }
+      catch (error) {
+        if (current() && previousSource && image.getAttribute("src") === source) image.src = previousSource;
+        throw error;
+      }
+      if (!current()) return false;
       image.dataset.detailImage = String(index); image.alt = `生成结果 ${index + 1}`;
       frame.querySelector(".detail-image-pending")?.remove(); frame.removeAttribute("aria-busy");
       transitionDetailBackdrop(frame); return true;
@@ -477,12 +625,12 @@
     if (!image.getAttribute("src") || Number(image.dataset.detailImage) !== index) frame.setAttribute("aria-busy", "true");
     try {
       await decodeDisplayImage(preview);
-      if (!publish(preview)) return false;
+      if (!await publish(preview)) return false;
       if (target !== preview) void decodeDisplayImage(target).then(() => publish(target)).catch(() => {});
       return true;
     } catch (error) {
       if (target !== preview) {
-        try { await decodeDisplayImage(target); return publish(target); } catch { /* Keep the previous visible image when both sources fail. */ }
+        try { await decodeDisplayImage(target); return await publish(target); } catch { /* Keep the previous visible image when both sources fail. */ }
       }
       if (current()) {
         frame.removeAttribute("aria-busy"); showNotice(errorMessage(error, "图片暂时无法显示"), "error");
@@ -502,11 +650,10 @@
     window.ImageStudioDetailSwipe.bind(frame, {
       getNeighbor: (direction) => {
         if (!current() || frame.getAttribute("aria-busy") === "true") return null;
-        const neighbor = detailDisplayImages(state.detailData || {}, state.detailFallbackThumbnail)[state.detailImageIndex + direction];
-        const src = neighbor?.thumbnail_data_url || neighbor?.data_url;
-        return src ? { src } : null;
+        return cachedDetailNeighbor(direction);
       },
-      navigate: (direction) => { if (current() && frame.getAttribute("aria-busy") !== "true") return navigateDetail(direction); },
+      prepareNeighbor: (direction) => current() && frame.getAttribute("aria-busy") !== "true" ? prepareDetailNeighbor(direction) : null,
+      navigate: (direction, target) => current() && frame.getAttribute("aria-busy") !== "true" ? navigateDetail(direction, target) : false,
     });
     frame.addEventListener("detail-swipe-start", () => {
       window.ImageStudioBackdrop.pause(frame.querySelector(".detail-image-backdrop:not(.detail-backdrop-previous)"));
@@ -514,6 +661,7 @@
     frame.addEventListener("detail-swipe-end", () => {
       if (current()) transitionDetailBackdrop(frame);
     });
+    frame.addEventListener("detail-swipe-error", (event) => showNotice(`图片切换失败：${errorMessage(event.detail?.error, "目标图片暂时无法读取")}`, "error"));
     frame.querySelector("[data-detail-image]").addEventListener("click", (event) => {
       if (!current() || frame.getAttribute("aria-busy") === "true" || !event.currentTarget.getAttribute("src")) return;
       const index = Number(event.currentTarget.dataset.detailImage);
@@ -600,10 +748,11 @@
     const focusedThumbnail = previousStrip?.contains(document.activeElement);
     const stripMount = displayImages.length > 1 ? '<div data-detail-filmstrip-mount></div>' : "";
     const previousFrame = els.drawerBody.querySelector(".detail-image-frame");
-    const imageFrame = currentImage ? previousFrame?.dataset.generationId === String(detail.id) ? previousFrame : createDetailImageFrame(detail.id) : null;
+    const imageFrame = currentImage ? previousFrame || createDetailImageFrame(detail.id) : null;
+    if (imageFrame) imageFrame.dataset.generationId = String(detail.id);
     const carousel = currentImage ? `<div class="detail-images"><div data-detail-frame-mount></div>${stripMount}</div>` : '<div class="detail-loading">正在读取生成图片…</div>';
     const metadata = `${library.detailMetadataMarkup(detail, currentImage)}<div class="detail-block"><h3>信息</h3><pre>${escape(JSON.stringify({ 服务商: detail.provider_name, 模型: detail.model, 模式: library.modeLabel(detail.mode), 生图来源: library.engineLabel(detail.generation_engine), 来源: sourceLabel(detail.source), 调用来源身份: sourceIdentity, 记录时间: formatDate(detail.created_at), 图片数量: images.length, 文件大小: formatBytes(totalBytes), 耗时毫秒: detail.elapsed_ms }, null, 2))}</pre></div><div class="detail-block"><h3>参考图</h3><div class="detail-references" data-detail-references>${detailReferenceMarkup(refs)}</div></div>${library.detailWarningsMarkup(detail, currentImage)}`;
-    // Keep the visible image and its compositor layer attached during same-group changes.
+    // The foreground and fixed backdrop stay attached across both image and group changes.
     if (imageFrame && imageFrame === previousFrame) {
       const media = imageFrame.parentElement;
       while (media.nextSibling) media.nextSibling.remove();
@@ -626,7 +775,10 @@
     els.drawerBody.querySelector("[data-copy-request]")?.addEventListener("click", () => void copyRequestParameters(detail));
     els.drawerBody.querySelector("[data-output-reference]")?.addEventListener("click", () => void useDataUrlAsReference(currentImageUrl, "gallery-output-reference.png"));
     els.drawerBody.scrollTop = scrollTop;
-    return paintDetailImage(imageFrame, currentImage, imageIndex);
+    return paintDetailImage(imageFrame, currentImage, imageIndex).then((painted) => {
+      if (painted && String(state.detailId) === String(detail.id)) void warmDetailNeighbors();
+      return painted;
+    });
   }
 
   async function loadDetailAssets(id, summary, fallbackThumbnail) {
@@ -644,6 +796,7 @@
       }));
       state.detailAssetsLoaded = true;
       state.detailData = { ...summary, ...assets, images: mergedImages };
+      if (mobileViewerSession?.active) return;
       library.updateDetailActions(state.detailData);
       if (state.imagePreviewContext?.type === "detail" && state.imagePreviewContext.generationId === id) {
         const previewItems = normalizePreviewItems(detailDisplayImages(state.detailData, fallbackThumbnail), "", "");
@@ -679,6 +832,8 @@
   }
 
   async function openDetail(id, requestedImageIndex = 0, options = {}) {
+    const session = createDetailNavigation();
+    state.detailNavigating = false;
     const previousBackdrop = els.drawerBody.querySelector(".detail-image-backdrop:not(.detail-backdrop-previous)");
     if (state.detailId) detailBackdropSource = previousBackdrop?.getAttribute("src") || detailBackdropSource;
     if (previousBackdrop) window.ImageStudioBackdrop.dispose(previousBackdrop);
@@ -694,44 +849,57 @@
     try {
       const summary = await apiGet(`gallery/detail/${id}`, { assets: "0" });
       if (revision !== detailRequestRevision || state.detailId !== id) return;
-      state.detailData = summary; renderDetail(summary, state.detailFallbackThumbnail);
+      state.detailData = summary; await renderDetail(summary, state.detailFallbackThumbnail);
+      if (revision !== detailRequestRevision || state.detailId !== id) return;
+      void warmDetailNeighbors(session);
       if (!options.deferAssets) void loadDetailAssets(id, summary, state.detailFallbackThumbnail);
     } catch (error) { if (revision === detailRequestRevision && state.detailId === id) showNotice(errorMessage(error, "生成详情加载失败"), "error"); }
   }
 
-  async function navigateDetail(direction) {
-    if (state.detailNavigating || !state.detailData) return;
-    const images = detailDisplayImages(state.detailData, state.detailFallbackThumbnail);
-    const targetImageIndex = state.detailImageIndex + direction;
-    if (targetImageIndex >= 0 && targetImageIndex < images.length) { state.detailRequestedImageIndex = targetImageIndex; return renderDetail(state.detailData, state.detailFallbackThumbnail); }
-    const currentIndex = state.galleryItems.findIndex((item) => String(item.id) === String(state.detailId));
-    if (currentIndex < 0 || !hasAdjacentGalleryRecord(direction)) return;
-    const originId = state.detailId; state.detailNavigating = true;
+  async function navigateDetail(direction, preparedTarget = null) {
+    if (state.detailNavigating || !state.detailData || mobileImageViewer || mobileViewerOpening) return false;
+    const session = detailNavigationSession;
+    const epoch = session?.epoch;
+    const originId = state.detailId;
+    const originIndex = state.detailImageIndex;
+    const originImageId = state.detailData.images?.[originIndex]?.id;
+    const revision = detailRequestRevision;
+    state.detailNavigating = true;
     try {
-      let target = state.galleryItems[currentIndex + direction];
-      if (!target) {
-        if (!await loadGallery(state.galleryPage + direction)) return;
-        target = direction < 0 ? state.galleryItems[state.galleryItems.length - 1] : state.galleryItems[0];
+      const target = preparedTarget?.detail ? preparedTarget : await prepareDetailNeighbor(direction, session);
+      if (!target || !currentDetailSession(session) || session.epoch !== epoch || revision !== detailRequestRevision || state.detailId !== originId || state.detailData.images?.[state.detailImageIndex]?.id !== originImageId || mobileImageViewer || mobileViewerOpening) return false;
+      const expected = detailNeighborCursor(direction, session);
+      if (!expected || String(expected.image_id) !== String(target.cursor.image_id)) return false;
+      const crossGroup = String(target.cursor.generation_id) !== String(originId);
+      if (crossGroup) {
+        detailRequestRevision++; detailImagePaintRevision++;
+        state.detailId = String(target.cursor.generation_id); state.detailAssetsLoaded = false;
+        state.detailFallbackThumbnail = target.detail.images?.[0]?.thumbnail_data_url || "";
       }
-      if (state.detailId !== originId) return;
-      if (target) await openDetail(target.id, direction < 0 ? "last" : 0);
-    } finally { state.detailNavigating = false; }
+      state.detailRequestedImageIndex = target.index;
+      const detail = crossGroup ? target.detail : state.detailData;
+      const painted = await renderDetail(detail, state.detailFallbackThumbnail);
+      if (painted && crossGroup && currentDetailSession(session) && String(state.detailId) === String(target.cursor.generation_id)) scheduleDetailAssets(state.detailId, detail, state.detailFallbackThumbnail);
+      return painted;
+    } catch (error) {
+      if (currentDetailSession(session) && revision === detailRequestRevision) showNotice(`图片切换失败：${errorMessage(error, "目标图片暂时无法读取")}`, "error");
+      return false;
+    } finally { if (currentDetailSession(session)) state.detailNavigating = false; }
   }
 
-  function closeDetail() { window.ImageStudioBackdrop.dispose(els.drawerBody.querySelector(".detail-image-backdrop:not(.detail-backdrop-previous)")); detailImagePaintRevision++; mobileDetailSyncRevision++; decodedDisplayImages.clear(); detailBackdropSource = ""; detailRequestRevision += 1; if (mobileImageViewer) { suppressMobileDetailSync = true; mobileImageViewer.close(); } state.detailId = ""; state.detailData = null; state.detailFallbackThumbnail = ""; state.detailAssetsLoaded = false; state.detailNavigating = false; state.detailImageIndex = 0; state.detailRequestedImageIndex = 0; closeImagePreview(); els.detailDrawer.classList.remove("is-open"); els.detailDrawer.setAttribute("aria-hidden", "true"); if (!activeConfirmation) els.scrim.classList.add("is-hidden"); syncPageScrollLock(); }
+  function closeDetail() { stopDetailNavigation(); window.ImageStudioBackdrop.dispose(els.drawerBody.querySelector(".detail-image-backdrop:not(.detail-backdrop-previous)")); detailImagePaintRevision++; mobileDetailSyncRevision++; decodedDisplayImages.clear(); detailBackdropSource = ""; detailRequestRevision += 1; if (mobileImageViewer) { suppressMobileDetailSync = true; mobileImageViewer.close(); } state.detailId = ""; state.detailData = null; state.detailFallbackThumbnail = ""; state.detailAssetsLoaded = false; state.detailNavigating = false; state.detailImageIndex = 0; state.detailRequestedImageIndex = 0; closeImagePreview(); els.detailDrawer.classList.remove("is-open"); els.detailDrawer.setAttribute("aria-hidden", "true"); if (!activeConfirmation) els.scrim.classList.add("is-hidden"); syncPageScrollLock(); }
 
   function isMobileDetailPreview(context) {
     return context?.type === "detail" && window.matchMedia("(max-width: 540px)").matches && typeof window.PhotoSwipe === "function";
   }
 
-  function mobileSourceForSequenceItem(sequenceItem, fallbackDataUrl, context) {
-    const detailImages = detailDisplayImages(state.detailData || {}, state.detailFallbackThumbnail);
+  function mobileSourceForSequenceItem(sequenceItem, fallbackDataUrl, context, knownImages, galleryById) {
     const sameRecord = String(state.detailId) === String(sequenceItem.generation_id);
-    const known = sameRecord ? detailImages.find((item, index) => String(item.id || "") === String(sequenceItem.image_id) || (!item.id && index === sequenceItem.image_index)) : null;
+    const known = sameRecord ? knownImages.get(String(sequenceItem.image_id)) || knownImages.get(`index:${sequenceItem.image_index}`) : null;
     if (known?.thumbnail_data_url) return { src: known.thumbnail_data_url, detail: "preview" };
     if (known?.data_url) return { src: known.data_url, detail: state.detailAssetsLoaded ? "original" : "preview" };
     if (String(sequenceItem.generation_id) === String(context.generationId) && sequenceItem.image_index === context.imageIndex && fallbackDataUrl) return { src: fallbackDataUrl, detail: state.detailAssetsLoaded ? "original" : "preview" };
-    const card = sequenceItem.image_index === 0 ? state.galleryItems.find((item) => String(item.id) === String(sequenceItem.generation_id)) : null;
+    const card = sequenceItem.image_index === 0 ? galleryById.get(String(sequenceItem.generation_id)) : null;
     if (card?.thumbnail_data_url) return { src: card.thumbnail_data_url, detail: "preview" };
     return { src: EMPTY_MOBILE_IMAGE, detail: "" };
   }
@@ -740,12 +908,60 @@
     return !!session?.active && !session.viewer.isDestroying && mobileViewerSession === session && mobileImageViewer === session.viewer && (!item || session.items[index] === item);
   }
 
+  function mobileViewerBusy(session) {
+    const viewer = session.viewer;
+    return document.hidden || session.pointerIds.size > 0 || session.touchCount > 0 || viewer.opener.isOpening
+      || viewer.gestures.isDragging || viewer.gestures.isZooming || viewer.mainScroll.isShifted()
+      || viewer.animations.activeAnimations.some((animation) => animation.props.isMainScroll || animation.props.isPan);
+  }
+
+  function scheduleMobileWork(session) {
+    if (!isCurrentMobileSession(session) || session.workTimer || !session.workQueue.size) return;
+    session.workTimer = window.setTimeout(() => {
+      session.workTimer = 0;
+      if (!isCurrentMobileSession(session)) return;
+      if (mobileViewerBusy(session)) { scheduleMobileWork(session); return; }
+      const jobs = Array.from(session.workQueue.values()); session.workQueue.clear();
+      jobs.forEach((job) => { Promise.resolve().then(job.run).then(job.resolve, job.reject); });
+    }, 80);
+  }
+
+  function queueMobileWork(session, key, run) {
+    if (!isCurrentMobileSession(session)) return Promise.resolve();
+    const previous = session.workQueue.get(key);
+    if (previous) return previous.promise;
+    let resolve, reject;
+    const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+    session.workQueue.set(key, { run, resolve, reject, promise }); scheduleMobileWork(session);
+    return promise;
+  }
+
+  function cancelMobileWork(session) {
+    window.clearTimeout(session.workTimer); session.workTimer = 0;
+    session.workQueue.forEach((job) => job.resolve()); session.workQueue.clear();
+    session.entryAnimation?.cancel();
+    session.retryTimers.forEach((timer) => window.clearTimeout(timer)); session.retryTimers.clear();
+  }
+
+  function trackMobilePointer(session, event, down) {
+    const original = event.originalEvent;
+    if (original?.pointerId !== undefined) down ? session.pointerIds.add(original.pointerId) : session.pointerIds.delete(original.pointerId);
+    else session.touchCount = original?.touches?.length ?? (down ? 1 : 0);
+    if (down) {
+      session.entryAnimation?.cancel();
+      window.clearTimeout(session.workTimer); session.workTimer = 0;
+      window.ImageStudioBackdrop.pause(session.backdrop);
+    } else {
+      updateMobileViewerFeedback(session); scheduleMobileWork(session);
+    }
+  }
+
   function updateMobileImageSource(index, payload, detail, session = mobileViewerSession) {
     const item = session?.items[index];
     if (!isCurrentMobileSession(session, index, item) || !item || !payload?.data_url) return;
     if (payload.id && String(payload.id) !== String(item.image_id)) return;
-    if (detail === "original" && Math.abs(session.viewer.currIndex - index) > 1) return;
-    if (detail === "original") item.originalSrc = payload.data_url;
+    if (detail === "original" && session.viewer.currIndex !== index) return;
+    if (detail === "original") { item.originalSrc = payload.data_url; session.originalIndices.add(index); }
     else item.previewSrc = payload.data_url;
     if (detail === "original") { item.originalError = ""; item.previewError = ""; item.originalRetryCount = 0; }
     else item.previewError = "";
@@ -781,19 +997,22 @@
     const key = `${item.image_id}:${detail}`;
     const loads = session.loads;
     if (!loads.has(key)) {
-      const available = detail === "original" ? item.originalSrc : (item.previewSrc || item.originalSrc);
-      const known = detail === "original" && state.detailAssetsLoaded && String(state.detailId) === String(item.generation_id)
-        ? state.detailData?.images?.find((image) => String(image.id) === String(item.image_id)) : null;
-      const payloadPromise = available || known?.data_url
-        ? Promise.resolve({ id: item.image_id, data_url: available || known.data_url })
-        : apiGet(`gallery/image/${item.image_id}`, { detail });
-      const resolvedDetail = available && !item.previewSrc && item.originalSrc ? "original" : detail;
-      const pending = payloadPromise.then(async (payload) => {
-        if (!isCurrentMobileSession(session, index, item)) return;
+      const relevant = () => isCurrentMobileSession(session, index, item)
+        && Math.abs(session.viewer.currIndex - index) <= (detail === "original" ? 0 : 1);
+      const pending = queueMobileWork(session, `load:${key}`, async () => {
+        if (!relevant()) return;
+        const available = detail === "original" ? item.originalSrc : (item.previewSrc || item.originalSrc);
+        const known = detail === "original" && state.detailAssetsLoaded && String(state.detailId) === String(item.generation_id)
+          ? state.detailData?.images?.find((image) => String(image.id) === String(item.image_id)) : null;
+        const payload = available || known?.data_url
+          ? { id: item.image_id, data_url: available || known.data_url }
+          : await apiGet(`gallery/image/${item.image_id}`, { detail });
+        if (!relevant()) return;
         if (!payload?.data_url) throw new Error("图片接口没有返回可用内容。");
-        await decodeDisplayImage(payload.data_url);
-        if (!isCurrentMobileSession(session, index, item)) return;
-        updateMobileImageSource(index, payload, resolvedDetail, session);
+        const resolvedDetail = available && !item.previewSrc && item.originalSrc ? "original" : detail;
+        // A response or decode may finish during a later gesture; gate both stages separately.
+        await queueMobileWork(session, `decode:${key}`, () => relevant() ? decodeDisplayImage(payload.data_url) : undefined);
+        await queueMobileWork(session, `paint:${key}`, () => { if (relevant()) updateMobileImageSource(index, payload, resolvedDetail, session); });
         return payload;
       }).finally(() => { if (loads.get(key) === pending) loads.delete(key); });
       loads.set(key, pending);
@@ -803,8 +1022,10 @@
 
   function pruneMobileOriginals(currentIndex, session = mobileViewerSession) {
     if (!isCurrentMobileSession(session)) return;
-    session.items.forEach((item, index) => {
-      if (Math.abs(index - currentIndex) <= 1 || !item.originalSrc) return;
+    session.originalIndices.forEach((index) => {
+      if (Math.abs(index - currentIndex) <= 1) return;
+      session.originalIndices.delete(index);
+      const item = session.items[index];
       item.originalSrc = "";
       item.src = item.previewSrc || EMPTY_MOBILE_IMAGE;
       item.msrc = item.src;
@@ -816,8 +1037,13 @@
 
   function updateMobileViewerFeedback(session = mobileViewerSession) {
     if (!isCurrentMobileSession(session)) return;
+    void queueMobileWork(session, "feedback", () => applyMobileViewerFeedback(session));
+  }
+
+  function applyMobileViewerFeedback(session) {
+    if (!isCurrentMobileSession(session)) return;
     const item = session.items[session.viewer.currIndex];
-    const src = item?.previewSrc || item?.originalSrc || "";
+    const src = item?.previewSrc || "";
     if (session.backdrop) void window.ImageStudioBackdrop.transition(session.backdrop, src, { opacity: .64, previousClass: "image-studio-viewer-backdrop-previous" });
     const message = item?.originalSrc ? "" : item?.originalError || item?.previewError || "";
     if (session.status) {
@@ -843,7 +1069,8 @@
 
   function warmMobileImages(index, session = mobileViewerSession) {
     if (!isCurrentMobileSession(session)) return;
-    pruneMobileOriginals(index, session); updateMobileViewerFeedback(session);
+    void queueMobileWork(session, "prune", () => pruneMobileOriginals(session.viewer.currIndex, session));
+    updateMobileViewerFeedback(session);
     for (const neighbor of [index - 1, index, index + 1]) {
       if (neighbor >= 0 && neighbor < session.items.length) void loadMobileImage(neighbor, "preview", session).catch((error) => {
         if (!isCurrentMobileSession(session)) return;
@@ -863,17 +1090,36 @@
 
   async function syncDetailToMobileImage(item, session = null) {
     if (!item) return;
-    if (session && !isCurrentMobileSession(session)) return;
+    const current = () => session ? session.active && mobileViewerSession === session && !suppressMobileDetailSync : !mobileViewerSession;
+    if (!current()) return;
     const revision = ++mobileDetailSyncRevision;
+    const detailRevision = detailRequestRevision;
     const targetPage = Math.floor(Math.max(0, Number(item.generation_position || 0)) / state.galleryLimit);
     if (targetPage !== state.galleryPage && !await loadGallery(targetPage)) return;
-    if (revision !== mobileDetailSyncRevision || session && !isCurrentMobileSession(session)) return;
+    if (revision !== mobileDetailSyncRevision || detailRevision !== detailRequestRevision || !current()) return;
     if (String(state.detailId) !== String(item.generation_id) || !state.detailData) {
       await openDetail(item.generation_id, item.image_index, { focus: false, resetScroll: false, deferAssets: true });
       return;
     }
     state.detailRequestedImageIndex = item.image_index;
-    renderDetail(state.detailData, state.detailFallbackThumbnail);
+    await renderDetail(state.detailData, state.detailFallbackThumbnail);
+  }
+
+  function prepareMobileDetail(session) {
+    if (!session.active || mobileViewerSession !== session || suppressMobileDetailSync) return Promise.resolve();
+    const index = session.viewer.currIndex;
+    if (session.detailSyncIndex === index && session.detailSyncPromise) return session.detailSyncPromise;
+    session.detailSyncIndex = index; session.preparingDetail = true;
+    const item = session.sequence[index];
+    if (String(state.detailId) !== String(item.generation_id)) {
+      library.updateDetailActions(null);
+      els.drawerBody.innerHTML = '<div class="detail-loading">正在读取生成详情…</div>';
+    }
+    const promise = syncDetailToMobileImage(item, session).catch((error) => {
+      if (session.active && mobileViewerSession === session) showNotice(errorMessage(error, "生成详情同步失败"), "error");
+    }).finally(() => { if (session.detailSyncPromise === promise) session.preparingDetail = false; });
+    session.detailSyncPromise = promise;
+    return promise;
   }
 
   async function downloadMobileImage() {
@@ -902,14 +1148,18 @@
       const sequence = Array.isArray(payload.items) ? payload.items : [];
       const initialIndex = sequence.findIndex((item) => String(item.generation_id) === String(context.generationId) && Number(item.image_index) === Number(context.imageIndex));
       if (initialIndex < 0 || !sequence.length) return false;
+      mobileDetailSyncRevision++;
       mobileImageSequence = sequence;
       mobileImageLoads = new Map();
+      const knownImages = new Map(detailDisplayImages(state.detailData || {}, state.detailFallbackThumbnail).map((item, index) => [item.id ? String(item.id) : `index:${index}`, item]));
+      const galleryById = new Map(state.galleryItems.map((item) => [String(item.id), item]));
       mobileImageDataSource = sequence.map((item) => {
-        const known = mobileSourceForSequenceItem(item, dataUrl, context);
+        const known = mobileSourceForSequenceItem(item, dataUrl, context, knownImages, galleryById);
         return { ...item, src: known.src, msrc: known.src, width: Math.max(1, Number(item.width || 1)), height: Math.max(1, Number(item.height || 1)), previewSrc: known.detail === "preview" ? known.src : "", originalSrc: known.detail === "original" ? known.src : "", loadedDetail: known.detail, alt: "生成结果" };
       });
-      const session = { active: true, sequence, items: mobileImageDataSource, loads: mobileImageLoads, retryTimers: new Set(), viewer: null, backdrop: null, status: null, retrying: false };
-      const pswp = new window.PhotoSwipe({ dataSource: mobileImageDataSource, index: initialIndex, loop: false, closeOnVerticalDrag: true, pinchToClose: false, tapAction: toggleMobileImageControls, imageClickAction: toggleMobileImageControls, bgClickAction: toggleMobileImageControls, doubleTapAction: "zoom", initialZoomLevel: "fit", secondaryZoomLevel: 2.5, maxZoomLevel: 4, preload: [1, 1], arrowPrev: false, arrowNext: false, close: false, zoom: false, counter: false, bgOpacity: 1, showHideAnimationType: "fade", showAnimationDuration: 220, hideAnimationDuration: 220, zoomAnimationDuration: 220, errorMsg: "图片暂时无法加载，请重试。", mainClass: "image-studio-pswp" });
+      const session = { active: true, sequence, items: mobileImageDataSource, loads: mobileImageLoads, retryTimers: new Set(), viewer: null, backdrop: null, status: null, retrying: false, workQueue: new Map(), workTimer: 0, pointerIds: new Set(), touchCount: 0, originalIndices: new Set(mobileImageDataSource.flatMap((item, index) => item.originalSrc ? [index] : [])), preparingDetail: false, detailSyncIndex: -1, detailSyncPromise: null, entryAnimation: null };
+      // PhotoSwipe blocks input during its opening animation; the visual fade is independent.
+      const pswp = new window.PhotoSwipe({ dataSource: mobileImageDataSource, index: initialIndex, loop: false, closeOnVerticalDrag: true, pinchToClose: false, tapAction: toggleMobileImageControls, imageClickAction: toggleMobileImageControls, bgClickAction: toggleMobileImageControls, doubleTapAction: "zoom", initialZoomLevel: "fit", secondaryZoomLevel: 2.5, maxZoomLevel: 4, preload: [1, 1], arrowPrev: false, arrowNext: false, close: false, zoom: false, counter: false, bgOpacity: 1, showHideAnimationType: "fade", showAnimationDuration: 0, hideAnimationDuration: 220, zoomAnimationDuration: 220, errorMsg: "图片暂时无法加载，请重试。", mainClass: "image-studio-pswp" });
       session.viewer = pswp;
       pswp.addFilter("contentErrorElement", (element, content) => {
         element.textContent = "图片暂时无法加载。";
@@ -922,19 +1172,31 @@
       });
       pswp.on("change", () => {
         if (!isCurrentMobileSession(session)) return;
-        const item = session.sequence[pswp.currIndex];
+        if (session.preparingDetail) { mobileDetailSyncRevision++; detailRequestRevision++; detailImagePaintRevision++; }
+        session.preparingDetail = false; session.detailSyncIndex = -1; session.detailSyncPromise = null;
         warmMobileImages(pswp.currIndex, session);
-        void syncDetailToMobileImage(item, session);
+      });
+      pswp.on("pointerDown", (event) => trackMobilePointer(session, event, true));
+      pswp.on("pointerUp", (event) => trackMobilePointer(session, event, false));
+      pswp.on("verticalDrag", () => { void prepareMobileDetail(session); });
+      pswp.on("close", () => {
+        cancelMobileWork(session);
+        window.ImageStudioBackdrop.pause(session.backdrop);
+        void prepareMobileDetail(session);
       });
       pswp.on("afterInit", () => {
+        const backgroundLayer = document.createElement("div"); backgroundLayer.className = "image-studio-viewer-background"; backgroundLayer.setAttribute("aria-hidden", "true");
         const background = document.createElement("img"); background.className = "image-studio-viewer-backdrop"; background.alt = ""; background.setAttribute("aria-hidden", "true");
-        pswp.bg?.appendChild(background); session.backdrop = background;
+        backgroundLayer.appendChild(background); pswp.bg?.appendChild(backgroundLayer); session.backdrop = background;
         const status = document.createElement("div"); status.className = "image-studio-image-status"; status.hidden = true; status.setAttribute("role", "status");
         const message = document.createElement("span"); const retry = document.createElement("button"); retry.className = "image-studio-image-retry"; retry.type = "button"; retry.textContent = "重试";
         retry.addEventListener("click", (event) => { event.stopPropagation(); void retryMobileImage(session); });
         status.append(message, retry); pswp.element.appendChild(status); session.status = status;
         updateMobileViewerFeedback(session);
         pswp.element?.classList.remove("image-studio-controls-visible");
+        detailImagePaintRevision++;
+        window.ImageStudioBackdrop.pause(els.drawerBody.querySelector(".detail-image-backdrop:not(.detail-backdrop-previous)"));
+        if (!window.matchMedia("(prefers-reduced-motion: reduce)").matches) session.entryAnimation = pswp.element.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, easing: "ease-out" });
         syncPageScrollLock();
       });
       pswp.on("openingAnimationEnd", () => pswp.element?.classList.remove("image-studio-controls-visible"));
@@ -942,6 +1204,7 @@
         const item = session.sequence[pswp.currIndex];
         const shouldSyncDetail = !suppressMobileDetailSync;
         session.active = false;
+        cancelMobileWork(session);
         window.ImageStudioBackdrop.dispose(session.backdrop);
         session.retryTimers.forEach((timer) => window.clearTimeout(timer)); session.retryTimers.clear(); session.loads.clear();
         if (mobileViewerSession !== session) return;
@@ -950,9 +1213,10 @@
         if (shouldSyncDetail) {
           void syncDetailToMobileImage(item).then(() => {
             if (mobileViewerSession) return;
+            if (!els.detailDrawer.classList.contains("is-open") || String(state.detailId) !== String(item?.generation_id)) return;
             if (state.detailData && !state.detailAssetsLoaded && state.detailId === item?.generation_id) void loadDetailAssets(state.detailId, state.detailData, state.detailFallbackThumbnail);
             els.detailDrawer.focus();
-          });
+          }).catch((error) => { if (els.detailDrawer.classList.contains("is-open")) showNotice(errorMessage(error, "生成详情同步失败"), "error"); });
         }
         syncPageScrollLock();
       });
@@ -1012,6 +1276,10 @@
     const originId = state.imagePreviewContext.generationId;
     state.imagePreviewNavigating = true;
     try {
+      if (String(state.detailId) === String(originId)) {
+        state.detailImageIndex = state.imagePreviewContext.imageIndex;
+        state.detailRequestedImageIndex = state.detailImageIndex;
+      }
       await navigateDetail(direction);
       if (state.detailId === originId || !state.detailData) return;
       const items = normalizePreviewItems(detailDisplayImages(state.detailData, state.detailFallbackThumbnail), "", "");

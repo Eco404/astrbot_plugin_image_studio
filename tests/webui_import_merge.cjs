@@ -203,7 +203,7 @@ async function lostCommitResponse(page, frame, name, targetId, network) {
       page.setDefaultTimeout(12000); const errors = []; page.on("pageerror", (error) => errors.push(error.message));
       await page.goto(base); const frame = page.frameLocator("#studio"); await frame.locator("#runtimeStatus").filter({ hasText: "已加载" }).waitFor({ state: "attached" });
       const targetId = await importSeed(page, `${name}-target-A-${runId}`);
-      const inner = page.frames().find((item) => item.url().includes("/ui/")); await inner.evaluate((value) => { document.documentElement.dataset.theme = value; }, test.theme);
+      const inner = page.frames().find((item) => item.url().includes("/ui/")); await inner.evaluate(async (value) => { await window.ImageStudioAppearance?.ready; window.ImageStudioAppearance.set({ preference: value }); }, test.theme);
       const network = { prepare: 0, upload: 0, targets: 0 };
       page.on("request", (request) => { if (request.url().includes("/imports/prepare")) network.prepare++; if (request.url().includes("/imports/upload/")) network.upload++; if (request.url().includes("/imports/merge-targets")) network.targets++; });
       await verifyBridgeContract(inner, network);
