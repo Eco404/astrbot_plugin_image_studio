@@ -20,6 +20,8 @@
   let mobileImageSequence = [];
   let mobileImageDataSource = [];
   let mobileImageLoads = new Map();
+  let mobileViewerSession = null;
+  let mobileViewerOpenRevision = 0;
   let mobileDetailSyncRevision = 0;
   let mobileViewerOpening = false;
   let suppressMobileDetailSync = false;
@@ -433,7 +435,7 @@
     const dots = displayImages.length > 1 ? `<div class="detail-carousel-dots" aria-label="本次生成图片位置">${displayImages.map((_item, index) => `<button class="detail-carousel-dot ${index === imageIndex ? "is-active" : ""}" data-detail-dot="${index}" type="button" aria-label="查看本次生成的第 ${index + 1} 张图片" aria-current="${index === imageIndex ? "true" : "false"}"></button>`).join("")}</div>` : "";
     const imageMarkup = currentImageUrl ? `<img class="detail-image-backdrop" src="${escape(currentImageUrl)}" alt="" aria-hidden="true" /><img class="detail-image" src="${escape(currentImageUrl)}" alt="生成结果 ${imageIndex + 1}" data-detail-image="${imageIndex}" />` : '<div class="detail-image-pending">正在读取图片…</div>';
     const carousel = currentImage ? `<div class="detail-images"><div class="detail-image-frame">${imageMarkup}<button class="detail-carousel-nav is-previous" data-detail-nav="-1" type="button" aria-label="查看上一张图片" ${canPrevious ? "" : "disabled"}><span aria-hidden="true">‹</span></button><button class="detail-carousel-nav is-next" data-detail-nav="1" type="button" aria-label="查看下一张图片" ${canNext ? "" : "disabled"}><span aria-hidden="true">›</span></button>${dots}</div></div>` : '<div class="detail-loading">正在读取生成图片…</div>';
-    els.drawerBody.innerHTML = `${carousel}${library.detailMetadataMarkup(detail, currentImage)}<div class="detail-block"><h3>信息</h3><pre>${escape(JSON.stringify({ 服务商: detail.provider_name, 模型: detail.model, 模式: library.modeLabel(detail.mode), 生图来源: library.engineLabel(detail.generation_engine), 来源: sourceLabel(detail.source), 调用来源身份: sourceIdentity, 记录时间: formatDate(detail.created_at), 图片数量: images.length, 文件大小: formatBytes(totalBytes), 耗时毫秒: detail.elapsed_ms }, null, 2))}</pre></div><div class="detail-block"><h3>参考图</h3><div class="detail-references" data-detail-references>${detailReferenceMarkup(refs)}</div></div>`;
+    els.drawerBody.innerHTML = `${carousel}${library.detailMetadataMarkup(detail, currentImage)}<div class="detail-block"><h3>信息</h3><pre>${escape(JSON.stringify({ 服务商: detail.provider_name, 模型: detail.model, 模式: library.modeLabel(detail.mode), 生图来源: library.engineLabel(detail.generation_engine), 来源: sourceLabel(detail.source), 调用来源身份: sourceIdentity, 记录时间: formatDate(detail.created_at), 图片数量: images.length, 文件大小: formatBytes(totalBytes), 耗时毫秒: detail.elapsed_ms }, null, 2))}</pre></div><div class="detail-block"><h3>参考图</h3><div class="detail-references" data-detail-references>${detailReferenceMarkup(refs)}</div></div>${library.detailWarningsMarkup(detail, currentImage)}`;
     library.updateDetailActions(detail);
     const imageFrame = els.drawerBody.querySelector(".detail-image-frame");
     let lastSwipeAt = 0;
@@ -585,7 +587,8 @@
 
   function mobileSourceForSequenceItem(sequenceItem, fallbackDataUrl, context) {
     const detailImages = detailDisplayImages(state.detailData || {}, state.detailFallbackThumbnail);
-    const known = detailImages.find((item, index) => String(item.id || "") === String(sequenceItem.image_id) || (String(sequenceItem.generation_id) === String(context.generationId) && index === sequenceItem.image_index));
+    const sameRecord = String(state.detailId) === String(sequenceItem.generation_id);
+    const known = sameRecord ? detailImages.find((item, index) => String(item.id || "") === String(sequenceItem.image_id) || (!item.id && index === sequenceItem.image_index)) : null;
     if (known?.data_url) return { src: known.data_url, detail: state.detailAssetsLoaded ? "original" : "preview" };
     if (String(sequenceItem.generation_id) === String(context.generationId) && sequenceItem.image_index === context.imageIndex && fallbackDataUrl) return { src: fallbackDataUrl, detail: state.detailAssetsLoaded ? "original" : "preview" };
     const card = sequenceItem.image_index === 0 ? state.galleryItems.find((item) => String(item.id) === String(sequenceItem.generation_id)) : null;
@@ -593,64 +596,140 @@
     return { src: EMPTY_MOBILE_IMAGE, detail: "" };
   }
 
-  function updateMobileImageSource(index, payload, detail) {
-    const item = mobileImageDataSource[index];
-    if (!item || !payload?.data_url) return;
-    if (detail === "original" && Math.abs((mobileImageViewer?.currIndex ?? index) - index) > 1) return;
+  function isCurrentMobileSession(session, index, item) {
+    return !!session?.active && mobileViewerSession === session && mobileImageViewer === session.viewer && (!item || session.items[index] === item);
+  }
+
+  function updateMobileImageSource(index, payload, detail, session = mobileViewerSession) {
+    const item = session?.items[index];
+    if (!isCurrentMobileSession(session, index, item) || !item || !payload?.data_url) return;
+    if (payload.id && String(payload.id) !== String(item.image_id)) return;
+    if (detail === "original" && Math.abs(session.viewer.currIndex - index) > 1) return;
     if (detail === "original") item.originalSrc = payload.data_url;
     else item.previewSrc = payload.data_url;
-    if (detail !== "original" && item.originalSrc) return;
+    if (detail === "original") { item.originalError = ""; item.previewError = ""; item.originalRetryCount = 0; }
+    else item.previewError = "";
     const source = item.originalSrc || item.previewSrc || payload.data_url;
     item.src = source; item.msrc = item.previewSrc || source; item.loadedDetail = item.originalSrc ? "original" : "preview";
-    const holders = mobileImageViewer?.mainScroll?.itemHolders || [];
+    const contents = new Set();
+    const cached = session.viewer.contentLoader?.getContentByIndex(index);
+    if (cached) contents.add(cached);
+    const holders = session.viewer.mainScroll?.itemHolders || [];
     holders.forEach((holder) => {
       const slide = holder.slide;
       if (!slide || slide.index !== index) return;
       slide.data.src = source; slide.data.msrc = item.msrc;
-      const image = slide.content?.element;
-      if (image?.tagName === "IMG" && image.getAttribute("src") !== source) image.src = source;
+      if (slide.content) contents.add(slide.content);
     });
+    contents.forEach((content) => {
+      if (content.data.image_id && String(content.data.image_id) !== String(item.image_id)) return;
+      content.data.src = source; content.data.msrc = item.msrc;
+      if (content.isError() || content.element?.tagName !== "IMG") {
+        // Error content is a DIV; reload through PhotoSwipe instead of changing DOM src.
+        content.remove(); content.load(false, true);
+        if (content.hasSlide) content.append();
+      } else if (content.element.getAttribute("src") !== source) {
+        content.loadImage(false);
+      }
+    });
+    if (session.viewer.currIndex === index) updateMobileViewerFeedback(session);
   }
 
-  async function loadMobileImage(index, detail) {
-    const item = mobileImageDataSource[index];
-    if (!item || (detail === "original" ? item.originalSrc : (item.previewSrc || item.originalSrc))) return;
-    const key = `${item.image_id}:${detail}`;
-    if (!mobileImageLoads.has(key)) {
-      mobileImageLoads.set(key, apiGet(`gallery/image/${item.image_id}`, { detail }).then((payload) => {
-        updateMobileImageSource(index, payload, detail);
-        return payload;
-      }).finally(() => mobileImageLoads.delete(key)));
+  async function loadMobileImage(index, detail, session = mobileViewerSession) {
+    const item = session?.items[index];
+    if (!item || !isCurrentMobileSession(session, index, item)) return;
+    const available = detail === "original" ? item.originalSrc : (item.previewSrc || item.originalSrc);
+    if (available) {
+      updateMobileImageSource(index, { data_url: available }, item.originalSrc ? "original" : "preview", session);
+      return;
     }
-    await mobileImageLoads.get(key);
+    const key = `${item.image_id}:${detail}`;
+    const loads = session.loads;
+    if (!loads.has(key)) {
+      const pending = apiGet(`gallery/image/${item.image_id}`, { detail }).then(async (payload) => {
+        if (!isCurrentMobileSession(session, index, item)) return;
+        if (!payload?.data_url) throw new Error("图片接口没有返回可用内容。");
+        const decoded = new Image(); decoded.src = payload.data_url;
+        await decoded.decode();
+        if (!decoded.naturalWidth || !decoded.naturalHeight) throw new Error("图片内容无法解码。");
+        if (!isCurrentMobileSession(session, index, item)) return;
+        updateMobileImageSource(index, payload, detail, session);
+        return payload;
+      }).finally(() => { if (loads.get(key) === pending) loads.delete(key); });
+      loads.set(key, pending);
+    }
+    await loads.get(key);
   }
 
-  function pruneMobileOriginals(currentIndex) {
-    mobileImageDataSource.forEach((item, index) => {
+  function pruneMobileOriginals(currentIndex, session = mobileViewerSession) {
+    if (!isCurrentMobileSession(session)) return;
+    session.items.forEach((item, index) => {
       if (Math.abs(index - currentIndex) <= 1 || !item.originalSrc) return;
       item.originalSrc = "";
       item.src = item.previewSrc || EMPTY_MOBILE_IMAGE;
       item.msrc = item.src;
       item.loadedDetail = item.previewSrc ? "preview" : "";
+      const cached = session.viewer.contentLoader?.getContentByIndex(index);
+      if (cached && !cached.hasSlide && !cached.isAttached) { session.viewer.contentLoader.removeByIndex(index); cached.destroy(); }
     });
   }
 
-  function warmMobileImages(index) {
-    pruneMobileOriginals(index);
-    for (const neighbor of [index - 1, index, index + 1]) {
-      if (neighbor >= 0 && neighbor < mobileImageDataSource.length) void loadMobileImage(neighbor, "preview").catch(() => {});
+  function updateMobileViewerFeedback(session = mobileViewerSession) {
+    if (!isCurrentMobileSession(session)) return;
+    const item = session.items[session.viewer.currIndex];
+    const src = item?.previewSrc || item?.originalSrc || "";
+    if (session.backdrop && session.backdrop.getAttribute("src") !== src) {
+      if (src) session.backdrop.src = src; else session.backdrop.removeAttribute("src");
     }
-    void loadMobileImage(index, "original").catch((error) => {
-      if (mobileImageViewer?.currIndex === index) showNotice(errorMessage(error, "原图加载失败"), "error");
+    const message = item?.originalSrc ? "" : item?.originalError || item?.previewError || "";
+    if (session.status) {
+      session.status.hidden = !message;
+      session.status.querySelector("span").textContent = item?.previewSrc && !item.originalSrc ? "原图加载失败，当前显示预览。" : "图片暂时无法加载。";
+      session.status.querySelector("button").disabled = !!session.retrying;
+    }
+  }
+
+  async function retryMobileImage(session = mobileViewerSession, index = session?.viewer.currIndex) {
+    if (!isCurrentMobileSession(session) || session.retrying || !session.items[index]) return;
+    const item = session.items[index]; session.retrying = true; updateMobileViewerFeedback(session);
+    const content = session.viewer.contentLoader?.getContentByIndex(index);
+    if (content?.isError() || content?.element?.tagName === "DIV") {
+      item.originalSrc = ""; item.previewSrc = ""; item.src = EMPTY_MOBILE_IMAGE;
+    }
+    try {
+      await loadMobileImage(index, "preview", session).catch(() => {});
+      await loadMobileImage(index, "original", session);
+    } catch (error) { if (isCurrentMobileSession(session, index, item)) item.originalError = errorMessage(error, "原图加载失败"); }
+    finally { session.retrying = false; updateMobileViewerFeedback(session); }
+  }
+
+  function warmMobileImages(index, session = mobileViewerSession) {
+    if (!isCurrentMobileSession(session)) return;
+    pruneMobileOriginals(index, session); updateMobileViewerFeedback(session);
+    for (const neighbor of [index - 1, index, index + 1]) {
+      if (neighbor >= 0 && neighbor < session.items.length) void loadMobileImage(neighbor, "preview", session).catch((error) => {
+        if (!isCurrentMobileSession(session)) return;
+        session.items[neighbor].previewError = errorMessage(error, "预览加载失败"); updateMobileViewerFeedback(session);
+      });
+    }
+    void loadMobileImage(index, "original", session).catch((error) => {
+      if (!isCurrentMobileSession(session)) return;
+      const item = session.items[index]; item.originalError = errorMessage(error, "原图加载失败"); updateMobileViewerFeedback(session);
+      if (!item.originalRetryCount) {
+        item.originalRetryCount = 1;
+        const timer = window.setTimeout(() => { session.retryTimers.delete(timer); if (isCurrentMobileSession(session) && session.viewer.currIndex === index) void retryMobileImage(session, index); }, 650);
+        session.retryTimers.add(timer);
+      }
     });
   }
 
-  async function syncDetailToMobileImage(item) {
+  async function syncDetailToMobileImage(item, session = null) {
     if (!item) return;
+    if (session && !isCurrentMobileSession(session)) return;
     const revision = ++mobileDetailSyncRevision;
     const targetPage = Math.floor(Math.max(0, Number(item.generation_position || 0)) / state.galleryLimit);
     if (targetPage !== state.galleryPage && !await loadGallery(targetPage)) return;
-    if (revision !== mobileDetailSyncRevision) return;
+    if (revision !== mobileDetailSyncRevision || session && !isCurrentMobileSession(session)) return;
     if (String(state.detailId) !== String(item.generation_id) || !state.detailData) {
       await openDetail(item.generation_id, item.image_index, { focus: false, resetScroll: false, deferAssets: true });
       return;
@@ -677,9 +756,11 @@
   async function openMobileImageViewer(dataUrl, context) {
     if (mobileImageViewer || mobileViewerOpening) return true;
     mobileViewerOpening = true;
+    const openingRevision = ++mobileViewerOpenRevision;
+    const requestedDetailRevision = detailRequestRevision;
     try {
       const payload = await apiGet("gallery/image-sequence", galleryFilters());
-      if (String(state.detailId) !== String(context.generationId)) return false;
+      if (openingRevision !== mobileViewerOpenRevision || requestedDetailRevision !== detailRequestRevision || String(state.detailId) !== String(context.generationId)) return true;
       const sequence = Array.isArray(payload.items) ? payload.items : [];
       const initialIndex = sequence.findIndex((item) => String(item.generation_id) === String(context.generationId) && Number(item.image_index) === Number(context.imageIndex));
       if (initialIndex < 0 || !sequence.length) return false;
@@ -689,27 +770,47 @@
         const known = mobileSourceForSequenceItem(item, dataUrl, context);
         return { ...item, src: known.src, msrc: known.src, width: Math.max(1, Number(item.width || 1)), height: Math.max(1, Number(item.height || 1)), previewSrc: known.detail === "preview" ? known.src : "", originalSrc: known.detail === "original" ? known.src : "", loadedDetail: known.detail, alt: "生成结果" };
       });
-      const pswp = new window.PhotoSwipe({ dataSource: mobileImageDataSource, index: initialIndex, loop: false, closeOnVerticalDrag: true, pinchToClose: false, tapAction: toggleMobileImageControls, imageClickAction: toggleMobileImageControls, bgClickAction: toggleMobileImageControls, doubleTapAction: "zoom", initialZoomLevel: "fit", secondaryZoomLevel: 2.5, maxZoomLevel: 4, preload: [1, 1], arrowPrev: false, arrowNext: false, close: false, zoom: false, counter: false, showHideAnimationType: "fade", showAnimationDuration: 220, hideAnimationDuration: 220, zoomAnimationDuration: 220, mainClass: "image-studio-pswp" });
+      const session = { active: true, sequence, items: mobileImageDataSource, loads: mobileImageLoads, retryTimers: new Set(), viewer: null, backdrop: null, status: null, retrying: false };
+      const pswp = new window.PhotoSwipe({ dataSource: mobileImageDataSource, index: initialIndex, loop: false, closeOnVerticalDrag: true, pinchToClose: false, tapAction: toggleMobileImageControls, imageClickAction: toggleMobileImageControls, bgClickAction: toggleMobileImageControls, doubleTapAction: "zoom", initialZoomLevel: "fit", secondaryZoomLevel: 2.5, maxZoomLevel: 4, preload: [1, 1], arrowPrev: false, arrowNext: false, close: false, zoom: false, counter: false, bgOpacity: 1, showHideAnimationType: "fade", showAnimationDuration: 220, hideAnimationDuration: 220, zoomAnimationDuration: 220, errorMsg: "图片暂时无法加载，请重试。", mainClass: "image-studio-pswp" });
+      session.viewer = pswp;
+      pswp.addFilter("contentErrorElement", (element, content) => {
+        element.textContent = "图片暂时无法加载。";
+        const retry = document.createElement("button"); retry.type = "button"; retry.className = "image-studio-image-retry"; retry.textContent = "重新加载";
+        retry.addEventListener("click", (event) => { event.stopPropagation(); void retryMobileImage(session, content.index); });
+        element.appendChild(retry); return element;
+      });
       pswp.on("uiRegister", () => {
         pswp.ui.registerElement({ name: "image-studio-download", className: "pswp__button--image-studio-download", isButton: true, appendTo: "root", title: "下载图片", ariaLabel: "下载当前图片", html: '<svg class="image-studio-download-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>', onClick: () => void downloadMobileImage() });
       });
       pswp.on("change", () => {
-        const item = mobileImageSequence[pswp.currIndex];
-        warmMobileImages(pswp.currIndex);
-        void syncDetailToMobileImage(item);
+        if (!isCurrentMobileSession(session)) return;
+        const item = session.sequence[pswp.currIndex];
+        warmMobileImages(pswp.currIndex, session);
+        void syncDetailToMobileImage(item, session);
       });
       pswp.on("afterInit", () => {
+        const background = document.createElement("img"); background.className = "image-studio-viewer-backdrop"; background.alt = ""; background.setAttribute("aria-hidden", "true");
+        pswp.bg?.appendChild(background); session.backdrop = background;
+        const status = document.createElement("div"); status.className = "image-studio-image-status"; status.hidden = true; status.setAttribute("role", "status");
+        const message = document.createElement("span"); const retry = document.createElement("button"); retry.className = "image-studio-image-retry"; retry.type = "button"; retry.textContent = "重试";
+        retry.addEventListener("click", (event) => { event.stopPropagation(); void retryMobileImage(session); });
+        status.append(message, retry); pswp.element.appendChild(status); session.status = status;
+        updateMobileViewerFeedback(session);
         pswp.element?.classList.remove("image-studio-controls-visible");
         syncPageScrollLock();
       });
       pswp.on("openingAnimationEnd", () => pswp.element?.classList.remove("image-studio-controls-visible"));
       pswp.on("destroy", () => {
-        const item = mobileImageSequence[pswp.currIndex];
+        const item = session.sequence[pswp.currIndex];
         const shouldSyncDetail = !suppressMobileDetailSync;
+        session.active = false;
+        session.retryTimers.forEach((timer) => window.clearTimeout(timer)); session.retryTimers.clear(); session.loads.clear();
+        if (mobileViewerSession !== session) return;
         suppressMobileDetailSync = false;
-        mobileImageViewer = null; mobileImageSequence = []; mobileImageDataSource = []; mobileImageLoads.clear(); mobileDetailSyncRevision += 1;
+        mobileImageViewer = null; mobileViewerSession = null; mobileImageSequence = []; mobileImageDataSource = []; mobileImageLoads = new Map(); mobileDetailSyncRevision += 1;
         if (shouldSyncDetail) {
           void syncDetailToMobileImage(item).then(() => {
+            if (mobileViewerSession) return;
             if (state.detailData && !state.detailAssetsLoaded && state.detailId === item?.generation_id) void loadDetailAssets(state.detailId, state.detailData, state.detailFallbackThumbnail);
             els.detailDrawer.focus();
           });
@@ -718,10 +819,11 @@
       });
       suppressMobileDetailSync = false;
       mobileImageViewer = pswp;
+      mobileViewerSession = session;
       pswp.init();
       return true;
     } finally {
-      mobileViewerOpening = false;
+      if (openingRevision === mobileViewerOpenRevision) mobileViewerOpening = false;
     }
   }
 

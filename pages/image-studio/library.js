@@ -372,10 +372,14 @@
       const metadataRows = { ...displayNormalized, ...(normalized.parameters || {}) };
       const summaryStatus = metadata.format === "comfyui" ? promptStatusMarkup(normalized.prompt_status, "正向：") + promptStatusMarkup(normalized.negative_prompt_status, "反向：") : "";
       if (metadata.format === "comfyui") for (const key of ["condition_nodes", "stages", "outputs"]) { delete metadataRows[key]; if (detail.source === "import") delete requestRows[key]; }
-      const warnings = [...(metadata.warnings || []), ...(detail.file_state && detail.file_state !== "available" ? [`文件状态：${detail.file_state}`] : [])];
       const raw = metadata.raw || {};
       const rawMarkup = Object.entries(raw).map(([name, value]) => `<details class="metadata-raw-field"><summary>${escape(name)}</summary>${parameterRows({ [name]: value })}</details>`).join("");
-      return `${warnings.length ? `<div class="retention-notice">${warnings.map(escape).join("<br>")}</div>` : ""}<div class="detail-block"><h3>${detail.source === "import" ? "导入信息" : "原始请求"}</h3><div class="detail-parameter-grid">${parameterRows(requestRows)}</div></div>${Object.keys(metadataRows).length ? `<div class="detail-block"><h3>图片生成参数 · ${escape(engineLabel(metadata.format))}</h3>${summaryStatus}<div class="detail-parameter-grid">${parameterRows(metadataRows)}</div></div>` : ""}${comfyDetailsMarkup(metadata, true)}${rawMarkup ? `<details class="detail-block raw-metadata"><summary>图片原始元数据</summary>${rawMarkup}</details>` : ""}`;
+      return `<div class="detail-block"><h3>${detail.source === "import" ? "导入信息" : "原始请求"}</h3><div class="detail-parameter-grid">${parameterRows(requestRows)}</div></div>${Object.keys(metadataRows).length ? `<div class="detail-block"><h3>图片生成参数 · ${escape(engineLabel(metadata.format))}</h3>${summaryStatus}<div class="detail-parameter-grid">${parameterRows(metadataRows)}</div></div>` : ""}${comfyDetailsMarkup(metadata, true)}${rawMarkup ? `<details class="detail-block raw-metadata"><summary>图片原始元数据</summary>${rawMarkup}</details>` : ""}`;
+    }
+
+    function detailWarningsMarkup(detail, image) {
+      const warnings = [...(image?.metadata?.warnings || []), ...(detail.file_state && detail.file_state !== "available" ? [`文件状态：${detail.file_state}`] : [])];
+      return warnings.length ? `<div class="retention-notice detail-warnings" role="status">${warnings.map(escape).join("<br>")}</div>` : "";
     }
 
     function updateDetailActions(detail) {
@@ -691,7 +695,7 @@
       window.addEventListener("beforeunload", () => imports.forEach((item) => URL.revokeObjectURL(item.url)));
     }
 
-    return { bind, modeLabel, engineLabel, galleryPageSize, renderGalleryCard, galleryRendered, selectionChanged, syncFloatingBars, detailMetadataMarkup, updateDetailActions, copyText, resolveParameters, setCommandLabel, modalOpen: () => !!modalClose };
+    return { bind, modeLabel, engineLabel, galleryPageSize, renderGalleryCard, galleryRendered, selectionChanged, syncFloatingBars, detailMetadataMarkup, detailWarningsMarkup, updateDetailActions, copyText, resolveParameters, setCommandLabel, modalOpen: () => !!modalClose };
   };
   window.ImageStudioMetadata = { extractMetadata, decodeComment };
 })();

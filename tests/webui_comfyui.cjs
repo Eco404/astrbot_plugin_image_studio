@@ -155,6 +155,10 @@ async function verifyStages(scope, name) {
       await frame.locator(`[data-gallery-id="${first.id}"]`).waitFor();
       await frame.locator(`[data-gallery-id="${first.id}"] .gallery-info`).click();
       await frame.locator("#drawerBody .comfy-summary-status").first().waitFor();
+      assert.equal(await inner.locator("#drawerBody").evaluate((body) => body.lastElementChild?.matches(".detail-warnings") && !!body.lastElementChild.previousElementSibling?.querySelector("[data-detail-references]")), true, "warnings must follow the reference section at the end of the scrollable details");
+      assert.equal(await frame.locator("#drawerBody .detail-warnings").count(), 1);
+      await inner.locator("#drawerBody").evaluate((body) => { body.scrollTop = body.scrollHeight; });
+      await capture(page, inner, `${name}-detail-warnings`);
       await verifyStages(frame.locator("#drawerBody"), `${name}-detail`);
       await capture(page, inner, `${name}-detail-stages`);
       await chooseFormat(frame, inner, "workflow");
