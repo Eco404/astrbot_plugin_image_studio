@@ -106,6 +106,7 @@
       $("studioModalBody").innerHTML = body;
       $("studioModalError").textContent = "";
       $("studioModalFooter").innerHTML = "";
+      $("studioModal").classList.toggle("is-merge-picker", !!options.mergePicker);
       $("studioModalRoot").classList.remove("is-hidden");
       hooks.syncPageScrollLock();
       return new Promise((resolve) => {
@@ -253,6 +254,9 @@
       $("importGroupOption").classList.toggle("is-hidden", imports.length < 2);
       $("importAsGroup").disabled = importing || imports.length < 2;
       if (imports.length < 2) $("importAsGroup").checked = false;
+      $("importMergeOption").classList.toggle("is-hidden", !imports.length);
+      $("importMergeExisting").disabled = importing || !imports.length;
+      if (!imports.length) $("importMergeExisting").checked = false;
       setCommandLabel("confirmImportButton", importing ? "正在导入…" : "确认导入");
     }
 
@@ -313,7 +317,14 @@
     async function confirmImports() {
       if (importing || !imports.length || imports.some((item) => item.status === "reading")) return;
       let preparedItems;
+      let mergeEngine = "";
       try {
+        if ($("importMergeExisting").checked) {
+          const sources = imports.map((item) => item.fields.generation_engine === "nai" ? "novelai" : item.fields.generation_engine);
+          if (sources.some((source) => !source || ["unknown", "mixed"].includes(source))) throw new Error("合并前请先为每张图片选择明确的生图来源。");
+          if (new Set(sources).size !== 1) throw new Error(`合并到已有图组时，生图来源必须相同：${imports.map((item, index) => `${item.file.name}：${engineLabel(sources[index])}`).join("；")}`);
+          mergeEngine = sources[0];
+        }
         preparedItems = imports.map((item) => {
           if (item.parsed?.normalized?.requires_output_selection) throw new Error(`${item.file.name} 包含多个保存输出，请先选择最终保存输出。`);
           let parameters;
@@ -338,9 +349,21 @@
         }
       } catch (error) { showNotice(error.message, "error"); return; }
       importing = true; renderImports();
-      if ($("importAsGroup").checked) {
-        try { await confirmImportGroup(preparedItems); }
-        catch (error) { $("importProgress").textContent = errorMessage(error, "图组导入失败，请重试"); }
+      if ($("importAsGroup").checked || mergeEngine) {
+        try {
+          let groupOptions = { as_group: true };
+          if (mergeEngine) {
+            const retryOptions = { merge_target_id: importGroupDraft?.targetId, generation_engine: mergeEngine };
+            const retry = retryOptions.merge_target_id && importGroupDraft.signature === JSON.stringify({ items: preparedItems, ...retryOptions });
+            if (!retry) $("importProgress").textContent = "正在查找同源的已导入图组…";
+            const targetId = retry ? retryOptions.merge_target_id : await chooseImportMergeTarget(mergeEngine);
+            if (!retry) $("importProgress").textContent = "";
+            if (!targetId) return;
+            groupOptions = { merge_target_id: targetId, generation_engine: mergeEngine };
+          }
+          await confirmImportGroup(preparedItems, groupOptions);
+        }
+        catch (error) { const message = errorMessage(error, "图组导入失败，请重试"); $("importProgress").textContent = message; showNotice(message, "error"); }
         finally { importing = false; renderImports(); }
         return;
       }
@@ -371,12 +394,73 @@
       if (draft) await apiPost(draft.prepared.cancel_endpoint, {}).catch(() => {});
     }
 
-    async function confirmImportGroup(items) {
-      const signature = JSON.stringify(items);
+    async function chooseImportMergeTarget(engine) {
+      const limit = 12;
+      const getPage = (offset) => apiGet(`imports/merge-targets?${new URLSearchParams({ generation_engine: engine, limit, offset })}`);
+      let page = await getPage(0);
+      if (!page.total) {
+        showNotice("暂无同源的已导入图组，请选择“作为图组导入”；单张图片可关闭合并后直接导入。", "error");
+        return null;
+      }
+      let offset = 0;
+      let selected = null;
+      let loading = false;
+      let active = true;
+      const previousTarget = importGroupDraft?.targetId;
+      function renderPage() {
+        $("importMergeTargets").innerHTML = page.items.map((item) => {
+          const full = Number(item.image_count) + imports.length > 100;
+          const checked = !full && item.id === selected?.id;
+          return `<label class="merge-target-card ${full ? "is-unavailable" : ""}" data-merge-target="${escape(item.id)}"><div class="merge-target-preview">${item.thumbnail_data_url ? `<img src="${escape(item.thumbnail_data_url)}" alt="" />` : icon("Image")}<span class="merge-target-count">${Number(item.image_count)} 张</span></div><div class="merge-target-heading"><input type="radio" name="importMergeTarget" value="${escape(item.id)}" aria-label="选择图组：${escape(item.model || "未记录模型")}，${Number(item.image_count)} 张，${escape(formatDate(item.created_at))}" ${checked ? "checked" : ""} ${full || loading ? "disabled" : ""} /><strong>${escape(item.model || "未记录模型")}</strong></div><time>${escape(formatDate(item.created_at))}</time><span class="merge-target-prompt">${escape(item.prompt_preview || "未记录提示词")}</span>${full ? '<span class="merge-target-warning">合并后超过 100 张上限</span>' : ""}</label>`;
+        }).join("");
+        $("importMergePage").textContent = `第 ${Math.floor(offset / limit) + 1} / ${Math.max(1, Math.ceil(page.total / limit))} 页`;
+        $("importMergePrev").disabled = loading || offset === 0;
+        $("importMergeNext").disabled = loading || offset + limit >= page.total;
+        $("importMergeConfirm").disabled = loading || !selected;
+        $("importMergeSelection").textContent = selected ? `已选：${selected.model || "未记录模型"} · ${formatDate(selected.created_at)} · ${selected.image_count} 张` : "尚未选择图组";
+      }
+      async function changePage(nextOffset) {
+        if (loading) return;
+        loading = true; renderPage();
+        $("importMergeTargets").setAttribute("aria-busy", "true");
+        $("studioModalError").textContent = "";
+        try {
+          const next = await getPage(nextOffset);
+          if (!active) return;
+          page = next; offset = nextOffset;
+        } catch (error) { if (active) $("studioModalError").textContent = errorMessage(error, "图组读取失败，请重试"); }
+        finally {
+          loading = false;
+          if (active) { renderPage(); $("importMergeTargets").removeAttribute("aria-busy"); $("studioModalBody").scrollTop = 0; }
+        }
+      }
+      return openModal("选择已有图组", `<p>${escape(engineLabel(engine))} · 待合并 ${imports.length} 张图片</p><div class="merge-target-grid" id="importMergeTargets" role="radiogroup" aria-label="已有导入图组"></div><div class="merge-target-pagination"><button type="button" class="studio-icon-button" id="importMergePrev" aria-label="上一页" title="上一页">${icon("ChevronLeft")}</button><span id="importMergePage" aria-live="polite"></span><button type="button" class="studio-icon-button" id="importMergeNext" aria-label="下一页" title="下一页">${icon("ChevronRight")}</button></div><div class="merge-target-selection" id="importMergeSelection" role="status"></div>`, [
+        { label: "取消", action: () => false },
+        { label: "确认导入", primary: true, id: "importMergeConfirm", action: () => {
+          if (loading) return undefined;
+          if (!selected) throw new Error("请先选择一个图组。");
+          return selected.id;
+        } },
+      ], { mergePicker: true, focus: "studioModalClose", onOpen: () => {
+        selected = page.items.find((item) => item.id === previousTarget && Number(item.image_count) + imports.length <= 100) || null;
+        renderPage();
+        $("importMergeTargets").addEventListener("change", (event) => {
+          if (loading || !event.target.matches('input[name="importMergeTarget"]')) return;
+          selected = page.items.find((item) => item.id === event.target.value) || null;
+          $("importMergeConfirm").disabled = !selected;
+          $("importMergeSelection").textContent = selected ? `已选：${selected.model || "未记录模型"} · ${formatDate(selected.created_at)} · ${selected.image_count} 张` : "尚未选择图组";
+        });
+        $("importMergePrev").addEventListener("click", () => void changePage(Math.max(0, offset - limit)));
+        $("importMergeNext").addEventListener("click", () => void changePage(offset + limit));
+      } }).finally(() => { active = false; });
+    }
+
+    async function confirmImportGroup(items, groupOptions = { as_group: true }) {
+      const signature = JSON.stringify({ items, ...groupOptions });
       if (importGroupDraft?.signature !== signature) {
         await discardImportGroup();
-        const prepared = await apiPost("imports/prepare", { items, as_group: true });
-        importGroupDraft = { signature, prepared, uploaded: new Set() };
+        const prepared = await apiPost("imports/prepare", { items, ...groupOptions });
+        importGroupDraft = { signature, prepared, targetId: groupOptions.merge_target_id, uploaded: new Set() };
       }
       const draft = importGroupDraft;
       const client = await bridge();
@@ -399,14 +483,14 @@
       try {
         await apiPost(draft.prepared.commit_endpoint, {});
       } catch (error) {
-        if (/过期|取消/.test(errorMessage(error, ""))) await discardImportGroup();
+        if (/过期|取消|目标.*(?:删除|不存在|来源|数量|100 张)/.test(errorMessage(error, ""))) await discardImportGroup();
         throw error;
       }
       const count = imports.length;
       imports.forEach((item) => URL.revokeObjectURL(item.url)); imports = [];
       importGroupDraft = null;
-      $("importProgress").textContent = `已导入 1 个图组，共 ${count} 张图片`;
-      showNotice(`已导入图组，共 ${count} 张图片。`, "success");
+      $("importProgress").textContent = groupOptions.merge_target_id ? `已合并 ${count} 张图片到已有图组` : `已导入 1 个图组，共 ${count} 张图片`;
+      showNotice(groupOptions.merge_target_id ? `已合并 ${count} 张图片到已有图组。` : `已导入图组，共 ${count} 张图片。`, "success");
     }
 
     function parameterRows(values, prefix = "") {
@@ -726,7 +810,9 @@
       $("importDropzone").addEventListener("click", () => $("importFiles").click());
       $("confirmImportButton").addEventListener("click", () => void confirmImports());
       $("cancelImportButton").addEventListener("click", clearImports);
-      $("importAsGroup").addEventListener("change", () => { void discardImportGroup(); });
+      for (const [id, other] of [["importAsGroup", "importMergeExisting"], ["importMergeExisting", "importAsGroup"]]) {
+        $(id).addEventListener("change", () => { if ($(id).checked) $(other).checked = false; void discardImportGroup(); });
+      }
       $("importGrid").addEventListener("click", (event) => { const button = event.target.closest("[data-remove-import]"); if (button) removeImport(button.dataset.removeImport); const candidate = event.target.closest("[data-candidate-target]"); if (candidate) addPromptCandidate(candidate); });
       $("importGrid").addEventListener("change", (event) => { if (!event.target.matches("[data-import-output]")) return; const item = imports.find((entry) => entry.id === event.target.closest("[data-import-id]").dataset.importId); void chooseImportOutput(item, event.target.value); });
       $("importGrid").addEventListener("input", (event) => {

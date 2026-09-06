@@ -184,6 +184,12 @@ class ImageStudioPlugin(Star):
                 "Image Studio: prepare imports",
             ),
             (
+                "imports/merge-targets",
+                self._api_import_merge_targets,
+                ["GET"],
+                "Image Studio: matching imported image groups",
+            ),
+            (
                 "imports/group/<group_id>/commit",
                 self._api_import_group_commit,
                 ["POST"],
@@ -484,6 +490,34 @@ class ImageStudioPlugin(Star):
         except (ValueError, TypeError, OverflowError) as exc:
             return error_response(str(exc), status_code=400)
 
+    @staticmethod
+    def _import_merge_engine(value: Any) -> str:
+        if not isinstance(value, str) or not value.strip() or len(value.strip()) > 80:
+            raise ValueError("请先为待合并图片选择明确的生图来源")
+        engine = value.strip()
+        if engine.lower() in {"unknown", "mixed"}:
+            raise ValueError("未知或混合来源不能合并，请先为图片选择相同的生图来源")
+        return "novelai" if engine.lower() in {"nai", "novelai"} else engine
+
+    async def _api_import_merge_targets(self) -> Any:
+        try:
+            engine = self._import_merge_engine(
+                web_request.query.get("generation_engine")
+            )
+            limit = int(web_request.query.get("limit", 24))
+            offset = int(web_request.query.get("offset", 0))
+            if not 1 <= limit <= 60 or offset < 0:
+                raise ValueError("分页数量须为 1 至 60，偏移量不能为负数")
+            result = await self.store.list_import_merge_targets(
+                engine,
+                limit=limit,
+                offset=offset,
+                query=str(web_request.query.get("query", ""))[:240],
+            )
+            return json_response(result)
+        except (ValueError, TypeError, OverflowError) as exc:
+            return error_response(str(exc), status_code=400)
+
     async def _api_import_prepare(self) -> Any:
         body = await web_request.json(default={})
         items = body.get("items") if isinstance(body, dict) else None
@@ -492,6 +526,35 @@ class ImageStudioPlugin(Star):
         as_group = body.get("as_group", False)
         if not isinstance(as_group, bool):
             return error_response("图组选项必须是布尔值", status_code=400)
+        merge_target_id = body.get("merge_target_id", "")
+        if not isinstance(merge_target_id, str) or (
+            merge_target_id and not re.fullmatch(r"[a-f0-9]{32}", merge_target_id)
+        ):
+            return error_response("合并目标图组 ID 无效", status_code=400)
+        if as_group and merge_target_id:
+            return error_response("新建图组和合并已有图组不能同时选择", status_code=400)
+        expected_engine = ""
+        if merge_target_id:
+            try:
+                expected_engine = self._import_merge_engine(
+                    body.get("generation_engine")
+                )
+                target = await self.store.generation_detail(
+                    merge_target_id, include_assets=False
+                )
+                if target is None:
+                    raise ValueError("目标图组已被删除或不存在，请重新选择")
+                if target.get("source") != "import":
+                    raise ValueError("只能合并到手动导入的图片或图组")
+                if (
+                    self._import_merge_engine(target.get("generation_engine"))
+                    != expected_engine
+                ):
+                    raise ValueError("目标图组与待导入图片的生图来源不一致，请重新选择")
+                if len(target.get("images", [])) + len(items) > 100:
+                    raise ValueError("合并后图组不能超过 100 张图片")
+            except ValueError as exc:
+                return error_response(str(exc), status_code=400)
         if as_group and len(items) < 2:
             return error_response("图组至少需要两张图片", status_code=400)
         await self._expire_import_groups()
@@ -520,6 +583,17 @@ class ImageStudioPlugin(Star):
                 return error_response("补充参数必须是小于 1 MB 的对象", status_code=400)
             if not isinstance(overrides.get("parameters", {}), dict):
                 return error_response("补充参数 parameters 必须是对象", status_code=400)
+            if merge_target_id and "generation_engine" in overrides:
+                try:
+                    if (
+                        self._import_merge_engine(overrides["generation_engine"])
+                        != expected_engine
+                    ):
+                        raise ValueError(
+                            f"图片 {item.get('filename') or client_id} 的生图来源与本批合并来源不一致"
+                        )
+                except ValueError as exc:
+                    return error_response(str(exc), status_code=400)
             seen.add(client_id)
             pending.append(
                 (
@@ -551,6 +625,7 @@ class ImageStudioPlugin(Star):
                 return error_response(
                     f"图组中的模型必须相同，当前模型不一致：{details}", status_code=400
                 )
+        if as_group or merge_target_id:
             group_id = uuid.uuid4().hex
             directory = self.store.imports_dir / group_id
             await asyncio.to_thread(directory.mkdir, parents=True, exist_ok=False)
@@ -560,13 +635,16 @@ class ImageStudioPlugin(Star):
                     path=directory / f"{ordinal:03d}-{token}.image",
                     uploaded=False,
                 )
-                item["overrides"]["model"] = item["overrides"]["model"].strip()
+                if as_group:
+                    item["overrides"]["model"] = item["overrides"]["model"].strip()
             self._import_groups[group_id] = {
                 "created_at": now,
                 "directory": directory,
                 "items": pending,
                 "lock": asyncio.Lock(),
                 "result": None,
+                "merge_target_id": merge_target_id,
+                "expected_engine": expected_engine,
             }
             group_response = {
                 "group_id": group_id,
@@ -702,12 +780,27 @@ class ImageStudioPlugin(Star):
                     f"图组尚有图片未上传：{'、'.join(missing)}", status_code=400
                 )
             try:
-                result = await self.store.import_group(
-                    [item for _, item in group["items"]],
-                    import_key=f"group:{group_id}",
-                    preview_max_edge=self._settings.asset_preview_max_edge,
-                    preview_quality=self._settings.asset_preview_quality,
-                )
+                if group.get("merge_target_id"):
+                    appended = await self.store.append_import_group(
+                        [item for _, item in group["items"]],
+                        group["merge_target_id"],
+                        import_key=f"import_merge:{group_id}",
+                        expected_engine=group["expected_engine"],
+                        preview_max_edge=self._settings.asset_preview_max_edge,
+                        preview_quality=self._settings.asset_preview_quality,
+                    )
+                    result = {
+                        **appended,
+                        "merged": True,
+                        "added_count": appended["added"],
+                    }
+                else:
+                    result = await self.store.import_group(
+                        [item for _, item in group["items"]],
+                        import_key=f"group:{group_id}",
+                        preview_max_edge=self._settings.asset_preview_max_edge,
+                        preview_quality=self._settings.asset_preview_quality,
+                    )
             except ValueError as exc:
                 return error_response(str(exc), status_code=400)
             except OSError:

@@ -490,7 +490,7 @@ class GenerationStore:
             return
         values: list[Any] = [
             _load_json(row["parameters_json"]),
-            _load_json(row["supplemental_json"]),
+            _canonical_supplemental(_load_json(row["supplemental_json"])),
         ]
         for item in conn.execute(
             "SELECT m.metadata_json, i.supplemental_json FROM generation_images i LEFT JOIN image_metadata m "
@@ -498,7 +498,9 @@ class GenerationStore:
             (generation_id,),
         ).fetchall():
             values.append(_load_json(item["metadata_json"]).get("normalized", {}))
-            values.append(_load_json(item["supplemental_json"]))
+            values.append(
+                _canonical_supplemental(_load_json(item["supplemental_json"]))
+            )
         # Only normalized fields are searchable; entire workflow graphs stay out.
         conn.execute(
             "UPDATE generations SET search_text = ? WHERE id = ?",
@@ -1236,7 +1238,7 @@ class GenerationStore:
             if import_key:
                 duplicate = conn.execute(
                     "SELECT g.id, g.supplemental_json, i.asset_id FROM generations g LEFT JOIN generation_images i "
-                    "ON i.generation_id = g.id WHERE g.import_key = ?",
+                    "ON i.generation_id = g.id WHERE g.import_key = ? ORDER BY i.ordinal LIMIT 1",
                     (import_key,),
                 ).fetchone()
                 if duplicate is not None and (
@@ -1267,6 +1269,9 @@ class GenerationStore:
                         for row in possible
                         if not _load_json(row["supplemental_json"]).get(
                             "is_import_group"
+                        )
+                        and not _load_json(row["supplemental_json"]).get(
+                            "merge_operations"
                         )
                         and (
                             _load_json(row["supplemental_json"])
@@ -1408,6 +1413,24 @@ class GenerationStore:
         preview_max_edge: int,
         preview_quality: int,
     ) -> dict[str, Any]:
+        prepared = self._prepare_import_entries_sync(entries)
+        models = {item["supplemental"]["model"] for item in prepared}
+        if "" in models or len(models) != 1:
+            descriptions = [
+                f"第 {index + 1} 张（{item['supplemental']['original_filename']}）："
+                f"{item['supplemental']['model'] or '未填写模型'}"
+                for index, item in enumerate(prepared)
+            ]
+            raise ValueError(
+                "图组中的模型必须全部填写且完全相同。" + "；".join(descriptions)
+            )
+        return self._create_import_group_sync(
+            prepared, import_key, preview_max_edge, preview_quality
+        )
+
+    def _prepare_import_entries_sync(
+        self, entries: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
         prepared: list[dict[str, Any]] = []
         errors: list[str] = []
         # First pass retains metadata only, so a large batch never holds every image in RAM.
@@ -1436,16 +1459,38 @@ class GenerationStore:
                 errors.append(f"第 {index + 1} 张（{filename}）：{exc}")
         if errors:
             raise ValueError("图组导入失败：" + "；".join(errors))
-        models = {item["supplemental"]["model"] for item in prepared}
-        if "" in models or len(models) != 1:
-            descriptions = [
-                f"第 {index + 1} 张（{item['supplemental']['original_filename']}）："
-                f"{item['supplemental']['model'] or '未填写模型'}"
-                for index, item in enumerate(prepared)
-            ]
-            raise ValueError(
-                "图组中的模型必须全部填写且完全相同。" + "；".join(descriptions)
+        return prepared
+
+    def _prepare_import_assets_sync(
+        self,
+        prepared: list[dict[str, Any]],
+        preview_max_edge: int,
+        preview_quality: int,
+    ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+        assets: dict[str, dict[str, Any]] = {}
+        thumbnails: dict[str, dict[str, Any]] = {}
+        for item in prepared:
+            if item["digest"] in assets:
+                continue
+            data = self._read_import_file_sync(item["path"])
+            if hashlib.sha256(data).hexdigest() != item["digest"]:
+                raise ValueError("待导入图片在准备过程中发生变化，请重新上传")
+            asset = self._prepare_asset_sync(data, "")
+            assets[asset["id"]] = asset
+            thumbnails[asset["id"]] = self._prepare_thumbnail_sync(
+                asset,
+                max_edge=preview_max_edge,
+                quality=preview_quality,
             )
+        return assets, thumbnails
+
+    def _create_import_group_sync(
+        self,
+        prepared: list[dict[str, Any]],
+        import_key: str,
+        preview_max_edge: int,
+        preview_quality: int,
+    ) -> dict[str, Any]:
         manifest = [item["digest"] for item in prepared]
         with self._connect() as conn:
             duplicate = conn.execute(
@@ -1482,23 +1527,10 @@ class GenerationStore:
                 for item in prepared
             ],
         }
-        assets: dict[str, dict[str, Any]] = {}
-        thumbnails: dict[str, dict[str, Any]] = {}
         try:
-            for item in prepared:
-                if item["digest"] in assets:
-                    continue
-                data = self._read_import_file_sync(item["path"])
-                if hashlib.sha256(data).hexdigest() != item["digest"]:
-                    raise ValueError("待导入图片在准备过程中发生变化，请重新上传")
-                asset = self._prepare_asset_sync(data, "")
-                assets[asset["id"]] = asset
-                thumbnails[asset["id"]] = self._prepare_thumbnail_sync(
-                    asset,
-                    max_edge=preview_max_edge,
-                    quality=preview_quality,
-                )
-                del data
+            assets, thumbnails = self._prepare_import_assets_sync(
+                prepared, preview_max_edge, preview_quality
+            )
             with self._connect() as conn:
                 conn.executemany(
                     "INSERT INTO image_assets (id, path, mime_type, size_bytes, width, height, created_at) "
@@ -1570,6 +1602,252 @@ class GenerationStore:
             raise
         return {"generation_id": generation_id, "duplicate": False}
 
+    async def list_import_merge_targets(
+        self, engine: str, *, limit: int = 24, offset: int = 0, query: str = ""
+    ) -> dict[str, Any]:
+        """List imported records whose surviving images all have the requested source."""
+
+        engine = _known_merge_engine(engine)
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._list_generations_sync,
+                {
+                    "source": "import",
+                    "_merge_target_engine": engine,
+                    "limit": limit,
+                    "offset": offset,
+                    "query": query,
+                },
+            )
+
+    @staticmethod
+    def _merge_target_sync(
+        conn: sqlite3.Connection, target_id: str, expected_engine: str
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        row = conn.execute(
+            "SELECT * FROM generations WHERE id = ?", (target_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError("目标导入图组不存在或已被删除，请重新选择")
+        target = dict(row)
+        if target["source"] != "import":
+            raise ValueError("只能合并到手动导入的图片或图组")
+        images = [
+            dict(item)
+            for item in conn.execute(
+                "SELECT id, ordinal, asset_id, supplemental_json FROM generation_images "
+                "WHERE generation_id = ? ORDER BY ordinal, id",
+                (target_id,),
+            ).fetchall()
+        ]
+        if not images:
+            raise ValueError("目标导入图组已没有图片，请重新选择")
+        mismatched = []
+        for index, image in enumerate(images):
+            supplemental = _load_json(image["supplemental_json"])
+            engine = _canonical_engine(
+                supplemental.get("generation_engine", target["generation_engine"])
+            )
+            if engine != expected_engine:
+                mismatched.append(f"第 {index + 1} 张：{engine}")
+        if mismatched:
+            raise ValueError(
+                "目标图组来源不一致或已发生变化，不能合并：" + "；".join(mismatched)
+            )
+        return target, images
+
+    async def append_import_group(
+        self,
+        entries: list[dict[str, Any]],
+        target_id: str,
+        *,
+        import_key: str,
+        expected_engine: str,
+        preview_max_edge: int = 768,
+        preview_quality: int = 80,
+    ) -> dict[str, Any]:
+        """Append a same-source batch to an existing import, with durable retry receipts."""
+
+        if not isinstance(entries, list) or not 1 <= len(entries) <= 100:
+            raise ValueError("每次合并需要 1 至 100 张图片")
+        if not isinstance(target_id, str) or not _SAFE_ID_RE.fullmatch(target_id):
+            raise ValueError("目标导入图组 ID 无效")
+        if (
+            not isinstance(import_key, str)
+            or not import_key.strip()
+            or len(import_key) > 160
+        ):
+            raise ValueError("合并导入请求标识无效")
+        engine = _known_merge_engine(expected_engine)
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._append_import_group_sync,
+                entries,
+                target_id,
+                import_key.strip(),
+                engine,
+                preview_max_edge,
+                preview_quality,
+            )
+
+    def _append_import_group_sync(
+        self,
+        entries: list[dict[str, Any]],
+        target_id: str,
+        import_key: str,
+        expected_engine: str,
+        preview_max_edge: int,
+        preview_quality: int,
+    ) -> dict[str, Any]:
+        prepared = self._prepare_import_entries_sync(entries)
+        mismatched = [
+            f"第 {index + 1} 张（{item['supplemental']['original_filename']}）：{item['supplemental']['generation_engine']}"
+            for index, item in enumerate(prepared)
+            if item["supplemental"]["generation_engine"] != expected_engine
+        ]
+        if mismatched:
+            raise ValueError(
+                "待合并图片必须全部具有相同的已知来源：" + "；".join(mismatched)
+            )
+        manifest = [item["digest"] for item in prepared]
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                [
+                    {
+                        "sha256": item["digest"],
+                        "filename": item["supplemental"]["original_filename"],
+                        "overrides": item["supplemental"]["overrides"],
+                    }
+                    for item in prepared
+                ],
+                sort_keys=True,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        with self._connect() as conn:
+            target, existing_images = self._merge_target_sync(
+                conn, target_id, expected_engine
+            )
+            operations = _load_json(target["supplemental_json"]).get(
+                "merge_operations", {}
+            )
+            if not isinstance(operations, dict):
+                raise ValueError("目标图组合并收据无效，请检查图组数据")
+            prior = operations.get(import_key)
+            if prior is not None:
+                if (
+                    not isinstance(prior, dict)
+                    or prior.get("fingerprint") != fingerprint
+                    or prior.get("engine") != expected_engine
+                ):
+                    raise ValueError(
+                        "合并请求标识已用于其他图片、顺序或参数，请重新准备导入"
+                    )
+                return {
+                    "generation_id": target_id,
+                    "duplicate": True,
+                    "added": 0,
+                    "image_count": len(existing_images),
+                }
+            if len(existing_images) + len(prepared) > 100:
+                raise ValueError(
+                    f"目标图组已有 {len(existing_images)} 张，追加 {len(prepared)} 张后超过 100 张上限"
+                )
+        try:
+            assets, thumbnails = self._prepare_import_assets_sync(
+                prepared, preview_max_edge, preview_quality
+            )
+            with self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                target, existing_images = self._merge_target_sync(
+                    conn, target_id, expected_engine
+                )
+                supplemental = _load_json(target["supplemental_json"])
+                operations = supplemental.get("merge_operations", {})
+                if not isinstance(operations, dict) or import_key in operations:
+                    raise ValueError("目标图组合并状态已变化，请重试")
+                if len(existing_images) + len(prepared) > 100:
+                    raise ValueError("目标图组图片数量已变化，合并后超过 100 张上限")
+                conn.executemany(
+                    "INSERT INTO image_assets (id, path, mime_type, size_bytes, width, height, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET file_state='available'",
+                    [
+                        (
+                            a["id"],
+                            a["path"],
+                            a["mime_type"],
+                            a["size_bytes"],
+                            a["width"],
+                            a["height"],
+                            time.time(),
+                        )
+                        for a in assets.values()
+                    ],
+                )
+                self._upsert_thumbnails_sync(conn, thumbnails.values())
+                self._save_metadata_sync(
+                    conn, {item["digest"]: item["metadata"] for item in prepared}
+                )
+                next_ordinal = max(int(item["ordinal"]) for item in existing_images) + 1
+                image_ids = [uuid.uuid4().hex for _ in prepared]
+                conn.executemany(
+                    "INSERT INTO generation_images (id, generation_id, ordinal, asset_id, supplemental_json) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    [
+                        (
+                            image_ids[index],
+                            target_id,
+                            next_ordinal + index,
+                            item["digest"],
+                            json.dumps(
+                                item["supplemental"],
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            ),
+                        )
+                        for index, item in enumerate(prepared)
+                    ],
+                )
+                old_modes = {
+                    _load_json(image["supplemental_json"]).get("mode", target["mode"])
+                    for image in existing_images
+                }
+                modes = old_modes | {item["supplemental"]["mode"] for item in prepared}
+                operations = {
+                    **operations,
+                    import_key: {
+                        "fingerprint": fingerprint,
+                        "manifest": manifest,
+                        "engine": expected_engine,
+                        "image_ids": image_ids,
+                        "added": len(prepared),
+                    },
+                }
+                supplemental = {**supplemental, "merge_operations": operations}
+                conn.execute(
+                    "UPDATE generations SET mode = ?, generation_engine = ?, supplemental_json = ? WHERE id = ?",
+                    (
+                        next(iter(modes)) if len(modes) == 1 else "unknown",
+                        expected_engine,
+                        json.dumps(
+                            supplemental, ensure_ascii=False, separators=(",", ":")
+                        ),
+                        target_id,
+                    ),
+                )
+                self._refresh_search_sync(conn, target_id)
+        except Exception:
+            self._cleanup_orphaned_asset_files_sync()
+            self._cleanup_orphaned_thumbnails_sync()
+            raise
+        return {
+            "generation_id": target_id,
+            "duplicate": False,
+            "added": len(prepared),
+            "image_count": len(existing_images) + len(prepared),
+        }
+
     async def list_generations(self, filters: dict[str, Any]) -> dict[str, Any]:
         """Return a paginated gallery collection and aggregate filter values."""
 
@@ -1592,6 +1870,15 @@ class GenerationStore:
         if source:
             where.append("g.source = ?")
             args.append(source)
+        if filters.get("_merge_target_engine"):
+            where.append(
+                "EXISTS (SELECT 1 FROM generation_images selected WHERE selected.generation_id = g.id) "
+                "AND NOT EXISTS (SELECT 1 FROM generation_images selected WHERE selected.generation_id = g.id "
+                "AND (CASE lower(trim(COALESCE(json_extract(selected.supplemental_json, '$.generation_engine'), g.generation_engine))) "
+                "WHEN 'nai' THEN 'novelai' WHEN 'novelai' THEN 'novelai' "
+                "ELSE trim(COALESCE(json_extract(selected.supplemental_json, '$.generation_engine'), g.generation_engine)) END) != ?)"
+            )
+            args.append(filters["_merge_target_engine"])
         if filters.get("generation_engine"):
             engine = _canonical_engine(filters["generation_engine"])
             if engine == "novelai":
@@ -1690,7 +1977,8 @@ class GenerationStore:
             rows = conn.execute(
                 "SELECT g.id AS generation_id, g.created_at, "
                 "COALESCE(json_extract(i.supplemental_json, '$.mode'), g.mode) AS mode, g.provider_id, "
-                "g.model, i.id AS image_id, i.ordinal, a.mime_type, a.size_bytes, "
+                "COALESCE(json_extract(i.supplemental_json, '$.model'), g.model) AS model, "
+                "i.id AS image_id, i.ordinal, a.mime_type, a.size_bytes, "
                 "a.width, a.height, a.path, a.file_state, "
                 "COUNT(*) OVER (PARTITION BY g.id) AS image_count "
                 "FROM generations g JOIN generation_images i ON i.generation_id = g.id "
@@ -1913,7 +2201,11 @@ class GenerationStore:
             if result["source"] == "import" and not image["supplemental"]:
                 image["supplemental"] = result["supplemental"]
             image["download_filename"] = export_image_filename(
-                {**result, "mode": image["supplemental"].get("mode", result["mode"])},
+                {
+                    **result,
+                    "mode": image["supplemental"].get("mode", result["mode"]),
+                    "model": image["supplemental"].get("model", result["model"]),
+                },
                 image_index=image_index,
                 image_count=len(result["images"]),
                 mime_type=str(image.get("mime_type") or ""),
@@ -2178,6 +2470,9 @@ class GenerationStore:
                                 **detail,
                                 "mode": image.get("supplemental", {}).get(
                                     "mode", detail["mode"]
+                                ),
+                                "model": image.get("supplemental", {}).get(
+                                    "model", detail["model"]
                                 ),
                             },
                             image_index=image_index,
@@ -2766,8 +3061,18 @@ def _canonical_engine(value: Any) -> str:
     return "novelai" if engine.lower() in {"nai", "novelai"} else engine
 
 
+def _known_merge_engine(value: Any) -> str:
+    if not isinstance(value, str):
+        raise ValueError("合并来源必须是字符串")
+    engine = _canonical_engine(value)
+    if not value.strip() or engine.lower() in {"unknown", "mixed"}:
+        raise ValueError("仅支持合并具有相同已知生图来源的图片")
+    return engine
+
+
 def _canonical_supplemental(value: dict[str, Any]) -> dict[str, Any]:
     result = dict(value)
+    result.pop("merge_operations", None)
     if "generation_engine" in result:
         result["generation_engine"] = _canonical_engine(result["generation_engine"])
     display = result.get("display_parameters")
