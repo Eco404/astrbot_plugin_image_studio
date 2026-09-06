@@ -328,7 +328,7 @@ def test_receipts_expire_after_task_window_without_deleting_gallery_records(tmp_
     asyncio.run(run())
 
 
-def test_dev2_database_upgrades_import_receipt_table_without_changing_gallery(tmp_path):
+def test_prebaseline_receipt_layout_is_rejected_without_changing_gallery(tmp_path):
     async def run():
         store = GenerationStore(tmp_path)
         await store.initialize()
@@ -338,9 +338,14 @@ def test_dev2_database_upgrades_import_receipt_table_without_changing_gallery(tm
         )
         with store._connect() as conn:
             conn.execute("DROP TABLE import_batches")
-            conn.execute("UPDATE schema_meta SET dev_revision = 2")
+            conn.execute(
+                "CREATE TABLE schema_meta (id INTEGER PRIMARY KEY, target_version INTEGER NOT NULL, dev_revision INTEGER NOT NULL)"
+            )
+            conn.execute("INSERT INTO schema_meta VALUES (1, 1, 2)")
+            conn.execute("PRAGMA user_version = 0")
         reopened = GenerationStore(tmp_path)
-        await reopened.initialize()
+        with pytest.raises(RuntimeError, match="末版开发版"):
+            await reopened.initialize()
         assert (
             await reopened.generation_detail(
                 result["generation_id"], include_assets=False
@@ -349,11 +354,14 @@ def test_dev2_database_upgrades_import_receipt_table_without_changing_gallery(tm
         )
         with reopened._connect() as conn:
             assert (
-                conn.execute("SELECT dev_revision FROM schema_meta").fetchone()[0] == 3
+                conn.execute("SELECT dev_revision FROM schema_meta").fetchone()[0] == 2
             )
             assert conn.execute("PRAGMA user_version").fetchone()[0] == 0
             assert (
-                conn.execute("SELECT COUNT(*) FROM import_batches").fetchone()[0] == 0
+                conn.execute(
+                    "SELECT name FROM sqlite_master WHERE name = 'import_batches'"
+                ).fetchone()
+                is None
             )
 
     asyncio.run(run())

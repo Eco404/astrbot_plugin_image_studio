@@ -70,6 +70,7 @@
 .detail-filmstrip-thumb { box-shadow: none; }
 .detail-filmstrip-preview { box-shadow: var(--control-shadow); }
 
+#galleryClearSearch,
 .parameter-copy,
 .parameter-copy:hover,
 .parameter-copy:active {

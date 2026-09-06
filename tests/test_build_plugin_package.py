@@ -7,6 +7,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "build_plugin_package.py"
@@ -23,12 +24,12 @@ def source_tree(tmp_path):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("runtime", encoding="utf-8")
     (root / "metadata.yaml").write_text(
-        'name: "astrbot_plugin_image_studio"\nversion: "0.6.1" # release\n',
+        'name: "astrbot_plugin_image_studio"\nversion: "1.0.0" # release\n',
         encoding="utf-8",
     )
     (root / "main.py").write_text(
         'PLUGIN_NAME = "astrbot_plugin_image_studio"\n'
-        '@register(PLUGIN_NAME, "local", "Description", "0.6.1")\n'
+        '@register(PLUGIN_NAME, "econeco", "Description", "1.0.0")\n'
         "class ImageStudioPlugin: pass\n",
         encoding="utf-8",
     )
@@ -49,20 +50,34 @@ def test_real_package_contains_all_runtime_assets_and_is_reproducible(tmp_path):
     assert outputs[0].read_bytes() == outputs[1].read_bytes()
     with zipfile.ZipFile(outputs[0]) as archive:
         assert archive.testzip() is None
-        name, _ = builder.package_identity(ROOT)
+        name, version = builder.package_identity(ROOT)
         expected = {f"{name}/{item}" for item in builder.REQUIRED_ARCHIVE_FILES}
         assert expected.issubset(archive.namelist())
         assert archive.read(f"{name}/main.py") == (ROOT / "main.py").read_bytes()
+        metadata = yaml.safe_load(archive.read(f"{name}/metadata.yaml"))
+        assert metadata["author"] == "econeco"
+        assert (
+            metadata["repo"] == "https://github.com/Eco404/astrbot_plugin_image_studio"
+        )
+        changelog = archive.read(f"{name}/CHANGELOG.md").decode("utf-8")
+        assert f"## {version} - " in changelog
+        readme = archive.read(f"{name}/README.md").decode("utf-8")
+        assert "](docs/images/generate.png)" in readme
+        for relative in ("docs/images/generate.png", "logo.png"):
+            image = archive.read(f"{name}/{relative}")
+            assert image == (ROOT / relative).read_bytes()
+            assert image.startswith(b"\x89PNG\r\n\x1a\n")
         for member in archive.infolist():
             assert not {
                 "data",
-                "docs",
                 "tests",
                 "scripts",
                 ".git",
                 "__pycache__",
                 "node_modules",
             }.intersection(Path(member.filename).parts)
+            if "docs" in Path(member.filename).parts:
+                assert member.filename == f"{name}/docs/images/generate.png"
             assert member.date_time == builder.FIXED_ZIP_TIMESTAMP
             assert member.external_attr >> 16 == 0o100644
 
@@ -75,6 +90,10 @@ def test_allowlist_includes_worktree_changes_but_not_runtime_residue(source_tree
         "pages/debug.log",
         "pages/__pycache__/module.pyc",
         "pages/node_modules/module.js",
+        "docs/internal.md",
+        "docs/images/private.sqlite3",
+        "docs/images/generate.webp",
+        "docs/images/gallery.webp",
     ):
         target = source_tree / name
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -92,7 +111,7 @@ def test_allowlist_includes_worktree_changes_but_not_runtime_residue(source_tree
 def test_mismatched_version_missing_module_and_symlink_fail(source_tree, tmp_path):
     metadata = source_tree / "metadata.yaml"
     original = metadata.read_text(encoding="utf-8")
-    metadata.write_text(original.replace("0.6.1", "0.7.0"), encoding="utf-8")
+    metadata.write_text(original.replace("1.0.0", "1.0.1"), encoding="utf-8")
     with pytest.raises(ValueError, match="不一致"):
         builder.build_package(source_tree)
     metadata.write_text(original, encoding="utf-8")

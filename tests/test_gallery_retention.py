@@ -265,7 +265,9 @@ def test_missing_thumbnail_rebuilt_for_protected_record(tmp_path):
     asyncio.run(run())
 
 
-def test_database_development_versions_are_explicit_and_unknown_are_rejected(tmp_path):
+def test_database_release_version_is_explicit_and_future_versions_are_rejected(
+    tmp_path,
+):
     async def run():
         store = GenerationStore(tmp_path)
         await store.initialize()
@@ -273,16 +275,12 @@ def test_database_development_versions_are_explicit_and_unknown_are_rejected(tmp
             "database_version"
         ] == DATABASE_VERSION
         with sqlite3.connect(store.db_path) as conn:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == 0
-            assert conn.execute(
-                "SELECT target_version, dev_revision FROM schema_meta"
-            ).fetchone() == (1, 3)
-            conn.execute("UPDATE schema_meta SET dev_revision = 99")
-        with pytest.raises(RuntimeError, match="开发修订"):
-            await GenerationStore(tmp_path).initialize()
-        with sqlite3.connect(store.db_path) as conn:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
             assert (
-                conn.execute("SELECT dev_revision FROM schema_meta").fetchone()[0] == 99
+                conn.execute(
+                    "SELECT name FROM sqlite_master WHERE name = 'schema_meta'"
+                ).fetchone()
+                is None
             )
             conn.execute("PRAGMA user_version = 2")
         with pytest.raises(RuntimeError, match="正式版本"):
@@ -503,12 +501,12 @@ def test_capacity_cleanup_excludes_leases_and_protected_reference_shares(tmp_pat
 
 
 def test_schema_transaction_rolls_back_before_version_stamp(tmp_path, monkeypatch):
-    import astrbot_plugin_image_studio.storage as storage_module
+    import astrbot_plugin_image_studio.database_schema as schema_module
 
     def fail_stamp(conn):
         raise RuntimeError("simulated migration failure")
 
-    monkeypatch.setattr(storage_module, "finish_development_schema", fail_stamp)
+    monkeypatch.setattr(schema_module, "_stamp_release", fail_stamp)
     store = GenerationStore(tmp_path)
     with pytest.raises(RuntimeError, match="migration failure"):
         asyncio.run(store.initialize())
@@ -793,8 +791,6 @@ def test_metadata_upgrade_refreshes_import_projection_but_preserves_request_and_
         ):
             assert generated_after[key] == generated_before[key]
         with store._connect() as conn:
-            assert (
-                conn.execute("SELECT dev_revision FROM schema_meta").fetchone()[0] == 3
-            )
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
 
     asyncio.run(run())

@@ -43,7 +43,7 @@ async function openView(frame, view) {
 
 async function checkShadows(frame, name) {
   const result = await frame.evaluate(() => {
-    const exceptions = ".nav-item, .detail-filmstrip-thumb, .parameter-copy, .copy-format-picker .studio-select-trigger, .segment:not(.is-active), .model-tab:not(.is-active)";
+    const exceptions = ".nav-item, .detail-filmstrip-thumb, .parameter-copy, #galleryClearSearch, .copy-format-picker .studio-select-trigger, .segment:not(.is-active), .model-tab:not(.is-active)";
     return Array.from(document.querySelectorAll("button, a.primary-button, a.quiet-button")).filter((button) => {
       if (!button.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) || button.matches(exceptions)) return false;
       return true;
@@ -128,6 +128,20 @@ async function importer(page, frame, name, uploaded) {
 
 async function gallery(page, frame, name, favoriteId) {
   await openView(frame, "gallery");
+  await frame.locator("#gallerySearch").fill("边界点击测试");
+  const clear = frame.locator("#galleryClearSearch");
+  await clear.hover();
+  const clearStyle = await clear.evaluate((button) => {
+    const style = getComputedStyle(button);
+    return { width: button.offsetWidth, height: button.offsetHeight, shadow: style.boxShadow, border: style.borderTopWidth, background: style.backgroundColor };
+  });
+  assert.deepEqual(clearStyle, { width: 40, height: 40, shadow: "none", border: "0px", background: "rgba(0, 0, 0, 0)" }, `${name}: frameless clear button must keep its hit area`);
+  await capture(page, frame, `${name}-clear-search`);
+  await clear.click({ position: { x: 2, y: 20 } });
+  assert.equal(await frame.locator("#gallerySearch").inputValue(), "", `${name}: clearing must work outside the visible icon`);
+  assert.equal(await clear.isDisabled(), true);
+  await frame.locator(".gallery-card").first().waitFor();
+  await settle(frame);
   for (const id of ["galleryFavorite", "galleryRefresh"]) await roundIcon(frame, `#${id}`, `${name}-${id}`);
   await checkFocus(frame, "#galleryFavorite", name);
   await checkShadows(frame, `${name}-gallery`);

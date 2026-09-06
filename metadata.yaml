@@ -1,16 +1,16 @@
 name: astrbot_plugin_image_studio
 display_name: Image Studio
-desc: 为 AstrBot 提供多 Provider 生图、画廊和可供 Agent 继续处理的图像工具。
-version: 0.6.1
-author: local
-repo: local
+desc: 多服务商 AI 生图工作台，支持聊天指令、Agent 生图改图、图片导入与画廊管理。
+version: 1.0.0
+author: econeco
+repo: https://github.com/Eco404/astrbot_plugin_image_studio
 category: AI 增强
 tags:
   - 生图
   - 图生图
   - Gallery
   - LLM Tool
-astrbot_version: ">=4.22.0"
+astrbot_version: ">=4.26.5"
 pages:
   - name: image-studio
     title: Image Studio

@@ -30,6 +30,7 @@ RUNTIME_FILES = (
     "_conf_schema.json",
     "requirements.txt",
     "README.md",
+    "docs/images/generate.png",
 )
 OPTIONAL_FILES = ("LICENSE", "logo.png", "CHANGELOG.md")
 RUNTIME_DIRECTORIES = ("pages",)

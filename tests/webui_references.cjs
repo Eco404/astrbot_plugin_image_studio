@@ -73,10 +73,12 @@ async function settle(frame) {
 
       let releaseUpload;
       const pending = new Promise(resolve => { releaseUpload = resolve; });
+      const uploadStarted = page.waitForRequest(request => request.url().endsWith("/studio/reference/upload"));
       await page.route("**/studio/reference/upload", async route => { await pending; await route.continue(); });
       await frame.locator("#referenceUpload").setInputFiles(files.slice(0, 3));
       await frame.locator('#referenceChooseButton[aria-busy="true"]').waitFor();
       assert.equal(await button.isDisabled(), true, "concurrent selections must be disabled");
+      await uploadStarted;
       const requestsBefore = uploads.length;
       await frame.locator('[data-mode="text2img"]').click();
       releaseUpload();

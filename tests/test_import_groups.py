@@ -446,7 +446,7 @@ def test_group_rejects_paths_outside_staging_and_bad_members(tmp_path):
     asyncio.run(run())
 
 
-def test_dev1_upgrade_preserves_single_import_and_metadata(tmp_path):
+def test_older_development_layout_is_rejected_without_rewriting_imports(tmp_path):
     async def run():
         store = GenerationStore(tmp_path)
         await store.initialize()
@@ -454,39 +454,22 @@ def test_dev1_upgrade_preserves_single_import_and_metadata(tmp_path):
             image(), "one.png", {"prompt": "manual", "parameters": {"artist": "artist"}}
         )
         await store.set_favorite(imported["generation_id"], True)
-        before = await store.generation_detail(
-            imported["generation_id"], include_assets=False
-        )
         with store._connect() as conn:
             conn.execute("ALTER TABLE generation_images DROP COLUMN supplemental_json")
-            conn.execute("UPDATE schema_meta SET dev_revision = 1")
+            conn.execute(
+                "CREATE TABLE schema_meta (id INTEGER PRIMARY KEY, target_version INTEGER NOT NULL, dev_revision INTEGER NOT NULL)"
+            )
+            conn.execute("INSERT INTO schema_meta VALUES (1, 1, 1)")
+            conn.execute("PRAGMA user_version = 0")
+        with store._connect() as conn:
+            before = list(conn.iterdump())
         upgraded = GenerationStore(tmp_path)
-        await upgraded.initialize()
-        after = await upgraded.generation_detail(
-            imported["generation_id"], include_assets=False
-        )
-        assert after["is_favorite"]
-        assert after["images"][0]["metadata"] == before["images"][0]["metadata"]
-        assert after["images"][0]["supplemental"]["prompt"] == "manual"
-        assert (
-            after["images"][0]["supplemental"]["overrides"]["parameters"]["artist"]
-            == "artist"
-        )
+        with pytest.raises(RuntimeError, match="末版开发版"):
+            await upgraded.initialize()
         with upgraded._connect() as conn:
-            assert (
-                conn.execute(
-                    "SELECT target_version, dev_revision FROM schema_meta"
-                ).fetchone()["dev_revision"]
-                == 3
-            )
+            assert list(conn.iterdump()) == before
             assert conn.execute("PRAGMA user_version").fetchone()[0] == 0
-        await upgraded.initialize()
-        assert (
-            await upgraded.generation_detail(
-                imported["generation_id"], include_assets=False
-            )
-            == after
-        )
+        assert not (tmp_path / "backups").exists()
 
     asyncio.run(run())
 
@@ -594,9 +577,7 @@ def test_nai_source_aliases_share_filters_and_preserve_raw_import_information(tm
                     "SELECT asset_id, metadata_json FROM image_metadata ORDER BY asset_id"
                 )
             ] == original_metadata
-            assert (
-                conn.execute("SELECT dev_revision FROM schema_meta").fetchone()[0] == 3
-            )
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
 
     asyncio.run(run())
 

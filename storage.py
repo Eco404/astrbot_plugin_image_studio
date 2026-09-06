@@ -16,11 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import HistorySettings
-from .database_schema import (
-    DATABASE_VERSION,
-    check_database_version,
-    finish_development_schema,
-)
+from .database_schema import DATABASE_VERSION, ensure_release_schema
 from .models import (
     GeneratedImage,
     GenerationRequest,
@@ -104,230 +100,44 @@ class GenerationStore:
         ):
             directory.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
-            check_database_version(conn)
-            conn.executescript(
-                """
-                BEGIN IMMEDIATE;
-                CREATE TABLE IF NOT EXISTS generations (
-                    id TEXT PRIMARY KEY,
-                    created_at REAL NOT NULL,
-                    source TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    mode TEXT NOT NULL,
-                    provider_id TEXT NOT NULL,
-                    provider_name TEXT NOT NULL,
-                    provider_kind TEXT NOT NULL,
-                    model TEXT NOT NULL,
-                    original_prompt TEXT NOT NULL,
-                    final_prompt TEXT NOT NULL,
-                    parameters_json TEXT NOT NULL,
-                    elapsed_ms INTEGER NOT NULL,
-                    error_message TEXT NOT NULL DEFAULT '',
-                    context_type TEXT NOT NULL DEFAULT '',
-                    platform_name TEXT NOT NULL DEFAULT '',
-                    platform_id TEXT NOT NULL DEFAULT '',
-                    group_id TEXT NOT NULL DEFAULT '',
-                    group_name TEXT NOT NULL DEFAULT '',
-                    user_id TEXT NOT NULL DEFAULT '',
-                    user_name TEXT NOT NULL DEFAULT ''
-                );
-                CREATE TABLE IF NOT EXISTS image_assets (
-                    id TEXT PRIMARY KEY,
-                    path TEXT NOT NULL UNIQUE,
-                    mime_type TEXT NOT NULL,
-                    size_bytes INTEGER NOT NULL,
-                    width INTEGER NOT NULL DEFAULT 0,
-                    height INTEGER NOT NULL DEFAULT 0,
-                    created_at REAL NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS image_thumbnails (
-                    asset_id TEXT PRIMARY KEY REFERENCES image_assets(id) ON DELETE CASCADE,
-                    path TEXT NOT NULL UNIQUE,
-                    mime_type TEXT NOT NULL,
-                    size_bytes INTEGER NOT NULL,
-                    max_edge INTEGER NOT NULL DEFAULT 0,
-                    quality INTEGER NOT NULL DEFAULT 0
-                );
-                CREATE TABLE IF NOT EXISTS generation_images (
-                    id TEXT PRIMARY KEY,
-                    generation_id TEXT NOT NULL REFERENCES generations(id) ON DELETE CASCADE,
-                    ordinal INTEGER NOT NULL,
-                    asset_id TEXT NOT NULL REFERENCES image_assets(id)
-                );
-                CREATE TABLE IF NOT EXISTS generation_references (
-                    id TEXT PRIMARY KEY,
-                    generation_id TEXT NOT NULL REFERENCES generations(id) ON DELETE CASCADE,
-                    ordinal INTEGER NOT NULL,
-                    filename TEXT NOT NULL,
-                    mime_type TEXT NOT NULL,
-                    size_bytes INTEGER NOT NULL,
-                    available INTEGER NOT NULL DEFAULT 1,
-                    deleted_at REAL,
-                    asset_id TEXT REFERENCES image_assets(id)
-                );
-                CREATE TABLE IF NOT EXISTS agent_asset_leases (
-                    id TEXT PRIMARY KEY,
-                    asset_id TEXT NOT NULL REFERENCES image_assets(id) ON DELETE CASCADE,
-                    scope_id TEXT NOT NULL,
-                    created_at REAL NOT NULL,
-                    last_accessed_at REAL NOT NULL,
-                    expires_at REAL NOT NULL,
-                    hard_expires_at REAL NOT NULL,
-                    UNIQUE(scope_id, asset_id)
-                );
-                CREATE TABLE IF NOT EXISTS image_metadata (
-                    asset_id TEXT PRIMARY KEY REFERENCES image_assets(id) ON DELETE CASCADE,
-                    format TEXT NOT NULL,
-                    parser_version INTEGER NOT NULL,
-                    metadata_json TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS import_batches (
-                    id TEXT PRIMARY KEY,
-                    fingerprint TEXT NOT NULL,
-                    result_json TEXT NOT NULL,
-                    expires_at REAL NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_import_batches_expiry ON import_batches(expires_at);
-                CREATE INDEX IF NOT EXISTS idx_generations_created_at ON generations(created_at DESC);
-                CREATE INDEX IF NOT EXISTS idx_generations_provider ON generations(provider_id);
-                CREATE INDEX IF NOT EXISTS idx_generation_images_generation ON generation_images(generation_id);
-                CREATE INDEX IF NOT EXISTS idx_generation_references_generation ON generation_references(generation_id);
-                CREATE INDEX IF NOT EXISTS idx_generation_images_asset ON generation_images(asset_id);
-                CREATE INDEX IF NOT EXISTS idx_generation_references_asset ON generation_references(asset_id);
-                CREATE INDEX IF NOT EXISTS idx_agent_asset_leases_asset ON agent_asset_leases(asset_id);
-                CREATE INDEX IF NOT EXISTS idx_agent_asset_leases_expiry ON agent_asset_leases(expires_at);
-                """
-            )
-            generation_columns = {
-                str(row["name"])
-                for row in conn.execute("PRAGMA table_info(generations)").fetchall()
-            }
-            for column in (
-                "context_type",
-                "platform_name",
-                "platform_id",
-                "group_id",
-                "group_name",
-                "user_id",
-                "user_name",
-            ):
-                if column not in generation_columns:
-                    conn.execute(
-                        f"ALTER TABLE generations ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
-                    )
-            for column, definition in {
-                "is_favorite": "INTEGER NOT NULL DEFAULT 0",
-                "cleanup_protected_until": "REAL NOT NULL DEFAULT 0",
-                "generation_engine": "TEXT NOT NULL DEFAULT 'unknown'",
-                "generated_at": "REAL",
-                "supplemental_json": "TEXT NOT NULL DEFAULT '{}'",
-                "import_key": "TEXT",
-                "search_text": "TEXT NOT NULL DEFAULT ''",
-            }.items():
-                if column not in generation_columns:
-                    conn.execute(
-                        f"ALTER TABLE generations ADD COLUMN {column} {definition}"
-                    )
-            conn.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_generations_import_key "
-                "ON generations(import_key) WHERE import_key IS NOT NULL"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_generations_retention "
-                "ON generations(source, is_favorite, cleanup_protected_until, created_at)"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_generations_engine "
-                "ON generations(generation_engine)"
-            )
-            image_columns = {
-                str(row["name"])
-                for row in conn.execute(
-                    "PRAGMA table_info(generation_images)"
-                ).fetchall()
-            }
-            if "supplemental_json" not in image_columns:
-                conn.execute(
-                    "ALTER TABLE generation_images ADD COLUMN supplemental_json "
-                    "TEXT NOT NULL DEFAULT '{}'"
-                )
-                for row in conn.execute(
-                    "SELECT id, supplemental_json, model, mode, original_prompt, "
-                    "generation_engine, generated_at FROM generations WHERE source = 'import'"
-                ).fetchall():
-                    supplemental = _load_json(row["supplemental_json"])
-                    supplemental.update(
-                        {
-                            "model": row["model"],
-                            "mode": row["mode"],
-                            "prompt": row["original_prompt"],
-                            "negative_prompt": supplemental.get(
-                                "display_parameters", {}
-                            ).get("negative_prompt", ""),
-                            "generation_engine": row["generation_engine"],
-                            "generated_at": row["generated_at"],
-                        }
-                    )
-                    conn.execute(
-                        "UPDATE generation_images SET supplemental_json = ? WHERE generation_id = ?",
-                        (
-                            json.dumps(
-                                supplemental, ensure_ascii=False, separators=(",", ":")
-                            ),
-                            row["id"],
-                        ),
-                    )
-            thumbnail_columns = {
-                str(row["name"])
-                for row in conn.execute(
-                    "PRAGMA table_info(image_thumbnails)"
-                ).fetchall()
-            }
-            for column in ("max_edge", "quality"):
-                if column not in thumbnail_columns:
-                    conn.execute(
-                        f"ALTER TABLE image_thumbnails ADD COLUMN {column} "
-                        "INTEGER NOT NULL DEFAULT 0"
-                    )
-            asset_columns = {
-                str(row["name"])
-                for row in conn.execute("PRAGMA table_info(image_assets)").fetchall()
-            }
-            for column in ("width", "height"):
-                if column not in asset_columns:
-                    conn.execute(
-                        f"ALTER TABLE image_assets ADD COLUMN {column} "
-                        "INTEGER NOT NULL DEFAULT 0"
-                    )
-            if "file_state" not in asset_columns:
-                conn.execute(
-                    "ALTER TABLE image_assets ADD COLUMN file_state TEXT NOT NULL DEFAULT 'available'"
-                )
-            for row in conn.execute(
+            ensure_release_schema(conn, backup_dir=self.data_dir / "backups")
+        self._repair_derived_fields_sync()
+        self._backfill_metadata_sync()
+        self._delete_expired_leases_sync(time.time())
+        self._delete_expired_import_batches_sync(time.time())
+        self._purge_unreferenced_assets_sync()
+        self._cleanup_orphaned_asset_files_sync()
+        self._cleanup_orphaned_thumbnails_sync()
+
+    def _repair_derived_fields_sync(self) -> None:
+        """Repair incomplete dimensions and indexed aliases independently of schema upgrades."""
+
+        with self._connect() as conn:
+            rows = conn.execute(
                 "SELECT id, path FROM image_assets WHERE width <= 0 OR height <= 0"
-            ).fetchall():
-                path = self.data_dir / str(row["path"])
-                try:
-                    dimensions = _image_dimensions(path.read_bytes())
-                except OSError:
-                    dimensions = (1, 1)
+            ).fetchall()
+        for row in rows:
+            path = self.data_dir / str(row["path"])
+            if not _is_within(path, self.assets_dir) or not path.is_file():
+                continue
+            try:
+                dimensions = _image_dimensions(path.read_bytes())
+            except OSError:
+                continue
+            with self._connect() as conn:
                 conn.execute(
-                    "UPDATE image_assets SET width = ?, height = ? WHERE id = ?",
+                    "UPDATE image_assets SET width = ?, height = ? WHERE id = ? "
+                    "AND (width <= 0 OR height <= 0)",
                     (*dimensions, str(row["id"])),
                 )
-            try:
-                conn.execute(
-                    "CREATE VIRTUAL TABLE IF NOT EXISTS generation_search USING fts5("
-                    "generation_id UNINDEXED, original_prompt, final_prompt, provider_name, model)"
-                )
-            except sqlite3.OperationalError:
-                pass
+        with self._connect() as conn:
             conn.execute(
                 "UPDATE generations SET generation_engine = CASE provider_kind "
                 "WHEN 'nai_direct' THEN 'novelai' WHEN '' THEN 'unknown' ELSE provider_kind END "
-                "WHERE generation_engine = 'unknown' AND source != 'import'"
+                "WHERE generation_engine = 'unknown' AND source != 'import' "
+                "AND provider_kind != ''"
             )
-            # Only the indexed display source changes; original requests and embedded metadata stay intact.
+            # Preserve raw requests and per-image metadata; normalize only the gallery projection.
             conn.execute(
                 "UPDATE generations SET generation_engine = 'novelai' "
                 "WHERE lower(trim(generation_engine)) IN ('nai', 'novelai') "
@@ -342,13 +152,6 @@ class GenerationStore:
                 "lower(trim(COALESCE(json_extract(i.supplemental_json, '$.generation_engine'), 'unknown'))) "
                 "NOT IN ('nai', 'novelai'))"
             )
-            finish_development_schema(conn)
-        self._backfill_metadata_sync()
-        self._delete_expired_leases_sync(time.time())
-        self._delete_expired_import_batches_sync(time.time())
-        self._purge_unreferenced_assets_sync()
-        self._cleanup_orphaned_asset_files_sync()
-        self._cleanup_orphaned_thumbnails_sync()
 
     async def maintenance_report(self) -> dict[str, Any]:
         """Return the latest maintenance report plus current lightweight stats."""
@@ -609,6 +412,7 @@ class GenerationStore:
         repaired["expired_import_batches"] = self._delete_expired_import_batches_sync(
             checked_at
         )
+        self._repair_derived_fields_sync()
         self._backfill_metadata_sync()
         broken_ids: list[str] = []
         with self._connect() as conn:

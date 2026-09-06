@@ -1,0 +1,94 @@
+# 开发与发布维护
+
+面向维护者。普通使用说明见 [README](../README.md)，正式版本变化见 [CHANGELOG](../CHANGELOG.md)。
+
+## 1.0.0 基线
+
+| 标识 | 当前值 | 含义 |
+| --- | --- | --- |
+| 插件版本 | `1.0.0` | `metadata.yaml` 与 `main.py` 注册版本必须相同 |
+| 数据库正式版本 | `1` | SQLite `PRAGMA user_version`，由 `database_schema.py` 管理 |
+| 配置格式版本 | `2` | `studio_config.json` 的 `schema_version`，与数据库版本独立 |
+| 图片解析器版本 | `image_metadata.PARSER_VERSION` | 控制派生元数据回填，不用于数据库结构升级 |
+
+正式 v1 的完整表和索引定义集中在 `database_schema.SCHEMA_STATEMENTS`。新库一次建立最终结构；已是 v1 的数据库只验证结构，不再执行开发期逐列补全。
+
+`storage.GenerationStore.initialize()` 负责调用版本入口；尺寸和生图来源的派生信息修复、图片元数据回填、过期租约和孤立文件维护保持独立，不放进长时间结构迁移事务。
+
+## 从开发版转换
+
+发布包不保留 `1-dev.1 → 1-dev.2 → 1-dev.3` 的迁移链，只保留最终开发结构到正式 v1 的单次转换：
+
+```text
+空数据库                         → 直接创建正式 v1
+user_version=0 + schema_meta(1,3) → 核验结构 → 备份 → 事务转换为 v1
+正式 v1                          → 只验证结构
+更早开发版、未知版本或结构异常    → 停止，不清空业务数据
+```
+
+转换前通过 SQLite Backup API 创建一致性备份：
+
+```text
+data/plugin_data/astrbot_plugin_image_studio/backups/
+  history-pre-v1-<UTC时间>-<唯一后缀>.sqlite3
+```
+
+备份失败时不执行转换。转换在 `BEGIN IMMEDIATE` 事务内重新核验版本和结构，再移除开发标记 `schema_meta`、设置 `user_version=1`；失败时回滚，备份保留。再次启动正式 v1 不重复备份。备份文件不参与图片配额和定时临时文件清理。
+
+自动备份只包含数据库，**不包含配置和图片文件**。升级前仍应停止 AstrBot，备份完整插件数据目录；不要只复制运行中的主 `.sqlite3` 文件而忽略 WAL 中的数据。
+
+对于 `1-dev.1`、`1-dev.2` 或更早的无版本开发数据：先在完整备份副本上使用末版开发代码 `f68ecb3` 完成开发结构升级，再用 1.0.0 转换。不要修改 `PRAGMA user_version` 或手动伪造 `schema_meta` 来绕过检查。如果旧开发代码也不能识别，停止尝试并保留原始副本。
+
+回退需要同时使用升级前代码与升级前完整数据副本。若只恢复自动数据库备份，必须确认原图和参考图文件仍完整，并处理已停止服务留下的 WAL/SHM 状态；优先从完整目录备份恢复，不直接把备份覆盖到正在使用的数据库上。
+
+## 后续开发版本
+
+1. 从最近正式发布的代码和数据库基线继续开发，不修改已发布版本的结构定义和版本含义。
+2. 只有数据库结构发生变化时才增加数据库版本；普通 UI、指令或 Provider 修改可以保持数据库 v1。
+3. 下一次结构目标为 v2 时，开发库保留 `user_version=1`，另以 `schema_meta` 记录 `target_version=2`、`dev_revision=1,2,...`，显示名称如 `2-dev.1`。开发标记必须与结构变更在同一事务内提交。
+4. 插件开发版本可以使用 `1.1.0-dev.1` 等版本号；它不必与数据库目标数字一致。开发测试使用独立数据副本，不与正式部署共用数据目录。
+5. 正式运行时拒绝带未发布开发标记的数据库。开发分支只能接纳明确支持的基线或修订，不能通过通用“缺列就补”绕过版本校验。
+6. 发布前将当期开发修订压缩为 **一个前一正式结构到新正式结构的迁移**，同时更新新库的最终结构定义。不要把每个开发修订作为永久发布迁移留下。
+7. 已发布的正式迁移不得压掉。未来 v3 应保留 `v1 → v2 → v3` 的可靠升级路径；升级结果与直接创建 v3 新库的结构必须一致。
+
+后续结构迁移继续集中在 `ensure_release_schema()` 的边界，保留升级前备份、事务失败回滚和未知版本拒绝。需要支持最终开发库转换时，必须核验该最终修订的实际结构，不能仅改版本号。
+
+## 测试与构建
+
+使用 Python 3.12+ 的 AstrBot 环境。在本机已有的环境中可以执行：
+
+```bash
+conda run -n astrbot python -m pytest -q tests
+conda run -n astrbot ruff check --select F,E9 .
+conda run -n astrbot ruff format --check .
+node --check pages/image-studio/app.js
+node --check pages/image-studio/library.js
+node --check pages/image-studio/appearance.js
+git diff --check
+conda run -n astrbot python scripts/build_plugin_package.py
+```
+
+构建默认输出 `dist/astrbot_plugin_image_studio-v<版本>.zip`，支持 `--root` 和 `--output`。构建基于当前工作区，不要求先提交 Git；不会执行数据库转换。
+
+安装包采用白名单：包含运行模块、WebUI、说明和指定的演示截图，不包含真实数据、日志、开发数据库、测试或维护文档。新增运行模块或 README 图片时，需要同步更新构建白名单和测试。包内保留第三方静态资源的许可证。
+
+浏览器测试仅连接 `tests/webui_harness.py` 创建的隔离服务；它使用临时数据目录和模拟 Provider。脚本可通过 `STUDIO_TEST_URL`、`STUDIO_PLAYWRIGHT` 指定服务地址和 Playwright 包路径。不要把含导入、删除或配置保存操作的测试对准真实部署。
+
+每次数据库发布至少验证：
+
+- 空库初始化与重复启动。
+- 上一正式版完整数据升级，图片关系、收藏、引用、租约和导入记录不丢失。
+- 数据库备份可读取、可恢复，备份失败不会继续升级。
+- 任意中途失败时结构和版本号同时回滚。
+- 旧版、未来版、开发标记与实际结构不符时拒绝写入。
+- 元数据回填失败后可重试，不影响已提交的结构版本。
+- 最终安装包可加载，版本、作者、仓库及必需资源正确。
+
+## 发布检查
+
+- 保持 `metadata.yaml`、`main.py`、CHANGELOG 和前端缓存版本一致；第三方库版本不要随插件版本替换。
+- 确认最低 AstrBot 版本具有所需 API，并至少验证插件导入、工具注册和页面 API。
+- 在真实配置中检查生图、图生图与当前聊天平台的产物投递；隔离测试不能替代真实服务商验证。
+- 审核截图、安装包和日志中没有真实密钥或会话身份信息。
+- 确定项目许可证后再对外声明许可；第三方库许可证不等于本插件的许可证。
+- 本地构建、Git 提交、创建标签、推送和发布 GitHub Release 是不同操作，应分别确认。

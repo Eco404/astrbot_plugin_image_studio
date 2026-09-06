@@ -86,9 +86,9 @@ IMAGE_WORKFLOW_CONTINUATION_PROMPT = (
 
 @register(
     PLUGIN_NAME,
-    "local",
+    "econeco",
     "多 Provider 生图、画廊与 Agent 可读图片工具。",
-    "0.6.1",
+    "1.0.0",
 )
 class ImageStudioPlugin(Star):
     """Own Image Studio configuration, generation, gallery, and tool APIs."""
