@@ -142,26 +142,105 @@
       const data = item.fields;
       const warnings = [...(item.parsed?.warnings || []), ...(item.warning ? [item.warning] : [])];
       const disabled = importing || item.status === "reading";
+      const saveOutputs = (item.parsed?.normalized?.outputs || []).filter((entry) => entry.kind === "save");
+      const outputChoice = saveOutputs.length > 1 ? `<label class="field field-wide">最终保存输出<select data-import-output aria-label="最终保存输出"><option value="">请选择保存输出</option>${saveOutputs.map((entry) => `<option value="${escape(entry.node_id)}" ${String(entry.node_id) === String(item.outputNodeId || "") ? "selected" : ""}>${escape(entry.type)} #${escape(entry.node_id)}</option>`).join("")}</select></label>` : "";
       return `<article class="import-card glass" data-import-id="${item.id}">
         <div class="import-card-header"><strong title="${escape(item.file.name)}">${escape(item.file.name)}</strong><button class="studio-icon-button is-danger" data-remove-import="${item.id}" type="button" aria-label="移除 ${escape(item.file.name)}" title="移除图片" ${importing ? "disabled" : ""}>${icon("X")}</button></div>
         <div class="import-card-preview"><img src="${item.url}" alt="${escape(item.file.name)}" /></div><div class="import-file-meta">${formatBytes(item.file.size)}${item.width ? ` · ${item.width} × ${item.height}` : ""}</div>
         <fieldset class="import-card-fields" ${disabled ? "disabled" : ""}>
+          ${outputChoice}
           <label class="field">生图来源<select data-import-field="generation_engine">${options(ENGINES, data.generation_engine)}</select></label>
           <label class="field">模型<input data-import-field="model" value="${escape(data.model)}" /></label>
           <label class="field">模式<select data-import-field="mode">${options({ unknown: "未知模式", text2img: "文生图", img2img: "图生图" }, data.mode || "unknown")}</select></label>
           <label class="field">生成时间<input data-import-field="generated_at" type="datetime-local" value="${escape(data.generated_at || "")}" /></label>
-          <label class="field field-wide">正向提示词${promptStatusMarkup(item.parsed?.normalized?.prompt_status)}<textarea data-import-field="prompt" rows="3">${escape(data.prompt)}</textarea></label>
-          <label class="field field-wide">反向提示词${promptStatusMarkup(item.parsed?.normalized?.negative_prompt_status)}<textarea data-import-field="negative_prompt" rows="2">${escape(data.negative_prompt)}</textarea></label>
+          <label class="field field-wide">正向提示词${item.editedFields.has("prompt") ? "" : promptStatusMarkup(item.parsed?.normalized?.prompt_status)}<textarea data-import-field="prompt" rows="3">${escape(data.prompt)}</textarea></label>
+          <label class="field field-wide">反向提示词${item.editedFields.has("negative_prompt") ? "" : promptStatusMarkup(item.parsed?.normalized?.negative_prompt_status)}<textarea data-import-field="negative_prompt" rows="2">${escape(data.negative_prompt)}</textarea></label>
           <details class="field-wide advanced"><summary>补充参数</summary><textarea data-import-field="parameters" rows="5" spellcheck="false" aria-label="补充参数 JSON">${escape(data.parameters)}</textarea></details>
-        </fieldset>${comfyDetailsMarkup(item.parsed)}<div class="import-card-status ${item.status === "error" ? "is-error" : ""}" role="status">${escape(item.status === "reading" ? "正在识别图片参数…" : item.error || (item.parsed?.format && item.parsed.format !== "unknown" ? `已识别 ${engineLabel(item.parsed.format)}` : "未检测到生图参数，可手动填写"))}</div>${warnings.length ? `<div class="import-warnings">${warnings.map(escape).join("<br>")}</div>` : ""}</article>`;
+        </fieldset>${promptCandidatesMarkup(item)}${comfyDetailsMarkup(item.parsed)}<div class="import-card-status ${item.status === "error" ? "is-error" : ""}" role="status">${escape(item.status === "reading" ? "正在识别图片参数…" : item.error || (item.parsed?.format && item.parsed.format !== "unknown" ? `已识别 ${engineLabel(item.parsed.format)}` : "未检测到生图参数，可手动填写"))}</div>${warnings.length ? `<div class="import-warnings">${warnings.map(escape).join("<br>")}</div>` : ""}</article>`;
+    }
+
+    function hasPromptBlock(value, block) {
+      const normalize = (text) => String(text || "").replace(/\r\n/g, "\n").trim();
+      const text = normalize(block);
+      return !!text && (`\n\n${normalize(value)}\n\n`).includes(`\n\n${text}\n\n`);
+    }
+
+    function promptCandidatesMarkup(item) {
+      if (item.parsed?.format !== "comfyui") return "";
+      const normalized = item.parsed.normalized || {};
+      const candidates = normalized.prompt_candidates || [];
+      if (!candidates.length && !normalized.requires_output_selection) return "";
+      const entries = candidates.map((candidate) => {
+        const role = { positive: "正向链路", negative: "反向链路", mixed: "正反向链路", unknown: "方向未确定" }[candidate.role] || "方向未确定";
+        const status = { static: "静态文本", template: "动态模板", unknown_path: "途经未知节点" }[candidate.status] || "作用未确定";
+        const actions = ["prompt", "negative_prompt"].map((target) => {
+          const exists = hasPromptBlock(item.fields[target], candidate.text);
+          const direction = target === "prompt" ? "正向" : "反向";
+          return `<button class="quiet-button" data-candidate-id="${escape(candidate.id)}" data-candidate-target="${target}" type="button" ${exists || importing || item.status === "reading" ? "disabled" : ""}>${exists ? "已填入" : "添加到"}${direction}</button>`;
+        }).join("");
+        return `<div class="prompt-candidate" data-prompt-candidate="${escape(candidate.id)}"><div class="prompt-candidate-title"><strong>${escape(candidate.node_type)} #${escape(candidate.node_id)}</strong><span>${escape(candidate.field)}</span></div><div class="prompt-candidate-meta">${role} · ${status}${candidate.stage_ids?.length ? ` · 阶段 ${candidate.stage_ids.map(escape).join("、")}` : ""}</div><details class="prompt-candidate-text"><summary>${escape(candidate.text)}</summary><pre>${escape(candidate.text)}</pre></details><div class="prompt-candidate-actions">${actions}</div></div>`;
+      }).join("");
+      return `<details class="import-prompt-candidates"><summary>候选提示词 · ${candidates.length} 项</summary>${normalized.requires_output_selection ? '<p class="field-hint">尚未选择最终保存输出</p>' : entries}</details>`;
+    }
+
+    function syncCandidateButtons(card, item) {
+      for (const target of ["prompt", "negative_prompt"]) if (item.editedFields.has(target)) card.querySelector(`[data-import-field="${target}"]`)?.parentElement.querySelector(".comfy-summary-status")?.remove();
+      card.querySelectorAll("[data-candidate-target]").forEach((button) => {
+        const candidate = item.parsed?.normalized?.prompt_candidates?.find((entry) => entry.id === button.dataset.candidateId);
+        if (!candidate) return;
+        const target = button.dataset.candidateTarget;
+        const exists = hasPromptBlock(item.fields[target], candidate.text);
+        button.disabled = exists || importing || item.status === "reading";
+        button.textContent = `${exists ? "已填入" : "添加到"}${target === "prompt" ? "正向" : "反向"}`;
+      });
+    }
+
+    function addPromptCandidate(button) {
+      const card = button.closest("[data-import-id]");
+      const item = imports.find((entry) => entry.id === card?.dataset.importId);
+      const target = button.dataset.candidateTarget;
+      if (!item || importing || item.status === "reading" || !["prompt", "negative_prompt"].includes(target)) return;
+      const candidate = item.parsed?.normalized?.prompt_candidates?.find((entry) => entry.id === button.dataset.candidateId);
+      if (!candidate?.text || hasPromptBlock(item.fields[target], candidate.text)) return;
+      void discardImportGroup();
+      const current = item.fields[target] || "";
+      item.fields[target] = current ? `${current}\n\n${candidate.text}` : candidate.text;
+      item.editedFields.add(target);
+      card.querySelector(`[data-import-field="${target}"]`).value = item.fields[target];
+      syncCandidateButtons(card, item);
+      showNotice(`候选已添加到${target === "prompt" ? "正向" : "反向"}提示词。`, "success");
+    }
+
+    function applyImportMetadata(item, parsed) {
+      item.parsed = parsed;
+      const normalized = parsed.normalized || {};
+      const fields = { generation_engine: normalized.generation_engine || (own(ENGINES, parsed.format) ? parsed.format : "unknown"), prompt: normalized.prompt ?? "", negative_prompt: normalized.negative_prompt ?? "", model: normalized.model ?? "", mode: normalized.mode || "unknown", parameters: JSON.stringify(normalized.parameters || {}, null, 2), generated_at: localDateTime(normalized.generated_at ?? item.importedAt) };
+      for (const [key, value] of Object.entries(fields)) if (!item.editedFields.has(key)) item.fields[key] = value;
+    }
+
+    async function chooseImportOutput(item, outputNodeId) {
+      if (!item || importing || item.status === "reading") return;
+      item.status = "reading"; item.error = ""; renderImports();
+      try {
+        await discardImportGroup();
+        if (!imports.includes(item)) return;
+        const parsed = await apiPost("imports/inspect", { metadata: item.rawMetadata || item.parsed?.raw || {}, width: item.width, height: item.height, output_node_id: outputNodeId });
+        if (!imports.includes(item)) return;
+        item.outputNodeId = outputNodeId;
+        applyImportMetadata(item, parsed); item.status = "ready";
+        if (item.editedFields.size) showNotice("输出分支已更新，手动填写的内容已保留，请核对。", "success");
+      } catch (error) { item.status = "error"; item.error = errorMessage(error, "保存输出读取失败，已保留上次选择"); }
+      if (imports.includes(item)) renderImports();
     }
 
     function renderImports() {
+      const expanded = new Set(Array.from($("importGrid").querySelectorAll(".import-prompt-candidates[open]"), (entry) => entry.closest("[data-import-id]").dataset.importId));
       const focused = document.activeElement;
       const focusId = focused?.closest?.("[data-import-id]")?.dataset.importId;
       const focusField = focused?.dataset?.importField;
       const selection = focusField && typeof focused.selectionStart === "number" ? [focused.selectionStart, focused.selectionEnd] : null;
       $("importGrid").innerHTML = imports.map(importCard).join("");
+      $("importGrid").querySelectorAll(".import-prompt-candidates").forEach((entry) => { entry.open = expanded.has(entry.closest("[data-import-id]").dataset.importId); });
       window.ImageStudioSelect?.refresh($("importGrid"));
       if (focusId && focusField) {
         const restored = $("importGrid").querySelector(`[data-import-id="${focusId}"] [data-import-field="${focusField}"]`);
@@ -198,9 +277,8 @@
         try { raw = await extractMetadata(item.file); } catch (error) { item.warning = errorMessage(error, "无法读取嵌入参数，可手动填写"); }
         if (!imports.includes(item)) return;
         const parsed = await apiPost("imports/inspect", { metadata: raw, width: item.width, height: item.height });
-        item.parsed = parsed;
-        const normalized = parsed.normalized || {};
-        item.fields = { generation_engine: normalized.generation_engine || (own(ENGINES, parsed.format) ? parsed.format : "unknown"), prompt: normalized.prompt ?? "", negative_prompt: normalized.negative_prompt ?? "", model: normalized.model ?? "", mode: normalized.mode || "unknown", parameters: JSON.stringify(normalized.parameters || {}, null, 2), generated_at: localDateTime(normalized.generated_at ?? item.importedAt) };
+        item.rawMetadata = raw;
+        applyImportMetadata(item, parsed);
         item.status = "ready";
       } catch (error) { item.status = "error"; item.error = errorMessage(error, "图片参数识别失败，可手动填写后导入"); }
       if (imports.includes(item)) renderImports();
@@ -237,6 +315,7 @@
       let preparedItems;
       try {
         preparedItems = imports.map((item) => {
+          if (item.parsed?.normalized?.requires_output_selection) throw new Error(`${item.file.name} 包含多个保存输出，请先选择最终保存输出。`);
           let parameters;
           try { parameters = item.fields.parameters.trim() ? JSON.parse(item.fields.parameters) : {}; } catch { throw new Error(`${item.file.name} 的补充参数不是合法 JSON。`); }
           if (!parameters || typeof parameters !== "object" || Array.isArray(parameters)) throw new Error(`${item.file.name} 的补充参数必须是 JSON 对象。`);
@@ -246,6 +325,7 @@
           };
           checkNumbers(parameters);
           const overrides = {};
+          if (item.outputNodeId) overrides.comfy_output_node = item.outputNodeId;
           for (const key of item.editedFields) overrides[key] = key === "parameters" ? parameters : item.fields[key];
           if (item.editedFields.has("generated_at") || item.parsed?.normalized?.generated_at == null) overrides.generated_at = item.fields.generated_at ? new Date(item.fields.generated_at).getTime() / 1000 : null;
           if ($("importAsGroup").checked) overrides.model = item.fields.model;
@@ -371,7 +451,7 @@
       const displayNormalized = { ...normalized }; delete displayNormalized.parameters;
       const metadataRows = { ...displayNormalized, ...(normalized.parameters || {}) };
       const summaryStatus = metadata.format === "comfyui" ? promptStatusMarkup(normalized.prompt_status, "正向：") + promptStatusMarkup(normalized.negative_prompt_status, "反向：") : "";
-      if (metadata.format === "comfyui") for (const key of ["condition_nodes", "stages", "outputs"]) { delete metadataRows[key]; if (detail.source === "import") delete requestRows[key]; }
+      if (metadata.format === "comfyui") for (const key of ["condition_nodes", "stages", "outputs", "prompt_candidates"]) { delete metadataRows[key]; if (detail.source === "import") delete requestRows[key]; }
       const raw = metadata.raw || {};
       const rawMarkup = Object.entries(raw).map(([name, value]) => `<details class="metadata-raw-field"><summary>${escape(name)}</summary>${parameterRows({ [name]: value })}</details>`).join("");
       return `<div class="detail-block"><h3>${detail.source === "import" ? "导入信息" : "原始请求"}</h3><div class="detail-parameter-grid">${parameterRows(requestRows)}</div></div>${Object.keys(metadataRows).length ? `<div class="detail-block"><h3>图片生成参数 · ${escape(engineLabel(metadata.format))}</h3>${summaryStatus}<div class="detail-parameter-grid">${parameterRows(metadataRows)}</div></div>` : ""}${comfyDetailsMarkup(metadata, true)}${rawMarkup ? `<details class="detail-block raw-metadata"><summary>图片原始元数据</summary>${rawMarkup}</details>` : ""}`;
@@ -647,11 +727,13 @@
       $("confirmImportButton").addEventListener("click", () => void confirmImports());
       $("cancelImportButton").addEventListener("click", clearImports);
       $("importAsGroup").addEventListener("change", () => { void discardImportGroup(); });
-      $("importGrid").addEventListener("click", (event) => { const button = event.target.closest("[data-remove-import]"); if (button) removeImport(button.dataset.removeImport); });
+      $("importGrid").addEventListener("click", (event) => { const button = event.target.closest("[data-remove-import]"); if (button) removeImport(button.dataset.removeImport); const candidate = event.target.closest("[data-candidate-target]"); if (candidate) addPromptCandidate(candidate); });
+      $("importGrid").addEventListener("change", (event) => { if (!event.target.matches("[data-import-output]")) return; const item = imports.find((entry) => entry.id === event.target.closest("[data-import-id]").dataset.importId); void chooseImportOutput(item, event.target.value); });
       $("importGrid").addEventListener("input", (event) => {
         const key = event.target.dataset.importField; if (!key) return;
         void discardImportGroup();
-        const item = imports.find((entry) => entry.id === event.target.closest("[data-import-id]").dataset.importId); if (item) { item.fields[key] = event.target.value; item.editedFields.add(key); }
+        const card = event.target.closest("[data-import-id]");
+        const item = imports.find((entry) => entry.id === card.dataset.importId); if (item) { item.fields[key] = event.target.value; item.editedFields.add(key); if (["prompt", "negative_prompt"].includes(key)) syncCandidateButtons(card, item); }
       });
       for (const view of [$("galleryView"), $("importView")]) {
         view.addEventListener("dragover", (event) => { if (!Array.from(event.dataTransfer.types).includes("Files")) return; event.preventDefault(); view.classList.add("is-drop-target"); });

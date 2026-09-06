@@ -1230,6 +1230,7 @@ class GenerationStore:
         preview_quality: int,
     ) -> dict[str, Any]:
         digest = hashlib.sha256(data).hexdigest()
+        requested_output = overrides.get("comfy_output_node") or ""
         with self._connect() as conn:
             duplicate = None
             if import_key:
@@ -1241,6 +1242,13 @@ class GenerationStore:
                 if duplicate is not None and (
                     duplicate["asset_id"] != digest
                     or _load_json(duplicate["supplemental_json"]).get("is_import_group")
+                    or (
+                        _load_json(duplicate["supplemental_json"])
+                        .get("overrides", {})
+                        .get("comfy_output_node")
+                        or ""
+                    )
+                    != requested_output
                 ):
                     raise ValueError(
                         "导入请求标识已用于另一张图片，请重新选择文件后重试"
@@ -1260,6 +1268,13 @@ class GenerationStore:
                         if not _load_json(row["supplemental_json"]).get(
                             "is_import_group"
                         )
+                        and (
+                            _load_json(row["supplemental_json"])
+                            .get("overrides", {})
+                            .get("comfy_output_node")
+                            or ""
+                        )
+                        == requested_output
                     ),
                     None,
                 )
@@ -1442,6 +1457,11 @@ class GenerationStore:
             if (
                 not original.get("is_import_group")
                 or original.get("group_manifest") != manifest
+                or original.get("group_output_nodes", [""] * len(manifest))
+                != [
+                    item["supplemental"]["overrides"].get("comfy_output_node", "")
+                    for item in prepared
+                ]
             ):
                 raise ValueError(
                     "导入请求标识已用于其他图片或顺序不同的图组，请重新准备导入"
@@ -1457,6 +1477,10 @@ class GenerationStore:
             **first,
             "is_import_group": True,
             "group_manifest": manifest,
+            "group_output_nodes": [
+                item["supplemental"]["overrides"].get("comfy_output_node", "")
+                for item in prepared
+            ],
         }
         assets: dict[str, dict[str, Any]] = {}
         thumbnails: dict[str, dict[str, Any]] = {}
@@ -2262,6 +2286,19 @@ class GenerationStore:
         path = self.data_dir / str(row["path"])
         thumbnail = self.data_dir / str(row.get("thumbnail_path") or "")
         preview = _path_data_url(path, row["mime_type"]) if preview_full else ""
+        supplemental = _canonical_supplemental(
+            _load_json(row.get("supplemental_json") or "{}")
+        )
+        metadata = _load_json(row.get("metadata_json") or "{}")
+        try:
+            metadata = project_import_metadata(
+                metadata, supplemental.get("overrides") or {}
+            )
+        except ValueError as exc:
+            metadata = {
+                **metadata,
+                "warnings": [*(metadata.get("warnings") or []), str(exc)],
+            }
         return {
             "id": row["id"],
             "path": row["path"],
@@ -2271,10 +2308,8 @@ class GenerationStore:
             "width": row.get("width", 1),
             "height": row.get("height", 1),
             "file_state": row.get("file_state", "available"),
-            "metadata": _load_json(row.get("metadata_json") or "{}"),
-            "supplemental": _canonical_supplemental(
-                _load_json(row.get("supplemental_json") or "{}")
-            ),
+            "metadata": metadata,
+            "supplemental": supplemental,
             "data_url": preview,
             # Keep summaries lightweight while allowing the carousel to render
             # every result before original assets arrive.
@@ -2714,6 +2749,10 @@ def _validate_import_overrides(overrides: Any) -> None:
         raise ValueError("导入补充信息必须为对象")
     if "parameters" in overrides and not isinstance(overrides["parameters"], dict):
         raise ValueError("导入参数必须为 JSON 对象")
+    if "comfy_output_node" in overrides and not isinstance(
+        overrides["comfy_output_node"], str
+    ):
+        raise ValueError("ComfyUI 输出节点 ID 必须是字符串")
     try:
         encoded = json.dumps(overrides, ensure_ascii=False, allow_nan=False)
         if len(encoded.encode("utf-8")) > 1024 * 1024:
@@ -2740,10 +2779,48 @@ def _canonical_supplemental(value: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def project_import_metadata(
+    metadata: dict[str, Any], overrides: dict[str, Any]
+) -> dict[str, Any]:
+    """Project a selected ComfyUI output without changing the shared asset metadata."""
+
+    if "comfy_output_node" not in overrides:
+        return metadata
+    output_node = overrides["comfy_output_node"]
+    if not isinstance(output_node, str):
+        raise ValueError("ComfyUI 输出节点 ID 必须是字符串")
+    if not output_node:
+        return metadata
+    if metadata.get("format") != "comfyui":
+        raise ValueError("仅 ComfyUI 图片支持选择输出节点")
+    from .image_metadata import parse_metadata_fields
+
+    raw = metadata.get("raw")
+    if not isinstance(raw, dict):
+        raise ValueError("ComfyUI 原始工作流不可用，无法选择输出节点")
+    normalized = metadata.get("normalized") or {}
+    if not isinstance(normalized, dict):
+        raise ValueError("metadata.normalized 必须是对象")
+    dimensions = normalized.get("file_dimensions") or {}
+    if not isinstance(dimensions, dict):
+        raise ValueError("图片尺寸信息必须是对象")
+    return parse_metadata_fields(
+        raw,
+        width=dimensions.get("width", 0),
+        height=dimensions.get("height", 0),
+        output_node_id=output_node,
+    )
+
+
 def _import_supplemental(
     filename: str, overrides: dict[str, Any], metadata: dict[str, Any]
 ) -> dict[str, Any]:
+    metadata = project_import_metadata(metadata, overrides)
     normalized = metadata.get("normalized", {})
+    if metadata.get("format") == "comfyui" and normalized.get(
+        "requires_output_selection"
+    ):
+        raise ValueError("图片包含多个 ComfyUI 保存输出，请先选择对应的最终保存节点")
     mode = str(overrides.get("mode") or normalized.get("mode") or "unknown")
     if mode not in {"text2img", "img2img", "unknown"}:
         raise ValueError("导入图片模式无效")
@@ -2776,6 +2853,9 @@ def _import_supplemental(
     return {
         "original_filename": str(filename or "")[:512],
         "overrides": overrides,
+        "comfy_output_node": overrides.get(
+            "comfy_output_node", normalized.get("selected_output_node", "")
+        ),
         "model": model,
         "mode": mode,
         "prompt": prompt,

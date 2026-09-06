@@ -470,8 +470,15 @@ class ImageStudioPlugin(Star):
                 raise ValueError("元数据不能超过 4 MB")
             width = max(0, min(65535, int(body.get("width") or 0)))
             height = max(0, min(65535, int(body.get("height") or 0)))
+            output_node_id = body.get("output_node_id", "")
+            if not isinstance(output_node_id, str):
+                raise ValueError("ComfyUI 输出节点 ID 必须是字符串")
             result = await asyncio.to_thread(
-                parse_metadata_fields, body["metadata"], width=width, height=height
+                parse_metadata_fields,
+                body["metadata"],
+                width=width,
+                height=height,
+                output_node_id=output_node_id,
             )
             return json_response(result)
         except (ValueError, TypeError, OverflowError) as exc:

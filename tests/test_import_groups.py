@@ -32,6 +32,203 @@ def stage(store, data, name, **overrides):
     return {"path": path, "filename": name, "overrides": overrides}
 
 
+def comfy_multi_output_image():
+    graph = {}
+    for offset, prompt in ((0, "first branch prompt"), (10, "second branch prompt")):
+        graph.update(
+            {
+                str(offset + 1): {
+                    "class_type": "CLIPTextEncode",
+                    "inputs": {"text": prompt},
+                },
+                str(offset + 2): {
+                    "class_type": "CLIPTextEncode",
+                    "inputs": {"text": "negative " + prompt},
+                },
+                str(offset + 3): {
+                    "class_type": "EmptyLatentImage",
+                    "inputs": {"width": 512, "height": 512},
+                },
+                str(offset + 4): {
+                    "class_type": "KSampler",
+                    "inputs": {
+                        "positive": [str(offset + 1), 0],
+                        "negative": [str(offset + 2), 0],
+                        "latent_image": [str(offset + 3), 0],
+                        "steps": offset + 20,
+                        "seed": offset + 1,
+                    },
+                },
+                str(offset + 5): {
+                    "class_type": "VAEDecode",
+                    "inputs": {"samples": [str(offset + 4), 0]},
+                },
+                str(offset + 6): {
+                    "class_type": "SaveImage",
+                    "inputs": {"images": [str(offset + 5), 0]},
+                },
+            }
+        )
+    graph["99"] = {"class_type": "PreviewImage", "inputs": {"images": ["5", 0]}}
+    raw = {
+        "prompt": json.dumps(graph),
+        "workflow": json.dumps({"nodes": [], "links": []}),
+    }
+    info = PngImagePlugin.PngInfo()
+    for key, value in raw.items():
+        info.add_text(key, value)
+    output = io.BytesIO()
+    Image.new("RGB", (24, 32), "red").save(output, "PNG", pnginfo=info)
+    return output.getvalue(), raw
+
+
+def test_comfy_output_selection_is_required_and_link_scoped(tmp_path):
+    async def run():
+        store = GenerationStore(tmp_path)
+        await store.initialize()
+        data, raw = comfy_multi_output_image()
+        with pytest.raises(ValueError, match="多个.*保存"):
+            await store.import_image(data, "multiple.png", {})
+        for invalid in ("99", "missing", 6):
+            with pytest.raises(ValueError):
+                await store.import_image(
+                    data, "invalid.png", {"comfy_output_node": invalid}
+                )
+        first = await store.import_image(
+            data, "first.png", {"comfy_output_node": "6"}, import_key="first-branch"
+        )
+        second = await store.import_image(
+            data,
+            "second.png",
+            {
+                "comfy_output_node": "16",
+                "prompt": "manual adopted text",
+                "parameters": {"steps": 12},
+            },
+        )
+        assert first["generation_id"] != second["generation_id"]
+        assert len(list(store.assets_dir.rglob("*.png"))) == 1
+        for result, selected, expected in (
+            (first, "6", "first branch prompt"),
+            (second, "16", "second branch prompt"),
+        ):
+            detail = await store.generation_detail(
+                result["generation_id"], include_assets=False
+            )
+            item = detail["images"][0]
+            assert item["metadata"]["normalized"]["selected_output_node"] == selected
+            assert item["metadata"]["normalized"]["prompt"] == expected
+            assert item["metadata"]["raw"] == raw
+            assert item["supplemental"]["comfy_output_node"] == selected
+            assert {
+                candidate["output_node_ids"][0]
+                for candidate in item["metadata"]["normalized"]["prompt_candidates"]
+            } == {selected}
+        second_detail = await store.generation_detail(
+            second["generation_id"], include_assets=False
+        )
+        assert second_detail["original_prompt"] == "manual adopted text"
+        assert (
+            second_detail["images"][0]["supplemental"]["display_parameters"]["steps"]
+            == 12
+        )
+        with store._connect() as conn:
+            shared = json.loads(
+                conn.execute("SELECT metadata_json FROM image_metadata").fetchone()[0]
+            )
+        assert shared["normalized"]["requires_output_selection"] is True
+        assert not shared["normalized"].get("prompt") and not shared["normalized"].get(
+            "selected_output_node"
+        )
+        assert shared["raw"] == raw
+        with pytest.raises(ValueError):
+            await store.import_image(
+                data,
+                "wrong-branch.png",
+                {"comfy_output_node": "16"},
+                import_key="first-branch",
+            )
+
+    asyncio.run(run())
+
+
+def test_legacy_multisave_import_survives_parser_upgrade_without_automatic_branch_choice(
+    tmp_path, monkeypatch
+):
+    import astrbot_plugin_image_studio.image_metadata as metadata_module
+
+    async def run():
+        data, raw = comfy_multi_output_image()
+        current_version = metadata_module.PARSER_VERSION
+        current_parser = metadata_module.parse_image_metadata
+
+        def old_parser(data):
+            return {
+                "format": "comfyui",
+                "parser_version": current_version - 1,
+                "raw": raw,
+                "normalized": {"prompt": "old combined prompt", "mode": "unknown"},
+                "warnings": [],
+            }
+
+        monkeypatch.setattr(metadata_module, "PARSER_VERSION", current_version - 1)
+        monkeypatch.setattr(metadata_module, "parse_image_metadata", old_parser)
+        store = GenerationStore(tmp_path)
+        await store.initialize()
+        imported = await store.import_image(
+            data, "legacy.png", {"prompt": "legacy explicit prompt"}
+        )
+        before = await store.generation_detail(
+            imported["generation_id"], include_assets=False
+        )
+        monkeypatch.setattr(metadata_module, "PARSER_VERSION", current_version)
+        monkeypatch.setattr(metadata_module, "parse_image_metadata", current_parser)
+        await GenerationStore(tmp_path).initialize()
+        after = await store.generation_detail(
+            imported["generation_id"], include_assets=False
+        )
+        assert (
+            after["original_prompt"]
+            == before["original_prompt"]
+            == "legacy explicit prompt"
+        )
+        assert after["images"][0]["supplemental"] == before["images"][0]["supplemental"]
+        assert after["images"][0]["metadata"]["normalized"]["requires_output_selection"]
+        assert not after["images"][0]["metadata"]["normalized"].get("prompt_candidates")
+        assert len(list(store.assets_dir.rglob("*.png"))) == 1
+
+    asyncio.run(run())
+
+
+def test_comfy_group_retry_rejects_changed_output_selection(tmp_path):
+    async def run():
+        store = GenerationStore(tmp_path)
+        await store.initialize()
+        data, _ = comfy_multi_output_image()
+        entries = [
+            stage(store, data, "first.png", model="same model", comfy_output_node="6"),
+            stage(
+                store, data, "second.png", model="same model", comfy_output_node="16"
+            ),
+        ]
+        imported = await store.import_group(entries, import_key="branch-group")
+        detail = await store.generation_detail(
+            imported["generation_id"], include_assets=False
+        )
+        assert [
+            item["metadata"]["normalized"]["selected_output_node"]
+            for item in detail["images"]
+        ] == ["6", "16"]
+        assert (await store.import_group(entries, import_key="branch-group"))[
+            "duplicate"
+        ]
+        entries[1]["overrides"]["comfy_output_node"] = "6"
+        with pytest.raises(ValueError):
+            await store.import_group(entries, import_key="branch-group")
+
+    asyncio.run(run())
+
+
 def test_import_group_preserves_per_image_metadata_and_overrides(tmp_path):
     async def run():
         store = GenerationStore(tmp_path)

@@ -13,6 +13,66 @@ from astrbot_plugin_image_studio.tests.webui_harness import create_app, fixture_
 PREFIX = "/astrbot_plugin_image_studio/"
 
 
+def test_comfy_inspect_and_upload_require_valid_save_selection(tmp_path):
+    from astrbot_plugin_image_studio.tests.test_import_groups import (
+        comfy_multi_output_image,
+    )
+
+    async def run():
+        app = await create_app(tmp_path, seed=False)
+        data, raw = comfy_multi_output_image()
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            parsed = await client.post(
+                PREFIX + "imports/inspect", json={"metadata": raw}
+            )
+            assert (
+                parsed.status_code == 200
+                and parsed.json()["normalized"]["requires_output_selection"]
+            )
+            for invalid in (6, None, "99", "missing"):
+                selected = await client.post(
+                    PREFIX + "imports/inspect",
+                    json={"metadata": raw, "output_node_id": invalid},
+                )
+                assert selected.status_code == 400
+            selected = await client.post(
+                PREFIX + "imports/inspect",
+                json={"metadata": raw, "output_node_id": "16"},
+            )
+            assert selected.status_code == 200
+            assert selected.json()["normalized"]["selected_output_node"] == "16"
+            endpoint = await prepare(client, "multi-unselected")
+            rejected = await client.post(
+                endpoint, files={"file": ("image.png", data, "image/png")}
+            )
+            assert rejected.status_code == 400
+            assert (await client.get(PREFIX + "gallery/list")).json()["total"] == 0
+            endpoint = await prepare(
+                client,
+                "multi-selected",
+                {"comfy_output_node": "16", "prompt": "manual"},
+            )
+            imported = await client.post(
+                endpoint, files={"file": ("image.png", data, "image/png")}
+            )
+            assert imported.status_code == 200
+            detail = (
+                await client.get(
+                    PREFIX + "gallery/detail/" + imported.json()["generation_id"],
+                    params={"assets": 0},
+                )
+            ).json()
+            assert (
+                detail["images"][0]["metadata"]["normalized"]["selected_output_node"]
+                == "16"
+            )
+            assert detail["original_prompt"] == "manual"
+
+    asyncio.run(run())
+
+
 def group_items(models=("nai-diffusion-4-5-full", " nai-diffusion-4-5-full ")):
     return [
         {

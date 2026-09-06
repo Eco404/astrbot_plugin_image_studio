@@ -122,6 +122,18 @@ html { scroll-padding-top: 112px; scroll-padding-bottom: calc(100px + env(safe-a
 .import-card .comfy-workflow-info .detail-parameter-grid { column-count: 1; }
 .comfy-summary-status { color: var(--warning); font-size: 11px; font-weight: 400; }
 .detail-block > .comfy-summary-status { display: block; margin-bottom: 8px; }
+.import-prompt-candidates { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--line); }
+.import-prompt-candidates > summary { cursor: pointer; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.prompt-candidate { margin-top: 12px; padding-block: 10px; border-top: 1px solid var(--line); }
+.prompt-candidate-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; font-size: 12px; overflow-wrap: anywhere; }
+.prompt-candidate-title > span, .prompt-candidate-meta { color: var(--muted); font-size: 11px; }
+.prompt-candidate-meta { margin-top: 5px; line-height: 1.5; overflow-wrap: anywhere; }
+.prompt-candidate-text { margin-block: 8px; padding: 9px 10px; border-radius: 8px; background: var(--surface); font-size: 12px; }
+.prompt-candidate-text > summary { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.prompt-candidate-text[open] > summary { margin-bottom: 8px; }
+.prompt-candidate-text > pre { margin: 0; max-height: 220px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.5; }
+.prompt-candidate-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.prompt-candidate-actions > button { flex: 1 1 110px; min-width: 0; min-height: 40px; padding-inline: 8px; }
 .import-floatingbar button { flex: 0 0 auto; width: auto; }
 .detail-footer { flex: 0 0 auto; display: flex; gap: 8px; align-items: center; justify-content: flex-end; padding: 12px 20px; border-top: 1px solid var(--line); background: var(--topbar-glass); border-radius: 0 0 14px 14px; }
 .drawer-body { flex: 1 1 0; }

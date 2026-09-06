@@ -219,8 +219,10 @@ def test_multiple_save_outputs_preserve_branches_without_selecting_one() -> None
     assert "selected_output_node" not in normalized
     assert "width" not in normalized
     assert [item["stage_ids"] for item in normalized["outputs"]] == [["5"], ["9"]]
-    assert normalized["prompt"] == "positive\n\nsecond output"
-    assert normalized["prompt_status"] == "summary"
+    assert "prompt" not in normalized
+    assert normalized["stages"] == []
+    assert normalized["prompt_candidates"] == []
+    assert normalized["requires_output_selection"] is True
     assert any("多个保存输出" in warning for warning in result["warnings"])
 
 

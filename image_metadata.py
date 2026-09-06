@@ -11,7 +11,7 @@ from typing import Any
 
 from PIL import Image
 
-PARSER_VERSION = 4
+PARSER_VERSION = 5
 MAX_IMAGE_BYTES = 64 * 1024 * 1024
 MAX_METADATA_BYTES = 4 * 1024 * 1024
 MAX_PIXELS = 64_000_000
@@ -287,9 +287,13 @@ def parse_image_metadata(data: bytes) -> dict:
     return parse_metadata_fields(fields, width=width, height=height)
 
 
-def parse_metadata_fields(fields: dict, *, width: int = 0, height: int = 0) -> dict:
+def parse_metadata_fields(
+    fields: dict, *, width: int = 0, height: int = 0, output_node_id: str = ""
+) -> dict:
     if not isinstance(fields, dict):
         raise ValueError("元数据必须是对象")
+    if not isinstance(output_node_id, str):
+        raise ValueError("保存输出节点 ID 必须是字符串")
     raw = {
         str(key): _decode_comment(value) if isinstance(value, bytes) else _safe(value)
         for key, value in fields.items()
@@ -325,13 +329,15 @@ def parse_metadata_fields(fields: dict, *, width: int = 0, height: int = 0) -> d
             result["normalized"]["model"] = str(fields["Source"])
     elif "workflow" in fields or _is_api_graph(_json(fields.get("prompt"))):
         result["format"] = "comfyui"
-        _comfyui(fields, result)
+        _comfyui(fields, result, output_node_id=output_node_id)
     else:
         for key in ("parameters", "UserComment", "ImageDescription", "Description"):
             value = fields.get(key)
             if isinstance(value, str) and _parse_infotext(value, result):
                 result["format"] = "a1111"
                 break
+    if output_node_id and result["format"] != "comfyui":
+        raise ValueError("只有 ComfyUI 工作流可以选择保存输出节点")
     return _safe(result)
 
 
@@ -559,6 +565,9 @@ def _workflow_graph(workflow: dict, result: dict) -> dict:
         "Seed (rgthree)": ("seed", "control_after_generate"),
         "PrimitiveString": ("value",),
         "PrimitiveInt": ("value",),
+        "TextInput_": ("text",),
+        "TextInput": ("text",),
+        "String": ("text",),
         "VAELoader": ("vae_name",),
     }
     graph = {}
@@ -589,7 +598,7 @@ def _workflow_graph(workflow: dict, result: dict) -> dict:
     return graph
 
 
-def _comfyui(fields: dict, result: dict) -> None:
+def _comfyui(fields: dict, result: dict, *, output_node_id: str = "") -> None:
     graph = _json(fields.get("prompt"))
     if not _is_api_graph(graph):
         workflow = _json(fields.get("workflow"))
@@ -637,6 +646,11 @@ def _comfyui(fields: dict, result: dict) -> None:
         if node.get("class_type") in save_types | {"PreviewImage"}
     ]
     if not roots:
+        if output_node_id:
+            raise ValueError("所选保存输出节点不存在")
+        result["normalized"].update(
+            prompt_candidates=[], requires_output_selection=False
+        )
         _warning(
             result,
             "未找到已知成图输出节点，完整工作流已保留，无法可靠确定参与生成的参数",
@@ -662,23 +676,27 @@ def _comfyui(fields: dict, result: dict) -> None:
         orders[root] = []
         visit(root, set(), set(), orders[root])
     saves = [root for root in roots if graph[root].get("class_type") in save_types]
+    if output_node_id and output_node_id not in saves:
+        raise ValueError("所选节点不存在或不是保存图片输出")
     selected_root = (
-        saves[0]
+        output_node_id
+        if output_node_id
+        else saves[0]
         if len(saves) == 1
         else roots[0]
         if not saves and len(roots) == 1
         else None
     )
-    selected_roots = [selected_root] if selected_root else saves or roots
+    selected_roots = [selected_root] if selected_root else [] if saves else roots
     order = list(
         dict.fromkeys(
             identifier for root in selected_roots for identifier in orders[root]
         )
     )
-    if len(saves) > 1:
+    if len(saves) > 1 and not selected_root:
         _warning(
             result,
-            "工作流包含多个保存输出，图片未指明对应输出；按输出分支保留参数，摘要不能确定本图的唯一来源",
+            "工作流包含多个保存输出，请先选择当前图片对应的保存分支，再查看参数和提示词候选",
         )
     elif not saves and len(roots) > 1:
         _warning(result, "工作流仅有多个预览输出，无法确定本图对应哪一个预览分支")
@@ -980,6 +998,177 @@ def _comfyui(fields: dict, result: dict) -> None:
         return {}
 
     normalized = result["normalized"]
+
+    def prompt_candidates() -> list[dict]:
+        if selected_root not in saves:
+            return []
+        selected_nodes = set(order)
+        workflow = _json(fields.get("workflow")) or {}
+        workflow_nodes = workflow.get("nodes", [])
+        ui_nodes = (
+            {
+                str(node["id"]): node
+                for node in workflow_nodes
+                if isinstance(node, dict) and "id" in node
+            }
+            if isinstance(workflow_nodes, list)
+            else {}
+        )
+        text_fields = {
+            "CLIPTextEncode": {"text"},
+            "CLIPTextEncodeSDXL": {"text_g", "text_l"},
+            "CLIPTextEncodeSDXLRefiner": {"text"},
+            "TextInput_": {"text"},
+            "TextInput": {"text"},
+            "String": {"text", "value"},
+            "PrimitiveString": {"value", "text"},
+            "Text Concatenate": {"text_a", "text_b", "text_c", "text_d"},
+            "TextConcatenate": {"text_a", "text_b", "text_c", "text_d"},
+        }
+        detail_types = {"FaceDetailer", "FaceDetailerPipe", "DetailerForEach"}
+        sampler_types = {"KSampler", "KSamplerAdvanced", *detail_types}
+        static_paths = {
+            *text_fields,
+            *condition_spec,
+            "Text Concatenate",
+            "TextConcatenate",
+        }
+        usages: dict[str, dict] = {}
+
+        def collect_usage(value: Any, stage_id: str, role: str) -> None:
+            pending = [(value, role, False, 0)]
+            visited: set[tuple[str, int, str, bool]] = set()
+            while pending:
+                value, incoming_role, unknown_path, depth = pending.pop()
+                ref = reference(value)
+                if ref is None or ref[0] not in selected_nodes:
+                    continue
+                identifier, port = ref
+                if depth > MAX_DEPTH:
+                    raise ValueError("ComfyUI 文本候选依赖层数过多")
+                identity = identifier, port, incoming_role, unknown_path
+                if identity in visited:
+                    continue
+                visited.add(identity)
+                kind = graph[identifier].get("class_type", "")
+                unknown_path = unknown_path or kind not in static_paths or port != 0
+                usage = usages.setdefault(
+                    identifier,
+                    {
+                        "roles": set(),
+                        "stage_ids": set(),
+                        "ports": set(),
+                        "unknown_path": False,
+                    },
+                )
+                usage["roles"].add(incoming_role)
+                usage["stage_ids"].add(stage_id)
+                usage["ports"].add(port)
+                usage["unknown_path"] |= unknown_path
+                for name, child in inputs(identifier).items():
+                    if name in {
+                        "clip",
+                        "model",
+                        "vae",
+                        "seed",
+                        "noise_seed",
+                        "mask",
+                        "filename",
+                        "filename_prefix",
+                    }:
+                        continue
+                    child_role = (
+                        "negative"
+                        if name in {"negative", "negative_prompt"}
+                        else "positive"
+                        if name in {"positive", "positive_prompt"}
+                        else incoming_role
+                    )
+                    if reference(child):
+                        pending.append((child, child_role, unknown_path, depth + 1))
+
+        stage_ancestors = {}
+        for identifier in order:
+            if graph[identifier].get("class_type") not in sampler_types:
+                continue
+            ancestors: list[str] = []
+            visit(identifier, set(), set(), ancestors)
+            stage_ancestors[identifier] = set(ancestors)
+            for name, role in (("positive", "positive"), ("negative", "negative")):
+                collect_usage(inputs(identifier).get(name), identifier, role)
+        candidates = []
+        for identifier in order:
+            kind, data = graph[identifier].get("class_type", ""), inputs(identifier)
+            if kind == "Raffle" or re.search(
+                r"showanything|debug|preview|saveimage", kind, re.I
+            ):
+                continue
+            known_fields = text_fields.get(kind, set())
+            eligible = set(known_fields)
+            if kind in detail_types:
+                eligible.add("wildcard")
+            if not eligible:
+                ui = ui_nodes.get(identifier, {})
+                declared = ui.get("inputs", []) if ui.get("type") == kind else []
+                declared_string_fields = (
+                    {
+                        entry.get("name")
+                        for entry in declared
+                        if isinstance(entry, dict)
+                        and entry.get("type") == "STRING"
+                        and isinstance(entry.get("name"), str)
+                    }
+                    if isinstance(declared, list)
+                    else set()
+                )
+                obvious_text_node = bool(re.search(r"text|prompt|string", kind, re.I))
+                eligible = {
+                    name
+                    for name in ("prompt", "positive_prompt", "negative_prompt", "text")
+                    if obvious_text_node or name in declared_string_fields
+                }
+            for field in data:
+                value = data[field]
+                if (
+                    field not in eligible
+                    or not isinstance(value, str)
+                    or not value.strip()
+                ):
+                    continue
+                usage = usages.get(identifier, {})
+                roles = set(usage.get("roles", set()))
+                if field in {"negative_prompt", "positive_prompt", "wildcard"}:
+                    roles = {"negative" if field == "negative_prompt" else "positive"}
+                role = "mixed" if len(roles) > 1 else next(iter(roles), "unknown")
+                stage_ids = sorted(
+                    usage.get("stage_ids")
+                    or {
+                        stage_id
+                        for stage_id, ancestors in stage_ancestors.items()
+                        if identifier in ancestors
+                    },
+                    key=lambda key: order.index(key),
+                )
+                candidates.append(
+                    {
+                        "id": f"{identifier}:{field}",
+                        "node_id": identifier,
+                        "node_type": kind,
+                        "field": field,
+                        "text": value,
+                        "output_node_ids": [selected_root],
+                        "stage_ids": stage_ids,
+                        "role": role,
+                        "status": "template"
+                        if field == "wildcard"
+                        else "static"
+                        if field in known_fields and not usage.get("unknown_path")
+                        else "unknown_path",
+                        "output_ports": sorted(usage.get("ports", set())),
+                    }
+                )
+        return candidates
+
     stages, loras, models = [], [], []
     for identifier in order:
         node = graph[identifier]
@@ -1154,6 +1343,10 @@ def _comfyui(fields: dict, result: dict) -> None:
                 "提示词摘要仅汇集条件链路引用文本；已排除清零条件，但未按权重、区域或时间范围计算实际贡献，不能等同于直接拼接提示词，请保留条件结构",
             )
     normalized["condition_nodes"] = conditions
+    normalized["prompt_candidates"] = prompt_candidates()
+    normalized["requires_output_selection"] = len(saves) > 1 and not selected_root
+    if normalized["requires_output_selection"]:
+        normalized["stages"] = []
     normalized["output_nodes"] = roots
     sampler_types = {
         "KSampler",
@@ -1182,7 +1375,11 @@ def _comfyui(fields: dict, result: dict) -> None:
             inputs(selected_root).get("images", inputs(selected_root).get("image"))
         )
         normalized["output_selection_reason"] = (
-            "single_save" if saves else "single_preview"
+            "user_selected_save"
+            if output_node_id
+            else "single_save"
+            if saves
+            else "single_preview"
         )
         final_dimensions = latent(
             inputs(selected_root).get("images", inputs(selected_root).get("image"))

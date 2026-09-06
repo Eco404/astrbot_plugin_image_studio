@@ -10,6 +10,7 @@ from typing import Any
 
 from .config import RuntimeSettings
 from .image_metadata import parse_parameter_text
+from .storage import project_import_metadata
 
 
 def request_snapshot(detail: dict[str, Any]) -> dict[str, Any]:
@@ -52,7 +53,10 @@ def export_parameters(
                 detail[key] = supplemental[key]
         if "prompt" in supplemental:
             detail["original_prompt"] = supplemental["prompt"]
-    metadata = image.get("metadata") or {}
+    metadata = project_import_metadata(
+        image.get("metadata") or {},
+        (detail.get("supplemental") or {}).get("overrides") or {},
+    )
     raw = metadata.get("raw") or {}
     normalized = metadata.get("normalized") or {}
     request = request_snapshot(detail)
@@ -198,14 +202,21 @@ def resolve_parameters(
         source = copy.deepcopy(envelope.get("data") or {})
         source_format = envelope.get("generation_engine") or source_format
         if envelope.get("has_request_snapshot") is False:
-            normalized = (envelope.get("metadata") or {}).get(
-                "normalized"
-            ) or normalized
+            projected = project_import_metadata(
+                envelope.get("metadata") or {}, supplemental.get("overrides") or {}
+            )
+            normalized = projected.get("normalized") or normalized
             supplemental = envelope.get("supplemental") or {}
             normalized = {
                 **normalized,
                 **(supplemental.get("display_parameters") or {}),
             }
+            if supplemental.get("overrides", {}).get("comfy_output_node"):
+                normalized = {
+                    **(supplemental.get("display_parameters") or {}),
+                    **(projected.get("normalized") or {}),
+                    **(supplemental.get("overrides", {}).get("parameters") or {}),
+                }
             overrides = supplemental.get("overrides") or {}
             source["parameters"] = {
                 **(source.get("parameters") or {}),
@@ -300,6 +311,9 @@ def resolve_parameters(
             selection_reason = "source_unique"
     warnings = list(parsed.get("warnings") or [])
     if source_format == "comfyui":
+        warnings.append(
+            "ComfyUI 文本候选仅供静态检查和人工采用，不会将全部候选自动加入提示词。"
+        )
         if isinstance(envelope, dict) and envelope.get("has_request_snapshot") is False:
             warnings.extend(
                 value
@@ -509,6 +523,9 @@ def resolve_parameters(
         "stages",
         "condition_nodes",
         "outputs",
+        "prompt_candidates",
+        "selected_output_node",
+        "requires_output_selection",
         "characters",
         "character_prompts",
     ):

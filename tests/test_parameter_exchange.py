@@ -52,6 +52,48 @@ def test_comfyui_import_copy_keeps_condition_structure_and_summary_warning():
     assert "多个阶段使用不同的正向条件" in result["warnings"]
 
 
+def test_comfy_output_copy_and_resolve_preserve_branch_without_auto_adopting_candidates():
+    from astrbot_plugin_image_studio.storage import _import_supplemental
+    from astrbot_plugin_image_studio.tests.test_import_groups import (
+        comfy_multi_output_image,
+    )
+
+    _, raw = comfy_multi_output_image()
+    metadata = parse_metadata_fields(raw)
+    manual = {
+        "comfy_output_node": "16",
+        "prompt": "only manually adopted text",
+        "parameters": {"steps": 12},
+    }
+    supplemental = _import_supplemental("workflow.png", manual, metadata)
+    item = detail(source="import", metadata=metadata)
+    item.update(generation_engine="comfyui", model="", original_prompt="stale prompt")
+    item["images"][0]["supplemental"] = supplemental
+    exported = export_parameters(item)
+    content = json.loads(exported["content"])
+    assert content["metadata"]["normalized"]["selected_output_node"] == "16"
+    assert content["metadata"]["raw"] == raw
+    assert content["supplemental"]["overrides"] == manual
+    assert export_parameters(item, format_name="workflow")["content"] == raw["workflow"]
+    assert export_parameters(item, format_name="comfy_api")["content"] == raw["prompt"]
+    result = resolve_parameters(
+        exported["content"], settings(), "nai:nai-diffusion-4-5-full"
+    )
+    assert result["draft"]["prompt"] == "only manually adopted text"
+    assert result["draft"]["parameters"]["steps"] == 12
+    assert result["unmapped"]["selected_output_node"] == "16"
+    assert {
+        candidate["output_node_ids"][0]
+        for candidate in result["unmapped"]["prompt_candidates"]
+    } == {"16"}
+    assert any("人工采用" in warning for warning in result["warnings"])
+    untouched = resolve_parameters(
+        raw["prompt"], settings(), "nai:nai-diffusion-4-5-full"
+    )
+    assert untouched["draft"]["prompt"] == ""
+    assert untouched["unmapped"]["requires_output_selection"]
+
+
 def test_fenced_studio_parameters_preserve_large_integer_and_import_data():
     content = json.dumps(
         {
