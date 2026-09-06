@@ -21,6 +21,20 @@
 .nav-item,
 .nav-icon { box-shadow: none; }
 
+.topbar > :first-child { min-width: 0; }
+.topbar-status { display: flex; flex: 0 1 46%; flex-direction: column; align-items: flex-end; gap: 4px; min-width: 0; text-align: right; }
+#providerStatusName { max-width: 100%; overflow-wrap: anywhere; }
+#providerQuota { font-size: 12px; line-height: 1.4; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+#providerQuota.is-warning { color: var(--warning); }
+#providerQuota.is-unavailable { color: var(--muted); }
+/* WebKit otherwise counts long options in the hidden native control's overflow. */
+#modelChoice.studio-select-native { contain: strict; }
+@media (max-width: 540px) {
+  .topbar-status { display: none; }
+  .topbar-status.has-provider-quota { display: flex; flex-basis: auto; max-width: 43%; }
+  .topbar-status.has-provider-quota #providerStatusName { display: none; }
+}
+
 .mode-tabs,
 .model-tabs,
 .appearance-modes {

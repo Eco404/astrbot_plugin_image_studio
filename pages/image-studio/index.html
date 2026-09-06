@@ -11,7 +11,7 @@
   <link rel="stylesheet" href="./detail-swipe.css?v=0.7.21" />
   <link rel="stylesheet" href="./select.css?v=0.7.7" />
   <link rel="stylesheet" href="./appearance.css?v=0.7.26" />
-  <link rel="stylesheet" href="./controls.css?v=0.7.22" />
+  <link rel="stylesheet" href="./controls.css?v=0.7.27" />
 </head>
 <body>
   <main class="app-shell quiet-glass-background">
@@ -33,7 +33,7 @@
       <div id="pageHeaderAnchor" aria-hidden="true"></div>
       <header class="topbar glass">
         <div><h1 id="pageTitle">生图</h1><p id="pageSubtitle">选择模式和模型后开始创作</p></div>
-        <div class="topbar-status" id="providerStatus"></div>
+        <div class="topbar-status" id="providerStatus"><span id="providerStatusName"></span><span id="providerQuota" role="status" aria-live="polite" hidden></span></div>
       </header>
       <div class="app-notice is-hidden" id="appNotice" role="status" aria-live="polite">
         <div class="app-notice__message" id="appNoticeMessage"></div>
@@ -248,6 +248,6 @@
   <script src="./library.js?v=0.7.21" onerror="window.__reportImageStudioPageError(true)"></script>
   <script src="./detail-swipe.js?v=0.7.21" onerror="window.__reportImageStudioPageError(true)"></script>
   <script src="./backdrop.js?v=0.7.21" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./app.js?v=0.7.21" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./app.js?v=0.7.27" onerror="window.__reportImageStudioPageError(true)"></script>
 </body>
 </html>

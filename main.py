@@ -268,6 +268,12 @@ class ImageStudioPlugin(Star):
                 ["GET"],
                 "Image Studio: bootstrap",
             ),
+            (
+                "studio/provider-quota",
+                self._api_provider_quota,
+                ["GET"],
+                "Image Studio: provider account quota",
+            ),
             ("studio/generate", self._api_generate, ["POST"], "Image Studio: generate"),
             (
                 "studio/reference/upload",
@@ -1123,6 +1129,29 @@ class ImageStudioPlugin(Star):
         except (ValueError, ProviderError) as exc:
             return error_response(str(exc), status_code=400)
         return json_response({"models": models, "provider_id": provider.id})
+
+    async def _api_provider_quota(self) -> Any:
+        provider_id = str(web_request.query.get("provider_id", "")).strip()
+        if not provider_id:
+            return error_response("请选择要查询的 NAI 服务商", status_code=400)
+        provider = self._settings.provider(provider_id)
+        if provider is None:
+            return error_response("服务商不存在或未启用", status_code=404)
+        if provider.kind != "nai_direct":
+            return error_response("当前服务商不支持额度查询", status_code=400)
+        if not provider.api_key.strip():
+            return error_response("NAI 服务商尚未配置密钥", status_code=400)
+        if self._service is None:
+            return error_response(
+                "Image Studio 正在初始化，请稍后重试", status_code=503
+            )
+        try:
+            quota = await self._service.executor.fetch_quota(provider)
+        except ProviderError as exc:
+            return error_response(str(exc), status_code=502)
+        response = json_response({"provider_id": provider.id, **quota})
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     def _test_request(self, provider: ImageProvider, model_id: str):
         from .models import GenerationRequest

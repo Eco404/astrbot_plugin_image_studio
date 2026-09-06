@@ -6,6 +6,7 @@ import base64
 import io
 import json
 import re
+import time
 from typing import Any
 from urllib.parse import quote
 
@@ -24,6 +25,57 @@ class ProviderExecutor:
 
     def __init__(self, session: aiohttp.ClientSession) -> None:
         self.session = session
+
+    async def fetch_quota(self, provider: ImageProvider) -> dict[str, Any]:
+        """Read the saved NAI proxy account quota without generating an image."""
+
+        if not provider.enabled or provider.kind != "nai_direct":
+            raise ProviderError("仅支持查询已启用的 NAI 服务商额度")
+        if not provider.api_key.strip():
+            raise ProviderError("NAI 服务商尚未配置密钥")
+        headers = {
+            key: value
+            for key, value in _headers(provider, bearer=False).items()
+            if key.lower() != "content-type"
+        }
+        headers["Content-Type"] = "application/json"
+        try:
+            async with self.session.post(
+                f"{provider.base_url.rstrip('/')}/api/api/getUser",
+                json={"toUserId": provider.api_key},
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=15),
+                allow_redirects=False,
+            ) as response:
+                if response.status != 200:
+                    raise ProviderError(
+                        f"额度查询失败：上游返回 HTTP {response.status}"
+                    )
+                payload = await response.json()
+        except TimeoutError as exc:
+            raise ProviderError("额度查询超时，请稍后重试") from exc
+        except (aiohttp.ContentTypeError, ValueError, UnicodeDecodeError) as exc:
+            raise ProviderError("额度查询失败：上游响应格式无效") from exc
+        except aiohttp.ClientError as exc:
+            raise ProviderError("额度查询失败：无法连接服务商") from exc
+        if not isinstance(payload, dict):
+            raise ProviderError("额度查询失败：上游响应格式无效")
+        if payload.get("status") != "ok":
+            raise ProviderError("额度查询失败：上游未确认账户，请检查密钥或账户状态")
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            raise ProviderError("额度查询失败：上游未返回有效账户信息")
+        remaining = data.get("value")
+        if isinstance(remaining, str) and re.fullmatch(
+            r"[0-9]{1,30}", remaining.strip()
+        ):
+            remaining = int(remaining)
+        if type(remaining) is not int or remaining < 0:
+            raise ProviderError("额度查询失败：上游未返回有效剩余额度")
+        enabled = data.get("enabled")
+        if not isinstance(enabled, bool):
+            raise ProviderError("额度查询失败：上游未返回有效账户状态")
+        return {"remaining": remaining, "enabled": enabled, "checked_at": time.time()}
 
     async def discover_models(self, provider: ImageProvider) -> list[dict[str, Any]]:
         """Best-effort model discovery for the provider settings page."""

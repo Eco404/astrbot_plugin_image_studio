@@ -86,6 +86,9 @@ class TestConfig(dict):
 
 
 class FakeExecutor:
+    async def fetch_quota(self, provider: Any) -> dict[str, Any]:
+        return {"remaining": 128, "enabled": True, "checked_at": 1788681600.0}
+
     async def generate(
         self, provider: Any, request: GenerationRequest
     ) -> tuple[GeneratedImage, ...]:
@@ -154,6 +157,7 @@ def harness_settings() -> dict:
                     "name": "NAI 测试",
                     "kind": "nai_direct",
                     "base_url": "https://example.test",
+                    "api_key": "isolated-harness-nai-token",
                     "models": [
                         {
                             "id": "nai-diffusion-4-5-full",

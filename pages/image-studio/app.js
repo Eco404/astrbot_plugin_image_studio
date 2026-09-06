@@ -14,6 +14,9 @@
   let storageRetention = null;
   let referencesUploading = false;
   let eventsBound = false;
+  const providerQuotas = new Map();
+  const PROVIDER_QUOTA_TTL = 30_000;
+  let providerQuotaTimer = 0;
   let galleryRequestRevision = 0;
   let detailRequestRevision = 0;
   let detailFilmstripScrollFrame = 0;
@@ -35,7 +38,7 @@
   const EMPTY_MOBILE_IMAGE = "data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=";
   const $ = (id) => document.getElementById(id);
   const els = {
-    pageTitle: $("pageTitle"), pageSubtitle: $("pageSubtitle"), runtimeStatus: $("runtimeStatus"), providerStatus: $("providerStatus"),
+    pageTitle: $("pageTitle"), pageSubtitle: $("pageSubtitle"), runtimeStatus: $("runtimeStatus"), providerStatus: $("providerStatus"), providerStatusName: $("providerStatusName"), providerQuota: $("providerQuota"),
     modelChoice: $("modelChoice"), modelProvider: $("modelProvider"), workspaceEmpty: $("workspaceEmpty"), generatorWorkspace: $("generatorWorkspace"), modelParameters: $("modelParameters"), referenceField: $("referenceField"), referenceUpload: $("referenceUpload"), referenceStrip: $("referenceStrip"),
     generationForm: $("generationForm"), prompt: $("prompt"), negativePromptField: $("negativePromptField"), negativePrompt: $("negativePrompt"), negativePromptHint: $("negativePromptHint"), resetNegativePromptButton: $("resetNegativePromptButton"), advancedParameters: $("advancedParameters"), parameters: $("parameters"), generationError: $("generationError"), generateButton: $("generateButton"), resultEmpty: $("resultEmpty"), resultGrid: $("resultGrid"), resultMeta: $("resultMeta"),
     galleryGrid: $("galleryGrid"), galleryEmpty: $("galleryEmpty"), galleryPagination: $("galleryPagination"), galleryPrev: $("galleryPrev"), galleryNext: $("galleryNext"), galleryPageLabel: $("galleryPageLabel"), gallerySearch: $("gallerySearch"), galleryProvider: $("galleryProvider"), galleryMode: $("galleryMode"), gallerySource: $("gallerySource"), selectionBar: $("selectionBar"), selectionCount: $("selectionCount"),
@@ -87,6 +90,44 @@
     window.__showImageStudioNotice(message, tone);
   }
 
+  function quotaProvider() {
+    const provider = selectedProvider();
+    return state.view === "generate" && selectedModel() && provider?.kind === "nai_direct" ? provider : null;
+  }
+
+  function renderProviderStatus() {
+    const model = selectedModel(), provider = selectedProvider(), active = quotaProvider();
+    els.providerStatusName.textContent = model && provider ? `${model.name} · ${provider.name}` : "未选择模型";
+    els.providerStatusName.title = els.providerStatusName.textContent;
+    els.providerStatus.classList.toggle("has-provider-quota", !!active);
+    els.providerQuota.hidden = !active;
+    if (!active) { els.providerQuota.textContent = ""; els.providerQuota.removeAttribute("title"); return; }
+    const quota = providerQuotas.get(active.id);
+    const failed = !!quota?.error;
+    els.providerQuota.classList.toggle("is-unavailable", failed);
+    els.providerQuota.classList.toggle("is-warning", !!quota?.data && (!quota.data.enabled || quota.data.remaining === 0));
+    els.providerQuota.textContent = failed ? "额度暂不可用" : quota?.data ? `剩余额度 ${quota.data.remaining.toLocaleString("zh-CN")}${quota.data.enabled ? "" : " · 已停用"}` : "额度查询中…";
+    els.providerQuota.title = failed ? quota.error : quota?.data ? `服务商：${active.name}\n更新于 ${formatDate(quota.data.checked_at)}` : `正在查询 ${active.name} 的额度`;
+  }
+
+  function refreshProviderQuota() {
+    const provider = quotaProvider();
+    if (!provider || document.hidden) { renderProviderStatus(); return; }
+    const previous = providerQuotas.get(provider.id);
+    if (previous && (previous.pending || Date.now() - previous.updatedAt < PROVIDER_QUOTA_TTL)) { renderProviderStatus(); return; }
+    const entry = { pending: true, updatedAt: 0, data: null, error: "" };
+    providerQuotas.set(provider.id, entry);
+    renderProviderStatus();
+    void apiGet("studio/provider-quota", { provider_id: provider.id }).then((payload) => {
+      if (payload?.provider_id !== provider.id || !Number.isSafeInteger(payload.remaining) || payload.remaining < 0 || typeof payload.enabled !== "boolean" || !Number.isFinite(payload.checked_at)) throw new Error("额度查询返回的数据格式不正确");
+      entry.data = payload;
+    }).catch((error) => { entry.error = errorMessage(error, "额度查询失败"); }).finally(() => {
+      entry.pending = false; entry.updatedAt = Date.now();
+      // A forced refresh or settings reload can supersede an earlier query.
+      if (providerQuotas.get(provider.id) === entry) renderProviderStatus();
+    });
+  }
+
   function syncPageScrollLock() {
     const locked = els.detailDrawer.classList.contains("is-open")
       || !els.imagePreview.classList.contains("is-hidden")
@@ -105,6 +146,7 @@
     document.querySelectorAll(".view").forEach((item) => item.classList.toggle("is-active", item.id === `${view}View`));
     const labels = { generate: ["生图", "选择模式和模型后开始创作"], gallery: ["画廊", "搜索、筛选、复现或导出历史生成记录"], import: ["导入", "图片与生成参数"], settings: ["设置", "管理运行策略、历史、生图服务商和模型"], };
     els.pageTitle.textContent = labels[view][0]; els.pageSubtitle.textContent = labels[view][1];
+    refreshProviderQuota();
     library.syncFloatingBars();
     if (view === "gallery") void loadGallery();
     if (view === "settings") { void loadSettings(); void loadStorageHealth(); }
@@ -161,7 +203,6 @@
 
   function renderGenerationForm() {
     const model = selectedModel();
-    const provider = selectedProvider();
     const supportsRefs = state.mode === "img2img" && referenceLimitForModel(model) > 0;
     const supportsNegative = !!model?.supports_negative_prompt;
     els.referenceField.classList.toggle("is-hidden", !supportsRefs);
@@ -170,7 +211,7 @@
     els.negativePrompt.disabled = !supportsNegative;
     els.negativePrompt.placeholder = "可选";
     els.negativePromptHint.textContent = supportsNegative ? "当前模型会将此字段作为专用反向提示词发送。" : "";
-    els.providerStatus.textContent = model && provider ? `${model.name} · ${provider.name}` : "未选择模型";
+    refreshProviderQuota();
     renderReferences();
     window.ImageStudioSelect?.refresh($("generateView"));
   }
@@ -263,6 +304,7 @@
 
   async function bootstrap() {
     const payload = await apiGet("studio/bootstrap");
+    providerQuotas.clear();
     state.providers = Array.isArray(payload.providers) ? payload.providers : [];
     state.models = Array.isArray(payload.models) ? payload.models : [];
     state.parameterValues = {}; state.parameterCarry = {}; state.negativePromptCarry = ""; state.hasNegativePromptCarry = false;
@@ -324,7 +366,10 @@
       els.resultGrid.querySelectorAll("[data-result-preview]").forEach((image) => image.addEventListener("click", () => { const index = Number(image.dataset.resultPreview); openImagePreview(image.src, `生成结果-${index + 1}`, state.resultImages[index]?.download_filename, state.resultImages, index); }));
       els.resultMeta.textContent = `${result.provider_name} · ${result.model} · ${(result.elapsed_ms / 1000).toFixed(1)} 秒${result.generation_id ? " · 已保存到画廊" : " · 历史未保留"}`;
     } catch (error) { setError(els.generationError, errorMessage(error, "生成失败")); }
-    finally { els.generateButton.disabled = false; els.generateButton.textContent = "生成图片"; }
+    finally {
+      els.generateButton.disabled = false; els.generateButton.textContent = "生成图片";
+      if (provider.kind === "nai_direct") { providerQuotas.delete(provider.id); refreshProviderQuota(); }
+    }
   }
 
   async function loadGallery(page = state.galleryPage) {
@@ -1765,6 +1810,12 @@
     if (eventsBound) return;
     eventsBound = true;
     library.bind();
+    const refreshQuota = () => refreshProviderQuota();
+    providerQuotaTimer = window.setInterval(refreshQuota, PROVIDER_QUOTA_TTL);
+    document.addEventListener("visibilitychange", refreshQuota);
+    window.addEventListener("focus", refreshQuota);
+    window.addEventListener("pagehide", () => { window.clearInterval(providerQuotaTimer); providerQuotaTimer = 0; });
+    window.addEventListener("pageshow", () => { if (!providerQuotaTimer) providerQuotaTimer = window.setInterval(refreshQuota, PROVIDER_QUOTA_TTL); refreshQuota(); });
     window.addEventListener("resize", () => { if (state.detailId) centerDetailFilmstrip(els.drawerBody.querySelector(".detail-filmstrip")); }, { passive: true });
     els.galleryGrid.addEventListener("click", (event) => { const card = event.target.closest("[data-gallery-id]"); if (card && !event.target.closest(".gallery-selection")) void openDetail(card.dataset.galleryId); });
     els.galleryGrid.addEventListener("change", (event) => { const input = event.target.closest("[data-select-id]"); if (!input) return; input.checked ? state.selectedIds.add(input.dataset.selectId) : state.selectedIds.delete(input.dataset.selectId); updateSelection(); });
