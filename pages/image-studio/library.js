@@ -763,30 +763,26 @@
       const title = document.querySelector(".topbar");
       const brand = document.querySelector(".sidebar");
       const mobile = window.matchMedia("(max-width: 900px)").matches;
-      let brandShift = 0;
       let brandProgress = 0;
       if (mobile) {
         const top = parseFloat(getComputedStyle(title).top) || 0;
         const gap = parseFloat(getComputedStyle(document.querySelector(".app-shell")).rowGap) || 0;
         const distance = brand.offsetHeight + gap;
-        brandShift = Math.max(0, Math.min(distance, top + distance - $("pageHeaderAnchor").getBoundingClientRect().top));
-        brandProgress = brandShift / Math.max(1, distance);
+        brandProgress = Math.max(0, Math.min(1, (top + distance - $("pageHeaderAnchor").getBoundingClientRect().top) / Math.max(1, distance)));
       }
-      brand.style.setProperty("--brand-header-offset", `${-brandShift}px`);
+      brand.style.setProperty("--brand-header-offset", "0px");
       brand.style.setProperty("--brand-header-opacity", String(1 - brandProgress));
       brand.style.setProperty("--brand-header-blur", `${brandProgress * 8}px`);
       brand.classList.toggle("is-brand-replaced", mobile);
       const active = state.view === "gallery" && !$("selectionBar").classList.contains("is-hidden");
-      let shift = 0;
       let progress = 0;
       if (active) {
-        // The anchor stays in normal flow after the action bar becomes sticky.
+        // Keep the covered header pinned; only the incoming bar's flow anchor drives fading.
         const top = parseFloat(getComputedStyle(title).top) || 0;
         const distance = title.offsetHeight + 10;
-        shift = Math.max(0, Math.min(distance, top + distance - $("selectionAnchor").getBoundingClientRect().top));
-        progress = shift / distance;
+        progress = Math.max(0, Math.min(1, (top + distance - $("selectionAnchor").getBoundingClientRect().top) / distance));
       }
-      title.style.setProperty("--selection-title-offset", `${-shift}px`);
+      title.style.setProperty("--selection-title-offset", "0px");
       title.style.setProperty("--selection-title-opacity", String(1 - progress));
       title.style.setProperty("--selection-title-blur", `${progress * 8}px`);
       title.classList.toggle("is-selection-replaced", active);

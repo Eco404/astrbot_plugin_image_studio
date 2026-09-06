@@ -140,7 +140,7 @@ async function opened(browser, test) {
     const multi = (listing.data || listing).items.find(item => item.image_count === 3);
     assert.ok(multi);
     await frame.locator(`[data-gallery-id="${multi.id}"] .gallery-info`).click();
-    await frame.locator('.detail-carousel-dot[data-detail-dot="1"]').click();
+    await frame.locator('[data-detail-dot="1"]').click();
     await settle(inner);
     await frame.locator("#detailFavorite").click();
     await frame.locator('#detailFavorite[aria-pressed="true"]:not(:disabled)').waitFor();

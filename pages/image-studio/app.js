@@ -16,6 +16,10 @@
   let eventsBound = false;
   let galleryRequestRevision = 0;
   let detailRequestRevision = 0;
+  let detailFilmstripScrollFrame = 0;
+  let detailBackdropSource = "";
+  let detailImagePaintRevision = 0;
+  const decodedDisplayImages = new Map();
   let mobileImageViewer = null;
   let mobileImageSequence = [];
   let mobileImageDataSource = [];
@@ -418,7 +422,165 @@
     return index < state.galleryItems.length - 1 || (state.galleryPage * state.galleryLimit) + index < state.galleryTotal - 1;
   }
 
+  function centerDetailFilmstrip(strip, smooth = false) {
+    cancelAnimationFrame(detailFilmstripScrollFrame);
+    if (!strip) return;
+    detailFilmstripScrollFrame = requestAnimationFrame(() => {
+      if (!strip.isConnected) return;
+      const active = strip.querySelector('[aria-current="true"]');
+      if (!active) return;
+      strip.scrollTo({ left: active.offsetLeft + active.offsetWidth / 2 - strip.clientWidth / 2, behavior: smooth && !window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "smooth" : "auto" });
+    });
+  }
+
+  function transitionDetailBackdrop(frame) {
+    if (!frame || frame.classList.contains("is-detail-swiping")) return;
+    const index = Number(frame.querySelector("[data-detail-image]")?.dataset.detailImage);
+    const item = state.detailData?.images?.[index];
+    const source = item?.thumbnail_data_url || (index === 0 ? state.detailFallbackThumbnail : "");
+    if (!source) return;
+    const backdrop = frame.querySelector(".detail-image-backdrop:not(.detail-backdrop-previous)");
+    if (!backdrop) return;
+    if (backdrop.getAttribute("src") === source && backdrop.dataset.backdropState === "idle") return;
+    void window.ImageStudioBackdrop.transition(backdrop, source, { opacity: .62, previousClass: "detail-backdrop-previous" });
+  }
+
+  function decodeDisplayImage(source) {
+    if (!decodedDisplayImages.has(source)) {
+      const image = new Image(); image.className = "detail-image"; image.src = source;
+      const entry = { ready: false, promise: null };
+      entry.promise = image.decode().then(() => {
+        if (!image.naturalWidth || !image.naturalHeight) throw new Error("图片内容无法解码。");
+        entry.ready = true; return image;
+      }).catch((error) => { if (decodedDisplayImages.get(source) === entry) decodedDisplayImages.delete(source); throw error; });
+      decodedDisplayImages.set(source, entry);
+      while (decodedDisplayImages.size > 8) decodedDisplayImages.delete(decodedDisplayImages.keys().next().value);
+    }
+    return decodedDisplayImages.get(source).promise;
+  }
+
+  async function paintDetailImage(frame, item, index) {
+    const revision = ++detailImagePaintRevision;
+    if (!frame) return false;
+    if (!item?.data_url) { frame.setAttribute("aria-busy", "true"); return false; }
+    const image = frame.querySelector("[data-detail-image]");
+    const target = item.data_url;
+    const preview = decodedDisplayImages.get(target)?.ready ? target : item.thumbnail_data_url || target;
+    const current = () => frame.isConnected && frame.dataset.generationId === String(state.detailId) && revision === detailImagePaintRevision;
+    const publish = (source) => {
+      if (!current()) return false;
+      if (image.getAttribute("src") !== source) image.src = source;
+      image.dataset.detailImage = String(index); image.alt = `生成结果 ${index + 1}`;
+      frame.querySelector(".detail-image-pending")?.remove(); frame.removeAttribute("aria-busy");
+      transitionDetailBackdrop(frame); return true;
+    };
+    if (!image.getAttribute("src") || Number(image.dataset.detailImage) !== index) frame.setAttribute("aria-busy", "true");
+    try {
+      await decodeDisplayImage(preview);
+      if (!publish(preview)) return false;
+      if (target !== preview) void decodeDisplayImage(target).then(() => publish(target)).catch(() => {});
+      return true;
+    } catch (error) {
+      if (target !== preview) {
+        try { await decodeDisplayImage(target); return publish(target); } catch { /* Keep the previous visible image when both sources fail. */ }
+      }
+      if (current()) {
+        frame.removeAttribute("aria-busy"); showNotice(errorMessage(error, "图片暂时无法显示"), "error");
+        if (image.getAttribute("src") && Number(image.dataset.detailImage) !== index) {
+          state.detailRequestedImageIndex = Number(image.dataset.detailImage);
+          void renderDetail(state.detailData, state.detailFallbackThumbnail);
+        }
+      }
+      return false;
+    }
+  }
+
+  function createDetailImageFrame(generationId) {
+    const frame = document.createElement("div"); frame.className = "detail-image-frame"; frame.dataset.generationId = generationId;
+    frame.innerHTML = `<div class="detail-image-background" aria-hidden="true"><img class="detail-image-backdrop" ${detailBackdropSource ? `src="${escape(detailBackdropSource)}"` : ""} alt="" /></div><img class="detail-image" alt="生成结果" data-detail-image="0" /><div class="detail-image-pending">正在读取图片…</div><button class="detail-carousel-nav is-previous" data-detail-nav="-1" type="button" aria-label="查看上一张图片"><span aria-hidden="true">‹</span></button><button class="detail-carousel-nav is-next" data-detail-nav="1" type="button" aria-label="查看下一张图片"><span aria-hidden="true">›</span></button>`;
+    const current = () => frame.isConnected && frame.dataset.generationId === String(state.detailId);
+    window.ImageStudioDetailSwipe.bind(frame, {
+      getNeighbor: (direction) => {
+        if (!current() || frame.getAttribute("aria-busy") === "true") return null;
+        const neighbor = detailDisplayImages(state.detailData || {}, state.detailFallbackThumbnail)[state.detailImageIndex + direction];
+        const src = neighbor?.thumbnail_data_url || neighbor?.data_url;
+        return src ? { src } : null;
+      },
+      navigate: (direction) => { if (current() && frame.getAttribute("aria-busy") !== "true") return navigateDetail(direction); },
+    });
+    frame.addEventListener("detail-swipe-start", () => {
+      window.ImageStudioBackdrop.pause(frame.querySelector(".detail-image-backdrop:not(.detail-backdrop-previous)"));
+    });
+    frame.addEventListener("detail-swipe-end", () => {
+      if (current()) transitionDetailBackdrop(frame);
+    });
+    frame.querySelector("[data-detail-image]").addEventListener("click", (event) => {
+      if (!current() || frame.getAttribute("aria-busy") === "true" || !event.currentTarget.getAttribute("src")) return;
+      const index = Number(event.currentTarget.dataset.detailImage);
+      const images = detailDisplayImages(state.detailData || {}, state.detailFallbackThumbnail);
+      openImagePreview(event.currentTarget.src, `生成结果 ${index + 1}`, images[index]?.download_filename, images, index, { type: "detail", generationId: state.detailId, imageIndex: index });
+    });
+    frame.querySelectorAll("[data-detail-nav]").forEach((button) => button.addEventListener("click", () => void navigateDetail(Number(button.dataset.detailNav))));
+    return frame;
+  }
+
+  function mountDetailFilmstrip(detail, images, imageIndex, previousStrip, previousScroll) {
+    const mount = els.drawerBody.querySelector("[data-detail-filmstrip-mount]");
+    if (!mount) return;
+    const key = JSON.stringify([detail.id, images.map((item, index) => item.id || item.sha256 || index)]);
+    const reused = previousStrip?.dataset.filmstripKey === key;
+    const strip = reused ? previousStrip : document.createElement("div");
+    const scrollLeft = reused ? previousScroll : 0;
+    if (!reused) {
+      strip.className = "detail-filmstrip";
+      strip.dataset.filmstripKey = key;
+      strip.dataset.generationId = detail.id;
+      strip.setAttribute("role", "group");
+      strip.setAttribute("aria-label", "本组生成图片缩略图");
+      strip.innerHTML = `<div class="detail-filmstrip-track">${images.map((item, index) => {
+        const preview = item.thumbnail_data_url || (index === 0 ? state.detailFallbackThumbnail : "");
+        return `<button class="detail-filmstrip-thumb" data-detail-dot="${index}" type="button" aria-label="查看本次生成的第 ${index + 1} 张图片" title="第 ${index + 1} / ${images.length} 张"><span class="detail-filmstrip-preview"><span class="detail-filmstrip-placeholder" aria-hidden="true" ${preview ? "hidden" : ""}>${index + 1}</span>${preview ? `<img src="${escape(preview)}" alt="" draggable="false" loading="lazy" decoding="async" />` : ""}</span></button>`;
+      }).join("")}</div>`;
+      strip.querySelectorAll("img").forEach((image) => image.addEventListener("error", () => { image.hidden = true; image.parentElement.querySelector(".detail-filmstrip-placeholder").hidden = false; }));
+      const selectImage = (index, focus = false) => {
+        if (state.detailId !== strip.dataset.generationId || !state.detailData) return;
+        if (index !== state.detailImageIndex) {
+          state.detailRequestedImageIndex = index;
+          renderDetail(state.detailData, state.detailFallbackThumbnail);
+        } else centerDetailFilmstrip(strip, true);
+        if (focus) strip.querySelector(`[data-detail-dot="${index}"]`)?.focus({ preventScroll: true });
+      };
+      strip.addEventListener("click", (event) => {
+        const button = event.target.closest("[data-detail-dot]");
+        if (button) selectImage(Number(button.dataset.detailDot));
+      });
+      strip.addEventListener("keydown", (event) => {
+        const button = event.target.closest("[data-detail-dot]");
+        if (!button) return;
+        const index = Number(button.dataset.detailDot);
+        const target = ({ ArrowLeft: Math.max(0, index - 1), ArrowRight: Math.min(images.length - 1, index + 1), Home: 0, End: images.length - 1 })[event.key];
+        if (target === undefined) return;
+        event.preventDefault(); event.stopPropagation(); selectImage(target, true);
+      });
+      strip.addEventListener("wheel", (event) => {
+        if (event.ctrlKey || event.metaKey || strip.scrollWidth <= strip.clientWidth || Math.abs(event.deltaX) >= Math.abs(event.deltaY)) return;
+        const scale = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? strip.clientWidth : 1;
+        event.preventDefault(); strip.scrollLeft += event.deltaY * scale;
+      }, { passive: false });
+    }
+    mount.replaceWith(strip);
+    strip.scrollLeft = scrollLeft;
+    strip.querySelectorAll("[data-detail-dot]").forEach((button) => {
+      const active = Number(button.dataset.detailDot) === imageIndex;
+      button.classList.toggle("is-active", active);
+      button.setAttribute("aria-current", String(active));
+      button.tabIndex = active ? 0 : -1;
+    });
+    centerDetailFilmstrip(strip, reused);
+  }
+
   function renderDetail(detail, fallbackThumbnail = "") {
+    const scrollTop = els.drawerBody.scrollTop;
     const images = Array.isArray(detail.images) ? detail.images : [];
     const displayImages = detailDisplayImages(detail, fallbackThumbnail);
     const requestedIndex = state.detailRequestedImageIndex < 0 ? displayImages.length - 1 : state.detailRequestedImageIndex;
@@ -433,56 +595,52 @@
     const sourceIdentity = invocationSourceLabel(detail.invocation_source);
     const canPrevious = imageIndex > 0 || hasAdjacentGalleryRecord(-1);
     const canNext = imageIndex < displayImages.length - 1 || hasAdjacentGalleryRecord(1);
-    const dots = displayImages.length > 1 ? `<div class="detail-carousel-dots" aria-label="本次生成图片位置">${displayImages.map((_item, index) => `<button class="detail-carousel-dot ${index === imageIndex ? "is-active" : ""}" data-detail-dot="${index}" type="button" aria-label="查看本次生成的第 ${index + 1} 张图片" aria-current="${index === imageIndex ? "true" : "false"}"></button>`).join("")}</div>` : "";
-    const imageMarkup = currentImageUrl ? `<img class="detail-image-backdrop" src="${escape(currentImageUrl)}" alt="" aria-hidden="true" /><img class="detail-image" src="${escape(currentImageUrl)}" alt="生成结果 ${imageIndex + 1}" data-detail-image="${imageIndex}" />` : '<div class="detail-image-pending">正在读取图片…</div>';
-    const carousel = currentImage ? `<div class="detail-images"><div class="detail-image-frame">${imageMarkup}<button class="detail-carousel-nav is-previous" data-detail-nav="-1" type="button" aria-label="查看上一张图片" ${canPrevious ? "" : "disabled"}><span aria-hidden="true">‹</span></button><button class="detail-carousel-nav is-next" data-detail-nav="1" type="button" aria-label="查看下一张图片" ${canNext ? "" : "disabled"}><span aria-hidden="true">›</span></button>${dots}</div></div>` : '<div class="detail-loading">正在读取生成图片…</div>';
-    els.drawerBody.innerHTML = `${carousel}${library.detailMetadataMarkup(detail, currentImage)}<div class="detail-block"><h3>信息</h3><pre>${escape(JSON.stringify({ 服务商: detail.provider_name, 模型: detail.model, 模式: library.modeLabel(detail.mode), 生图来源: library.engineLabel(detail.generation_engine), 来源: sourceLabel(detail.source), 调用来源身份: sourceIdentity, 记录时间: formatDate(detail.created_at), 图片数量: images.length, 文件大小: formatBytes(totalBytes), 耗时毫秒: detail.elapsed_ms }, null, 2))}</pre></div><div class="detail-block"><h3>参考图</h3><div class="detail-references" data-detail-references>${detailReferenceMarkup(refs)}</div></div>${library.detailWarningsMarkup(detail, currentImage)}`;
-    library.updateDetailActions(detail);
-    const imageFrame = els.drawerBody.querySelector(".detail-image-frame");
-    let lastSwipeAt = 0;
-    if (imageFrame) {
-      let touchStartX = 0;
-      let touchStartY = 0;
-      let touchStarted = false;
-      imageFrame.addEventListener("touchstart", (event) => {
-        if (event.touches.length !== 1) { touchStarted = false; return; }
-        touchStartX = event.touches[0].clientX;
-        touchStartY = event.touches[0].clientY;
-        touchStarted = true;
-      }, { passive: true });
-      imageFrame.addEventListener("touchend", (event) => {
-        if (!touchStarted) return;
-        touchStarted = false;
-        const touch = event.changedTouches[0];
-        if (!touch) return;
-        const deltaX = touch.clientX - touchStartX;
-        const deltaY = touch.clientY - touchStartY;
-        if (Math.abs(deltaX) < 48 || Math.abs(deltaX) < Math.abs(deltaY) * 1.15) return;
-        lastSwipeAt = Date.now();
-        event.preventDefault();
-        void navigateDetail(deltaX < 0 ? 1 : -1);
-      }, { passive: false });
-      imageFrame.addEventListener("touchcancel", () => { touchStarted = false; }, { passive: true });
+    const previousStrip = els.drawerBody.querySelector(".detail-filmstrip");
+    const previousStripScroll = previousStrip?.scrollLeft || 0;
+    const focusedThumbnail = previousStrip?.contains(document.activeElement);
+    const stripMount = displayImages.length > 1 ? '<div data-detail-filmstrip-mount></div>' : "";
+    const previousFrame = els.drawerBody.querySelector(".detail-image-frame");
+    const imageFrame = currentImage ? previousFrame?.dataset.generationId === String(detail.id) ? previousFrame : createDetailImageFrame(detail.id) : null;
+    const carousel = currentImage ? `<div class="detail-images"><div data-detail-frame-mount></div>${stripMount}</div>` : '<div class="detail-loading">正在读取生成图片…</div>';
+    const metadata = `${library.detailMetadataMarkup(detail, currentImage)}<div class="detail-block"><h3>信息</h3><pre>${escape(JSON.stringify({ 服务商: detail.provider_name, 模型: detail.model, 模式: library.modeLabel(detail.mode), 生图来源: library.engineLabel(detail.generation_engine), 来源: sourceLabel(detail.source), 调用来源身份: sourceIdentity, 记录时间: formatDate(detail.created_at), 图片数量: images.length, 文件大小: formatBytes(totalBytes), 耗时毫秒: detail.elapsed_ms }, null, 2))}</pre></div><div class="detail-block"><h3>参考图</h3><div class="detail-references" data-detail-references>${detailReferenceMarkup(refs)}</div></div>${library.detailWarningsMarkup(detail, currentImage)}`;
+    // Keep the visible image and its compositor layer attached during same-group changes.
+    if (imageFrame && imageFrame === previousFrame) {
+      const media = imageFrame.parentElement;
+      while (media.nextSibling) media.nextSibling.remove();
+      previousStrip?.remove();
+      media.insertAdjacentHTML("beforeend", stripMount);
+      els.drawerBody.insertAdjacentHTML("beforeend", metadata);
+    } else {
+      els.drawerBody.innerHTML = carousel + metadata;
+      if (imageFrame) els.drawerBody.querySelector("[data-detail-frame-mount]").replaceWith(imageFrame);
     }
-    els.drawerBody.querySelector("[data-detail-image]")?.addEventListener("click", (event) => { if (Date.now() - lastSwipeAt < 500) return; openImagePreview(event.currentTarget.src, `生成结果 ${imageIndex + 1}`, currentImage.download_filename, detailDisplayImages(state.detailData || detail, state.detailFallbackThumbnail), imageIndex, { type: "detail", generationId: detail.id, imageIndex }); });
-    els.drawerBody.querySelectorAll("[data-detail-nav]").forEach((button) => button.addEventListener("click", () => void navigateDetail(Number(button.dataset.detailNav))));
-    els.drawerBody.querySelectorAll("[data-detail-dot]").forEach((button) => button.addEventListener("click", () => { state.detailRequestedImageIndex = Number(button.dataset.detailDot); renderDetail(state.detailData, state.detailFallbackThumbnail); }));
+    if (imageFrame) {
+      imageFrame.querySelector('[data-detail-nav="-1"]').disabled = !canPrevious;
+      imageFrame.querySelector('[data-detail-nav="1"]').disabled = !canNext;
+    }
+    mountDetailFilmstrip(detail, displayImages, imageIndex, previousStrip, previousStripScroll);
+    if (focusedThumbnail) els.drawerBody.querySelector(`.detail-filmstrip [data-detail-dot="${imageIndex}"]`)?.focus({ preventScroll: true });
+    library.updateDetailActions(detail);
     bindDetailReferenceEvents(detail);
     els.drawerBody.querySelector("[data-reproduce]")?.addEventListener("click", () => void reproduce(detail.id));
     els.drawerBody.querySelector("[data-copy-request]")?.addEventListener("click", () => void copyRequestParameters(detail));
     els.drawerBody.querySelector("[data-output-reference]")?.addEventListener("click", () => void useDataUrlAsReference(currentImageUrl, "gallery-output-reference.png"));
+    els.drawerBody.scrollTop = scrollTop;
+    return paintDetailImage(imageFrame, currentImage, imageIndex);
   }
 
   async function loadDetailAssets(id, summary, fallbackThumbnail) {
+    const revision = detailRequestRevision;
     try {
       const assets = await apiGet(`gallery/assets/${id}`);
-      if (state.detailId !== id) return;
+      if (revision !== detailRequestRevision || state.detailId !== id) return;
       const summaryImages = Array.isArray(summary.images) ? summary.images : [];
+      const summaryById = new Map(summaryImages.filter((image) => image.id).map((image) => [String(image.id), image]));
       const assetImages = Array.isArray(assets.images) ? assets.images : [];
       const mergedImages = assetImages.map((item, index) => ({
-        ...summaryImages[index],
+        ...(item.id ? summaryById.get(String(item.id)) : summaryImages[index]),
         ...item,
-        thumbnail_data_url: item?.thumbnail_data_url || summaryImages[index]?.thumbnail_data_url || "",
+        thumbnail_data_url: item?.thumbnail_data_url || (item.id ? summaryById.get(String(item.id)) : summaryImages[index])?.thumbnail_data_url || "",
       }));
       state.detailAssetsLoaded = true;
       state.detailData = { ...summary, ...assets, images: mergedImages };
@@ -498,31 +656,7 @@
       }
       const currentImage = detailDisplayImages(state.detailData, fallbackThumbnail)[state.detailImageIndex];
       const currentImageUrl = currentImage?.data_url || "";
-      const image = els.drawerBody.querySelector("[data-detail-image]");
-      const backdrop = els.drawerBody.querySelector(".detail-image-backdrop");
-      if (currentImageUrl) {
-        if (backdrop) backdrop.src = currentImageUrl;
-        if (image) {
-          image.src = currentImageUrl;
-        } else {
-          const frame = els.drawerBody.querySelector(".detail-image-frame");
-          const pending = frame?.querySelector(".detail-image-pending");
-          if (frame && pending) {
-            const upgradedImage = document.createElement("img");
-            upgradedImage.className = "detail-image";
-            upgradedImage.src = currentImageUrl;
-            upgradedImage.alt = `生成结果 ${state.detailImageIndex + 1}`;
-            upgradedImage.dataset.detailImage = String(state.detailImageIndex);
-            upgradedImage.addEventListener("click", () => openImagePreview(upgradedImage.src, `生成结果 ${state.detailImageIndex + 1}`, currentImage.download_filename, detailDisplayImages(state.detailData, state.detailFallbackThumbnail), state.detailImageIndex, { type: "detail", generationId: state.detailId, imageIndex: state.detailImageIndex }));
-            const upgradedBackdrop = document.createElement("img");
-            upgradedBackdrop.className = "detail-image-backdrop";
-            upgradedBackdrop.src = currentImageUrl;
-            upgradedBackdrop.alt = "";
-            upgradedBackdrop.setAttribute("aria-hidden", "true");
-            pending.replaceWith(upgradedBackdrop, upgradedImage);
-          }
-        }
-      }
+      void paintDetailImage(els.drawerBody.querySelector(".detail-image-frame"), currentImage, state.detailImageIndex);
       const references = els.drawerBody.querySelector("[data-detail-references]");
       if (references) {
         const refs = Array.isArray(state.detailData.references) ? state.detailData.references : [];
@@ -540,11 +674,15 @@
         placeholder.replaceWith(referenceButton);
       }
     } catch (error) {
-      if (state.detailId === id) showNotice(errorMessage(error, "高清图片加载失败"), "error");
+      if (revision === detailRequestRevision && state.detailId === id) showNotice(errorMessage(error, "高清图片加载失败"), "error");
     }
   }
 
   async function openDetail(id, requestedImageIndex = 0, options = {}) {
+    const previousBackdrop = els.drawerBody.querySelector(".detail-image-backdrop:not(.detail-backdrop-previous)");
+    if (state.detailId) detailBackdropSource = previousBackdrop?.getAttribute("src") || detailBackdropSource;
+    if (previousBackdrop) window.ImageStudioBackdrop.dispose(previousBackdrop);
+    detailImagePaintRevision++;
     const revision = ++detailRequestRevision;
     state.detailId = id; state.detailData = null; state.detailAssetsLoaded = false; state.detailRequestedImageIndex = requestedImageIndex === "last" ? -1 : Math.max(0, Number(requestedImageIndex) || 0);
     library.updateDetailActions(null);
@@ -565,7 +703,7 @@
     if (state.detailNavigating || !state.detailData) return;
     const images = detailDisplayImages(state.detailData, state.detailFallbackThumbnail);
     const targetImageIndex = state.detailImageIndex + direction;
-    if (targetImageIndex >= 0 && targetImageIndex < images.length) { state.detailRequestedImageIndex = targetImageIndex; renderDetail(state.detailData, state.detailFallbackThumbnail); return; }
+    if (targetImageIndex >= 0 && targetImageIndex < images.length) { state.detailRequestedImageIndex = targetImageIndex; return renderDetail(state.detailData, state.detailFallbackThumbnail); }
     const currentIndex = state.galleryItems.findIndex((item) => String(item.id) === String(state.detailId));
     if (currentIndex < 0 || !hasAdjacentGalleryRecord(direction)) return;
     const originId = state.detailId; state.detailNavigating = true;
@@ -580,7 +718,7 @@
     } finally { state.detailNavigating = false; }
   }
 
-  function closeDetail() { detailRequestRevision += 1; if (mobileImageViewer) { suppressMobileDetailSync = true; mobileImageViewer.close(); } state.detailId = ""; state.detailData = null; state.detailFallbackThumbnail = ""; state.detailAssetsLoaded = false; state.detailNavigating = false; state.detailImageIndex = 0; state.detailRequestedImageIndex = 0; closeImagePreview(); els.detailDrawer.classList.remove("is-open"); els.detailDrawer.setAttribute("aria-hidden", "true"); if (!activeConfirmation) els.scrim.classList.add("is-hidden"); syncPageScrollLock(); }
+  function closeDetail() { window.ImageStudioBackdrop.dispose(els.drawerBody.querySelector(".detail-image-backdrop:not(.detail-backdrop-previous)")); detailImagePaintRevision++; mobileDetailSyncRevision++; decodedDisplayImages.clear(); detailBackdropSource = ""; detailRequestRevision += 1; if (mobileImageViewer) { suppressMobileDetailSync = true; mobileImageViewer.close(); } state.detailId = ""; state.detailData = null; state.detailFallbackThumbnail = ""; state.detailAssetsLoaded = false; state.detailNavigating = false; state.detailImageIndex = 0; state.detailRequestedImageIndex = 0; closeImagePreview(); els.detailDrawer.classList.remove("is-open"); els.detailDrawer.setAttribute("aria-hidden", "true"); if (!activeConfirmation) els.scrim.classList.add("is-hidden"); syncPageScrollLock(); }
 
   function isMobileDetailPreview(context) {
     return context?.type === "detail" && window.matchMedia("(max-width: 540px)").matches && typeof window.PhotoSwipe === "function";
@@ -590,6 +728,7 @@
     const detailImages = detailDisplayImages(state.detailData || {}, state.detailFallbackThumbnail);
     const sameRecord = String(state.detailId) === String(sequenceItem.generation_id);
     const known = sameRecord ? detailImages.find((item, index) => String(item.id || "") === String(sequenceItem.image_id) || (!item.id && index === sequenceItem.image_index)) : null;
+    if (known?.thumbnail_data_url) return { src: known.thumbnail_data_url, detail: "preview" };
     if (known?.data_url) return { src: known.data_url, detail: state.detailAssetsLoaded ? "original" : "preview" };
     if (String(sequenceItem.generation_id) === String(context.generationId) && sequenceItem.image_index === context.imageIndex && fallbackDataUrl) return { src: fallbackDataUrl, detail: state.detailAssetsLoaded ? "original" : "preview" };
     const card = sequenceItem.image_index === 0 ? state.galleryItems.find((item) => String(item.id) === String(sequenceItem.generation_id)) : null;
@@ -598,7 +737,7 @@
   }
 
   function isCurrentMobileSession(session, index, item) {
-    return !!session?.active && mobileViewerSession === session && mobileImageViewer === session.viewer && (!item || session.items[index] === item);
+    return !!session?.active && !session.viewer.isDestroying && mobileViewerSession === session && mobileImageViewer === session.viewer && (!item || session.items[index] === item);
   }
 
   function updateMobileImageSource(index, payload, detail, session = mobileViewerSession) {
@@ -639,22 +778,22 @@
   async function loadMobileImage(index, detail, session = mobileViewerSession) {
     const item = session?.items[index];
     if (!item || !isCurrentMobileSession(session, index, item)) return;
-    const available = detail === "original" ? item.originalSrc : (item.previewSrc || item.originalSrc);
-    if (available) {
-      updateMobileImageSource(index, { data_url: available }, item.originalSrc ? "original" : "preview", session);
-      return;
-    }
     const key = `${item.image_id}:${detail}`;
     const loads = session.loads;
     if (!loads.has(key)) {
-      const pending = apiGet(`gallery/image/${item.image_id}`, { detail }).then(async (payload) => {
+      const available = detail === "original" ? item.originalSrc : (item.previewSrc || item.originalSrc);
+      const known = detail === "original" && state.detailAssetsLoaded && String(state.detailId) === String(item.generation_id)
+        ? state.detailData?.images?.find((image) => String(image.id) === String(item.image_id)) : null;
+      const payloadPromise = available || known?.data_url
+        ? Promise.resolve({ id: item.image_id, data_url: available || known.data_url })
+        : apiGet(`gallery/image/${item.image_id}`, { detail });
+      const resolvedDetail = available && !item.previewSrc && item.originalSrc ? "original" : detail;
+      const pending = payloadPromise.then(async (payload) => {
         if (!isCurrentMobileSession(session, index, item)) return;
         if (!payload?.data_url) throw new Error("图片接口没有返回可用内容。");
-        const decoded = new Image(); decoded.src = payload.data_url;
-        await decoded.decode();
-        if (!decoded.naturalWidth || !decoded.naturalHeight) throw new Error("图片内容无法解码。");
+        await decodeDisplayImage(payload.data_url);
         if (!isCurrentMobileSession(session, index, item)) return;
-        updateMobileImageSource(index, payload, detail, session);
+        updateMobileImageSource(index, payload, resolvedDetail, session);
         return payload;
       }).finally(() => { if (loads.get(key) === pending) loads.delete(key); });
       loads.set(key, pending);
@@ -679,9 +818,7 @@
     if (!isCurrentMobileSession(session)) return;
     const item = session.items[session.viewer.currIndex];
     const src = item?.previewSrc || item?.originalSrc || "";
-    if (session.backdrop && session.backdrop.getAttribute("src") !== src) {
-      if (src) session.backdrop.src = src; else session.backdrop.removeAttribute("src");
-    }
+    if (session.backdrop) void window.ImageStudioBackdrop.transition(session.backdrop, src, { opacity: .64, previousClass: "image-studio-viewer-backdrop-previous" });
     const message = item?.originalSrc ? "" : item?.originalError || item?.previewError || "";
     if (session.status) {
       session.status.hidden = !message;
@@ -805,6 +942,7 @@
         const item = session.sequence[pswp.currIndex];
         const shouldSyncDetail = !suppressMobileDetailSync;
         session.active = false;
+        window.ImageStudioBackdrop.dispose(session.backdrop);
         session.retryTimers.forEach((timer) => window.clearTimeout(timer)); session.retryTimers.clear(); session.loads.clear();
         if (mobileViewerSession !== session) return;
         suppressMobileDetailSync = false;
@@ -1359,6 +1497,7 @@
     if (eventsBound) return;
     eventsBound = true;
     library.bind();
+    window.addEventListener("resize", () => { if (state.detailId) centerDetailFilmstrip(els.drawerBody.querySelector(".detail-filmstrip")); }, { passive: true });
     els.galleryGrid.addEventListener("click", (event) => { const card = event.target.closest("[data-gallery-id]"); if (card && !event.target.closest(".gallery-selection")) void openDetail(card.dataset.galleryId); });
     els.galleryGrid.addEventListener("change", (event) => { const input = event.target.closest("[data-select-id]"); if (!input) return; input.checked ? state.selectedIds.add(input.dataset.selectId) : state.selectedIds.delete(input.dataset.selectId); updateSelection(); });
     ["input", "change", "click"].forEach((name) => $("settingsView").addEventListener(name, () => window.setTimeout(updateSettingsDirty, 0)));

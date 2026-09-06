@@ -19,12 +19,25 @@ async function geometry(frame) {
     const header = document.querySelector(".topbar");
     const bar = document.getElementById("selectionBar");
     const title = getComputedStyle(header);
+    const headerBounds = header.getBoundingClientRect();
+    const barBounds = bar.getBoundingClientRect();
+    const overlapTop = Math.max(headerBounds.top, barBounds.top);
+    const overlapBottom = Math.min(headerBounds.bottom, barBounds.bottom);
+    const overlapLeft = Math.max(headerBounds.left, barBounds.left);
+    const overlapRight = Math.min(headerBounds.right, barBounds.right);
+    const overlapOwner = overlapTop < overlapBottom && overlapLeft < overlapRight
+      ? document.elementFromPoint((overlapLeft + overlapRight) / 2, (overlapTop + overlapBottom) / 2)
+      : null;
     return {
       scroll: window.scrollY,
       opacity: Number(title.opacity),
       blur: title.filter,
       transform: title.transform,
       titleTop: header.getBoundingClientRect().top,
+      titleInset: parseFloat(title.top),
+      titleZIndex: Number(title.zIndex),
+      barZIndex: Number(getComputedStyle(bar).zIndex),
+      barCoversTitle: !!overlapOwner && (overlapOwner === bar || bar.contains(overlapOwner)),
       barTop: bar.getBoundingClientRect().top,
       inset: parseFloat(getComputedStyle(bar).top),
       barWidth: bar.getBoundingClientRect().width,
@@ -72,8 +85,11 @@ async function geometry(frame) {
       await scrollTo(frame, midpointScroll);
       const middle = await geometry(frame);
       assert.ok(middle.opacity > 0.4 && middle.opacity < 0.6, JSON.stringify(middle));
-      assert.ok(middle.titleTop < initial.inset);
+      assert.ok(Math.abs(middle.titleTop - initial.titleInset) < 1, "the outgoing title must remain fixed at its sticky inset");
+      assert.equal(middle.transform, "none", "the title must not slide with the incoming selection bar");
+      assert.ok(middle.barZIndex > middle.titleZIndex && middle.barCoversTitle, "the selection bar must visually cover the fixed title in their overlap");
       assert.ok(middle.blur.startsWith("blur("));
+      assert.ok(Math.abs(parseFloat(middle.blur.slice(5)) - 4) < 0.2, "title blur should be proportional to the half-completed overlap");
       assert.ok(middle.barTop > initial.inset);
       await page.screenshot({ path: path.join(output, `${name}-middle.png`) });
       // Time passing without scrolling must not finish the handoff.
@@ -82,9 +98,13 @@ async function geometry(frame) {
       assert.equal(paused.opacity, middle.opacity);
       assert.equal(paused.transform, middle.transform);
       assert.equal(paused.blur, middle.blur);
+      assert.equal(paused.titleTop, middle.titleTop);
       await scrollTo(frame, initial.anchorTop + 180);
       const pinned = await geometry(frame);
       assert.equal(pinned.opacity, 0);
+      assert.ok(Math.abs(pinned.titleTop - middle.titleTop) < 1, "the covered title must stay fixed after the bar pins");
+      assert.equal(pinned.transform, "none");
+      assert.ok(pinned.barZIndex > pinned.titleZIndex && pinned.barCoversTitle);
       assert.ok(Math.abs(pinned.barTop - pinned.inset) < 1);
       assert.ok(pinned.pageScrollWidth <= pinned.pageWidth + 1);
       assert.ok(pinned.barScrollWidth <= pinned.barWidth + 1);
@@ -95,6 +115,8 @@ async function geometry(frame) {
       await scrollTo(frame, midpointScroll);
       const reversed = await geometry(frame);
       assert.equal(reversed.opacity, middle.opacity);
+      assert.equal(reversed.titleTop, middle.titleTop);
+      assert.equal(reversed.transform, "none");
       await scrollTo(frame, initial.anchorTop + 180);
       await frame.locator("#cancelSelectionButton").click();
       const cleared = await geometry(frame);

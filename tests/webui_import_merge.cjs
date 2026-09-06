@@ -214,7 +214,7 @@ async function lostCommitResponse(page, frame, name, targetId, network) {
       await inner.evaluate(() => window.scrollTo(0, 0)); await frame.locator('[data-view="gallery"]').click();
       await frame.locator("#gallerySearch").fill(`${name}-target-A-${runId}`); await frame.locator("#gallerySearch").press("Tab");
       await frame.locator(`[data-gallery-id="${targetId}"]`).waitFor(); await frame.locator(`[data-gallery-id="${targetId}"] .gallery-info`).click();
-      await frame.locator('.detail-carousel-dot[data-detail-dot="1"]').click();
+      await frame.locator('[data-detail-dot="1"]').click();
       await frame.locator("#drawerBody").filter({ hasText: `${name}-model-B` }).waitFor(); await capture(page, inner, `${name}-merged-detail`);
       assert.deepEqual(errors, []); await page.close(); console.log(`${name}: merge validation, pagination, cancellation, two upload retries, single-image append, per-image parameters passed`);
     }

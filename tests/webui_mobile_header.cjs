@@ -41,6 +41,7 @@ async function headerState(inner) {
       opacity: Number(style.opacity), offset: parseFloat(style.getPropertyValue("--brand-header-offset")) || 0,
       blur: parseFloat(style.getPropertyValue("--brand-header-blur")) || 0,
       variableOpacity: parseFloat(style.getPropertyValue("--brand-header-opacity")) || 0,
+      sidebarZ: Number(style.zIndex), titleZ: Number(getComputedStyle(title).zIndex),
       titleTop: title.getBoundingClientRect().top,
       anchorTop: document.getElementById("pageHeaderAnchor").getBoundingClientRect().top,
     };
@@ -69,6 +70,13 @@ async function checkRoundIcon(frame, selector, name) {
 
 async function checkHeader(page, frame, inner, view, test) {
   await openView(frame, inner, view);
+  const navBackground = await inner.locator(`.nav-item[data-view="${view}"]`).evaluate((button) => {
+    const canvas = document.createElement("canvas"); canvas.width = 1; canvas.height = 1; const context = canvas.getContext("2d");
+    const alpha = (element) => { context.clearRect(0, 0, 1, 1); context.fillStyle = getComputedStyle(element).backgroundColor; context.fillRect(0, 0, 1, 1); return context.getImageData(0, 0, 1, 1).data[3]; };
+    return { outer: alpha(button), inner: alpha(button.querySelector(".nav-icon")) };
+  });
+  assert.ok(navBackground.inner > 0, `${test.name}/${view}: selected icon must retain its inner background`);
+  assert.ok(test.width <= 900 ? navBackground.outer === 0 : navBackground.outer > 0, `${test.name}/${view}: unexpected navigation background ${JSON.stringify(navBackground)}`);
   if (test.width <= 540 && view === "generate") await checkRoundIcon(frame, "#pasteParametersButton", `${test.name}-paste`);
   if (test.width <= 540 && view === "gallery") await checkRoundIcon(frame, "#galleryRefresh", `${test.name}-refresh`);
   const initial = await headerState(inner);
@@ -81,14 +89,16 @@ async function checkHeader(page, frame, inner, view, test) {
   const distance = Math.max(1, initial.anchorTop - 8);
   await scroll(inner, distance / 2); const midpoint = await headerState(inner);
   assert.ok(midpoint.opacity > .1 && midpoint.opacity < .9, `${test.name}/${view}: missing intermediate fade ${JSON.stringify(midpoint)}`);
-  assert.ok(midpoint.offset < -1, `${test.name}/${view}: missing upward translation`);
+  assert.ok(Math.abs(midpoint.offset) < .01 && Math.abs(midpoint.top - initial.top) < 1, `${test.name}/${view}: underlying brand header must stay stationary`);
+  assert.ok(midpoint.titleZ > midpoint.sidebarZ, `${test.name}/${view}: title must layer above the brand header`);
   assert.ok(midpoint.blur > 0 || test.reduced, `${test.name}/${view}: missing intermediate blur`);
   await capture(page, inner, `${test.name}-${view}-midpoint`);
   await page.waitForTimeout(180);
   const paused = await headerState(inner);
-  assert.ok(Math.abs(paused.opacity - midpoint.opacity) < .01 && Math.abs(paused.offset - midpoint.offset) < .5, `${test.name}/${view}: scroll pause must not finish animation`);
+  assert.ok(Math.abs(paused.opacity - midpoint.opacity) < .01 && Math.abs(paused.top - midpoint.top) < .5, `${test.name}/${view}: scroll pause must not finish animation`);
   await scroll(inner, distance + 30); const replaced = await headerState(inner);
   assert.ok(replaced.opacity < .02, `${test.name}/${view}: brand should disappear after replacement`);
+  assert.ok(Math.abs(replaced.offset) < .01 && Math.abs(replaced.top - initial.top) < 1, `${test.name}/${view}: fully covered brand must retain its position`);
   assert.ok(Math.abs(replaced.titleTop - 8) < 1.5, `${test.name}/${view}: title must pin at 8px ${JSON.stringify(replaced)}`);
   await capture(page, inner, `${test.name}-${view}-replaced`);
   await scroll(inner, distance / 2); const backwards = await headerState(inner);
@@ -139,9 +149,17 @@ async function checkSelectionHeader(page, frame, inner, test) {
   await scroll(inner, Math.max(0, values.selection - values.sticky - values.titleHeight / 2));
   const middle = await inner.locator(".topbar").evaluate((element) => ({ opacity: Number(getComputedStyle(element).opacity), replaced: element.classList.contains("is-selection-replaced") }));
   assert.ok(middle.replaced && middle.opacity > .01 && middle.opacity < .99, `${test.name}: selection bar no longer replaces title progressively ${JSON.stringify(middle)}`);
+  const overlay = await inner.locator(".topbar").evaluate((element) => { const selection = document.getElementById("selectionBar"); return { top: element.getBoundingClientRect().top, offset: parseFloat(getComputedStyle(element).getPropertyValue("--selection-title-offset")) || 0, titleZ: Number(getComputedStyle(element).zIndex), selectionZ: Number(getComputedStyle(selection).zIndex) }; });
+  assert.ok(Math.abs(overlay.top - values.sticky) < 1 && Math.abs(overlay.offset) < .01, `${test.name}: covered title must remain stationary ${JSON.stringify(overlay)}`);
+  assert.ok(overlay.selectionZ > overlay.titleZ, `${test.name}: selection bar must layer above title`);
+  await page.waitForTimeout(120);
+  assert.ok(Math.abs(Number(await inner.locator(".topbar").evaluate((element) => getComputedStyle(element).opacity)) - middle.opacity) < .01, `${test.name}: paused selection handoff should remain at midpoint`);
   await scroll(inner, values.selection + 20);
   assert.ok(Number(await inner.locator(".topbar").evaluate((element) => getComputedStyle(element).opacity)) < .02);
+  assert.ok(Math.abs((await inner.locator(".topbar").boundingBox()).y - values.sticky) < 1);
   await capture(page, inner, `${test.name}-selection-header`);
+  await scroll(inner, Math.max(0, values.selection - values.sticky - values.titleHeight / 2));
+  assert.ok(Math.abs(Number(await inner.locator(".topbar").evaluate((element) => getComputedStyle(element).opacity)) - middle.opacity) < .02, `${test.name}: reverse scroll should restore the title handoff midpoint`);
   await frame.locator("#cancelSelectionButton").click();
 }
 

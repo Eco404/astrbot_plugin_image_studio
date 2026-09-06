@@ -70,9 +70,31 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .health-status { flex: 0 0 auto; padding: 4px 7px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--muted); font-size: 10px; font-weight: 700; }.health-status[data-status="healthy"] { color: var(--accent-strong); }.health-status[data-status="warning"], .health-status[data-status="error"] { color: var(--danger); }.storage-health-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 14px; }.storage-health-grid div { min-width: 0; padding-top: 8px; border-top: 1px solid var(--line); }.storage-health-grid span, .storage-health-grid strong { display: block; overflow-wrap: anywhere; }.storage-health-grid span { margin-bottom: 4px; color: var(--muted); font-size: 10px; }.storage-health-grid strong { font-size: 12px; }.maintenance-report { min-height: 18px; margin: 12px 0; color: var(--muted); font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }.maintenance-actions { justify-content: flex-start; }
 
 /* Match the stable detail sizing used before the carousel was introduced. */
-.detail-image-frame { height: auto; min-height: 0; }
-.detail-image { width: 100%; height: auto; max-height: 620px; aspect-ratio: 1; }
-.detail-image-pending { position: relative; z-index: 1; color: var(--muted); font-size: 12px; }
+.detail-image-frame { height: auto; min-height: 0; isolation: isolate; }
+/* Keep Safari's blur surface stable while only its child images crossfade. */
+.detail-image-background { position: absolute; z-index: 0; inset: -28px; width: calc(100% + 56px); height: calc(100% + 56px); filter: blur(24px) saturate(.82); transform: translate3d(0, 0, 0) scale(1.05); backface-visibility: hidden; pointer-events: none; }
+.detail-image-background > .detail-image-backdrop { inset: 0; width: 100%; height: 100%; filter: none; transform: none; }
+.detail-image { width: 100%; height: auto; max-height: 620px; aspect-ratio: 1; transform: translateZ(0); backface-visibility: hidden; }
+.detail-image-pending { position: absolute; z-index: 1; color: var(--muted); font-size: 12px; }
+.detail-image:not([src]), .detail-image-backdrop:not([src]) { visibility: hidden; }
+
+.detail-filmstrip {
+  width: 100%; height: 68px; margin-top: 6px;
+  overflow-x: auto; overflow-y: hidden; scrollbar-width: none;
+  overscroll-behavior-x: contain; touch-action: pan-x pan-y;
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 12px, #000 calc(100% - 12px), transparent);
+  mask-image: linear-gradient(to right, transparent, #000 12px, #000 calc(100% - 12px), transparent);
+}
+.detail-filmstrip::-webkit-scrollbar { display: none; }
+.drawer-body { overflow-anchor: none; }
+.detail-filmstrip-track { position: relative; display: flex; width: max-content; min-width: 100%; height: 100%; align-items: center; justify-content: center; padding: 4px 16px; }
+.detail-filmstrip-thumb { display: grid; flex: 0 0 44px; width: 44px; height: 60px; min-height: 60px; place-items: center; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--muted); touch-action: pan-x pan-y; }
+.detail-filmstrip-preview { position: relative; display: grid; place-items: center; width: 40px; height: 48px; overflow: hidden; border: 1px solid var(--line); border-radius: 5px; background: var(--surface); opacity: .68; transform: scale(.78); transition: opacity var(--motion-fast) ease, transform var(--motion-fast) ease, border-color var(--motion-fast) ease; }
+.detail-filmstrip-preview > img { position: absolute; inset: 0; display: block; width: 100%; height: 100%; object-fit: cover; user-select: none; }
+.detail-filmstrip-placeholder { font-size: 11px; font-variant-numeric: tabular-nums; }
+.detail-filmstrip-thumb:hover .detail-filmstrip-preview { opacity: 1; }
+.detail-filmstrip-thumb.is-active .detail-filmstrip-preview { transform: scale(1); opacity: 1; border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.detail-filmstrip-thumb:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 
 /* Normalize symbol glyph metrics so icon-only controls are visually centered. */
 .icon-button,
@@ -284,7 +306,6 @@ select:focus {
 .image-preview:not(.is-hidden) .image-preview__panel { animation: dialog-enter var(--motion-slow) var(--motion-ease) both; }
 .parameter-dialog:not(.is-hidden),
 .confirm-dialog:not(.is-hidden) { animation: centered-dialog-enter var(--motion-slow) var(--motion-ease) both; }
-.detail-image,
 .image-preview__body img { animation: image-enter var(--motion-base) ease both; }
 
 @keyframes view-enter {

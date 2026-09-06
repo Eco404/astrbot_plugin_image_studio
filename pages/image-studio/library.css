@@ -35,11 +35,11 @@ html { scroll-padding-top: 112px; scroll-padding-bottom: calc(100px + env(safe-a
 .gallery-floatingbar .gallery-pagination { margin: 0; padding: 0; background: transparent; box-shadow: none; }
 .gallery-floatingbar .gallery-pagination { flex: 0 1 auto; }
 .topbar, .gallery-selection-bar { top: max(var(--gallery-sticky-top), env(safe-area-inset-top)); }
-.topbar { transition-property: background-color, border-color, box-shadow; }
+.topbar { z-index: 2; transition-property: background-color, border-color, box-shadow; }
 #selectionAnchor { height: 0; overflow-anchor: none; }
 #pageHeaderAnchor { height: 0; overflow-anchor: none; }
 .selection-bar.gallery-selection-bar { position: sticky; z-index: 3; min-height: 58px; margin: 0 0 10px; padding: 9px 12px; background: var(--topbar-glass); animation: none; transition: none; }
-.topbar.is-selection-replaced { transform: translateY(var(--selection-title-offset, 0px)); opacity: var(--selection-title-opacity, 1); filter: blur(var(--selection-title-blur, 0px)); transition: none; animation: none; }
+.topbar.is-selection-replaced { transform: none; opacity: var(--selection-title-opacity, 1); filter: blur(var(--selection-title-blur, 0px)); transition: none; animation: none; }
 .gallery-pagination span { min-width: 140px; }
 .gallery-pagination button { min-width: 40px; }
 .gallery-toolbar .search-field { flex: 2 1 240px; }
@@ -205,13 +205,15 @@ html { scroll-padding-top: 112px; scroll-padding-bottom: calc(100px + env(safe-a
 }
 @media (max-width: 900px) {
   :root { --gallery-sticky-top: 8px; }
-  .sidebar { position: sticky; top: max(var(--gallery-sticky-top), env(safe-area-inset-top)); z-index: 2; }
-  .sidebar.is-brand-replaced { transform: translateY(var(--brand-header-offset, 0px)); opacity: var(--brand-header-opacity, 1); filter: blur(var(--brand-header-blur, 0px)); transition: none; animation: none; }
+  .sidebar { position: sticky; top: max(var(--gallery-sticky-top), env(safe-area-inset-top)); z-index: 1; }
+  .sidebar.is-brand-replaced { transform: none; opacity: var(--brand-header-opacity, 1); filter: blur(var(--brand-header-blur, 0px)); transition: none; animation: none; }
   .floatingbar { left: 12px; right: 12px; max-width: calc(100vw - 24px); }
   .import-grid { grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
   .gallery-floatingbar { justify-content: space-between; }
   .brand { min-width: 0; }
   .nav-list { gap: 2px; }
+  .nav-item, .nav-item:hover, .nav-item.is-active { background: transparent; }
+  .nav-item:not(.is-active):hover .nav-icon { background: var(--surface-hover); }
 }
 @media (max-width: 540px) {
   #favoriteSelectionButton { min-width: 44px; }
