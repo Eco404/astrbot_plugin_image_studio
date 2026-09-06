@@ -263,12 +263,24 @@ WRAPPER_HTML = r"""<!doctype html><html lang="zh-CN"><head><meta name="viewport"
 <style>html,body{margin:0;width:100%;height:100%;overflow:hidden}iframe{width:100%;height:100%;border:0;display:block}</style></head><body>
 <iframe id="studio" src="/ui/index.html" sandbox="allow-scripts allow-forms allow-downloads"></iframe>
 <script>
+// Match PluginPagePage.vue: endpoint paths and query parameters are separate.
+const normalizePluginEndpoint = (endpoint) => {
+  if (typeof endpoint !== 'string') throw new Error('Plugin bridge endpoint must be a string.');
+  const trimmed = endpoint.trim().replace(/^\/+/, '');
+  if (!trimmed) throw new Error('Plugin bridge endpoint cannot be empty.');
+  if (trimmed.includes('\\') || trimmed.includes('://') || trimmed.includes('?') || trimmed.includes('#')) {
+    throw new Error('Plugin bridge endpoint is invalid.');
+  }
+  const segments = trimmed.split('/');
+  if (segments.some(segment => !segment || segment === '.' || segment === '..')) throw new Error('Plugin bridge endpoint is invalid.');
+  return segments.map(segment => encodeURIComponent(segment)).join('/');
+};
 window.addEventListener('message', async event => {
   const frame = document.getElementById('studio');
   if (event.source !== frame.contentWindow || event.data?.harnessCall === undefined) return;
   const request = event.data;
   try {
-    const url = new URL('/astrbot_plugin_image_studio/' + String(request.path).replace(/^\/+/, ''), location.origin);
+    const url = new URL('/astrbot_plugin_image_studio/' + normalizePluginEndpoint(request.path), location.origin);
     if (!url.pathname.startsWith('/astrbot_plugin_image_studio/')) throw new Error('测试 API 路径无效');
     const options = {};
     if (request.method === 'POST') { options.method = 'POST'; options.headers = {'Content-Type':'application/json'}; options.body = JSON.stringify(request.data); }

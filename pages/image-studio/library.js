@@ -58,6 +58,9 @@
     let importing = false;
     let importSequence = 0;
     let importGroupDraft = null;
+    let importAddQueue = Promise.resolve();
+    let importAddJobs = 0;
+    let importEpoch = 0;
     let modalClose = null;
     let modalPending = false;
     let detailCopies = [];
@@ -145,7 +148,7 @@
       const disabled = importing || item.status === "reading";
       const saveOutputs = (item.parsed?.normalized?.outputs || []).filter((entry) => entry.kind === "save");
       const outputChoice = saveOutputs.length > 1 ? `<label class="field field-wide">最终保存输出<select data-import-output aria-label="最终保存输出"><option value="">请选择保存输出</option>${saveOutputs.map((entry) => `<option value="${escape(entry.node_id)}" ${String(entry.node_id) === String(item.outputNodeId || "") ? "selected" : ""}>${escape(entry.type)} #${escape(entry.node_id)}</option>`).join("")}</select></label>` : "";
-      return `<article class="import-card glass" data-import-id="${item.id}">
+      return `<article class="import-card glass ${item.duplicateReason ? "is-duplicate" : ""}" data-import-id="${item.id}" data-import-sha256="${item.sha256}">
         <div class="import-card-header"><strong title="${escape(item.file.name)}">${escape(item.file.name)}</strong><button class="studio-icon-button is-danger" data-remove-import="${item.id}" type="button" aria-label="移除 ${escape(item.file.name)}" title="移除图片" ${importing ? "disabled" : ""}>${icon("X")}</button></div>
         <div class="import-card-preview"><img src="${item.url}" alt="${escape(item.file.name)}" /></div><div class="import-file-meta">${formatBytes(item.file.size)}${item.width ? ` · ${item.width} × ${item.height}` : ""}</div>
         <fieldset class="import-card-fields" ${disabled ? "disabled" : ""}>
@@ -157,7 +160,7 @@
           <label class="field field-wide">正向提示词${item.editedFields.has("prompt") ? "" : promptStatusMarkup(item.parsed?.normalized?.prompt_status)}<textarea data-import-field="prompt" rows="3">${escape(data.prompt)}</textarea></label>
           <label class="field field-wide">反向提示词${item.editedFields.has("negative_prompt") ? "" : promptStatusMarkup(item.parsed?.normalized?.negative_prompt_status)}<textarea data-import-field="negative_prompt" rows="2">${escape(data.negative_prompt)}</textarea></label>
           <details class="field-wide advanced"><summary>补充参数</summary><textarea data-import-field="parameters" rows="5" spellcheck="false" aria-label="补充参数 JSON">${escape(data.parameters)}</textarea></details>
-        </fieldset>${promptCandidatesMarkup(item)}${comfyDetailsMarkup(item.parsed)}<div class="import-card-status ${item.status === "error" ? "is-error" : ""}" role="status">${escape(item.status === "reading" ? "正在识别图片参数…" : item.error || (item.parsed?.format && item.parsed.format !== "unknown" ? `已识别 ${engineLabel(item.parsed.format)}` : "未检测到生图参数，可手动填写"))}</div>${warnings.length ? `<div class="import-warnings">${warnings.map(escape).join("<br>")}</div>` : ""}</article>`;
+        </fieldset>${promptCandidatesMarkup(item)}${comfyDetailsMarkup(item.parsed)}<div class="import-card-status ${item.status === "error" || item.duplicateReason ? "is-error" : ""}" role="status">${escape(item.duplicateReason || (item.status === "reading" ? "正在识别图片参数…" : item.error || (item.parsed?.format && item.parsed.format !== "unknown" ? `已识别 ${engineLabel(item.parsed.format)}` : "未检测到生图参数，可手动填写")))}</div>${warnings.length ? `<div class="import-warnings">${warnings.map(escape).join("<br>")}</div>` : ""}</article>`;
     }
 
     function hasPromptBlock(value, block) {
@@ -248,8 +251,8 @@
         restored?.focus({ preventScroll: true }); if (selection && restored?.setSelectionRange) restored.setSelectionRange(...selection);
       }
       $("importDropzone").classList.toggle("is-hidden", imports.length > 0);
-      $("importSummary").textContent = imports.length ? `已选择 ${imports.length} 张图片` : "尚未选择图片";
-      $("confirmImportButton").disabled = importing || !imports.length || imports.some((item) => item.status === "reading");
+      $("importSummary").textContent = importAddJobs ? `正在校验图片… 已选择 ${imports.length} 张` : imports.length ? `已选择 ${imports.length} 张图片` : "尚未选择图片";
+      $("confirmImportButton").disabled = importing || importAddJobs > 0 || !imports.length || imports.some((item) => item.status === "reading");
       $("cancelImportButton").disabled = importing; $("chooseImportFiles").disabled = importing;
       $("importGroupOption").classList.toggle("is-hidden", imports.length < 2);
       $("importAsGroup").disabled = importing || imports.length < 2;
@@ -269,6 +272,7 @@
 
     function clearImports() {
       if (importing) return;
+      importEpoch++; importAddJobs = 0;
       void discardImportGroup();
       imports.forEach((item) => URL.revokeObjectURL(item.url)); imports = [];
       $("importProgress").textContent = ""; renderImports();
@@ -288,23 +292,39 @@
       if (imports.includes(item)) renderImports();
     }
 
-    async function addImportFiles(files) {
+    function addImportFiles(files) {
       if (importing) return;
       const accepted = Array.from(files).filter((file) => /^image\/(png|jpeg|webp|gif)$/.test(file.type) || /\.(png|jpe?g|webp|gif)$/i.test(file.name));
       if (!accepted.length) { showNotice("请选择 PNG、JPEG、WebP 或 GIF 图片。", "error"); return; }
-      await discardImportGroup();
       hooks.switchView("import");
-      const added = [];
-      for (const file of accepted) {
-        if (imports.length >= 100) { showNotice("单次最多选择 100 张图片。", "error"); break; }
-        if (file.size > 30 * 1024 * 1024) { showNotice(`${file.name} 超过 30 MB。`, "error"); continue; }
-        const importedAt = Date.now() / 1000;
-        const item = { id: `import_${Date.now().toString(36)}_${++importSequence}`, file, url: URL.createObjectURL(file), importedAt, editedFields: new Set(), fields: { generation_engine: "unknown", prompt: "", negative_prompt: "", model: "", mode: "unknown", parameters: "{}", generated_at: localDateTime(importedAt) }, status: "reading" };
-        imports.push(item); added.push(item);
-      }
-      renderImports();
-      // Bound decoder work so a large drop does not freeze a phone browser.
-      for (let index = 0; index < added.length; index += 3) await Promise.all(added.slice(index, index + 3).map(inspectFile));
+      const epoch = importEpoch;
+      importAddJobs++; renderImports();
+      // Serialize additions so simultaneous file picks cannot create duplicate cards.
+      importAddQueue = importAddQueue.then(async () => {
+        const added = []; let skipped = 0;
+        for (const file of accepted) {
+          if (epoch !== importEpoch) return;
+          if (file.size > 30 * 1024 * 1024) { showNotice(`${file.name} 超过 30 MB。`, "error"); continue; }
+          let sha256;
+          try { sha256 = await window.ImageStudioHash.fileSHA256(file); }
+          catch (error) { if (epoch === importEpoch) showNotice(errorMessage(error, `${file.name} 校验失败，请重新选择`), "error"); continue; }
+          if (epoch !== importEpoch) return;
+          if (imports.some((item) => item.sha256 === sha256)) { skipped++; continue; }
+          if (imports.length >= 100) { showNotice("单次最多选择 100 张不同图片。", "error"); break; }
+          if (!added.length) await discardImportGroup();
+          if (epoch !== importEpoch) return;
+          const importedAt = Date.now() / 1000;
+          const item = { id: `import_${Date.now().toString(36)}_${++importSequence}`, sha256, file, url: URL.createObjectURL(file), importedAt, editedFields: new Set(), fields: { generation_engine: "unknown", prompt: "", negative_prompt: "", model: "", mode: "unknown", parameters: "{}", generated_at: localDateTime(importedAt) }, status: "reading" };
+          imports.push(item); added.push(item); renderImports();
+        }
+        if (skipped) showNotice(`已忽略 ${skipped} 张待导入列表中的重复图片。`);
+        for (let index = 0; index < added.length; index += 3) {
+          if (epoch !== importEpoch) return;
+          await Promise.all(added.slice(index, index + 3).filter((item) => imports.includes(item)).map(inspectFile));
+        }
+      }).catch((error) => { if (epoch === importEpoch) showNotice(errorMessage(error, "图片添加失败"), "error"); })
+        .finally(() => { if (epoch === importEpoch) { importAddJobs--; renderImports(); } });
+      return importAddQueue;
     }
 
     function localDateTime(timestamp) {
@@ -315,7 +335,7 @@
     }
 
     async function confirmImports() {
-      if (importing || !imports.length || imports.some((item) => item.status === "reading")) return;
+      if (importing || importAddJobs || !imports.length || imports.some((item) => item.status === "reading")) return;
       let preparedItems;
       let mergeEngine = "";
       try {
@@ -340,7 +360,7 @@
           for (const key of item.editedFields) overrides[key] = key === "parameters" ? parameters : item.fields[key];
           if (item.editedFields.has("generated_at") || item.parsed?.normalized?.generated_at == null) overrides.generated_at = item.fields.generated_at ? new Date(item.fields.generated_at).getTime() / 1000 : null;
           if ($("importAsGroup").checked) overrides.model = item.fields.model;
-          return { client_id: item.id, filename: item.file.name, overrides };
+          return { client_id: item.id, sha256: item.sha256, filename: item.file.name, overrides };
         });
         if ($("importAsGroup").checked) {
           const missing = preparedItems.filter((item) => !String(item.overrides.model || "").trim());
@@ -349,44 +369,43 @@
         }
       } catch (error) { showNotice(error.message, "error"); return; }
       importing = true; renderImports();
-      if ($("importAsGroup").checked || mergeEngine) {
-        try {
-          let groupOptions = { as_group: true };
+      try {
+        let groupOptions = mergeEngine ? { merge_target_id: importGroupDraft?.targetId, generation_engine: mergeEngine } : { as_group: $("importAsGroup").checked };
+        const retry = importGroupDraft?.signature === JSON.stringify({ items: preparedItems, ...groupOptions });
+        if (!retry) {
+          await discardImportGroup();
+          imports.forEach((item) => { item.duplicateReason = ""; item.error = ""; });
+          $("importProgress").textContent = "正在检查画廊中已有的图片…";
+          renderImports();
+          requireImportAllowed(await apiPost("imports/check", { items: preparedItems.map(({ client_id, sha256 }) => ({ client_id, sha256 })) }));
           if (mergeEngine) {
-            const retryOptions = { merge_target_id: importGroupDraft?.targetId, generation_engine: mergeEngine };
-            const retry = retryOptions.merge_target_id && importGroupDraft.signature === JSON.stringify({ items: preparedItems, ...retryOptions });
-            if (!retry) $("importProgress").textContent = "正在查找同源的已导入图组…";
-            const targetId = retry ? retryOptions.merge_target_id : await chooseImportMergeTarget(mergeEngine);
-            if (!retry) $("importProgress").textContent = "";
+            $("importProgress").textContent = "正在查找同源的已导入图组…";
+            const targetId = await chooseImportMergeTarget(mergeEngine);
+            $("importProgress").textContent = "";
             if (!targetId) return;
             groupOptions = { merge_target_id: targetId, generation_engine: mergeEngine };
           }
-          await confirmImportGroup(preparedItems, groupOptions);
         }
-        catch (error) { const message = errorMessage(error, "图组导入失败，请重试"); $("importProgress").textContent = message; showNotice(message, "error"); }
-        finally { importing = false; renderImports(); }
-        return;
+        await confirmImportGroup(preparedItems, groupOptions);
+      } catch (error) {
+        if (error.discardImportBatch) await discardImportGroup();
+        const message = errorMessage(error, "图片导入失败，请重试");
+        $("importProgress").textContent = message; showNotice(message, "error");
       }
-      let succeeded = 0; let duplicates = 0;
-      try {
-        await discardImportGroup();
-        const prepared = await apiPost("imports/prepare", { items: preparedItems });
-        const client = await bridge(); const pending = imports.slice();
-        for (let index = 0; index < pending.length; index++) {
-          const item = pending[index]; const ticket = (prepared.items || []).find((entry) => entry.client_id === item.id);
-          $("importProgress").textContent = `正在导入 ${index + 1} / ${pending.length}`;
-          try {
-            if (!ticket?.upload_endpoint) throw new Error(ticket?.error || "无法创建图片上传任务。");
-            const result = await client.upload(ticket.upload_endpoint, item.file);
-            succeeded++; if (result.duplicate) duplicates++;
-            URL.revokeObjectURL(item.url); imports = imports.filter((entry) => entry !== item);
-          } catch (error) { item.status = "error"; item.error = errorMessage(error, "导入失败，请重试"); }
-          renderImports();
-        }
-        $("importProgress").textContent = `已导入 ${succeeded} 张${duplicates ? `，其中 ${duplicates} 张已存在` : ""}${imports.length ? `；${imports.length} 张待重试` : ""}`;
-        if (succeeded) showNotice(`已导入 ${succeeded} 张图片。`, "success");
-      } catch (error) { $("importProgress").textContent = errorMessage(error, "导入准备失败"); }
       finally { importing = false; renderImports(); }
+    }
+
+    function requireImportAllowed(result) {
+      if (result?.allowed !== false) return result;
+      const hashes = new Set(result.duplicate_hashes || []);
+      for (const item of imports) {
+        if (hashes.has(item.sha256)) item.duplicateReason = result.code === "batch_duplicates" ? "本批图片重复" : "画廊中已存在";
+        if (result.code === "hash_mismatch" && result.client_id === item.id) { item.status = "error"; item.error = result.message; }
+      }
+      renderImports();
+      const error = new Error(result.message || "本批图片未通过校验，导入已取消。");
+      error.discardImportBatch = ["gallery_duplicates", "batch_duplicates"].includes(result.code);
+      throw error;
     }
 
     async function discardImportGroup() {
@@ -396,7 +415,7 @@
 
     async function chooseImportMergeTarget(engine) {
       const limit = 12;
-      const getPage = (offset) => apiGet(`imports/merge-targets?${new URLSearchParams({ generation_engine: engine, limit, offset })}`);
+      const getPage = (offset) => apiGet("imports/merge-targets", { generation_engine: engine, limit, offset });
       let page = await getPage(0);
       if (!page.total) {
         showNotice("暂无同源的已导入图组，请选择“作为图组导入”；单张图片可关闭合并后直接导入。", "error");
@@ -459,7 +478,7 @@
       const signature = JSON.stringify({ items, ...groupOptions });
       if (importGroupDraft?.signature !== signature) {
         await discardImportGroup();
-        const prepared = await apiPost("imports/prepare", { items, ...groupOptions });
+        const prepared = requireImportAllowed(await apiPost("imports/prepare", { items, ...groupOptions }));
         importGroupDraft = { signature, prepared, targetId: groupOptions.merge_target_id, uploaded: new Set() };
       }
       const draft = importGroupDraft;
@@ -468,10 +487,10 @@
         const item = imports[index];
         if (draft.uploaded.has(item.id)) continue;
         const ticket = draft.prepared.items.find((entry) => entry.client_id === item.id);
-        $("importProgress").textContent = `正在上传图组 ${index + 1} / ${imports.length}`;
+        $("importProgress").textContent = `正在上传图片 ${index + 1} / ${imports.length}`;
         try {
-          await client.upload(ticket.upload_endpoint, item.file);
-          draft.uploaded.add(item.id); item.status = "ready"; item.error = "已上传，等待图组入库";
+          requireImportAllowed(await client.upload(ticket.upload_endpoint, item.file));
+          draft.uploaded.add(item.id); item.status = "ready"; item.error = "已上传，等待整批入库";
         } catch (error) {
           item.status = "error"; item.error = errorMessage(error, "上传失败，请重试"); renderImports();
           if (/过期|取消/.test(item.error)) await discardImportGroup();
@@ -479,9 +498,9 @@
         }
         renderImports();
       }
-      $("importProgress").textContent = "正在保存图组…";
+      $("importProgress").textContent = "正在保存本批图片…";
       try {
-        await apiPost(draft.prepared.commit_endpoint, {});
+        requireImportAllowed(await apiPost(draft.prepared.commit_endpoint, {}));
       } catch (error) {
         if (/过期|取消|目标.*(?:删除|不存在|来源|数量|100 张)/.test(errorMessage(error, ""))) await discardImportGroup();
         throw error;
@@ -489,8 +508,9 @@
       const count = imports.length;
       imports.forEach((item) => URL.revokeObjectURL(item.url)); imports = [];
       importGroupDraft = null;
-      $("importProgress").textContent = groupOptions.merge_target_id ? `已合并 ${count} 张图片到已有图组` : `已导入 1 个图组，共 ${count} 张图片`;
-      showNotice(groupOptions.merge_target_id ? `已合并 ${count} 张图片到已有图组。` : `已导入图组，共 ${count} 张图片。`, "success");
+      const message = groupOptions.merge_target_id ? `已合并 ${count} 张图片到已有图组` : groupOptions.as_group ? `已导入 1 个图组，共 ${count} 张图片` : `已导入 ${count} 张图片`;
+      $("importProgress").textContent = message;
+      showNotice(`${message}。`, "success");
     }
 
     function parameterRows(values, prefix = "") {

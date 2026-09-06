@@ -37,6 +37,7 @@ REQUIRED_ARCHIVE_FILES = RUNTIME_FILES + (
     "pages/image-studio/app.js",
     "pages/image-studio/app.css",
     "pages/image-studio/library.js",
+    "pages/image-studio/hash.js",
     "pages/image-studio/library.css",
     "pages/image-studio/select.js",
     "pages/image-studio/select.css",
@@ -47,6 +48,8 @@ REQUIRED_ARCHIVE_FILES = RUNTIME_FILES + (
     "pages/image-studio/vendor/exifreader/LICENSE",
     "pages/image-studio/vendor/lucide/icons.js",
     "pages/image-studio/vendor/lucide/LICENSE",
+    "pages/image-studio/vendor/js-sha256/sha256.min.js",
+    "pages/image-studio/vendor/js-sha256/LICENSE",
 )
 IGNORED_NAMES = {
     ".DS_Store",

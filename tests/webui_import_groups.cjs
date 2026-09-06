@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { execFileSync } = require("node:child_process");
 const { chromium } = require(process.env.STUDIO_PLAYWRIGHT || "playwright");
 const base = process.env.STUDIO_TEST_URL || "http://127.0.0.1:18765";
 const prefix = base + "/astrbot_plugin_image_studio/";
@@ -33,7 +34,11 @@ const output = fs.mkdtempSync(path.join(os.tmpdir(), "image-studio-import-groups
       const before = await (await page.request.get(prefix + "gallery/list?limit=60")).json();
       const originals = before.items.filter(item => item.source !== "import").slice(0, 2);
       const buffers = [];
-      for (const item of originals) buffers.push(await (await page.request.get(prefix + `gallery/download/${item.image_id}`)).body());
+      for (const item of originals) {
+        const original = await (await page.request.get(prefix + `gallery/download/${item.image_id}`)).body();
+        const unique = execFileSync(process.env.STUDIO_PYTHON || "/home/coder/apps/miniconda3/envs/astrbot/bin/python", ["-c", "import sys,io; from PIL import Image,PngImagePlugin; image=Image.open(io.BytesIO(sys.stdin.buffer.read())); metadata=PngImagePlugin.PngInfo(); [metadata.add_text(k,v) for k,v in image.info.items() if isinstance(v,str)]; metadata.add_text('BrowserFixture',sys.argv[1]); output=io.BytesIO(); image.save(output,format='PNG',pnginfo=metadata); sys.stdout.buffer.write(output.getvalue())", `${path.basename(output)}-${test.width}-${item.id}`], { input: original });
+        buffers.push(unique);
+      }
       await frame.locator('[data-view="import"]').click();
       await frame.locator("#importFiles").setInputFiles(buffers.map((buffer, index) => ({ name: `group-${index}.png`, mimeType: "image/png", buffer })));
       await frame.locator("#confirmImportButton:not(:disabled)").waitFor();

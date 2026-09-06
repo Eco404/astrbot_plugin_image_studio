@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import json
 import time
 
@@ -43,20 +44,25 @@ def test_comfy_inspect_and_upload_require_valid_save_selection(tmp_path):
             )
             assert selected.status_code == 200
             assert selected.json()["normalized"]["selected_output_node"] == "16"
-            endpoint = await prepare(client, "multi-unselected")
-            rejected = await client.post(
-                endpoint, files={"file": ("image.png", data, "image/png")}
+            prepared = await prepare(client, "multi-unselected", data=data)
+            await client.post(
+                PREFIX + prepared["items"][0]["upload_endpoint"],
+                files={"file": ("image.png", data, "image/png")},
             )
+            rejected = await client.post(PREFIX + prepared["commit_endpoint"], json={})
             assert rejected.status_code == 400
             assert (await client.get(PREFIX + "gallery/list")).json()["total"] == 0
-            endpoint = await prepare(
+            prepared = await prepare(
                 client,
                 "multi-selected",
                 {"comfy_output_node": "16", "prompt": "manual"},
+                data=data,
             )
-            imported = await client.post(
-                endpoint, files={"file": ("image.png", data, "image/png")}
+            await client.post(
+                PREFIX + prepared["items"][0]["upload_endpoint"],
+                files={"file": ("image.png", data, "image/png")},
             )
+            imported = await client.post(PREFIX + prepared["commit_endpoint"], json={})
             assert imported.status_code == 200
             detail = (
                 await client.get(
@@ -78,6 +84,7 @@ def group_items(models=("nai-diffusion-4-5-full", " nai-diffusion-4-5-full ")):
         {
             "client_id": f"group-item-{i}",
             "filename": f"group-{i}.png",
+            "sha256": hashlib.sha256(fixture_image(i, novelai=True)).hexdigest(),
             "overrides": {
                 "model": model,
                 "prompt": f"manual group prompt {i}",
@@ -142,7 +149,10 @@ def test_group_upload_commit_retry_and_individual_parameters(tmp_path):
                 endpoints[1],
                 files={"file": ("invalid.png", b"not an image", "image/png")},
             )
-            assert malformed.status_code == 400
+            assert (
+                malformed.status_code == 200
+                and malformed.json()["code"] == "hash_mismatch"
+            )
             assert (await client.get(PREFIX + "gallery/list")).json()["total"] == 0
             second = await client.post(
                 endpoints[1],
@@ -152,12 +162,6 @@ def test_group_upload_commit_retry_and_individual_parameters(tmp_path):
             )
             assert second.status_code == 200
             group = app.state.plugin._import_groups[prepared["group_id"]]
-            group["items"][1][1]["overrides"]["model"] = "different"
-            assert (
-                await client.post(PREFIX + prepared["commit_endpoint"], json={})
-            ).status_code == 400
-            assert (await client.get(PREFIX + "gallery/list")).json()["total"] == 0
-            group["items"][1][1]["overrides"]["model"] = "nai-diffusion-4-5-full"
             result = await client.post(PREFIX + prepared["commit_endpoint"], json={})
             assert result.status_code == 200, result.text
             generation_id = result.json()["generation_id"]
@@ -211,7 +215,14 @@ def test_cancel_and_expiry_remove_only_pending_group_files(tmp_path):
                 ).json()
                 upload = PREFIX + prepared["items"][0]["upload_endpoint"]
                 await client.post(
-                    upload, files={"file": ("first.png", fixture_image(), "image/png")}
+                    upload,
+                    files={
+                        "file": (
+                            "first.png",
+                            fixture_image(0, novelai=True),
+                            "image/png",
+                        )
+                    },
                 )
                 group = app.state.plugin._import_groups[prepared["group_id"]]
                 assert group["directory"].exists()
@@ -232,8 +243,12 @@ def test_cancel_and_expiry_remove_only_pending_group_files(tmp_path):
 
 
 async def prepare(
-    client: httpx.AsyncClient, identifier: str, overrides: dict | None = None
-) -> str:
+    client: httpx.AsyncClient,
+    identifier: str,
+    overrides: dict | None = None,
+    *,
+    data: bytes | None = None,
+) -> dict:
     response = await client.post(
         PREFIX + "imports/prepare",
         json={
@@ -241,13 +256,16 @@ async def prepare(
                 {
                     "client_id": identifier,
                     "filename": "landscape.png",
+                    "sha256": hashlib.sha256(
+                        data if data is not None else fixture_image(5, novelai=True)
+                    ).hexdigest(),
                     "overrides": overrides or {},
                 }
             ]
         },
     )
     assert response.status_code == 200, response.text
-    return PREFIX + response.json()["items"][0]["upload_endpoint"]
+    return response.json()
 
 
 def test_import_inspect_confirm_and_retry_are_consistent(tmp_path) -> None:
@@ -270,11 +288,12 @@ def test_import_inspect_confirm_and_retry_are_consistent(tmp_path) -> None:
             assert inspect.status_code == 200
             assert inspect.json()["format"] == "novelai"
             assert (await client.get(PREFIX + "gallery/list")).json()["total"] == 0
-            endpoint = await prepare(
+            prepared = await prepare(
                 client,
                 "import-first",
                 {"prompt": "人工说明", "parameters": {"seed": 78}},
             )
+            endpoint = PREFIX + prepared["items"][0]["upload_endpoint"]
             upload = await client.post(
                 endpoint,
                 files={
@@ -286,7 +305,11 @@ def test_import_inspect_confirm_and_retry_are_consistent(tmp_path) -> None:
                 },
             )
             assert upload.status_code == 200, upload.text
-            identifier = upload.json()["generation_id"]
+            assert upload.json()["uploaded"]
+            assert (await client.get(PREFIX + "gallery/list")).json()["total"] == 0
+            committed = await client.post(PREFIX + prepared["commit_endpoint"], json={})
+            assert committed.status_code == 200, committed.text
+            identifier = committed.json()["generation_id"]
             detail = (
                 await client.get(
                     PREFIX + f"gallery/detail/{identifier}", params={"assets": 0}
@@ -308,19 +331,11 @@ def test_import_inspect_confirm_and_retry_are_consistent(tmp_path) -> None:
                     },
                 )
             ).status_code == 410
-            retry = await prepare(client, "import-first")
-            duplicate = await client.post(
-                retry,
-                files={
-                    "file": (
-                        "landscape.png",
-                        fixture_image(5, novelai=True),
-                        "image/png",
-                    )
-                },
-            )
-            assert duplicate.status_code == 200
-            assert duplicate.json() == {"generation_id": identifier, "duplicate": True}
+            retry = await client.post(PREFIX + prepared["commit_endpoint"], json={})
+            assert retry.json() == committed.json()
+            duplicate = await prepare(client, "import-first")
+            assert duplicate["allowed"] is False
+            assert duplicate["code"] == "gallery_duplicates"
             assert (
                 await client.get(
                     PREFIX + "gallery/list",
@@ -563,7 +578,8 @@ def test_invalid_input_and_oversize_upload_rejected_without_persistence(
             ]:
                 response = await client.post(PREFIX + path, json=body)
                 assert response.status_code == 400, (path, response.text)
-            endpoint = await prepare(client, "oversize")
+            prepared = await prepare(client, "oversize", data=b"not an image")
+            endpoint = PREFIX + prepared["items"][0]["upload_endpoint"]
             response = await client.post(
                 endpoint,
                 files={

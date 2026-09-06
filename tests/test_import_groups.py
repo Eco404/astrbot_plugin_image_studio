@@ -11,7 +11,7 @@ import pytest
 from PIL import Image, PngImagePlugin
 
 from astrbot_plugin_image_studio.config import HistorySettings
-from astrbot_plugin_image_studio.storage import GenerationStore
+from astrbot_plugin_image_studio.storage import GenerationStore, ImportDuplicateError
 
 
 def image(color="red", *, prompt="embedded", model="embedded-model", seed=1):
@@ -32,7 +32,7 @@ def stage(store, data, name, **overrides):
     return {"path": path, "filename": name, "overrides": overrides}
 
 
-def comfy_multi_output_image():
+def comfy_multi_output_image(color="red"):
     graph = {}
     for offset, prompt in ((0, "first branch prompt"), (10, "second branch prompt")):
         graph.update(
@@ -78,7 +78,7 @@ def comfy_multi_output_image():
     for key, value in raw.items():
         info.add_text(key, value)
     output = io.BytesIO()
-    Image.new("RGB", (24, 32), "red").save(output, "PNG", pnginfo=info)
+    Image.new("RGB", (24, 32), color).save(output, "PNG", pnginfo=info)
     return output.getvalue(), raw
 
 
@@ -97,8 +97,12 @@ def test_comfy_output_selection_is_required_and_link_scoped(tmp_path):
         first = await store.import_image(
             data, "first.png", {"comfy_output_node": "6"}, import_key="first-branch"
         )
+        with pytest.raises(ImportDuplicateError):
+            await store.import_image(
+                data, "duplicate-branch.png", {"comfy_output_node": "16"}
+            )
         second = await store.import_image(
-            data,
+            comfy_multi_output_image("blue")[0],
             "second.png",
             {
                 "comfy_output_node": "16",
@@ -107,7 +111,7 @@ def test_comfy_output_selection_is_required_and_link_scoped(tmp_path):
             },
         )
         assert first["generation_id"] != second["generation_id"]
-        assert len(list(store.assets_dir.rglob("*.png"))) == 1
+        assert len(list(store.assets_dir.rglob("*.png"))) == 2
         for result, selected, expected in (
             (first, "6", "first branch prompt"),
             (second, "16", "second branch prompt"),
@@ -208,7 +212,11 @@ def test_comfy_group_retry_rejects_changed_output_selection(tmp_path):
         entries = [
             stage(store, data, "first.png", model="same model", comfy_output_node="6"),
             stage(
-                store, data, "second.png", model="same model", comfy_output_node="16"
+                store,
+                comfy_multi_output_image("blue")[0],
+                "second.png",
+                model="same model",
+                comfy_output_node="16",
             ),
         ]
         imported = await store.import_group(entries, import_key="branch-group")
@@ -335,7 +343,7 @@ def test_group_retry_uses_original_ordered_manifest_after_partial_delete(tmp_pat
             "generation_id": created["generation_id"],
             "duplicate": True,
         }
-        with pytest.raises(ValueError, match="顺序不同"):
+        with pytest.raises(ValueError, match="顺序或参数"):
             await store.import_group(list(reversed(entries)), import_key="group")
         detail = await store.generation_detail(
             created["generation_id"], include_assets=False
@@ -352,9 +360,7 @@ def test_group_retry_uses_original_ordered_manifest_after_partial_delete(tmp_pat
     asyncio.run(run())
 
 
-def test_group_shares_assets_but_keeps_association_data_and_single_import_identity(
-    tmp_path,
-):
+def test_group_rejects_repeated_bytes_without_overwriting_image_parameters(tmp_path):
     async def run():
         store = GenerationStore(tmp_path)
         await store.initialize()
@@ -363,35 +369,18 @@ def test_group_shares_assets_but_keeps_association_data_and_single_import_identi
             stage(store, data, "one.png", prompt="one"),
             stage(store, data, "two.png", prompt="two"),
         ]
-        grouped = await store.import_group(entries, import_key="group")
-        assert len(list(store.assets_dir.rglob("*.png"))) == 1
-        detail = await store.generation_detail(
-            grouped["generation_id"], include_assets=False
-        )
-        assert [item["supplemental"]["prompt"] for item in detail["images"]] == [
-            "one",
-            "two",
-        ]
-        assert detail["images"][0]["sha256"] == detail["images"][1]["sha256"]
-        await store.delete_images(detail["id"], [detail["images"][0]["id"]])
-        single = await store.import_image(data, "single.png", {"prompt": "single"})
-        assert (
-            single["generation_id"] != grouped["generation_id"]
-            and not single["duplicate"]
-        )
-        assert (await store.import_image(data, "again.png", {}))[
-            "generation_id"
-        ] == single["generation_id"]
-        with pytest.raises(ValueError, match="另一张图片"):
-            await store.import_image(data, "single.png", {}, import_key="group")
-        await store.set_favorite(grouped["generation_id"], True)
-        status = await store.retention_status(HistorySettings(True, 0, 0, False))
-        assert status["record_count"] == status["size_bytes"] == 0
-        store._cleanup_sync(HistorySettings(True, 0, 0, False))
-        assert (await store.list_generations({}))["total"] == 2
-        await store.delete_generation(grouped["generation_id"])
-        assert len(list(store.assets_dir.rglob("*.png"))) == 1
-        await store.delete_generation(single["generation_id"])
+        with pytest.raises(ImportDuplicateError) as duplicate:
+            await store.import_group(entries, import_key="group")
+        assert duplicate.value.code == "batch_duplicates"
+        assert (await store.list_generations({}))["total"] == 0
+        assert not list(store.assets_dir.rglob("*.png"))
+        first = await store.import_image(data, "first.png", {"prompt": "original"})
+        with pytest.raises(ImportDuplicateError):
+            await store.import_group([entries[0]], import_key="second-group")
+        assert (await store.generation_detail(first["generation_id"]))[
+            "original_prompt"
+        ] == "original"
+        await store.delete_generation(first["generation_id"])
         assert not list(store.assets_dir.rglob("*.png"))
 
     asyncio.run(run())
@@ -406,7 +395,7 @@ def test_group_failure_rolls_back_all_links_and_preserves_shared_assets(
         data = image()
         existing = await store.import_image(data, "existing.png", {})
         entries = [
-            stage(store, data, "one.png"),
+            stage(store, image("yellow"), "one.png"),
             stage(store, image("blue"), "two.png"),
         ]
 
@@ -488,7 +477,7 @@ def test_dev1_upgrade_preserves_single_import_and_metadata(tmp_path):
                 conn.execute(
                     "SELECT target_version, dev_revision FROM schema_meta"
                 ).fetchone()["dev_revision"]
-                == 2
+                == 3
             )
             assert conn.execute("PRAGMA user_version").fetchone()[0] == 0
         await upgraded.initialize()
@@ -606,7 +595,7 @@ def test_nai_source_aliases_share_filters_and_preserve_raw_import_information(tm
                 )
             ] == original_metadata
             assert (
-                conn.execute("SELECT dev_revision FROM schema_meta").fetchone()[0] == 2
+                conn.execute("SELECT dev_revision FROM schema_meta").fetchone()[0] == 3
             )
 
     asyncio.run(run())

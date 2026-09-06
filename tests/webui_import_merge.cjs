@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { execFileSync } = require("node:child_process");
+const { createHash } = require("node:crypto");
 const { chromium } = require(process.env.STUDIO_PLAYWRIGHT || "playwright");
 const base = process.env.STUDIO_TEST_URL;
 if (!base) throw new Error("Set STUDIO_TEST_URL to an isolated WebUI harness.");
@@ -20,10 +21,10 @@ folder=Path(sys.argv[1]); paths=[]
 for i in range(6):
  image=Image.new("RGB",(320,240),(175+i*3,204,210));draw=ImageDraw.Draw(image);draw.rectangle((0,150,320,240),fill=(103,148+i*3,138));draw.polygon([(0,165),(125,48),(250,165)],fill=(116,140,151));draw.ellipse((226,32,277,61),fill=(232,239,230))
  params={"prompt":f"safe landscape merge image {i}","uc":"blur, watermark","model":f"merge-model-{i}","steps":20+i,"scale":6,"cfg_rescale":0.3,"seed":10+i,"width":320,"height":240,"request_type":"PromptGenerateRequest"}
- metadata=PngImagePlugin.PngInfo();metadata.add_text("Software","NovelAI");metadata.add_text("Comment",json.dumps(params));file=folder/f"merge-{i}.png";image.save(file,pnginfo=metadata);paths.append(str(file))
+ metadata=PngImagePlugin.PngInfo();metadata.add_text("Software","NovelAI");metadata.add_text("Comment",json.dumps(params));metadata.add_text("BrowserFixture",sys.argv[2] if len(sys.argv)>2 else folder.name);file=folder/f"merge-{i}.png";image.save(file,pnginfo=metadata);paths.append(str(file))
 print(json.dumps(paths))
 `;
-const fixtures = JSON.parse(execFileSync(python, ["-c", fixtureScript, output], { encoding: "utf8" }));
+let fixtures = JSON.parse(execFileSync(python, ["-c", fixtureScript, output], { encoding: "utf8" }));
 
 async function body(response) { const payload = await response.json(); return payload.data || payload; }
 async function api(page, method, endpoint, data) {
@@ -34,9 +35,10 @@ async function api(page, method, endpoint, data) {
 
 async function importSeed(page, name, index = 0) {
   const bytes = execFileSync(python, ["-c", "import sys,io; from PIL import Image,PngImagePlugin; image=Image.open(sys.argv[1]); metadata=PngImagePlugin.PngInfo(); [metadata.add_text(k,v) for k,v in image.info.items() if isinstance(v,str)]; metadata.add_text('MergeFixture',sys.argv[2]); output=io.BytesIO(); image.save(output,format='PNG',pnginfo=metadata); sys.stdout.buffer.write(output.getvalue())", fixtures[index], name]);
-  const prepared = await api(page, "post", "imports/prepare", { items: [{ client_id: `${runId}_${name}`, filename: `${name}.png`, overrides: { generation_engine: "novelai", model: name, prompt: `safe seeded landscape ${name}` } }] });
+  const prepared = await api(page, "post", "imports/prepare", { items: [{ client_id: `${runId}_${name}`, filename: `${name}.png`, sha256: createHash("sha256").update(bytes).digest("hex"), overrides: { generation_engine: "novelai", model: name, prompt: `safe seeded landscape ${name}` } }] });
   const response = await page.request.post(`${apiRoot}/${prepared.items[0].upload_endpoint}`, { multipart: { file: { name: `${name}.png`, mimeType: "image/png", buffer: bytes } } });
-  assert.ok(response.ok()); return (await body(response)).generation_id;
+  assert.ok(response.ok());
+  return (await api(page, "post", prepared.commit_endpoint, {})).generation_id;
 }
 
 async function settle(inner) {
@@ -89,6 +91,24 @@ async function target(frame, id) {
 }
 
 async function cleared(frame) { await frame.locator("#importGrid").filter({ hasNot: frame.locator(".import-card") }).waitFor({ state: "attached" }); }
+
+async function verifyBridgeContract(inner, network) {
+  const before = network.targets;
+  const rejected = await inner.evaluate(async () => {
+    const paths = ["imports/merge-targets?generation_engine=novelai", "imports/merge-targets#fragment", "imports/../merge-targets"];
+    return await Promise.all(paths.map(async (path) => {
+      try { await window.AstrBotPluginPage.apiGet(path); return "accepted"; }
+      catch (error) { return error.message; }
+    }));
+  });
+  assert.ok(rejected.every(message => message === "Plugin bridge endpoint is invalid."));
+  assert.equal(network.targets, before, "invalid endpoints must fail before any backend request");
+  const result = await inner.evaluate(() => window.AstrBotPluginPage.apiGet("imports/merge-targets", { generation_engine: "novelai", limit: 1, offset: 0 }));
+  assert.equal(result.items.length, 1);
+  assert.equal(result.limit, 1);
+  assert.equal(result.offset, 0);
+  assert.equal(network.targets, before + 1);
+}
 
 async function rejectCases(page, frame, inner, name, network) {
   await stage(frame, fixtures.slice(1, 3));
@@ -179,12 +199,14 @@ async function lostCommitResponse(page, frame, name, targetId, network) {
     await seed.close();
     for (const test of [{ width: 1440, theme: "light" }, { width: 1100, theme: "dark" }, { width: 390, theme: "light" }, { width: 320, theme: "dark" }]) {
       const name = `${test.width}-${test.theme}`; const page = await browser.newPage({ viewport: { width: test.width, height: test.width < 600 ? 844 : 1000 }, hasTouch: test.width < 600 });
+      fixtures = JSON.parse(execFileSync(python, ["-c", fixtureScript, output, `${name}-${runId}`], { encoding: "utf8" }));
       page.setDefaultTimeout(12000); const errors = []; page.on("pageerror", (error) => errors.push(error.message));
       await page.goto(base); const frame = page.frameLocator("#studio"); await frame.locator("#runtimeStatus").filter({ hasText: "已加载" }).waitFor({ state: "attached" });
       const targetId = await importSeed(page, `${name}-target-A-${runId}`);
       const inner = page.frames().find((item) => item.url().includes("/ui/")); await inner.evaluate((value) => { document.documentElement.dataset.theme = value; }, test.theme);
       const network = { prepare: 0, upload: 0, targets: 0 };
       page.on("request", (request) => { if (request.url().includes("/imports/prepare")) network.prepare++; if (request.url().includes("/imports/upload/")) network.upload++; if (request.url().includes("/imports/merge-targets")) network.targets++; });
+      await verifyBridgeContract(inner, network);
       await frame.locator('[data-view="import"]').click();
       await rejectCases(page, frame, inner, name, network);
       await paginationAndRetry(page, frame, inner, name, targetId, network);

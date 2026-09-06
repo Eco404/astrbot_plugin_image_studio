@@ -77,6 +77,7 @@ def test_import_preserves_metadata_and_separates_request_snapshot(tmp_path):
         assert generated_detail["final_prompt"] == "actual prompt"
         assert generated_detail["generation_engine"] == "novelai"
         assert generated_detail["provider_kind"] == "nai_direct"
+        await store.delete_generation(generated)
         imported = await store.import_image(
             raw,
             "原图.png",
@@ -94,13 +95,16 @@ def test_import_preserves_metadata_and_separates_request_snapshot(tmp_path):
         assert detail["supplemental"]["display_parameters"]["extra"] == 0
         assert detail["supplemental"]["original_filename"] == "原图.png"
         duplicate = await store.import_image(
-            raw, "new.png", {"prompt": "overwrite"}, import_key="upload-1"
+            raw,
+            "原图.png",
+            {"prompt": "my correction", "parameters": {"extra": 0}},
+            import_key="upload-1",
         )
         assert duplicate == {
             "generation_id": imported["generation_id"],
             "duplicate": True,
         }
-        with pytest.raises(ValueError, match="另一张图片"):
+        with pytest.raises(ValueError, match="其他图片"):
             await store.import_image(
                 picture("blue"), "other.png", {}, import_key="upload-1"
             )
@@ -125,6 +129,7 @@ def test_quota_excludes_imports_favorites_and_shared_assets(tmp_path):
         store = GenerationStore(tmp_path)
         await store.initialize()
         red, green, blue = picture(), picture("green"), picture("blue")
+        await store.import_image(red, "shared.png", {})
         ordinary = await record(store, [red])
         favorite = await record(store, [green])
         imported = await store.import_image(blue, "import.png", {})
@@ -132,8 +137,7 @@ def test_quota_excludes_imports_favorites_and_shared_assets(tmp_path):
         status = await store.retention_status(HistorySettings(True, 1, 0, False))
         assert status["record_count"] == 1 and status["near_limit"]
         assert status["candidate_ids"] == [ordinary]
-        assert status["favorite_records"] == status["imported_records"] == 1
-        await store.import_image(red, "shared.png", {})
+        assert status["favorite_records"] == 1 and status["imported_records"] == 2
         assert (await store.retention_status(HistorySettings(True, 1, 0, False)))[
             "size_bytes"
         ] == 0
@@ -272,7 +276,7 @@ def test_database_development_versions_are_explicit_and_unknown_are_rejected(tmp
             assert conn.execute("PRAGMA user_version").fetchone()[0] == 0
             assert conn.execute(
                 "SELECT target_version, dev_revision FROM schema_meta"
-            ).fetchone() == (1, 2)
+            ).fetchone() == (1, 3)
             conn.execute("UPDATE schema_meta SET dev_revision = 99")
         with pytest.raises(RuntimeError, match="开发修订"):
             await GenerationStore(tmp_path).initialize()
@@ -321,9 +325,9 @@ def test_quota_usage_splits_exempt_records_and_unique_assets(tmp_path):
         store = GenerationStore(tmp_path)
         await store.initialize()
         counted = await record(store, [picture("red")])
+        imported = await store.import_image(picture("blue"), "import.png", {})
         await record(store, [picture("blue")])
         favorite = await record(store, [picture("green")])
-        imported = await store.import_image(picture("blue"), "import.png", {})
         await store.set_favorite(favorite, True)
         await store.set_favorite(imported["generation_id"], True)
         await store.lease_agent_images(
@@ -702,7 +706,7 @@ def test_metadata_upgrade_refreshes_import_projection_but_preserves_request_and_
         generated_before = await store.generation_detail(
             generated, include_assets=False
         )
-        automatic = await store.import_image(picture(), "automatic.png", {})
+        automatic = await store.import_image(picture("green"), "automatic.png", {})
         explicit = {
             "prompt": "",
             "negative_prompt": "",
@@ -790,7 +794,7 @@ def test_metadata_upgrade_refreshes_import_projection_but_preserves_request_and_
             assert generated_after[key] == generated_before[key]
         with store._connect() as conn:
             assert (
-                conn.execute("SELECT dev_revision FROM schema_meta").fetchone()[0] == 2
+                conn.execute("SELECT dev_revision FROM schema_meta").fetchone()[0] == 3
             )
 
     asyncio.run(run())

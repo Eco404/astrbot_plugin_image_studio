@@ -13,7 +13,7 @@ from astrbot_plugin_image_studio.models import (
     GenerationRequest,
     ImageProvider,
 )
-from astrbot_plugin_image_studio.storage import GenerationStore
+from astrbot_plugin_image_studio.storage import GenerationStore, ImportDuplicateError
 from astrbot_plugin_image_studio.tests.test_import_groups import image, stage
 
 
@@ -239,7 +239,7 @@ def test_append_receipts_survive_restart_and_partial_deletion(tmp_path):
         before = await store.generation_detail(target, include_assets=False)
         entries = [
             stage(store, image("green"), "new-a.png"),
-            stage(store, image("red"), "new-b.png"),
+            stage(store, image("yellow"), "new-b.png"),
         ]
         await store.append_import_group(
             entries, target, import_key="merge", expected_engine="novelai"
@@ -279,35 +279,26 @@ def test_append_receipts_survive_restart_and_partial_deletion(tmp_path):
     asyncio.run(run())
 
 
-def test_append_duplicate_bytes_keep_separate_links_and_existing_asset(tmp_path):
+def test_append_duplicate_bytes_are_rejected_without_changing_target(tmp_path):
     async def run():
         store = GenerationStore(tmp_path)
         await store.initialize()
         data = image()
         target = (await store.import_image(data, "first.png", {}))["generation_id"]
+        before = await store.generation_detail(target, include_assets=False)
         entries = [
             stage(store, data, "repeat-a.png", prompt="A"),
             stage(store, data, "repeat-b.png", prompt="B"),
         ]
-        await store.append_import_group(
-            entries, target, import_key="repeats", expected_engine="novelai"
-        )
-        detail = await store.generation_detail(target, include_assets=False)
-        assert (
-            len(detail["images"]) == 3
-            and len({item["id"] for item in detail["images"]}) == 3
-        )
+        with pytest.raises(ImportDuplicateError) as duplicate:
+            await store.append_import_group(
+                entries, target, import_key="repeats", expected_engine="novelai"
+            )
+        assert duplicate.value.code == "batch_duplicates"
+        assert await store.generation_detail(target, include_assets=False) == before
         assert len(list(store.assets_dir.rglob("*.png"))) == 1
-        assert len(list(store.thumbnails_dir.glob("*.webp"))) == 1
-        await store.delete_images(
-            target, [detail["images"][0]["id"], detail["images"][1]["id"]]
-        )
-        assert len(list(store.assets_dir.rglob("*.png"))) == 1
-        assert (await store.generation_detail(target))["images"][0]["supplemental"][
-            "prompt"
-        ] == "B"
-        single = await store.import_image(data, "separate single.png", {})
-        assert single["generation_id"] != target
+        with pytest.raises(ImportDuplicateError):
+            await store.import_image(data, "another.png", {"prompt": "new"})
 
     asyncio.run(run())
 
@@ -322,7 +313,7 @@ def test_append_failure_rolls_back_database_and_removes_only_new_orphans(
         target = (await store.import_image(data, "target.png", {}))["generation_id"]
         before = await store.generation_detail(target, include_assets=False)
         entries = [
-            stage(store, data, "shared.png"),
+            stage(store, image("green"), "shared.png"),
             stage(store, image("blue"), "new.png"),
         ]
 
@@ -349,14 +340,20 @@ def test_append_enforces_total_image_limit_without_partial_addition(tmp_path):
         await store.initialize()
         data = image()
         target = (await store.import_image(data, "target.png", {}))["generation_id"]
-        entries = [stage(store, data, f"repeat-{index}.png") for index in range(99)]
+        entries = [
+            stage(store, image(seed=index + 10), f"new-{index}.png")
+            for index in range(99)
+        ]
         result = await store.append_import_group(
             entries, target, import_key="full", expected_engine="novelai"
         )
         assert result["image_count"] == 100
         with pytest.raises(ValueError, match="100 张上限"):
             await store.append_import_group(
-                entries[:1], target, import_key="too-many", expected_engine="novelai"
+                [stage(store, image(seed=1000), "extra.png")],
+                target,
+                import_key="too-many",
+                expected_engine="novelai",
             )
         assert (
             len((await store.generation_detail(target, include_assets=False))["images"])
@@ -390,12 +387,14 @@ def test_merge_receipts_remain_internal_and_do_not_enter_search_or_exports(tmp_p
                 "SELECT supplemental_json, search_text FROM generations WHERE id = ?",
                 (target,),
             ).fetchone()
-            receipt = json.loads(row["supplemental_json"])["merge_operations"][
-                operation_id
-            ]
+            batch = conn.execute(
+                "SELECT fingerprint, result_json FROM import_batches WHERE id = ?",
+                (operation_id,),
+            ).fetchone()
+            receipt = json.loads(batch["result_json"])
             assert receipt["added"] == 1
             assert operation_id not in row["search_text"]
-            assert receipt["fingerprint"] not in row["search_text"]
+            assert batch["fingerprint"] not in row["search_text"]
         detail = await store.generation_detail(target, include_assets=False)
         assert "merge_operations" not in detail["supplemental"]
         assert all(
@@ -434,16 +433,18 @@ def test_merge_receipts_remain_internal_and_do_not_enter_search_or_exports(tmp_p
 
 
 @pytest.mark.parametrize("change", ["source", "deleted"])
-def test_append_rechecks_target_after_asset_preparation(tmp_path, monkeypatch, change):
+def test_append_rechecks_target_after_metadata_preparation(
+    tmp_path, monkeypatch, change
+):
     async def run():
         store = GenerationStore(tmp_path)
         await store.initialize()
         target = (await store.import_image(image(), "target.png", {}))["generation_id"]
         entries = [stage(store, image("blue"), "new.png")]
-        prepare_assets = store._prepare_import_assets_sync
+        prepare_entries = store._prepare_import_entries_sync
 
-        def changed_target(prepared, preview_max_edge, preview_quality):
-            result = prepare_assets(prepared, preview_max_edge, preview_quality)
+        def changed_target(prepared):
+            result = prepare_entries(prepared)
             if change == "deleted":
                 store._delete_generation_sync(target)
             else:
@@ -460,7 +461,7 @@ def test_append_rechecks_target_after_asset_preparation(tmp_path, monkeypatch, c
                     )
             return result
 
-        monkeypatch.setattr(store, "_prepare_import_assets_sync", changed_target)
+        monkeypatch.setattr(store, "_prepare_import_entries_sync", changed_target)
         with pytest.raises(ValueError, match="来源不一致|已被删除"):
             await store.append_import_group(
                 entries, target, import_key="changed", expected_engine="novelai"

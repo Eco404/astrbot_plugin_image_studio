@@ -45,7 +45,7 @@ for identifier,node in graph.items():
  if kind=="KSampler":
   data=node["inputs"]; values=[data["seed"],"fixed",data["steps"],data["cfg"],data["sampler_name"],data["scheduler"],data["denoise"]]
  nodes.append({"id":int(identifier),"type":kind,"pos":[int(identifier)*20,100],"size":[200,120],"inputs":inputs,"widgets_values":values})
-workflow={"last_node_id":14,"last_link_id":next_link-1,"nodes":nodes,"links":links,"groups":[],"config":{},"extra":{"fixture":name},"version":0.4}
+workflow={"last_node_id":14,"last_link_id":next_link-1,"nodes":nodes,"links":links,"groups":[],"config":{},"extra":{"fixture":name,"run":folder.name},"version":0.4}
 workflow_text=json.dumps(workflow,ensure_ascii=False,indent=2)+"\n"
 api_text=json.dumps(graph,ensure_ascii=False,indent=1)+"\n"
 (folder/f"{name}-workflow.json").write_text(workflow_text)
@@ -113,12 +113,13 @@ async function verifyStages(scope, name) {
       const frame = page.frameLocator("#studio"); await frame.locator("#runtimeStatus").filter({ hasText: "已加载" }).waitFor({ state: "attached" });
       const inner = page.frames().find((item) => item.url().includes("/ui/")); await inner.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
       await frame.locator('[data-view="import"]').click();
-      const inspectReplies = []; const uploads = []; let submitted;
+      const inspectReplies = []; const uploads = []; let submitted; let committed;
       page.on("request", (request) => { if (request.url().includes("/imports/prepare")) submitted = request.postDataJSON(); });
       const responses = [];
       page.on("response", (response) => {
         if (response.url().includes("/imports/inspect")) responses.push(response.json().then((body) => inspectReplies.push(body.data || body)));
         if (response.url().includes("/imports/upload/")) responses.push(response.json().then((body) => uploads.push(body.data || body)));
+        if (/\/imports\/group\/[^/]+\/commit/.test(response.url())) responses.push(response.json().then((body) => { committed = body.data || body; }));
       });
       await frame.locator("#importFiles").setInputFiles(fixture.files);
       await frame.locator("#confirmImportButton:not(:disabled)").waitFor(); await Promise.all(responses);
@@ -143,8 +144,9 @@ async function verifyStages(scope, name) {
       const automatic = submitted.items[0].overrides; const cleared = submitted.items[1].overrides;
       for (const key of ["prompt", "mode", "generation_engine", "model", "negative_prompt", "parameters"]) assert.equal(Object.hasOwn(automatic, key), false, `untouched automatic ${key} must not become an override`);
       assert.ok(automatic.generated_at > 0, "fallback import date should be preserved"); assert.equal(cleared.prompt, "", "manual clear must survive as an explicit override");
-      const first = await api(page, `gallery/detail/${uploads[0].generation_id}?assets=0`);
-      const second = await api(page, `gallery/detail/${uploads[1].generation_id}?assets=0`);
+      assert.equal(committed.generation_ids.length, 2);
+      const first = await api(page, `gallery/detail/${committed.generation_ids[0]}?assets=0`);
+      const second = await api(page, `gallery/detail/${committed.generation_ids[1]}?assets=0`);
       assert.match(first.original_prompt, /mountain lake in daylight/); assert.equal(second.original_prompt, "");
       assert.equal(second.supplemental.overrides.prompt, "");
       assert.match(second.images[0].metadata.normalized.prompt, /mountain lake in daylight/);

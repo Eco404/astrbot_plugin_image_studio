@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 
 import httpx
 import pytest
@@ -20,8 +21,9 @@ async def target_record(app, *, color="red", engine="novelai", model="target-mod
 
 
 async def prepare_merge(
-    client, target_id, *, count=1, engine="novelai", overrides=None
+    client, target_id, *, count=1, engine="novelai", overrides=None, data=None
 ):
+    images = data or [image(color) for color in ("blue", "green")[:count]]
     response = await client.post(
         PREFIX + "imports/prepare",
         json={
@@ -31,6 +33,7 @@ async def prepare_merge(
                 {
                     "client_id": f"merge-item-{index}",
                     "filename": f"merge-{index}.png",
+                    "sha256": hashlib.sha256(images[index]).hexdigest(),
                     "overrides": overrides or {},
                 }
                 for index in range(count)
@@ -97,7 +100,9 @@ def test_merge_single_into_single_and_retry_retains_individual_models(tmp_path):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test"
         ) as client:
-            prepared = await prepare_merge(client, target, engine="nai")
+            prepared = await prepare_merge(
+                client, target, engine="nai", data=[image("blue", model="new-model")]
+            )
             staged = await upload(client, prepared, image("blue", model="new-model"))
             assert staged.status_code == 200
             group = app.state.plugin._import_groups[prepared["group_id"]]
@@ -148,7 +153,7 @@ def test_merge_prepare_rejects_invalid_target_or_ambiguous_source(tmp_path, extr
                 json={
                     "merge_target_id": target,
                     "generation_engine": "novelai",
-                    "items": [{"client_id": "a"}],
+                    "items": [{"client_id": "a", "sha256": "a" * 64}],
                     **extra,
                 },
             )
@@ -175,11 +180,13 @@ def test_merge_declared_source_mismatch_rejected_before_upload(tmp_path):
                         {
                             "client_id": "a",
                             "filename": "one.png",
+                            "sha256": "a" * 64,
                             "overrides": {"generation_engine": "novelai"},
                         },
                         {
                             "client_id": "b",
                             "filename": "two.png",
+                            "sha256": "b" * 64,
                             "overrides": {"generation_engine": "comfyui"},
                         },
                     ],
@@ -216,7 +223,7 @@ def test_merge_cancel_discards_staging_without_touching_target(tmp_path):
     asyncio.run(run())
 
 
-def test_merge_commit_source_error_preserves_upload_for_correction_retry(tmp_path):
+def test_merge_commit_source_error_discards_invalid_batch_for_new_prepare(tmp_path):
     async def run():
         app = await create_app(tmp_path, seed=False)
         target = await target_record(app)
@@ -237,13 +244,17 @@ def test_merge_commit_source_error_preserves_upload_for_correction_retry(tmp_pat
             group["items"][1][1]["overrides"]["generation_engine"] = "comfyui"
             failed = await client.post(PREFIX + prepared["commit_endpoint"], json={})
             assert failed.status_code == 400
-            assert group["directory"].exists()
+            assert not group["directory"].exists()
             detail = await app.state.plugin.store.generation_detail(
                 target, include_assets=False
             )
             assert len(detail["images"]) == 1
-            group["items"][1][1]["overrides"]["generation_engine"] = "novelai"
-            retried = await client.post(PREFIX + prepared["commit_endpoint"], json={})
+            replacement = await prepare_merge(client, target, count=2)
+            await upload(client, replacement, image("blue"))
+            await upload(client, replacement, image("green"), 1)
+            retried = await client.post(
+                PREFIX + replacement["commit_endpoint"], json={}
+            )
             assert retried.status_code == 200, retried.text
             assert retried.json()["added_count"] == 2
 
@@ -264,9 +275,7 @@ def test_merge_commit_rechecks_deleted_target_and_does_not_create_replacement(tm
             assert response.status_code == 400
             assert "目标" in response.json()["message"]
             assert (await client.get(PREFIX + "gallery/list")).json()["total"] == 0
-            assert app.state.plugin._import_groups[prepared["group_id"]][
-                "directory"
-            ].exists()
+            assert prepared["group_id"] not in app.state.plugin._import_groups
 
     asyncio.run(run())
 
@@ -278,13 +287,16 @@ def test_actual_uploaded_unknown_source_fails_then_reupload_can_retry(tmp_path):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test"
         ) as client:
-            prepared = await prepare_merge(client, target)
+            prepared = await prepare_merge(client, target, data=[fixture_image(33)])
             assert (
                 await upload(client, prepared, fixture_image(33))
             ).status_code == 200
             failed = await client.post(PREFIX + prepared["commit_endpoint"], json={})
             assert failed.status_code == 400
             assert "来源" in failed.json()["message"]
+            prepared = await prepare_merge(
+                client, target, data=[image("blue", model="reuploaded-model")]
+            )
             assert (
                 await upload(client, prepared, image("blue", model="reuploaded-model"))
             ).status_code == 200
@@ -341,7 +353,7 @@ def test_merge_prepare_rejects_automatic_target_and_overfull_batch(tmp_path):
                 json={
                     "merge_target_id": generated.json()["generation_id"],
                     "generation_engine": "novelai",
-                    "items": [{"client_id": "first"}],
+                    "items": [{"client_id": "first", "sha256": "a" * 64}],
                 },
             )
             assert rejected.status_code == 400
@@ -351,7 +363,10 @@ def test_merge_prepare_rejects_automatic_target_and_overfull_batch(tmp_path):
                 json={
                     "merge_target_id": target,
                     "generation_engine": "novelai",
-                    "items": [{"client_id": f"item-{index}"} for index in range(100)],
+                    "items": [
+                        {"client_id": f"item-{index}", "sha256": f"{index:064x}"}
+                        for index in range(100)
+                    ],
                 },
             )
             assert overfull.status_code == 400

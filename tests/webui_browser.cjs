@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { execFileSync } = require("node:child_process");
 const { chromium } = require(process.env.STUDIO_PLAYWRIGHT || "playwright");
 const root = path.resolve(__dirname, "..");
 const base = process.env.STUDIO_TEST_URL || "http://127.0.0.1:18765";
@@ -161,7 +162,8 @@ async function opened(browser, test) {
     await frame.locator('[data-view="import"]').click();
     const files = ["20260831162558_t2i_nai-diffusion-4-5-full.png", "Anima_00001_.png", "Stable Diffusion 149299935.webp"].map(name => path.join(root, "data/image", name));
     if (files.every(file => fs.existsSync(file))) {
-      await frame.locator("#importFiles").setInputFiles(files);
+      const testFiles = files.map((file, index) => ({ name: `unique-browser-${index}.png`, mimeType: "image/png", buffer: execFileSync(process.env.STUDIO_PYTHON || "/home/coder/apps/miniconda3/envs/astrbot/bin/python", ["-c", "import sys,io; from PIL import Image,PngImagePlugin; image=Image.open(sys.argv[1]); metadata=PngImagePlugin.PngInfo(); [metadata.add_text(k,v) for k,v in image.info.items() if isinstance(v,str)]; metadata.add_text('BrowserFixture',sys.argv[2]); output=io.BytesIO(); image.save(output,format='PNG',pnginfo=metadata,exif=image.info.get('exif',b'')); sys.stdout.buffer.write(output.getvalue())", file, `${path.basename(output)}-${index}`], { maxBuffer: 32 * 1024 * 1024 }) }));
+      await frame.locator("#importFiles").setInputFiles(testFiles);
       await frame.locator(".import-card").nth(2).waitFor();
       await frame.locator("#confirmImportButton:not(:disabled)").waitFor();
       assert.equal(calls.filter(url => url.includes("/upload/")).length, 0, "no image uploads before confirmation");
@@ -170,10 +172,9 @@ async function opened(browser, test) {
       const malicious = 'model" autofocus onfocus="window.__metadataExecuted=true';
       await frame.locator('[data-import-field="model"]').first().fill(malicious);
       // A second batch redraws existing cards with the edited model attribute.
-      await frame.locator("#importFiles").setInputFiles(files.slice(0, 1));
-      await frame.locator(".import-card").nth(3).waitFor();
+      await frame.locator("#importFiles").setInputFiles(testFiles.slice(0, 1));
       await frame.locator("#confirmImportButton:not(:disabled)").waitFor();
-      await frame.locator("[data-remove-import]").nth(3).click();
+      assert.equal(await frame.locator(".import-card").count(), 3, "reselecting the same bytes must not add another card");
       assert.equal(await frame.locator('[data-import-field="model"]').first().inputValue(), malicious);
       assert.equal(await inner.evaluate(() => !!window.__metadataExecuted), false);
       await frame.locator('.import-card [data-import-field="prompt"]').first().fill("手动修改的导入提示词");

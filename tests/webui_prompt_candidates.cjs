@@ -43,7 +43,7 @@ second={
 files={}; workflows={}
 for kind in ("single", "multi", "group_a", "group_b"):
  data={**graph,**(second if kind=="multi" else {})}
- workflow={"nodes":[{"id":int(key),"type":node["class_type"],"inputs":[],"widgets_values":[],"pos":[int(key)*2,40],"size":[200,100]} for key,node in data.items()],"links":[],"groups":[],"extra":{"test":name,"kind":kind},"version":0.4}
+ workflow={"nodes":[{"id":int(key),"type":node["class_type"],"inputs":[],"widgets_values":[],"pos":[int(key)*2,40],"size":[200,100]} for key,node in data.items()],"links":[],"groups":[],"extra":{"test":name,"kind":kind,"run":folder.name},"version":0.4}
  raw_workflow=json.dumps(workflow,indent=2)+"\n";raw_graph=json.dumps(data,indent=1)+"\n"
  workflow_path=folder/f"{name}-{kind}-workflow.json"; workflow_path.write_text(raw_workflow);workflows[kind]=str(workflow_path)
  image=Image.new("RGB",(640,480),(175,206,212));draw=ImageDraw.Draw(image);draw.rectangle((0,300,640,480),fill=(102,148,137));draw.polygon([(0,320),(250,90),(500,320)],fill=(117,143,151));draw.ellipse((440,75,535,130),fill=(231,236,226));draw.line((0,390,640,345),fill=(208,220,197),width=6)
@@ -99,7 +99,7 @@ async function stage(page, frame, file) {
 
 async function submitSingle(page, frame) {
   const prepare = page.waitForRequest((request) => request.url().includes("/imports/prepare"));
-  const uploaded = page.waitForResponse((response) => response.url().includes("/imports/upload/"));
+  const uploaded = page.waitForResponse((response) => /\/imports\/group\/[^/]+\/commit/.test(response.url()));
   await frame.locator("#confirmImportButton").click();
   const request = (await prepare).postDataJSON(); const result = await jsonResponse(await uploaded);
   await frame.locator("#importGrid").filter({ hasNot: frame.locator(".import-card") }).waitFor({ state: "attached" });

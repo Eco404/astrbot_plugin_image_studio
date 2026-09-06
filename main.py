@@ -44,6 +44,7 @@ from .providers import ProviderError, ProviderExecutor
 from .service import ImageGenerationService
 from .storage import (
     GenerationStore,
+    ImportDuplicateError,
     detect_mime_type,
     export_image_filename,
     image_data_url,
@@ -184,6 +185,12 @@ class ImageStudioPlugin(Star):
                 "Image Studio: prepare imports",
             ),
             (
+                "imports/check",
+                self._api_import_check,
+                ["POST"],
+                "Image Studio: check import batch hashes",
+            ),
+            (
                 "imports/merge-targets",
                 self._api_import_merge_targets,
                 ["GET"],
@@ -193,13 +200,13 @@ class ImageStudioPlugin(Star):
                 "imports/group/<group_id>/commit",
                 self._api_import_group_commit,
                 ["POST"],
-                "Image Studio: commit image group",
+                "Image Studio: commit import batch",
             ),
             (
                 "imports/group/<group_id>/cancel",
                 self._api_import_group_cancel,
                 ["POST"],
-                "Image Studio: cancel image group",
+                "Image Studio: cancel import batch",
             ),
             (
                 "imports/upload/<upload_id>",
@@ -491,6 +498,53 @@ class ImageStudioPlugin(Star):
             return error_response(str(exc), status_code=400)
 
     @staticmethod
+    def _import_hash_items(body: Any) -> list[dict[str, str]]:
+        items = body.get("items") if isinstance(body, dict) else None
+        if not isinstance(items, list) or not 1 <= len(items) <= 100:
+            raise ValueError("每批请选择 1 至 100 张图片")
+        result, seen = [], set()
+        for item in items:
+            if not isinstance(item, dict):
+                raise ValueError("导入项目格式错误")
+            client_id, digest = item.get("client_id"), item.get("sha256")
+            if (
+                not isinstance(client_id, str)
+                or not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", client_id)
+                or client_id in seen
+            ):
+                raise ValueError("导入图片标识无效或重复")
+            if not isinstance(digest, str) or not re.fullmatch(
+                r"[a-fA-F0-9]{64}", digest
+            ):
+                raise ValueError(f"图片 {client_id} 缺少有效的 SHA-256，请重新选择图片")
+            seen.add(client_id)
+            result.append({"client_id": client_id, "sha256": digest.lower()})
+        return result
+
+    async def _check_import_items(self, items: list[dict[str, str]]) -> dict[str, Any]:
+        hashes = [item["sha256"] for item in items]
+        seen, repeated = set(), set()
+        for digest in hashes:
+            if digest in seen:
+                repeated.add(digest)
+            seen.add(digest)
+        if repeated:
+            return {
+                "allowed": False,
+                "code": "batch_duplicates",
+                "duplicate_hashes": sorted(repeated),
+                "message": "本次选择包含内容相同的图片，请移除重复图片后重试",
+            }
+        return await self.store.check_import_hashes(hashes)
+
+    async def _api_import_check(self) -> Any:
+        try:
+            items = self._import_hash_items(await web_request.json(default={}))
+            return json_response(await self._check_import_items(items))
+        except ValueError as exc:
+            return error_response(str(exc), status_code=400)
+
+    @staticmethod
     def _import_merge_engine(value: Any) -> str:
         if not isinstance(value, str) or not value.strip() or len(value.strip()) > 80:
             raise ValueError("请先为待合并图片选择明确的生图来源")
@@ -523,6 +577,14 @@ class ImageStudioPlugin(Star):
         items = body.get("items") if isinstance(body, dict) else None
         if not isinstance(items, list) or not 1 <= len(items) <= 100:
             return error_response("每批请选择 1 至 100 张图片", status_code=400)
+        try:
+            hashes = self._import_hash_items(body)
+            check = await self._check_import_items(hashes)
+        except ValueError as exc:
+            return error_response(str(exc), status_code=400)
+        if not check["allowed"]:
+            return json_response(check)
+        hashes_by_id = {item["client_id"]: item["sha256"] for item in hashes}
         as_group = body.get("as_group", False)
         if not isinstance(as_group, bool):
             return error_response("图组选项必须是布尔值", status_code=400)
@@ -600,6 +662,7 @@ class ImageStudioPlugin(Star):
                     uuid.uuid4().hex,
                     {
                         "client_id": client_id,
+                        "sha256": hashes_by_id[client_id],
                         "created_at": now,
                         "filename": str(item.get("filename") or "import.png")[:240],
                         "overrides": copy.deepcopy(overrides),
@@ -610,7 +673,6 @@ class ImageStudioPlugin(Star):
             return error_response(
                 "待上传项目过多，请完成已有上传后重试", status_code=429
             )
-        group_response: dict[str, Any] = {}
         if as_group:
             models = [item["overrides"].get("model") for _, item in pending]
             if any(not isinstance(model, str) or not model.strip() for model in models):
@@ -625,32 +687,33 @@ class ImageStudioPlugin(Star):
                 return error_response(
                     f"图组中的模型必须相同，当前模型不一致：{details}", status_code=400
                 )
-        if as_group or merge_target_id:
-            group_id = uuid.uuid4().hex
-            directory = self.store.imports_dir / group_id
-            await asyncio.to_thread(directory.mkdir, parents=True, exist_ok=False)
-            for ordinal, (token, item) in enumerate(pending):
-                item.update(
-                    group_id=group_id,
-                    path=directory / f"{ordinal:03d}-{token}.image",
-                    uploaded=False,
-                )
-                if as_group:
-                    item["overrides"]["model"] = item["overrides"]["model"].strip()
-            self._import_groups[group_id] = {
-                "created_at": now,
-                "directory": directory,
-                "items": pending,
-                "lock": asyncio.Lock(),
-                "result": None,
-                "merge_target_id": merge_target_id,
-                "expected_engine": expected_engine,
-            }
-            group_response = {
-                "group_id": group_id,
-                "commit_endpoint": f"imports/group/{group_id}/commit",
-                "cancel_endpoint": f"imports/group/{group_id}/cancel",
-            }
+        group_id = uuid.uuid4().hex
+        directory = self.store.imports_dir / group_id
+        await asyncio.to_thread(directory.mkdir, parents=True, exist_ok=False)
+        for ordinal, (token, item) in enumerate(pending):
+            item.update(
+                group_id=group_id,
+                path=directory / f"{ordinal:03d}-{token}.image",
+                uploaded=False,
+            )
+            if as_group:
+                item["overrides"]["model"] = item["overrides"]["model"].strip()
+        self._import_groups[group_id] = {
+            "created_at": now,
+            "directory": directory,
+            "items": pending,
+            "lock": asyncio.Lock(),
+            "result": None,
+            "merge_target_id": merge_target_id,
+            "expected_engine": expected_engine,
+            "mode": "merge" if merge_target_id else "group" if as_group else "separate",
+        }
+        group_response = {
+            "allowed": True,
+            "group_id": group_id,
+            "commit_endpoint": f"imports/group/{group_id}/commit",
+            "cancel_endpoint": f"imports/group/{group_id}/cancel",
+        }
         self._imports.update(pending)
         return json_response(
             {
@@ -680,16 +743,29 @@ class ImageStudioPlugin(Star):
         raw = await upload.read(limit + 1)
         if not raw or len(raw) > limit:
             return error_response("图片为空或超过 30 MB", status_code=400)
+        actual_digest = hashlib.sha256(raw).hexdigest()
+        if actual_digest != item["sha256"]:
+            return json_response(
+                {
+                    "allowed": False,
+                    "code": "hash_mismatch",
+                    "client_id": item["client_id"],
+                    "expected_sha256": item["sha256"],
+                    "actual_sha256": actual_digest,
+                    "message": "上传图片内容与查重时不一致，请重新选择或上传原图片",
+                }
+            )
         if item.get("group_id"):
             group = self._import_groups.get(item["group_id"])
             if group is None:
-                return error_response("图组上传已过期或取消，请重试", status_code=410)
+                return error_response("导入批次已过期或取消，请重试", status_code=410)
             async with group["lock"]:
                 if self._import_groups.get(item["group_id"]) is not group:
-                    return error_response("图组上传已取消，请重试", status_code=410)
+                    return error_response("导入批次已取消，请重试", status_code=410)
                 if group["result"] is not None:
                     return json_response(
                         {
+                            "allowed": True,
                             "uploaded": True,
                             "group_id": item["group_id"],
                             "committed": True,
@@ -700,6 +776,7 @@ class ImageStudioPlugin(Star):
                     item["uploaded"] = True
                     return json_response(
                         {
+                            "allowed": True,
                             "uploaded": True,
                             "group_id": item["group_id"],
                             "client_id": item["client_id"],
@@ -709,25 +786,9 @@ class ImageStudioPlugin(Star):
                     return error_response(str(exc), status_code=400)
                 except OSError:
                     return error_response(
-                        "图组图片暂存失败，请检查磁盘空间后重试", status_code=500
+                        "图片暂存失败，请检查磁盘空间后重试", status_code=500
                     )
-        try:
-            result = await self.store.import_image(
-                raw,
-                item["filename"],
-                item["overrides"],
-                import_key=item["client_id"],
-                preview_max_edge=self._settings.asset_preview_max_edge,
-                preview_quality=self._settings.asset_preview_quality,
-            )
-        except ValueError as exc:
-            return error_response(str(exc), status_code=400)
-        except OSError:
-            return error_response(
-                "图片保存失败，请检查数据目录及磁盘空间后重试", status_code=500
-            )
-        self._imports.pop(upload_id, None)
-        return json_response(result)
+        return error_response("导入批次不存在，请重新选择图片", status_code=410)
 
     async def _expire_import_groups(self) -> None:
         now = time.time()
@@ -760,16 +821,32 @@ class ImageStudioPlugin(Star):
                 await self._discard_import_group(group_id, group)
         return json_response({"cancelled": True})
 
+    @staticmethod
+    def _import_batch_result(saved: dict[str, Any]) -> dict[str, Any]:
+        return {
+            **saved,
+            "allowed": True,
+            "merged": saved["mode"] == "merge",
+            "added_count": saved["added"],
+        }
+
     async def _api_import_group_commit(self, group_id: str) -> Any:
+        if not re.fullmatch(r"[a-f0-9]{32}", group_id):
+            return error_response("导入批次 ID 无效", status_code=400)
         group = self._import_groups.get(group_id)
-        if group is None:
-            return error_response("图组上传已过期或取消，请重试", status_code=410)
+        if group is None or time.time() - group["created_at"] >= 3600:
+            previous = await self.store.get_import_batch_result(
+                f"import_batch:{group_id}"
+            )
+            if previous is not None:
+                return json_response(self._import_batch_result(previous))
+            return error_response("导入批次已过期或取消，请重试", status_code=410)
         async with group["lock"]:
             if (
                 self._import_groups.get(group_id) is not group
                 or time.time() - group["created_at"] >= 3600
             ):
-                return error_response("图组上传已过期或取消，请重试", status_code=410)
+                return error_response("导入批次已过期或取消，请重试", status_code=410)
             if group["result"] is not None:
                 return json_response(group["result"])
             missing = [
@@ -777,35 +854,28 @@ class ImageStudioPlugin(Star):
             ]
             if missing:
                 return error_response(
-                    f"图组尚有图片未上传：{'、'.join(missing)}", status_code=400
+                    f"本批尚有图片未上传：{'、'.join(missing)}", status_code=400
                 )
             try:
-                if group.get("merge_target_id"):
-                    appended = await self.store.append_import_group(
-                        [item for _, item in group["items"]],
-                        group["merge_target_id"],
-                        import_key=f"import_merge:{group_id}",
-                        expected_engine=group["expected_engine"],
-                        preview_max_edge=self._settings.asset_preview_max_edge,
-                        preview_quality=self._settings.asset_preview_quality,
-                    )
-                    result = {
-                        **appended,
-                        "merged": True,
-                        "added_count": appended["added"],
-                    }
-                else:
-                    result = await self.store.import_group(
-                        [item for _, item in group["items"]],
-                        import_key=f"group:{group_id}",
-                        preview_max_edge=self._settings.asset_preview_max_edge,
-                        preview_quality=self._settings.asset_preview_quality,
-                    )
+                saved = await self.store.commit_import_batch(
+                    [item for _, item in group["items"]],
+                    import_key=f"import_batch:{group_id}",
+                    mode=group["mode"],
+                    target_id=group.get("merge_target_id", ""),
+                    expected_engine=group.get("expected_engine", ""),
+                    preview_max_edge=self._settings.asset_preview_max_edge,
+                    preview_quality=self._settings.asset_preview_quality,
+                )
+                result = self._import_batch_result(saved)
+            except ImportDuplicateError as exc:
+                await self._discard_import_group(group_id, group)
+                return json_response(exc.as_dict())
             except ValueError as exc:
+                await self._discard_import_group(group_id, group)
                 return error_response(str(exc), status_code=400)
             except OSError:
                 return error_response(
-                    "图组保存失败，请检查磁盘空间后重试", status_code=500
+                    "导入保存失败，请检查磁盘空间后重试", status_code=500
                 )
             group["result"] = result
             for token, _ in group["items"]:
@@ -815,7 +885,7 @@ class ImageStudioPlugin(Star):
             try:
                 await asyncio.to_thread(shutil.rmtree, group["directory"])
             except OSError:
-                logger.warning("%s 图组已保存，暂存目录将由维护任务清理", LOG_TAG)
+                logger.warning("%s 导入批次已保存，暂存目录将由维护任务清理", LOG_TAG)
             return json_response(result)
 
     async def _api_resolve_parameters(self) -> Any:

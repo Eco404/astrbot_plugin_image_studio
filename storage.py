@@ -40,6 +40,28 @@ _SAFE_ID_RE = re.compile(r"^[a-f0-9]{32}$")
 _SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 
 
+class ImportDuplicateError(ValueError):
+    """A recoverable import conflict identified by exact content hashes."""
+
+    def __init__(self, duplicate_hashes: list[str], *, batch: bool = False) -> None:
+        self.duplicate_hashes = list(dict.fromkeys(duplicate_hashes))
+        self.code = "batch_duplicates" if batch else "gallery_duplicates"
+        message = (
+            f"本次上传包含 {len(duplicate_hashes)} 张批内重复图片，整批上传已取消，请移除重复项"
+            if batch
+            else f"本次上传包含 {len(duplicate_hashes)} 张画廊已有图片，整批上传已取消，请移除重复项"
+        )
+        super().__init__(message)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "allowed": False,
+            "code": self.code,
+            "duplicate_hashes": self.duplicate_hashes,
+            "message": str(self),
+        }
+
+
 class GenerationStore:
     """Store plugin-owned gallery files and queryable generation metadata."""
 
@@ -159,6 +181,13 @@ class GenerationStore:
                     parser_version INTEGER NOT NULL,
                     metadata_json TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS import_batches (
+                    id TEXT PRIMARY KEY,
+                    fingerprint TEXT NOT NULL,
+                    result_json TEXT NOT NULL,
+                    expires_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_import_batches_expiry ON import_batches(expires_at);
                 CREATE INDEX IF NOT EXISTS idx_generations_created_at ON generations(created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_generations_provider ON generations(provider_id);
                 CREATE INDEX IF NOT EXISTS idx_generation_images_generation ON generation_images(generation_id);
@@ -316,6 +345,7 @@ class GenerationStore:
             finish_development_schema(conn)
         self._backfill_metadata_sync()
         self._delete_expired_leases_sync(time.time())
+        self._delete_expired_import_batches_sync(time.time())
         self._purge_unreferenced_assets_sync()
         self._cleanup_orphaned_asset_files_sync()
         self._cleanup_orphaned_thumbnails_sync()
@@ -556,6 +586,7 @@ class GenerationStore:
         errors: list[str] = []
         repaired = {
             "expired_leases": 0,
+            "expired_import_batches": 0,
             "broken_assets": 0,
             "rebuilt_thumbnails": 0,
             "unreferenced_assets": 0,
@@ -575,6 +606,9 @@ class GenerationStore:
             errors.append(f"SQLite 检查失败：{type(exc).__name__}")
 
         repaired["expired_leases"] = self._delete_expired_leases_sync(checked_at)
+        repaired["expired_import_batches"] = self._delete_expired_import_batches_sync(
+            checked_at
+        )
         self._backfill_metadata_sync()
         broken_ids: list[str] = []
         with self._connect() as conn:
@@ -1231,124 +1265,26 @@ class GenerationStore:
         preview_max_edge: int,
         preview_quality: int,
     ) -> dict[str, Any]:
-        digest = hashlib.sha256(data).hexdigest()
-        requested_output = overrides.get("comfy_output_node") or ""
-        with self._connect() as conn:
-            duplicate = None
-            if import_key:
-                duplicate = conn.execute(
-                    "SELECT g.id, g.supplemental_json, i.asset_id FROM generations g LEFT JOIN generation_images i "
-                    "ON i.generation_id = g.id WHERE g.import_key = ? ORDER BY i.ordinal LIMIT 1",
-                    (import_key,),
-                ).fetchone()
-                if duplicate is not None and (
-                    duplicate["asset_id"] != digest
-                    or _load_json(duplicate["supplemental_json"]).get("is_import_group")
-                    or (
-                        _load_json(duplicate["supplemental_json"])
-                        .get("overrides", {})
-                        .get("comfy_output_node")
-                        or ""
-                    )
-                    != requested_output
-                ):
-                    raise ValueError(
-                        "导入请求标识已用于另一张图片，请重新选择文件后重试"
-                    )
-            if duplicate is None:
-                possible = conn.execute(
-                    "SELECT g.id, g.supplemental_json FROM generations g JOIN generation_images i "
-                    "ON i.generation_id = g.id WHERE g.source = 'import' "
-                    "AND i.asset_id = ? AND (SELECT COUNT(*) FROM generation_images siblings "
-                    "WHERE siblings.generation_id = g.id) = 1 ORDER BY g.created_at, g.id",
-                    (digest,),
-                ).fetchall()
-                duplicate = next(
-                    (
-                        row
-                        for row in possible
-                        if not _load_json(row["supplemental_json"]).get(
-                            "is_import_group"
-                        )
-                        and not _load_json(row["supplemental_json"]).get(
-                            "merge_operations"
-                        )
-                        and (
-                            _load_json(row["supplemental_json"])
-                            .get("overrides", {})
-                            .get("comfy_output_node")
-                            or ""
-                        )
-                        == requested_output
-                    ),
-                    None,
-                )
-            if duplicate is not None:
-                return {"generation_id": str(duplicate["id"]), "duplicate": True}
-        metadata = self._metadata_for_asset_sync(digest, data, strict=True)
-        normalized = metadata.get("normalized", {})
-        generation_id = uuid.uuid4().hex
-        created_at = time.time()
-        supplemental = _import_supplemental(filename, overrides, metadata)
-        try:
-            asset = self._prepare_asset_sync(data, "")
-            thumbnail = self._prepare_thumbnail_sync(
-                asset, max_edge=preview_max_edge, quality=preview_quality
-            )
-            with self._connect() as conn:
-                conn.execute(
-                    "INSERT INTO image_assets (id, path, mime_type, size_bytes, width, height, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET file_state='available'",
-                    (
-                        digest,
-                        asset["path"],
-                        asset["mime_type"],
-                        asset["size_bytes"],
-                        asset["width"],
-                        asset["height"],
-                        created_at,
-                    ),
-                )
-                self._upsert_thumbnails_sync(conn, [thumbnail])
-                self._save_metadata_sync(conn, {digest: metadata})
-                conn.execute(
-                    "INSERT INTO generations (id, created_at, source, status, mode, "
-                    "provider_id, provider_name, provider_kind, model, original_prompt, "
-                    "final_prompt, parameters_json, elapsed_ms, generation_engine, generated_at, "
-                    "supplemental_json, import_key) "
-                    "VALUES (?, ?, 'import', 'succeeded', ?, '', '', '', ?, ?, ?, '{}', 0, ?, ?, ?, ?)",
-                    (
-                        generation_id,
-                        created_at,
-                        supplemental["mode"],
-                        supplemental["model"],
-                        supplemental["prompt"],
-                        str(normalized.get("prompt") or supplemental["prompt"]),
-                        supplemental["generation_engine"],
-                        supplemental["generated_at"],
-                        json.dumps(
-                            supplemental, ensure_ascii=False, separators=(",", ":")
-                        ),
-                        import_key or None,
-                    ),
-                )
-                conn.execute(
-                    "INSERT INTO generation_images (id, generation_id, ordinal, asset_id, supplemental_json) VALUES (?, ?, 0, ?, ?)",
-                    (
-                        uuid.uuid4().hex,
-                        generation_id,
-                        digest,
-                        json.dumps(
-                            supplemental, ensure_ascii=False, separators=(",", ":")
-                        ),
-                    ),
-                )
-                self._refresh_search_sync(conn, generation_id)
-        except Exception:
-            self._cleanup_orphaned_asset_files_sync()
-            self._cleanup_orphaned_thumbnails_sync()
-            raise
-        return {"generation_id": generation_id, "duplicate": False}
+        result = self._commit_import_batch_sync(
+            [
+                {
+                    "data": data,
+                    "filename": filename,
+                    "overrides": overrides,
+                    "sha256": hashlib.sha256(data).hexdigest(),
+                }
+            ],
+            import_key or uuid.uuid4().hex,
+            "separate",
+            "",
+            "",
+            preview_max_edge,
+            preview_quality,
+        )
+        return {
+            "generation_id": result["generation_id"],
+            "duplicate": result["duplicate"],
+        }
 
     async def stage_import_file(self, path: Path, data: bytes) -> None:
         """Validate and stage an import while excluding concurrent maintenance."""
@@ -1413,20 +1349,39 @@ class GenerationStore:
         preview_max_edge: int,
         preview_quality: int,
     ) -> dict[str, Any]:
-        prepared = self._prepare_import_entries_sync(entries)
-        models = {item["supplemental"]["model"] for item in prepared}
-        if "" in models or len(models) != 1:
-            descriptions = [
-                f"第 {index + 1} 张（{item['supplemental']['original_filename']}）："
-                f"{item['supplemental']['model'] or '未填写模型'}"
-                for index, item in enumerate(prepared)
-            ]
-            raise ValueError(
-                "图组中的模型必须全部填写且完全相同。" + "；".join(descriptions)
-            )
-        return self._create_import_group_sync(
-            prepared, import_key, preview_max_edge, preview_quality
+        result = self._commit_import_batch_sync(
+            self._declare_import_entries_sync(entries),
+            import_key,
+            "group",
+            "",
+            "",
+            preview_max_edge,
+            preview_quality,
         )
+        return {
+            "generation_id": result["generation_id"],
+            "duplicate": result["duplicate"],
+        }
+
+    def _declare_import_entries_sync(
+        self, entries: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        declared = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ValueError("导入项目必须为对象")
+            item = dict(entry)
+            if "sha256" not in item:
+                try:
+                    item["sha256"] = hashlib.sha256(
+                        self._read_import_file_sync(item.get("path"))
+                    ).hexdigest()
+                except (ValueError, OSError) as exc:
+                    raise ValueError(
+                        f"{item.get('filename') or '待导入图片'}：{exc}"
+                    ) from exc
+            declared.append(item)
+        return declared
 
     def _prepare_import_entries_sync(
         self, entries: list[dict[str, Any]]
@@ -1442,13 +1397,21 @@ class GenerationStore:
             try:
                 overrides = entry.get("overrides", {})
                 _validate_import_overrides(overrides)
-                data = self._read_import_file_sync(entry.get("path"))
+                data = (
+                    entry.get("data")
+                    if isinstance(entry.get("data"), bytes)
+                    else self._read_import_file_sync(entry.get("path"))
+                )
+                _validate_import_content(data)
                 digest = hashlib.sha256(data).hexdigest()
+                if digest != entry.get("sha256"):
+                    raise ValueError("实际图片 SHA-256 与声明不一致，请重新选择图片")
                 metadata = self._metadata_for_asset_sync(digest, data, strict=True)
                 supplemental = _import_supplemental(filename, overrides, metadata)
                 prepared.append(
                     {
-                        "path": entry["path"],
+                        "path": entry.get("path"),
+                        "data": entry.get("data"),
                         "digest": digest,
                         "metadata": metadata,
                         "supplemental": supplemental,
@@ -1472,7 +1435,11 @@ class GenerationStore:
         for item in prepared:
             if item["digest"] in assets:
                 continue
-            data = self._read_import_file_sync(item["path"])
+            data = (
+                item.get("data")
+                if isinstance(item.get("data"), bytes)
+                else self._read_import_file_sync(item["path"])
+            )
             if hashlib.sha256(data).hexdigest() != item["digest"]:
                 raise ValueError("待导入图片在准备过程中发生变化，请重新上传")
             asset = self._prepare_asset_sync(data, "")
@@ -1483,124 +1450,6 @@ class GenerationStore:
                 quality=preview_quality,
             )
         return assets, thumbnails
-
-    def _create_import_group_sync(
-        self,
-        prepared: list[dict[str, Any]],
-        import_key: str,
-        preview_max_edge: int,
-        preview_quality: int,
-    ) -> dict[str, Any]:
-        manifest = [item["digest"] for item in prepared]
-        with self._connect() as conn:
-            duplicate = conn.execute(
-                "SELECT id, supplemental_json FROM generations WHERE import_key = ?",
-                (import_key,),
-            ).fetchone()
-        if duplicate is not None:
-            original = _load_json(duplicate["supplemental_json"])
-            if (
-                not original.get("is_import_group")
-                or original.get("group_manifest") != manifest
-                or original.get("group_output_nodes", [""] * len(manifest))
-                != [
-                    item["supplemental"]["overrides"].get("comfy_output_node", "")
-                    for item in prepared
-                ]
-            ):
-                raise ValueError(
-                    "导入请求标识已用于其他图片或顺序不同的图组，请重新准备导入"
-                )
-            return {"generation_id": str(duplicate["id"]), "duplicate": True}
-
-        generation_id = uuid.uuid4().hex
-        created_at = time.time()
-        first = prepared[0]["supplemental"]
-        modes = {item["supplemental"]["mode"] for item in prepared}
-        engines = {item["supplemental"]["generation_engine"] for item in prepared}
-        group_supplemental = {
-            **first,
-            "is_import_group": True,
-            "group_manifest": manifest,
-            "group_output_nodes": [
-                item["supplemental"]["overrides"].get("comfy_output_node", "")
-                for item in prepared
-            ],
-        }
-        try:
-            assets, thumbnails = self._prepare_import_assets_sync(
-                prepared, preview_max_edge, preview_quality
-            )
-            with self._connect() as conn:
-                conn.executemany(
-                    "INSERT INTO image_assets (id, path, mime_type, size_bytes, width, height, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET file_state='available'",
-                    [
-                        (
-                            a["id"],
-                            a["path"],
-                            a["mime_type"],
-                            a["size_bytes"],
-                            a["width"],
-                            a["height"],
-                            created_at,
-                        )
-                        for a in assets.values()
-                    ],
-                )
-                self._upsert_thumbnails_sync(conn, thumbnails.values())
-                self._save_metadata_sync(
-                    conn, {item["digest"]: item["metadata"] for item in prepared}
-                )
-                conn.execute(
-                    "INSERT INTO generations (id, created_at, source, status, mode, provider_id, "
-                    "provider_name, provider_kind, model, original_prompt, final_prompt, parameters_json, "
-                    "elapsed_ms, generation_engine, generated_at, supplemental_json, import_key) "
-                    "VALUES (?, ?, 'import', 'succeeded', ?, '', '', '', ?, ?, ?, '{}', 0, ?, ?, ?, ?)",
-                    (
-                        generation_id,
-                        created_at,
-                        first["mode"] if len(modes) == 1 else "unknown",
-                        first["model"],
-                        first["prompt"],
-                        str(
-                            prepared[0]["metadata"].get("normalized", {}).get("prompt")
-                            or first["prompt"]
-                        ),
-                        first["generation_engine"] if len(engines) == 1 else "mixed",
-                        first["generated_at"],
-                        json.dumps(
-                            group_supplemental,
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                        ),
-                        import_key,
-                    ),
-                )
-                conn.executemany(
-                    "INSERT INTO generation_images (id, generation_id, ordinal, asset_id, supplemental_json) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    [
-                        (
-                            uuid.uuid4().hex,
-                            generation_id,
-                            ordinal,
-                            item["digest"],
-                            json.dumps(
-                                item["supplemental"],
-                                ensure_ascii=False,
-                                separators=(",", ":"),
-                            ),
-                        )
-                        for ordinal, item in enumerate(prepared)
-                    ],
-                )
-                self._refresh_search_sync(conn, generation_id)
-        except Exception:
-            self._cleanup_orphaned_asset_files_sync()
-            self._cleanup_orphaned_thumbnails_sync()
-            raise
-        return {"generation_id": generation_id, "duplicate": False}
 
     async def list_import_merge_targets(
         self, engine: str, *, limit: int = 24, offset: int = 0, query: str = ""
@@ -1699,154 +1548,406 @@ class GenerationStore:
         preview_max_edge: int,
         preview_quality: int,
     ) -> dict[str, Any]:
-        prepared = self._prepare_import_entries_sync(entries)
-        mismatched = [
-            f"第 {index + 1} 张（{item['supplemental']['original_filename']}）：{item['supplemental']['generation_engine']}"
-            for index, item in enumerate(prepared)
-            if item["supplemental"]["generation_engine"] != expected_engine
+        result = self._commit_import_batch_sync(
+            self._declare_import_entries_sync(entries),
+            import_key,
+            "merge",
+            target_id,
+            expected_engine,
+            preview_max_edge,
+            preview_quality,
+        )
+        return {
+            key: result[key]
+            for key in ("generation_id", "duplicate", "added", "image_count")
+        }
+
+    async def check_import_hashes(self, hashes: list[str]) -> dict[str, Any]:
+        """Check exact gallery membership and duplicates within an import selection."""
+
+        hashes = _validate_import_hashes(hashes)
+        async with self._lock:
+            return await asyncio.to_thread(self._check_import_hashes_sync, hashes)
+
+    def _check_import_hashes_sync(self, hashes: list[str]) -> dict[str, Any]:
+        with self._connect() as conn:
+            try:
+                self._assert_import_hashes_available(conn, hashes)
+            except ImportDuplicateError as exc:
+                return exc.as_dict()
+        return {"allowed": True, "duplicate_hashes": []}
+
+    @staticmethod
+    def _assert_import_hashes_available(
+        conn: sqlite3.Connection, hashes: list[str]
+    ) -> None:
+        seen: set[str] = set()
+        repeated: set[str] = set()
+        for digest in hashes:
+            if digest in seen:
+                repeated.add(digest)
+            seen.add(digest)
+        placeholders = ",".join("?" for _ in seen)
+        existing = {
+            str(row[0])
+            for row in conn.execute(
+                f"SELECT DISTINCT asset_id FROM generation_images WHERE asset_id IN ({placeholders})",
+                list(seen),
+            ).fetchall()
+        }
+        duplicates = [
+            digest for digest in hashes if digest in existing or digest in repeated
         ]
-        if mismatched:
-            raise ValueError(
-                "待合并图片必须全部具有相同的已知来源：" + "；".join(mismatched)
+        if duplicates:
+            raise ImportDuplicateError(duplicates, batch=bool(repeated))
+
+    async def commit_import_batch(
+        self,
+        entries: list[dict[str, Any]],
+        *,
+        import_key: str,
+        mode: str = "separate",
+        target_id: str = "",
+        expected_engine: str = "",
+        preview_max_edge: int = 768,
+        preview_quality: int = 80,
+    ) -> dict[str, Any]:
+        """Commit separate imports, a new group, or an append in one database transaction."""
+
+        if not isinstance(entries, list) or not 1 <= len(entries) <= 100:
+            raise ValueError("每次导入需要 1 至 100 张图片")
+        for entry in entries:
+            if not isinstance(entry, dict) or "data" in entry:
+                raise ValueError("批量导入项目必须使用已暂存的图片")
+            path = entry.get("path")
+            if not isinstance(path, (str, Path)) or not _is_within(
+                Path(path), self.imports_dir
+            ):
+                raise ValueError("待导入图片路径不属于导入暂存目录")
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._commit_import_batch_sync,
+                entries,
+                import_key,
+                mode,
+                target_id,
+                expected_engine,
+                preview_max_edge,
+                preview_quality,
             )
-        manifest = [item["digest"] for item in prepared]
+
+    def _import_batch_receipt_sync(
+        self, conn: sqlite3.Connection, import_key: str, fingerprint: str
+    ) -> dict[str, Any] | None:
+        row = conn.execute(
+            "SELECT fingerprint, result_json FROM import_batches WHERE id = ? AND expires_at > ?",
+            (import_key, time.time()),
+        ).fetchone()
+        if row is None:
+            return None
+        if row["fingerprint"] != fingerprint:
+            raise ValueError("导入请求标识已用于其他图片、顺序或参数，请重新准备导入")
+        result = _load_json(row["result_json"])
+        ids = result.get("generation_ids") or []
+        placeholders = ",".join("?" for _ in ids)
+        count = (
+            int(
+                conn.execute(
+                    f"SELECT COUNT(*) FROM generation_images WHERE generation_id IN ({placeholders})",
+                    ids,
+                ).fetchone()[0]
+            )
+            if ids
+            else 0
+        )
+        return {**result, "duplicate": True, "added": 0, "image_count": count}
+
+    async def get_import_batch_result(self, import_key: str) -> dict[str, Any] | None:
+        """Recover a successful import response after an API process restart."""
+
+        if not isinstance(import_key, str) or not import_key or len(import_key) > 160:
+            return None
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._get_import_batch_result_sync, import_key
+            )
+
+    def _get_import_batch_result_sync(self, import_key: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT result_json FROM import_batches WHERE id = ? AND expires_at > ?",
+                (import_key, time.time()),
+            ).fetchone()
+        return _load_json(row["result_json"]) if row is not None else None
+
+    def _commit_import_batch_sync(
+        self,
+        entries: list[dict[str, Any]],
+        import_key: str,
+        mode: str,
+        target_id: str,
+        expected_engine: str,
+        preview_max_edge: int,
+        preview_quality: int,
+    ) -> dict[str, Any]:
+        if (
+            not isinstance(import_key, str)
+            or not import_key.strip()
+            or len(import_key) > 160
+        ):
+            raise ValueError("导入请求标识无效")
+        import_key = import_key.strip()
+        if mode not in {"separate", "group", "merge"}:
+            raise ValueError("导入方式无效")
+        if not isinstance(entries, list) or not 1 <= len(entries) <= 100:
+            raise ValueError("每次导入需要 1 至 100 张图片")
+        if mode == "merge":
+            if not isinstance(target_id, str) or not _SAFE_ID_RE.fullmatch(target_id):
+                raise ValueError("目标导入图组 ID 无效")
+            expected_engine = _known_merge_engine(expected_engine)
+        elif target_id or expected_engine:
+            raise ValueError("只有合并导入可以指定目标和预期来源")
+        if any(not isinstance(entry, dict) for entry in entries):
+            raise ValueError("导入项目必须是对象")
+        hashes = _validate_import_hashes([entry.get("sha256") for entry in entries])
+        descriptors = []
+        for entry, digest in zip(entries, hashes, strict=True):
+            _validate_import_overrides(entry.get("overrides", {}))
+            descriptors.append(
+                {
+                    "sha256": digest,
+                    "filename": str(entry.get("filename") or ""),
+                    "overrides": entry.get("overrides", {}),
+                }
+            )
         fingerprint = hashlib.sha256(
             json.dumps(
-                [
-                    {
-                        "sha256": item["digest"],
-                        "filename": item["supplemental"]["original_filename"],
-                        "overrides": item["supplemental"]["overrides"],
-                    }
-                    for item in prepared
-                ],
+                {
+                    "mode": mode,
+                    "target_id": target_id,
+                    "expected_engine": expected_engine,
+                    "entries": descriptors,
+                },
                 sort_keys=True,
                 ensure_ascii=False,
                 separators=(",", ":"),
             ).encode("utf-8")
         ).hexdigest()
         with self._connect() as conn:
-            target, existing_images = self._merge_target_sync(
-                conn, target_id, expected_engine
-            )
-            operations = _load_json(target["supplemental_json"]).get(
-                "merge_operations", {}
-            )
-            if not isinstance(operations, dict):
-                raise ValueError("目标图组合并收据无效，请检查图组数据")
-            prior = operations.get(import_key)
-            if prior is not None:
-                if (
-                    not isinstance(prior, dict)
-                    or prior.get("fingerprint") != fingerprint
-                    or prior.get("engine") != expected_engine
-                ):
-                    raise ValueError(
-                        "合并请求标识已用于其他图片、顺序或参数，请重新准备导入"
-                    )
-                return {
-                    "generation_id": target_id,
-                    "duplicate": True,
-                    "added": 0,
-                    "image_count": len(existing_images),
-                }
-            if len(existing_images) + len(prepared) > 100:
+            previous = self._import_batch_receipt_sync(conn, import_key, fingerprint)
+            if previous is not None:
+                return previous
+        prepared = self._prepare_import_entries_sync(entries)
+        if mode == "group":
+            models = {item["supplemental"]["model"] for item in prepared}
+            if "" in models or len(models) != 1:
+                descriptions = [
+                    f"第 {index + 1} 张（{item['supplemental']['original_filename']}）：{item['supplemental']['model'] or '未填写模型'}"
+                    for index, item in enumerate(prepared)
+                ]
                 raise ValueError(
-                    f"目标图组已有 {len(existing_images)} 张，追加 {len(prepared)} 张后超过 100 张上限"
+                    "图组中的模型必须全部填写且完全相同。" + "；".join(descriptions)
+                )
+        if mode == "merge":
+            mismatched = [
+                f"第 {index + 1} 张（{item['supplemental']['original_filename']}）：{item['supplemental']['generation_engine']}"
+                for index, item in enumerate(prepared)
+                if item["supplemental"]["generation_engine"] != expected_engine
+            ]
+            if mismatched:
+                raise ValueError(
+                    "待合并图片必须全部具有相同的已知来源：" + "；".join(mismatched)
                 )
         try:
-            assets, thumbnails = self._prepare_import_assets_sync(
-                prepared, preview_max_edge, preview_quality
-            )
             with self._connect() as conn:
                 conn.execute("BEGIN IMMEDIATE")
-                target, existing_images = self._merge_target_sync(
-                    conn, target_id, expected_engine
+                previous = self._import_batch_receipt_sync(
+                    conn, import_key, fingerprint
                 )
-                supplemental = _load_json(target["supplemental_json"])
-                operations = supplemental.get("merge_operations", {})
-                if not isinstance(operations, dict) or import_key in operations:
-                    raise ValueError("目标图组合并状态已变化，请重试")
-                if len(existing_images) + len(prepared) > 100:
-                    raise ValueError("目标图组图片数量已变化，合并后超过 100 张上限")
+                if previous is not None:
+                    return previous
+                self._assert_import_hashes_available(conn, hashes)
+                target = None
+                existing_images: list[dict[str, Any]] = []
+                if mode == "merge":
+                    target, existing_images = self._merge_target_sync(
+                        conn, target_id, expected_engine
+                    )
+                    if len(existing_images) + len(prepared) > 100:
+                        raise ValueError(
+                            f"目标图组已有 {len(existing_images)} 张，追加 {len(prepared)} 张后超过 100 张上限"
+                        )
+                elif conn.execute(
+                    "SELECT 1 FROM generations WHERE import_key = ?", (import_key,)
+                ).fetchone():
+                    raise ValueError("该导入请求标识已被旧请求使用，请重新准备导入")
+                # Hold SQLite's writer reservation during preparation as well as insertion.
+                assets, thumbnails = self._prepare_import_assets_sync(
+                    prepared, preview_max_edge, preview_quality
+                )
+                now = time.time()
                 conn.executemany(
                     "INSERT INTO image_assets (id, path, mime_type, size_bytes, width, height, created_at) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET file_state='available'",
                     [
                         (
-                            a["id"],
-                            a["path"],
-                            a["mime_type"],
-                            a["size_bytes"],
-                            a["width"],
-                            a["height"],
-                            time.time(),
+                            asset["id"],
+                            asset["path"],
+                            asset["mime_type"],
+                            asset["size_bytes"],
+                            asset["width"],
+                            asset["height"],
+                            now,
                         )
-                        for a in assets.values()
+                        for asset in assets.values()
                     ],
                 )
                 self._upsert_thumbnails_sync(conn, thumbnails.values())
                 self._save_metadata_sync(
                     conn, {item["digest"]: item["metadata"] for item in prepared}
                 )
-                next_ordinal = max(int(item["ordinal"]) for item in existing_images) + 1
-                image_ids = [uuid.uuid4().hex for _ in prepared]
-                conn.executemany(
-                    "INSERT INTO generation_images (id, generation_id, ordinal, asset_id, supplemental_json) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    [
-                        (
-                            image_ids[index],
-                            target_id,
-                            next_ordinal + index,
-                            item["digest"],
-                            json.dumps(
-                                item["supplemental"],
-                                ensure_ascii=False,
-                                separators=(",", ":"),
-                            ),
+                if target is not None:
+                    next_ordinal = (
+                        max(int(item["ordinal"]) for item in existing_images) + 1
+                    )
+                    self._insert_import_images_sync(
+                        conn, target_id, prepared, next_ordinal
+                    )
+                    modes = {
+                        _load_json(item["supplemental_json"]).get(
+                            "mode", target["mode"]
                         )
-                        for index, item in enumerate(prepared)
-                    ],
-                )
-                old_modes = {
-                    _load_json(image["supplemental_json"]).get("mode", target["mode"])
-                    for image in existing_images
-                }
-                modes = old_modes | {item["supplemental"]["mode"] for item in prepared}
-                operations = {
-                    **operations,
-                    import_key: {
-                        "fingerprint": fingerprint,
-                        "manifest": manifest,
-                        "engine": expected_engine,
-                        "image_ids": image_ids,
-                        "added": len(prepared),
-                    },
-                }
-                supplemental = {**supplemental, "merge_operations": operations}
-                conn.execute(
-                    "UPDATE generations SET mode = ?, generation_engine = ?, supplemental_json = ? WHERE id = ?",
-                    (
-                        next(iter(modes)) if len(modes) == 1 else "unknown",
-                        expected_engine,
-                        json.dumps(
-                            supplemental, ensure_ascii=False, separators=(",", ":")
+                        for item in existing_images
+                    } | {item["supplemental"]["mode"] for item in prepared}
+                    conn.execute(
+                        "UPDATE generations SET mode = ?, generation_engine = ? WHERE id = ?",
+                        (
+                            next(iter(modes)) if len(modes) == 1 else "unknown",
+                            expected_engine,
+                            target_id,
                         ),
-                        target_id,
+                    )
+                    self._refresh_search_sync(conn, target_id)
+                    generation_ids = [target_id]
+                else:
+                    groups = (
+                        [[item] for item in prepared]
+                        if mode == "separate"
+                        else [prepared]
+                    )
+                    generation_ids = [
+                        self._insert_import_record_sync(
+                            conn,
+                            group,
+                            import_key if len(groups) == 1 else None,
+                            grouped=mode == "group",
+                        )
+                        for group in groups
+                    ]
+                result = {
+                    "mode": mode,
+                    "generation_ids": generation_ids,
+                    "generation_id": generation_ids[0]
+                    if len(generation_ids) == 1
+                    else "",
+                    "duplicate": False,
+                    "added": len(prepared),
+                    "image_count": len(existing_images) + len(prepared),
+                }
+                conn.execute(
+                    "INSERT INTO import_batches (id, fingerprint, result_json, expires_at) VALUES (?, ?, ?, ?) "
+                    "ON CONFLICT(id) DO UPDATE SET fingerprint=excluded.fingerprint, result_json=excluded.result_json, expires_at=excluded.expires_at",
+                    (
+                        import_key,
+                        fingerprint,
+                        json.dumps(result, ensure_ascii=False, separators=(",", ":")),
+                        now + 24 * 3600,
                     ),
                 )
-                self._refresh_search_sync(conn, target_id)
+            return result
         except Exception:
-            self._cleanup_orphaned_asset_files_sync()
-            self._cleanup_orphaned_thumbnails_sync()
+            with self._connect() as cleanup_conn:
+                cleanup_conn.execute("BEGIN IMMEDIATE")
+                self._cleanup_orphaned_asset_files_sync()
+                self._cleanup_orphaned_thumbnails_sync()
             raise
-        return {
-            "generation_id": target_id,
-            "duplicate": False,
-            "added": len(prepared),
-            "image_count": len(existing_images) + len(prepared),
-        }
+
+    def _insert_import_record_sync(
+        self,
+        conn: sqlite3.Connection,
+        prepared: list[dict[str, Any]],
+        import_key: str | None,
+        *,
+        grouped: bool,
+    ) -> str:
+        generation_id = uuid.uuid4().hex
+        first = prepared[0]["supplemental"]
+        modes = {item["supplemental"]["mode"] for item in prepared}
+        engines = {item["supplemental"]["generation_engine"] for item in prepared}
+        supplemental = dict(first)
+        if grouped:
+            supplemental.update(
+                is_import_group=True,
+                group_manifest=[item["digest"] for item in prepared],
+                group_output_nodes=[
+                    item["supplemental"]["overrides"].get("comfy_output_node", "")
+                    for item in prepared
+                ],
+            )
+        conn.execute(
+            "INSERT INTO generations (id, created_at, source, status, mode, provider_id, provider_name, provider_kind, model, original_prompt, final_prompt, parameters_json, elapsed_ms, generation_engine, generated_at, supplemental_json, import_key) "
+            "VALUES (?, ?, 'import', 'succeeded', ?, '', '', '', ?, ?, ?, '{}', 0, ?, ?, ?, ?)",
+            (
+                generation_id,
+                time.time(),
+                first["mode"] if len(modes) == 1 else "unknown",
+                first["model"],
+                first["prompt"],
+                str(
+                    prepared[0]["metadata"].get("normalized", {}).get("prompt")
+                    or first["prompt"]
+                ),
+                first["generation_engine"] if len(engines) == 1 else "mixed",
+                first["generated_at"],
+                json.dumps(supplemental, ensure_ascii=False, separators=(",", ":")),
+                import_key,
+            ),
+        )
+        self._insert_import_images_sync(conn, generation_id, prepared, 0)
+        self._refresh_search_sync(conn, generation_id)
+        return generation_id
+
+    @staticmethod
+    def _insert_import_images_sync(
+        conn: sqlite3.Connection,
+        generation_id: str,
+        prepared: list[dict[str, Any]],
+        next_ordinal: int,
+    ) -> None:
+        conn.executemany(
+            "INSERT INTO generation_images (id, generation_id, ordinal, asset_id, supplemental_json) VALUES (?, ?, ?, ?, ?)",
+            [
+                (
+                    uuid.uuid4().hex,
+                    generation_id,
+                    next_ordinal + index,
+                    item["digest"],
+                    json.dumps(
+                        item["supplemental"], ensure_ascii=False, separators=(",", ":")
+                    ),
+                )
+                for index, item in enumerate(prepared)
+            ],
+        )
+
+    def _delete_expired_import_batches_sync(self, now: float) -> int:
+        with self._connect() as conn:
+            return max(
+                0,
+                conn.execute(
+                    "DELETE FROM import_batches WHERE expires_at <= ?", (now,)
+                ).rowcount,
+            )
 
     async def list_generations(self, filters: dict[str, Any]) -> dict[str, Any]:
         """Return a paginated gallery collection and aggregate filter values."""
@@ -2990,6 +3091,17 @@ def image_data_url(data: bytes, mime_type: str) -> str:
     """Encode an image for the authenticated plugin iframe."""
 
     return f"data:{mime_type};base64,{base64.b64encode(data).decode('ascii')}"
+
+
+def _validate_import_hashes(hashes: Any) -> list[str]:
+    if not isinstance(hashes, list) or not 1 <= len(hashes) <= 100:
+        raise ValueError("每次查重需要 1 至 100 个图片哈希")
+    if any(
+        not isinstance(value, str) or not _SHA256_RE.fullmatch(value)
+        for value in hashes
+    ):
+        raise ValueError("图片 SHA-256 必须为 64 位小写十六进制字符串")
+    return list(hashes)
 
 
 def _validate_generation_selection(generation_ids: Any) -> list[str]:

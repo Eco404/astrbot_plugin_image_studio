@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { execFileSync } = require("node:child_process");
 const { chromium } = require(process.env.STUDIO_PLAYWRIGHT || "playwright");
 const base = process.env.STUDIO_TEST_URL || "http://127.0.0.1:18765";
 const root = path.resolve(__dirname, "..");
@@ -121,7 +122,8 @@ async function checkMenu(frame) {
       const sample = path.join(root, "data/image/149037466_p0.webp");
       if (fs.existsSync(sample)) {
         await frame.locator('[data-view="import"]').click();
-        await frame.locator("#importFiles").setInputFiles(sample);
+        const buffer = execFileSync(process.env.STUDIO_PYTHON || "/home/coder/apps/miniconda3/envs/astrbot/bin/python", ["-c", "import sys,io; from PIL import Image,PngImagePlugin; image=Image.open(sys.argv[1]); metadata=PngImagePlugin.PngInfo(); [metadata.add_text(k,v) for k,v in image.info.items() if isinstance(v,str)]; metadata.add_text('BrowserFixture',sys.argv[2]); output=io.BytesIO(); image.save(output,format='PNG',pnginfo=metadata,exif=image.info.get('exif',b'')); sys.stdout.buffer.write(output.getvalue())", sample, `${path.basename(output)}-${test.width}-${test.theme}`], { maxBuffer: 32 * 1024 * 1024 });
+        await frame.locator("#importFiles").setInputFiles({ name: `converted-${test.width}.png`, mimeType: "image/png", buffer });
         await frame.locator("#confirmImportButton:not(:disabled)").waitFor();
         assert.equal(await frame.locator('[data-import-field="generation_engine"]').inputValue(), "comfyui");
         assert.equal(await frame.locator('[data-import-field="model"]').inputValue(), "anima_baseV10.safetensors");

@@ -73,6 +73,7 @@
     if (/[\u3400-\u9fff]/.test(message)) return message;
     if (/network error|failed to fetch/i.test(message)) return `${fallback}：无法连接 AstrBot 后端`;
     if (/request failed with status code/i.test(message)) return `${fallback}：服务请求失败`;
+    if (/plugin bridge endpoint/i.test(message)) return `${fallback}：接口路径不符合 AstrBot 页面桥接要求`;
     if (/plugin bridge/i.test(message)) return `${fallback}：页面通信失败`;
     return `${fallback}：${message}`;
   }
