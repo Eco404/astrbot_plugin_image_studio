@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import math
 import re
 import time
 from pathlib import Path
@@ -64,11 +65,11 @@ class ImageGenerationService:
         mode: str,
         provider_id: str,
         prompt: str,
-        negative_prompt: str = "",
+        negative_prompt: str | None = None,
         model_ref: str = "",
         model: str = "",
         size: str = "",
-        count: Any = 0,
+        count: Any = None,
         parameters: Any = None,
         references: tuple[ReferenceImage, ...] = (),
         source: str = "webui",
@@ -108,7 +109,10 @@ class ImageGenerationService:
             raise ValueError(
                 "当前模式未设置默认 LLM 生图模型，请先查询模型能力并传入 model_ref"
             )
-        provider, selected_model = self._select_model(
+        select_model = (
+            self._select_command_model if source == "command" else self._select_model
+        )
+        provider, selected_model = select_model(
             settings,
             provider_id,
             model_ref,
@@ -145,6 +149,37 @@ class ImageGenerationService:
                     "或传入当前 Agent 工作区内的有效图片路径"
                 )
         normalized_refs = references[:reference_limit]
+        advanced_parameters = parameters
+        if source == "command":
+            normalized_count, advanced_parameters = _command_count(
+                count, parameters, selected_model
+            )
+            if negative_prompt is None:
+                negative_prompt = selected_model.negative_prompt_default
+        else:
+            normalized_count = max(
+                1,
+                min(
+                    4,
+                    _as_int(
+                        count
+                        if count not in (None, "", 0)
+                        else _control_parameter_value(
+                            parameters, selected_model, "count", source=source
+                        ),
+                        1,
+                    ),
+                ),
+            )
+        model_parameters = _parameters_for_model(
+            advanced_parameters, selected_model, source=source
+        )
+        if source == "command":
+            model_parameters = {
+                key: value
+                for key, value in model_parameters.items()
+                if key not in {"count", "n"}
+            }
         request = GenerationRequest(
             mode=normalized_mode,
             provider_id=provider.id,
@@ -162,21 +197,8 @@ class ImageGenerationService:
                 ),
                 provider.kind,
             ),
-            count=max(
-                1,
-                min(
-                    4,
-                    _as_int(
-                        count
-                        if count not in (None, "", 0)
-                        else _control_parameter_value(
-                            parameters, selected_model, "count", source=source
-                        ),
-                        1,
-                    ),
-                ),
-            ),
-            parameters=_parameters_for_model(parameters, selected_model, source=source),
+            count=normalized_count,
+            parameters=model_parameters,
             references=normalized_refs,
             source=source if source in {"webui", "command", "llm_tool"} else "webui",
             selection_source=selection_source,
@@ -416,6 +438,69 @@ class ImageGenerationService:
             raise ValueError("当前模式没有可用模型，请先在设置页完成服务商和模型配置")
         return selected
 
+    def resolve_command_model(
+        self, *, mode: str, provider_id: str = "", model: str = ""
+    ) -> tuple[ImageProvider, ImageModel]:
+        """Validate command routing before loading potentially costly references."""
+
+        normalized_mode = _mode(mode)
+        return self._select_command_model(
+            self.settings,
+            provider_id,
+            "",
+            model,
+            normalized_mode,
+            self.settings.default_model_ref(normalized_mode, "command"),
+        )
+
+    def _select_command_model(
+        self,
+        settings: RuntimeSettings,
+        provider_id: str,
+        model_ref: str,
+        model_id: str,
+        mode: str,
+        mode_default_ref: str,
+    ) -> tuple[ImageProvider, ImageModel]:
+        """Resolve commands without silently replacing explicit or stale choices."""
+
+        requested_provider = str(provider_id or "").strip()
+        if requested_provider and settings.provider(requested_provider) is None:
+            raise ValueError("指定服务商不存在或未启用，请检查 --provider")
+        explicit_ref = str(model_ref or model_id or "").strip()
+        requested_ref = explicit_ref or str(mode_default_ref or "").strip()
+        if not requested_ref:
+            raise ValueError(
+                "当前模式未设置默认页面生图模型，请在设置中配置或使用 --model"
+            )
+        matches = [
+            (provider, model)
+            for provider, model in settings.models_for_mode(mode)
+            if requested_ref in {model.id, f"{provider.id}:{model.id}"}
+        ]
+        if requested_provider:
+            owned = [item for item in matches if item[0].id == requested_provider]
+            if matches and not owned:
+                if not explicit_ref:
+                    raise ValueError(
+                        "当前模式的默认模型不属于指定服务商，请同时提供 --model"
+                    )
+                raise ValueError(
+                    "指定模型不属于指定服务商，请检查 --provider 和 --model"
+                )
+            matches = owned
+        if not matches:
+            if explicit_ref:
+                raise ValueError("指定模型不存在、服务商未启用或不支持当前生图模式")
+            raise ValueError(
+                "当前模式的默认模型已失效，请修改页面默认模型或提供 --model"
+            )
+        if len(matches) > 1:
+            raise ValueError(
+                "多个服务商包含同名模型，请使用 --provider 或 --model 服务商ID:模型ID"
+            )
+        return matches[0]
+
 
 def _mode(value: str) -> str:
     raw = str(value or "").strip().lower()
@@ -429,6 +514,62 @@ def _mode(value: str) -> str:
     if normalized not in {"text2img", "img2img"}:
         raise ValueError("模式仅支持 text2img 或 img2img")
     return normalized
+
+
+def _command_count(
+    explicit_count: Any, parameters: Any, model: ImageModel
+) -> tuple[int, dict[str, Any]]:
+    """Use page model defaults and bounds for commands, including count aliases."""
+
+    aliases = {"count", "n"}
+    descriptors = []
+    for name, descriptor in model.parameters.items():
+        if name in aliases or descriptor.get("request_key") in {"count", "n"}:
+            aliases.add(name)
+            descriptors.append((name, descriptor))
+    descriptor = next(
+        (value for name, value in descriptors if name == "count"),
+        descriptors[0][1] if descriptors else {},
+    )
+    raw = _parameters(parameters)
+    raw_count = next(
+        (
+            raw[name]
+            for name in ("count", "n", *(name for name, _ in descriptors))
+            if name in raw
+        ),
+        None,
+    )
+    supplied = explicit_count if explicit_count is not None else raw_count
+    value = supplied if supplied is not None else descriptor.get("default", 1)
+    try:
+        if isinstance(value, bool):
+            raise ValueError
+        number = float(value)
+        if not math.isfinite(number) or not number.is_integer():
+            raise ValueError
+        requested = int(number)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("图片数量必须为整数") from exc
+    if supplied is not None and requested <= 0:
+        raise ValueError("图片数量必须大于 0")
+    try:
+        lower = max(
+            1,
+            math.ceil(
+                float(descriptor.get("min") if descriptor.get("min") is not None else 1)
+            ),
+        )
+        upper = math.floor(
+            float(descriptor.get("max") if descriptor.get("max") is not None else 4)
+        )
+        if upper < lower:
+            raise ValueError
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("模型的图片数量范围配置无效，请检查 count 的 min/max") from exc
+    return max(lower, min(upper, requested)), {
+        key: value for key, value in raw.items() if key not in aliases
+    }
 
 
 def _size(value: str, provider_kind: str = "") -> str:

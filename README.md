@@ -77,9 +77,19 @@ OpenAI Images 会预填尺寸、数量、质量、背景和输出格式；Gemini
 指令示例：
 
 ```text
-/image_gen 一张山间湖泊的影棚风格摄影 --provider my-openai --size 1024x1024
-/image_gen 重新绘制这张图片 --mode img2img --ref workspace/input.png
+/img --help
+/image_gen 一张山间湖泊的影棚风格摄影 --provider my-openai --model gpt-image-2 --size 1024x1024
+/image_gen 重新绘制这张图片 --mode img2img --ref input.png
+/img '1girl, solo, full body, garden' --provider nai --model nai-diffusion-4-5-full --n 3 --param-style galgame
 ```
+
+指令直接调用生成服务，不经过 LLM。只有单独的 `--help` 输出帮助，不读取参考图、不调用模型；与提示词或其他参数混用时忽略 `--help`，其他输入照常处理。
+
+省略模型时使用“默认值 → 页面”中对应模式的默认模型；默认模型未配置或失效会报错。显式填写的服务商、模型必须存在、已启用并支持当前模式，不再回退到其他模型。只填 `--provider` 而默认模型属于其他服务商时，需要补充 `--model`；跨服务商同名模型需用 `--provider` 或完整 `--model 服务商ID:模型ID` 消除歧义。
+
+省略 `--n` 和 `--negative` 时，分别读取模型配置中的默认数量与反向提示词；`--negative ''` 明确清空，不支持反向提示词的模型继续忽略该字段。数量按模型 schema 的 `count` 范围截断，也兼容 `n` 或映射到这些请求字段的参数；未配置数量默认值时为 1，未配置上限时保留 4 的兜底上限。`--n` 必须是正整数。NAI 第三方接口一次生成一张，指令请求多张时顺序调用，并沿用同一服务商并发名额与一条历史记录；中途失败会停止余下调用，不自动重试，已经完成的上游请求可能已消耗额度。其他来源的数量行为保持不变。`--param-*` 仍按字符串传递，不增加自动类型转换。
+
+未指定 `--mode` 时，没有图片和 `--ref` 使用文生图；存在消息图片、引用图片或 `--ref` 则使用图生图。参考图按“当前消息中的图片 → 引用消息中的图片 → `--ref` 中的图片”排列，内容去重后按所选模型的最大参考图数量截断，超额图片不再读取；AstrBot 已解析的图片引用仅作补充容错。自动参考图无法读取时可跳过，但不能因此退回文生图；图生图最终没有任何可用参考图会报错。显式 `--ref` 在保留范围内不可读取时会报错。显式 `--mode text2img` 则完全忽略参考图，不读取其内容。
 
 LLM 工具包括 `image_studio_get_capabilities`、`image_studio_generate`、`image_studio_view_asset` 和 `image_studio_send_output`。每次生成前都必须先查询能力。未指定模型或模型类型的常规请求首先使用 `query_type=default`；`mode` 可以省略，此时同时返回文生图和图生图默认模型，也可以指定 `text2img` 或 `img2img` 只获取对应默认。如果默认模型支持用户明确要求的模式、参考图数量和参数，就直接生成，不再查询全部模型。普通主体、画风、构图和文字描述可以通过提示词表达，不属于模型能力缺口。只有默认模型存在明确能力缺口或不可用、用户要求比较模型，或者指定了模型类型但不知道具体 `model_ref` 时，才使用 `query_type=all`，并尽量携带相同的 `mode`。明确指定模型时使用 `query_type=model` 和完整 `model_ref`。
 

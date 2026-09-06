@@ -1328,13 +1328,46 @@ class ImageStudioPlugin(Star):
 
         try:
             options = _parse_command(str(event.message_str or ""))
-            references = await self._event_references(
-                event, options.get("reference_paths", [])
-            )
+            if options["help"]:
+                yield event.plain_result(COMMAND_HELP)
+                return
+            service = self._service_or_raise()
             mode = options["mode"]
-            if not options["mode_explicit"] and references:
+            explicit_text = options["mode_explicit"] and mode.strip().lower() in {
+                "text2img",
+                "text",
+                "txt2img",
+            }
+            sources = (
+                []
+                if explicit_text
+                else await self._command_reference_sources(
+                    event, options["reference_paths"]
+                )
+            )
+            if not options["mode_explicit"] and sources:
                 mode = "img2img"
-            result = await self._service_or_raise().generate(
+            _, selected_model = service.resolve_command_model(
+                mode=mode, provider_id=options["provider_id"], model=options["model"]
+            )
+            references = (
+                await self._event_references(
+                    event,
+                    ordered_sources=sources,
+                    max_images=selected_model.max_reference_images,
+                )
+                if sources
+                else ()
+            )
+            if (
+                not explicit_text
+                and (options["mode_explicit"] or sources)
+                and not references
+            ):
+                raise ValueError(
+                    "图生图未读取到可用参考图，请附带图片、引用含图消息或填写 --ref"
+                )
+            result = await service.generate(
                 mode=mode,
                 provider_id=options["provider_id"],
                 prompt=options["prompt"],
@@ -1358,12 +1391,32 @@ class ImageStudioPlugin(Star):
         chain.extend(Image.fromBytes(image.data) for image in result.images)
         yield event.chain_result(chain)
 
+    async def _command_reference_sources(
+        self, event: AstrMessageEvent, explicit_references: list[str]
+    ) -> list[tuple[Any, bool]]:
+        messages = event.get_messages() if hasattr(event, "get_messages") else []
+        sources = [(item, False) for item in messages if isinstance(item, Image)]
+        for item in messages:
+            if isinstance(item, Reply):
+                sources.extend((image, False) for image in _iter_event_images(item))
+        try:
+            quoted = await extract_quoted_message_images(event)
+        except Exception as exc:
+            logger.debug("%s 指令引用图片解析失败: %s", LOG_TAG, type(exc).__name__)
+            quoted = []
+        sources.extend((item, False) for item in quoted)
+        sources.extend((item, False) for item in _provider_request_image_refs(event))
+        sources.extend((item, True) for item in explicit_references)
+        return sources
+
     async def _event_references(
         self,
         event: AstrMessageEvent,
         explicit_references: list[Any] | None = None,
         *,
         include_event_references: bool = True,
+        ordered_sources: list[tuple[Any, bool]] | None = None,
+        max_images: int = 8,
     ) -> tuple[Any, ...]:
         service = self._service_or_raise()
         references: list[Any] = []
@@ -1374,7 +1427,7 @@ class ImageStudioPlugin(Star):
         )
 
         async def append_reference(raw_ref: str, *, required: bool = False) -> bool:
-            if len(references) >= 8:
+            if len(references) >= max_images:
                 return True
             try:
                 reference = await service.reference_from_media_ref(
@@ -1399,6 +1452,21 @@ class ImageStudioPlugin(Star):
                 seen.add(digest)
                 references.append(reference)
             return True
+
+        if ordered_sources is not None:
+            for source, required in ordered_sources:
+                if len(references) >= max_images:
+                    break
+                if isinstance(source, Image):
+                    try:
+                        source = await source.convert_to_file_path()
+                    except Exception as exc:
+                        logger.debug(
+                            "%s 指令消息图片无法读取: %s", LOG_TAG, type(exc).__name__
+                        )
+                        continue
+                await append_reference(str(source or ""), required=required)
+            return tuple(references)
 
         for item in (explicit_references or [])[:8]:
             if isinstance(item, dict):
@@ -2724,24 +2792,53 @@ def _set_event_extra(event: Any, key: str, value: Any) -> None:
         return
 
 
+COMMAND_HELP = """Image Studio 生图指令
+/image_gen <提示词> [参数]，别名 /img
+
+--provider ID：指定服务商
+--model ID：指定模型，可用 服务商ID:模型ID
+--mode text2img|img2img：文生图或图生图
+--size 尺寸：如 1024x1024，NAI 可用 竖图、2K横图
+--n 数量：缺省使用模型默认值，超出模型上限时截断
+--negative 内容：缺省使用模型默认反向提示词；--negative '' 清空
+--ref 路径或URL：可重复填写多张参考图
+--param-参数名 值：如 --param-steps 26，值保持字符串
+
+默认模型在 WebUI 设置的“默认值 → 页面”中配置。
+未指定模式时，有图片或 --ref 则使用图生图，否则文生图。
+参考图顺序：当前消息、引用消息、--ref；去重后按模型上限截断。
+指定图生图但没有可用参考图会报错；指定文生图则忽略参考图。
+参数可写成 --key=value；包含空格的值请使用英文引号。
+单独 /img --help 显示此帮助；与其他内容混用时忽略 --help。
+
+示例：/img 清晨的山间湖泊
+示例：/img 重绘这张图 --mode img2img --ref input.png
+示例：/img '1girl, solo, full body, garden' --provider nai --model nai-diffusion-4-5-full --param-style galgame
+""".strip()
+
+
 def _parse_command(raw: str) -> dict[str, Any]:
-    text = raw.strip()
-    for prefix in ("/image_gen", "image_gen", "/img", "img"):
-        if text.startswith(prefix):
-            text = text[len(prefix) :].strip()
-            break
-    tokens = shlex.split(text)
+    tokens = shlex.split(raw.strip())
+    if tokens and tokens[0] in {"/image_gen", "image_gen", "/img", "img"}:
+        tokens.pop(0)
+    help_only = tokens == ["--help"]
+    tokens = [token for token in tokens if token != "--help"]
     values: dict[str, Any] = {
         "mode": "text2img",
         "provider_id": "",
         "model": "",
         "size": "",
-        "negative_prompt": "",
-        "count": 1,
+        "negative_prompt": None,
+        "count": None,
         "reference_paths": [],
         "mode_explicit": False,
         "parameters": {},
+        "help": help_only,
     }
+    if help_only:
+        values["prompt"] = ""
+        return values
+    known = {"mode", "provider", "model", "size", "negative", "n", "ref"}
     prompt_parts: list[str] = []
     index = 0
     while index < len(tokens):
@@ -2750,11 +2847,19 @@ def _parse_command(raw: str) -> dict[str, Any]:
             key, value = token[2:].split("=", 1)
         elif token.startswith("--") and index + 1 < len(tokens):
             key, value = token[2:], tokens[index + 1]
+            if (key in known or key.startswith("param-")) and value.startswith("--"):
+                raise ValueError(f"参数 --{key} 缺少值")
             index += 1
         else:
+            if token.startswith("--") and (
+                token[2:] in known or token.startswith("--param-")
+            ):
+                raise ValueError(f"参数 {token} 缺少值")
             prompt_parts.append(token)
             index += 1
             continue
+        if key in {"mode", "provider", "model", "size", "ref"} and not value.strip():
+            raise ValueError(f"参数 --{key} 不能为空")
         if key == "mode":
             values["mode"] = value
             values["mode_explicit"] = True
@@ -2767,19 +2872,24 @@ def _parse_command(raw: str) -> dict[str, Any]:
         elif key == "negative":
             values["negative_prompt"] = value
         elif key == "n":
-            values["count"] = _as_int(value, 1)
+            try:
+                values["count"] = int(value)
+            except ValueError as exc:
+                raise ValueError("参数 --n 必须是正整数") from exc
+            if values["count"] <= 0:
+                raise ValueError("参数 --n 必须是正整数")
         elif key == "ref":
             values["reference_paths"].append(value)
         elif key.startswith("param-"):
+            if key == "param-":
+                raise ValueError("--param- 后必须填写参数名")
             values["parameters"][key.removeprefix("param-")] = value
         else:
             prompt_parts.append(token)
         index += 1
     values["prompt"] = " ".join(prompt_parts).strip()
     if not values["prompt"]:
-        raise ValueError(
-            "用法：/image_gen <提示词> [--provider id] [--mode text2img|img2img] [--size 1024x1024] [--ref 路径]"
-        )
+        raise ValueError("请填写提示词；使用 /image_gen --help 查看指令帮助")
     return values
 
 

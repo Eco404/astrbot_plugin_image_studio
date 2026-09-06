@@ -259,13 +259,36 @@ class ProviderExecutor:
             raise ProviderError("NAI 第三方 GET 服务仅支持文生图")
         endpoint = _join_url(provider.base_url, provider.generate_path or "/generate")
         query = _nai_query(provider, request)
-        async with self.session.get(
-            endpoint,
-            params=query,
-            headers=_headers(provider, bearer=False),
-            timeout=aiohttp.ClientTimeout(total=provider.timeout_seconds),
-        ) as response:
-            return await self._read_response_images(response, provider)
+        # The proxy accepts one image per request; command batches share the
+        # service's existing provider concurrency slot and history record.
+        count = request.count if request.source == "command" else 1
+        images: list[GeneratedImage] = []
+        for _ in range(count):
+            try:
+                async with self.session.get(
+                    endpoint,
+                    params=query,
+                    headers=_headers(provider, bearer=False),
+                    timeout=aiohttp.ClientTimeout(total=provider.timeout_seconds),
+                ) as response:
+                    images.extend(await self._read_response_images(response, provider))
+            except (ProviderError, aiohttp.ClientError, TimeoutError) as exc:
+                if request.source != "command":
+                    raise
+                reason = (
+                    str(exc)
+                    if isinstance(exc, ProviderError)
+                    else "请求超时"
+                    if isinstance(exc, TimeoutError)
+                    else "无法连接服务商"
+                )
+                partial = (
+                    f"；本批已完成 {len(images)} 张，但尚未保存或投递" if images else ""
+                )
+                raise ProviderError(
+                    f"NAI 生图失败：{reason}{partial}；部分请求可能已消耗额度，请核对后重试"
+                ) from exc
+        return tuple(images)
 
     async def _custom_json(
         self,
@@ -401,7 +424,9 @@ def _nai_query(provider: ImageProvider, request: GenerationRequest) -> dict[str,
             "nocache": "1",
         }
     )
-    if provider.get_model(request.model).negative_prompt and request.negative_prompt:
+    if provider.get_model(request.model).negative_prompt and (
+        request.negative_prompt or request.source == "command"
+    ):
         query["negative"] = request.negative_prompt
     return query
 
