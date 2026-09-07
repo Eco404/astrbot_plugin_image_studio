@@ -128,11 +128,7 @@ class ImageModel:
     def supports(self, mode: GenerationMode) -> bool:
         """Return whether the model supports a requested generation mode."""
 
-        return (
-            self.text2img
-            if mode == "text2img"
-            else self.img2img and self.max_reference_images > 0
-        )
+        return self.text2img if mode == "text2img" else self.img2img
 
     def public_dict(self) -> dict[str, Any]:
         """Return the model descriptor consumed by the WebUI."""
@@ -168,8 +164,8 @@ class ImageModel:
         configured = _as_int(
             self.tool.get("max_reference_images"), self.max_reference_images
         )
-        configured = max(0, min(8, configured))
-        return max(0, min(self.max_reference_images, configured))
+        configured = max(1, min(8, configured))
+        return min(max(1, self.max_reference_images), configured)
 
     @property
     def llm_negative_prompt_policy(self) -> dict[str, Any]:
@@ -306,13 +302,13 @@ class ImageProvider:
             text2img=_as_bool(value.get("supports_text2img"), True),
             img2img=img2img,
             negative_prompt=supports_negative_prompt,
-            max_reference_images=max_refs if img2img else 0,
+            max_reference_images=max_refs,
             negative_prompt_default=_model_negative_default(value, kind),
             parameters=_normalize_parameters(value.get("parameters")),
             tool=_normalize_tool(
                 value.get("tool"),
                 img2img,
-                max_refs if img2img else 0,
+                max_refs,
                 supports_negative_prompt,
                 kind,
                 model_parameters=value.get("parameters"),
@@ -363,7 +359,8 @@ class ImageProvider:
                 text2img=any(item.text2img for item in models),
                 img2img=any(item.supports("img2img") for item in models),
                 max_reference_images=max(
-                    (item.max_reference_images for item in models), default=0
+                    (item.max_reference_images for item in models if item.img2img),
+                    default=0,
                 ),
                 negative_prompt=any(item.negative_prompt for item in models),
             ),
@@ -687,9 +684,7 @@ def _model_from_mapping(
     native_size, native_source = _native_batch_fields(value, kind, discovered)
     img2img = kind != "nai_direct" and _as_bool(value.get("supports_img2img"), False)
     capability_source = _text(value.get("capability_source"), 32) or "manual"
-    max_reference_images = (
-        max(0, min(8, _as_int(value.get("max_reference_images"), 0))) if img2img else 0
-    )
+    max_reference_images = max(1, min(8, _as_int(value.get("max_reference_images"), 1)))
     supports_negative_prompt = (
         False
         if kind == "gemini"
@@ -773,7 +768,7 @@ def _normalize_tool(
                 else:
                     item.pop("choice_descriptions", None)
                 normalized_parameters[name] = item
-    limit_default = max_reference_images if img2img else 0
+    limit_default = max(1, min(8, max_reference_images))
     nai = kind == "nai_direct"
     return {
         "enabled": _as_bool(raw.get("enabled", raw.get("available_to_llm")), True),
@@ -800,10 +795,9 @@ def _normalize_tool(
             else False
         ),
         "max_reference_images": max(
-            0, min(8, _as_int(raw.get("max_reference_images"), limit_default))
-        )
-        if img2img
-        else 0,
+            1,
+            min(limit_default, _as_int(raw.get("max_reference_images"), limit_default)),
+        ),
         "parameters": normalized_parameters,
     }
 

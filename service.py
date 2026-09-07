@@ -175,7 +175,7 @@ class ImageGenerationService:
             if reference_limit <= 0:
                 if source == "llm_tool":
                     raise ValueError("当前模型未向 LLM 工具开放可用的参考图数量")
-                raise ValueError("当前模型的参考图能力上限为 0，不能用于图生图")
+                raise ValueError("当前模型未开放图生图参考图输入")
             if not references:
                 raise ValueError(
                     "未读取到可用参考图；请使用当前消息或引用消息中的图片，"

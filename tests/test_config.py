@@ -343,7 +343,7 @@ def test_models_are_configured_independently_and_filtered_by_mode() -> None:
     assert settings.providers[0].get_model("draw-edit").max_reference_images == 3
 
 
-def test_img2img_requires_a_positive_reference_limit() -> None:
+def test_img2img_reference_limit_zero_is_normalized_without_disabling_support() -> None:
     settings, errors = runtime_settings(
         {},
         {
@@ -378,11 +378,13 @@ def test_img2img_requires_a_positive_reference_limit() -> None:
 
     assert errors == []
     assert [model.id for _, model in settings.models_for_mode("img2img")] == [
-        "manual-limit"
+        "zero-limit",
+        "manual-limit",
     ]
     zero_limit = settings.providers[0].get_model("zero-limit")
     manual_limit = settings.providers[0].get_model("manual-limit")
-    assert zero_limit.llm_max_reference_images == 0
+    assert zero_limit.max_reference_images == 1
+    assert zero_limit.llm_max_reference_images == 1
     assert manual_limit.llm_max_reference_images == 2
 
 
