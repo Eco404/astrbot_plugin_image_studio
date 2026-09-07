@@ -65,6 +65,9 @@
     let modalPending = false;
     let modalDismissOutside = true;
     let detailCopies = [];
+    let detailParameterGrids = [];
+    let detailParameterObserver = null;
+    let detailParameterFrame = 0;
     let favoritePending = false;
     let batchFavoritePending = false;
     let selectionFavoriteKey = "";
@@ -541,6 +544,54 @@
       showNotice(`${message}。`, "success");
     }
 
+    function clearDetailParameterLayout() {
+      detailParameterObserver?.disconnect(); detailParameterObserver = null;
+      cancelAnimationFrame(detailParameterFrame); detailParameterFrame = 0;
+      detailParameterGrids = [];
+    }
+
+    function positionDetailParameters() {
+      detailParameterFrame = 0;
+      for (const grid of detailParameterGrids) {
+        if (!grid.isConnected || !grid.getClientRects().length || !grid.clientWidth) continue;
+        const columns = Number(getComputedStyle(grid).getPropertyValue("--parameter-columns")) === 1 ? 1 : 2;
+        const rows = Array.from(grid.children);
+        if (columns === 1) rows.forEach(row => { row.style.gridColumn = "1"; });
+        // Measure at the final column width, independently of the drawer's opening transform.
+        const sizes = rows.map(row => {
+          const style = getComputedStyle(row);
+          return Math.max(1, Math.ceil((parseFloat(style.height) || row.offsetHeight) + (parseFloat(style.marginBottom) || 0)));
+        });
+        const heights = [0, 0]; let column = 0;
+        rows.forEach((row, index) => {
+          const gridColumn = String(column + 1);
+          const gridRow = `${heights[column] + 1} / span ${sizes[index]}`;
+          if (row.style.gridColumn !== gridColumn) row.style.gridColumn = gridColumn;
+          if (row.style.gridRow !== gridRow) row.style.gridRow = gridRow;
+          heights[column] += sizes[index];
+          if (columns === 2 && heights[column] > heights[1 - column]) column = 1 - column;
+        });
+      }
+    }
+
+    function scheduleDetailParameterLayout() {
+      if (detailParameterGrids.length && !detailParameterFrame) detailParameterFrame = requestAnimationFrame(positionDetailParameters);
+    }
+
+    function layoutDetailParameters() {
+      clearDetailParameterLayout();
+      detailParameterGrids = Array.from($("drawerBody").querySelectorAll(".detail-parameter-grid"));
+      detailParameterGrids.forEach(grid => grid.classList.add("is-masonry"));
+      positionDetailParameters();
+      if (window.ResizeObserver) {
+        detailParameterObserver = new ResizeObserver(scheduleDetailParameterLayout);
+        for (const grid of detailParameterGrids) {
+          detailParameterObserver.observe(grid);
+          for (const row of grid.children) detailParameterObserver.observe(row);
+        }
+      }
+    }
+
     function parameterRows(values, prefix = "") {
       if (!values || typeof values !== "object") return "";
       return Object.entries(values).map(([key, value]) => {
@@ -886,6 +937,9 @@
       $("detailUseReference").addEventListener("click", () => { const image = state.detailData?.images?.[state.detailImageIndex]; if (image?.data_url) void hooks.useDataUrlAsReference(image.data_url, "gallery-output-reference.png"); });
       $("detailDelete").addEventListener("click", () => void deleteDetailImages());
       $("drawerBody").addEventListener("click", (event) => { const button = event.target.closest("[data-copy-field]"); if (button) void copyText(detailCopies[Number(button.dataset.copyField)]); });
+      $("drawerBody").addEventListener("toggle", scheduleDetailParameterLayout, true);
+      window.addEventListener("resize", scheduleDetailParameterLayout, { passive: true });
+      window.addEventListener("beforeunload", clearDetailParameterLayout);
       $("studioModalClose").addEventListener("click", () => modalClose?.(false));
       $("studioModalRoot").querySelector(".studio-modal-scrim").addEventListener("click", () => { if (modalDismissOutside) modalClose?.(false); });
       $("galleryGrid").addEventListener("click", (event) => { const card = event.target.closest("[data-gallery-id]"); if (card && !event.target.closest(".gallery-selection")) detailTrigger = card; });
@@ -913,7 +967,7 @@
       window.addEventListener("beforeunload", () => imports.forEach((item) => URL.revokeObjectURL(item.url)));
     }
 
-    return { bind, modeLabel, engineLabel, galleryPageSize, renderGalleryCard, galleryRendered, selectionChanged, syncFloatingBars, detailMetadataMarkup, detailWarningsMarkup, updateDetailActions, copyText, resolveParameters, schemaPolicyButton, editParameterPolicy, setCommandLabel, modalOpen: () => !!modalClose };
+    return { bind, modeLabel, engineLabel, galleryPageSize, renderGalleryCard, galleryRendered, selectionChanged, syncFloatingBars, detailMetadataMarkup, detailWarningsMarkup, layoutDetailParameters, clearDetailParameterLayout, updateDetailActions, copyText, resolveParameters, schemaPolicyButton, editParameterPolicy, setCommandLabel, modalOpen: () => !!modalClose };
   };
   window.ImageStudioMetadata = { extractMetadata, decodeComment };
 })();

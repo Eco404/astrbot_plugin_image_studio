@@ -841,6 +841,7 @@
     mountDetailFilmstrip(detail, displayImages, imageIndex, previousStrip, previousStripScroll);
     if (focusedThumbnail) els.drawerBody.querySelector(`.detail-filmstrip [data-detail-dot="${imageIndex}"]`)?.focus({ preventScroll: true });
     library.updateDetailActions(detail);
+    library.layoutDetailParameters();
     bindDetailReferenceEvents(detail);
     els.drawerBody.querySelector("[data-reproduce]")?.addEventListener("click", () => void reproduce(detail.id));
     els.drawerBody.querySelector("[data-copy-request]")?.addEventListener("click", () => void copyRequestParameters(detail));
@@ -903,6 +904,7 @@
   }
 
   async function openDetail(id, requestedImageIndex = 0, options = {}) {
+    library.clearDetailParameterLayout();
     const session = createDetailNavigation();
     state.detailNavigating = false;
     const previousBackdrop = els.drawerBody.querySelector(".detail-image-backdrop:not(.detail-backdrop-previous)");
@@ -958,7 +960,7 @@
     } finally { if (currentDetailSession(session)) state.detailNavigating = false; }
   }
 
-  function closeDetail() { stopDetailNavigation(); window.ImageStudioBackdrop.dispose(els.drawerBody.querySelector(".detail-image-backdrop:not(.detail-backdrop-previous)")); detailImagePaintRevision++; mobileDetailSyncRevision++; decodedDisplayImages.clear(); detailBackdropSource = ""; detailRequestRevision += 1; if (mobileImageViewer) { suppressMobileDetailSync = true; mobileImageViewer.close(); } state.detailId = ""; state.detailData = null; state.detailFallbackThumbnail = ""; state.detailAssetsLoaded = false; state.detailNavigating = false; state.detailImageIndex = 0; state.detailRequestedImageIndex = 0; closeImagePreview(); els.detailDrawer.classList.remove("is-open"); els.detailDrawer.setAttribute("aria-hidden", "true"); if (!activeConfirmation) els.scrim.classList.add("is-hidden"); syncPageScrollLock(); }
+  function closeDetail() { library.clearDetailParameterLayout(); stopDetailNavigation(); window.ImageStudioBackdrop.dispose(els.drawerBody.querySelector(".detail-image-backdrop:not(.detail-backdrop-previous)")); detailImagePaintRevision++; mobileDetailSyncRevision++; decodedDisplayImages.clear(); detailBackdropSource = ""; detailRequestRevision += 1; if (mobileImageViewer) { suppressMobileDetailSync = true; mobileImageViewer.close(); } state.detailId = ""; state.detailData = null; state.detailFallbackThumbnail = ""; state.detailAssetsLoaded = false; state.detailNavigating = false; state.detailImageIndex = 0; state.detailRequestedImageIndex = 0; closeImagePreview(); els.detailDrawer.classList.remove("is-open"); els.detailDrawer.setAttribute("aria-hidden", "true"); if (!activeConfirmation) els.scrim.classList.add("is-hidden"); syncPageScrollLock(); }
 
   function isMobileDetailPreview(context) {
     return context?.type === "detail" && window.matchMedia("(max-width: 540px)").matches && typeof window.PhotoSwipe === "function";

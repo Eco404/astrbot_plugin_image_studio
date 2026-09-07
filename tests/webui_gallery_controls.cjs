@@ -81,7 +81,7 @@ async function checkMenu(frame) {
 
       await frame.locator(".gallery-card .gallery-info").first().click();
       await frame.locator(".detail-parameter-grid").first().waitFor();
-      const columns = await frame.locator(".detail-parameter-grid").first().evaluate(element => getComputedStyle(element).columnCount);
+      const columns = await frame.locator(".detail-parameter-grid").first().evaluate(element => getComputedStyle(element).getPropertyValue("--parameter-columns").trim());
       assert.equal(columns, test.width <= 540 ? "1" : "2");
       await frame.locator("#drawerBody").evaluate(element => { element.scrollTop = 280; });
       await settle(frame);
