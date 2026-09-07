@@ -206,8 +206,11 @@ def test_page_and_tool_defaults_use_each_models_parameter_defaults(tmp_path) -> 
         )
 
         assert [(item.model, item.size, item.count) for item in captured] == [
-            ("page-model", "1024x1536", 2),
-            ("tool-model", "1536x1024", 3),
+            ("page-model", "1024x1536", 1),
+            ("page-model", "1024x1536", 1),
+            ("tool-model", "1536x1024", 1),
+            ("tool-model", "1536x1024", 1),
+            ("tool-model", "1536x1024", 1),
         ]
 
     asyncio.run(run())

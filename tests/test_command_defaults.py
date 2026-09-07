@@ -102,7 +102,9 @@ def test_command_defaults_come_from_model_and_explicit_empty_negative_stays_empt
         assert cleared.request.negative_prompt == "" and cleared.request.count == 1
         override = await generate(subject, negative_prompt=" explicit ")
         assert override.request.negative_prompt == "explicit"
-        assert len(recorder.requests) == len(recorder.history) == 3
+        assert len(recorder.history) == 3
+        assert len(recorder.requests) == 13
+        assert all(request.count == 1 for _, request in recorder.requests)
 
     asyncio.run(run())
 
@@ -116,9 +118,9 @@ def test_command_defaults_come_from_model_and_explicit_empty_negative_stays_empt
         ({"default": 0, "max": 8}, None, 1),
         ({"default": 0, "min": 2, "max": 8}, None, 2),
         ({"default": 2, "min": 3, "max": 8}, 1, 3),
-        ({"default": 6}, None, 4),
+        ({"default": 6}, None, 6),
         ({}, None, 1),
-        ({}, 20, 4),
+        ({}, 20, 16),
     ],
 )
 def test_command_count_uses_model_limits_without_global_four_cap(
@@ -138,11 +140,11 @@ def test_command_count_uses_model_limits_without_global_four_cap(
     asyncio.run(run())
 
 
-def test_command_count_without_schema_uses_safe_legacy_defaults():
+def test_command_count_without_schema_uses_default_total_limit():
     async def run():
         subject, _ = service([configured_provider(parameters={})])
         assert (await generate(subject)).request.count == 1
-        assert (await generate(subject, count=9)).request.count == 4
+        assert (await generate(subject, count=9)).request.count == 9
 
     asyncio.run(run())
 
@@ -301,15 +303,15 @@ def test_command_image_mode_uses_its_page_default_and_reference_limit():
     asyncio.run(run())
 
 
-def test_webui_and_llm_keep_existing_count_and_negative_behavior():
+def test_webui_and_llm_follow_model_count_limits_and_negative_behavior():
     async def run():
         subject, _ = service()
         page = await generate(subject, source="webui")
         tool = await generate(subject, source="llm_tool")
-        assert page.request.count == 4 and page.request.negative_prompt == ""
+        assert page.request.count == 6 and page.request.negative_prompt == ""
         assert tool.request.count == 3 and tool.request.negative_prompt == ""
-        assert (await generate(subject, source="webui", count=50)).request.count == 4
-        assert (await generate(subject, source="llm_tool", count=50)).request.count == 4
+        assert (await generate(subject, source="webui", count=50)).request.count == 8
+        assert (await generate(subject, source="llm_tool", count=50)).request.count == 8
         assert (
             await generate(subject, source="webui", model="missing")
         ).request.model == "paint"

@@ -24,6 +24,7 @@ from .models import (
     ReferenceImage,
     WorkflowImageAsset,
     WorkflowImageLoadResult,
+    parameter_flag,
 )
 
 _IMAGE_SUFFIXES = {
@@ -831,6 +832,7 @@ class GenerationStore:
         history: HistorySettings,
         preview_max_edge: int = 768,
         preview_quality: int = 80,
+        batch_failures: tuple[tuple[int, str], ...] = (),
     ) -> str:
         """Persist a successful generation when history is enabled.
 
@@ -851,6 +853,7 @@ class GenerationStore:
                 history.record_invocation_identity,
                 preview_max_edge,
                 preview_quality,
+                batch_failures,
             )
             await asyncio.to_thread(self._cleanup_sync, history)
         return generation_id
@@ -865,6 +868,7 @@ class GenerationStore:
         record_invocation_identity: bool,
         preview_max_edge: int,
         preview_quality: int,
+        batch_failures: tuple[tuple[int, str], ...] = (),
     ) -> str:
         generation_id = uuid.uuid4().hex
         created_at = time.time()
@@ -919,10 +923,26 @@ class GenerationStore:
                     "negative_prompt": request.negative_prompt,
                     "size": request.size,
                     "count": request.count,
-                    "parameters": request.parameters,
+                    "native_batch_size": request.native_batch_size,
+                    "max_concurrent_requests": request.max_concurrent_requests,
+                    "parameters": {**request.parameters, **request.local_parameters},
                     "selection_source": request.selection_source,
                 }
             )
+            model = provider.get_model(request.model)
+            denied: set[str] = set()
+            for name, descriptor in model.parameters.items():
+                if not parameter_flag(descriptor, "record_in_history"):
+                    denied.update({name, str(descriptor.get("request_key") or name)})
+            if "n" in denied:
+                denied.add("count")
+            parameters["parameters"] = {
+                name: value
+                for name, value in parameters["parameters"].items()
+                if name not in denied
+            }
+            for name in denied & {"size", "count", "negative_prompt"}:
+                parameters.pop(name, None)
             invocation = (
                 request.invocation_source.public_dict()
                 if record_invocation_identity
@@ -1015,6 +1035,42 @@ class GenerationStore:
                         generation_id,
                     ),
                 )
+                if (
+                    batch_failures
+                    or request.count > request.native_batch_size
+                    or len(images) != request.count
+                ):
+                    request_sizes = [
+                        min(request.native_batch_size, request.count - offset)
+                        for offset in range(0, request.count, request.native_batch_size)
+                    ]
+                    conn.execute(
+                        "UPDATE generations SET supplemental_json = ? WHERE id = ?",
+                        (
+                            json.dumps(
+                                {
+                                    "batch": {
+                                        "requested": request.count,
+                                        "succeeded": len(images),
+                                        "failed": len(batch_failures),
+                                        "request_count": len(request_sizes),
+                                        "request_sizes": request_sizes,
+                                        "succeeded_requests": len(request_sizes)
+                                        - len(batch_failures),
+                                        "failed_requests": len(batch_failures),
+                                        "returned_images": len(images),
+                                        "failures": [
+                                            {"index": index, "error": reason}
+                                            for index, reason in batch_failures
+                                        ],
+                                    }
+                                },
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            ),
+                            generation_id,
+                        ),
+                    )
                 self._refresh_search_sync(conn, generation_id)
                 try:
                     conn.execute(

@@ -86,18 +86,67 @@ class TestConfig(dict):
 
 
 class FakeExecutor:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.active = 0
+
     async def fetch_quota(self, provider: Any) -> dict[str, Any]:
         return {"remaining": 128, "enabled": True, "checked_at": 1788681600.0}
+
+    async def discover_models(self, provider: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": model_id,
+                "name": model_id,
+                "supports_text2img": True,
+                "supports_img2img": False,
+                "max_reference_images": 0,
+                "capability_source": "remote",
+                "native_batch_size": 4,
+                "native_batch_size_source": "remote",
+            }
+            for model_id in [
+                *(model.id for model in provider.models),
+                f"discovered-{provider.kind}",
+            ]
+        ]
 
     async def generate(
         self, provider: Any, request: GenerationRequest
     ) -> tuple[GeneratedImage, ...]:
+        if request.model.startswith("batch-"):
+            self.active += 1
+            ordinal = len(self.calls)
+            self.calls.append(
+                {
+                    "provider_id": provider.id,
+                    "model": request.model,
+                    "count": request.count,
+                    "parameters": request.parameters,
+                    "active": self.active,
+                }
+            )
+            try:
+                await asyncio.sleep(0.04)
+                count = (
+                    2
+                    if request.model.startswith("batch-multi-")
+                    else 1
+                    if provider.kind == "nai_direct"
+                    else request.count
+                )
+                return tuple(
+                    GeneratedImage(fixture_image(ordinal + index + 75), "image/png")
+                    for index in range(count)
+                )
+            finally:
+                self.active -= 1
         return tuple(
             GeneratedImage(
                 fixture_image(index + 75, novelai=provider.kind == "nai_direct"),
                 "image/png",
             )
-            for index in range(2)
+            for index in range(1 if provider.kind == "nai_direct" else request.count)
         )
 
 
@@ -386,6 +435,10 @@ async def create_app(data_dir: Path, seed: bool = True) -> FastAPI:
     @app.get("/api/plugin/page/bridge-sdk.js")
     async def bridge() -> Response:
         return Response(BRIDGE_JS, media_type="application/javascript")
+
+    @app.get("/_harness/generation-stats")
+    async def generation_stats() -> dict[str, Any]:
+        return {"calls": plugin._service.executor.calls}
 
     app.mount(
         "/ui",

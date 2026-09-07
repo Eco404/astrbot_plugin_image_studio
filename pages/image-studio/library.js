@@ -63,6 +63,7 @@
     let importEpoch = 0;
     let modalClose = null;
     let modalPending = false;
+    let modalDismissOutside = true;
     let detailCopies = [];
     let favoritePending = false;
     let batchFavoritePending = false;
@@ -110,6 +111,7 @@
       $("studioModalError").textContent = "";
       $("studioModalFooter").innerHTML = "";
       $("studioModal").classList.toggle("is-merge-picker", !!options.mergePicker);
+      modalDismissOutside = options.dismissOutside !== false;
       $("studioModalRoot").classList.remove("is-hidden");
       hooks.syncPageScrollLock();
       return new Promise((resolve) => {
@@ -140,6 +142,31 @@
         window.ImageStudioSelect?.refresh($("studioModal"));
         (options.focus ? $(options.focus) : $("studioModalFooter").querySelector("button"))?.focus();
       });
+    }
+
+    function schemaPolicyButton(name) {
+      return `<button class="studio-icon-button parameter-copy" data-edit-schema-policy="${escape(name)}" type="button" aria-label="编辑 ${escape(name)} 的参数行为" title="编辑参数行为">${icon("Settings2")}</button>`;
+    }
+
+    function editParameterPolicy(name, descriptor) {
+      const fields = [["webui_visible", "在生图面板显示"], ["record_in_history", "保存到请求记录"], ["refill_from_history", "复现时使用历史值"]];
+      const body = fields.map(([key, label]) => `<div class="toggle-row"><label for="schemaPolicy-${key}">${label}</label><label class="toggle-control"><input id="schemaPolicy-${key}" type="checkbox" ${descriptor[key] !== false ? "checked" : ""}><span aria-hidden="true"></span></label></div>`).join("");
+      const syncDependencies = (changedKey) => {
+        const visible = $("schemaPolicy-webui_visible");
+        const recorded = $("schemaPolicy-record_in_history");
+        const refill = $("schemaPolicy-refill_from_history");
+        if (changedKey === "refill_from_history" && refill.checked) {
+          visible.checked = true;
+          recorded.checked = true;
+        } else if (!visible.checked || !recorded.checked) refill.checked = false;
+      };
+      return openModal(`参数行为：${name}`, body, [{ label: "取消", action: () => false }, { label: "保存", primary: true, action: () => {
+        syncDependencies();
+        return Object.fromEntries(fields.map(([key]) => [key, $(`schemaPolicy-${key}`).checked]));
+      } }], { dismissOutside: false, onOpen: () => {
+        for (const [key] of fields) $(`schemaPolicy-${key}`).addEventListener("change", () => syncDependencies(key));
+        syncDependencies();
+      } });
     }
 
     function importCard(item) {
@@ -694,25 +721,27 @@
       } });
     }
 
-    async function resolveParameters(content, modelRef) {
-      const result = await apiPost("studio/parameters/resolve", { content, ...(modelRef ? { model_ref: modelRef } : {}) });
+    async function resolveParameters(content, modelRef, options = {}) {
+      const request = { content, for_reproduction: options.forReproduction === true };
+      const result = await apiPost("studio/parameters/resolve", { ...request, ...(modelRef ? { model_ref: modelRef } : {}) });
       if (result.requires_model_selection) {
         const candidates = result.candidates?.length ? result.candidates : state.models;
         if (!candidates.length) throw new Error("没有可用模型，请先在设置中添加模型。");
         return await openModal("选择目标模型", `<label class="field">目标模型<select id="parameterTargetModel"><option value="">请选择模型</option>${candidates.map((model) => `<option value="${escape(model.model_ref)}">${escape(model.name || model.id)} · ${escape(model.provider_name || model.provider_id || "")}</option>`).join("")}</select></label>${(result.warnings || []).length ? `<p class="import-warnings">${result.warnings.map(escape).join("<br>")}</p>` : ""}`, [{ label: "取消", action: () => false }, { label: "填入参数", primary: true, action: async () => {
           const target = $("parameterTargetModel").value; if (!target) throw new Error("请选择目标模型。");
-          const resolved = await apiPost("studio/parameters/resolve", { content, model_ref: target });
+          const resolved = await apiPost("studio/parameters/resolve", { ...request, model_ref: target });
           if (resolved.requires_model_selection) throw new Error("此模型无法接收当前参数，请选择其他模型。");
-          applyResolved(resolved); return true;
+          applyResolved(resolved, options); return true;
         } }], { focus: "parameterTargetModel" });
       }
-      applyResolved(result); return true;
+      applyResolved(result, options); return true;
     }
 
-    function applyResolved(result) {
+    function applyResolved(result, options = {}) {
       if (!result.draft) throw new Error("参数解析结果缺少可填写的内容。");
-      hooks.applyDraft(result.draft);
-      const warnings = result.warnings || [];
+      const references = options.references?.length && result.draft.mode === "img2img" ? options.references : null;
+      hooks.applyDraft(references ? { ...result.draft, references } : result.draft, options);
+      const warnings = (result.warnings || []).filter((warning) => !references || warning !== "参数文本不包含原始参考图，请补充参考图后生成。");
       const unmapped = result.unmapped || {};
       const notice = $("parameterImportNotice");
       notice.innerHTML = `<button class="studio-icon-button" data-dismiss-parameter-notice type="button" aria-label="关闭参数提示" title="关闭参数提示">${icon("X")}</button>${warnings.map((warning) => `<p>${escape(warning)}</p>`).join("")}${Object.keys(unmapped).length ? `<details><summary>未映射参数</summary><pre>${escape(serial(unmapped))}</pre></details>` : ""}`;
@@ -858,7 +887,7 @@
       $("detailDelete").addEventListener("click", () => void deleteDetailImages());
       $("drawerBody").addEventListener("click", (event) => { const button = event.target.closest("[data-copy-field]"); if (button) void copyText(detailCopies[Number(button.dataset.copyField)]); });
       $("studioModalClose").addEventListener("click", () => modalClose?.(false));
-      $("studioModalRoot").querySelector(".studio-modal-scrim").addEventListener("click", () => modalClose?.(false));
+      $("studioModalRoot").querySelector(".studio-modal-scrim").addEventListener("click", () => { if (modalDismissOutside) modalClose?.(false); });
       $("galleryGrid").addEventListener("click", (event) => { const card = event.target.closest("[data-gallery-id]"); if (card && !event.target.closest(".gallery-selection")) detailTrigger = card; });
       $("closeDrawer").addEventListener("click", () => detailTrigger?.focus?.({ preventScroll: true }));
       window.addEventListener("resize", () => {
@@ -884,7 +913,7 @@
       window.addEventListener("beforeunload", () => imports.forEach((item) => URL.revokeObjectURL(item.url)));
     }
 
-    return { bind, modeLabel, engineLabel, galleryPageSize, renderGalleryCard, galleryRendered, selectionChanged, syncFloatingBars, detailMetadataMarkup, detailWarningsMarkup, updateDetailActions, copyText, resolveParameters, setCommandLabel, modalOpen: () => !!modalClose };
+    return { bind, modeLabel, engineLabel, galleryPageSize, renderGalleryCard, galleryRendered, selectionChanged, syncFloatingBars, detailMetadataMarkup, detailWarningsMarkup, updateDetailActions, copyText, resolveParameters, schemaPolicyButton, editParameterPolicy, setCommandLabel, modalOpen: () => !!modalClose };
   };
   window.ImageStudioMetadata = { extractMetadata, decodeComment };
 })();

@@ -23,6 +23,32 @@ COMMON_MODEL_PARAMETERS: dict[str, dict[str, Any]] = {
         "min": 1,
         "max": 4,
         "request_key": "count",
+        "refill_from_history": False,
+    },
+}
+
+BATCH_LIMIT = 16
+MODEL_SCHEDULING_KEYS = frozenset(
+    {
+        "concurrency",
+        "batch_mode",
+        "native_count_supported",
+        "native_batch_size",
+        "native_batch_size_source",
+        "max_concurrent_requests",
+    }
+)
+BATCH_PARAMETERS: dict[str, dict[str, Any]] = {
+    "count": {
+        "type": "integer",
+        "label": "生图张数",
+        "description": "本次希望生成的总图片数；按模型原生批次上限自动拆分请求，实际返回取决于上游。",
+        "default": 1,
+        "min": 1,
+        "max": BATCH_LIMIT,
+        "step": 1,
+        "request_key": "count",
+        "refill_from_history": False,
     },
 }
 
@@ -84,6 +110,20 @@ class ImageModel:
     parameters: dict[str, dict[str, Any]] = field(default_factory=dict)
     tool: dict[str, Any] = field(default_factory=dict)
     capability_source: str = "manual"
+    native_batch_size: int = 1
+    max_concurrent_requests: int = 8
+    native_batch_size_source: str = "default"
+
+    @property
+    def active_parameters(self) -> dict[str, dict[str, Any]]:
+        """Model scheduling settings are never caller-controlled parameters."""
+
+        return {
+            name: descriptor
+            for name, descriptor in self.parameters.items()
+            if name not in MODEL_SCHEDULING_KEYS
+            and descriptor.get("request_key") not in MODEL_SCHEDULING_KEYS
+        }
 
     def supports(self, mode: GenerationMode) -> bool:
         """Return whether the model supports a requested generation mode."""
@@ -108,6 +148,9 @@ class ImageModel:
             "parameters": self.parameters,
             "tool": self.tool,
             "capability_source": self.capability_source,
+            "native_batch_size": self.native_batch_size,
+            "max_concurrent_requests": self.max_concurrent_requests,
+            "native_batch_size_source": self.native_batch_size_source,
         }
 
     @property
@@ -129,21 +172,44 @@ class ImageModel:
         return max(0, min(self.max_reference_images, configured))
 
     @property
+    def llm_negative_prompt_policy(self) -> dict[str, Any]:
+        parameters = self.tool.get("parameters")
+        policy = (
+            parameters.get("negative_prompt") if isinstance(parameters, dict) else None
+        )
+        return policy if isinstance(policy, dict) else {}
+
+    @property
     def llm_negative_prompt_enabled(self) -> bool:
         """Whether the LLM may override this model's negative prompt."""
 
         return self.negative_prompt and _as_bool(
-            self.tool.get("negative_prompt_exposed"), self.negative_prompt
+            self.llm_negative_prompt_policy.get("exposed"),
+            _as_bool(self.tool.get("negative_prompt_exposed"), self.negative_prompt),
         )
+
+    @property
+    def llm_negative_prompt_default(self) -> str:
+        """Resolve the tool default without changing page or command defaults."""
+
+        if not self.negative_prompt:
+            return ""
+        policy = self.llm_negative_prompt_policy
+        value = policy.get(
+            "default_override", policy.get("default", self.negative_prompt_default)
+        )
+        return value if isinstance(value, str) else self.negative_prompt_default
 
     @property
     def llm_exposed_parameter_names(self) -> frozenset[str]:
         """Return schema keys that the LLM may override for this model."""
 
         configured = self.tool.get("parameters")
-        restrict_to_configured = isinstance(configured, dict) and bool(configured)
+        restrict_to_configured = isinstance(configured, dict) and any(
+            name != "negative_prompt" for name in configured
+        )
         exposed: set[str] = set()
-        for name, descriptor in self.parameters.items():
+        for name, descriptor in self.active_parameters.items():
             if name == "negative_prompt":
                 continue
             if (
@@ -220,6 +286,11 @@ class ImageProvider:
             kind, PROVIDER_TRANSPORT_DEFAULTS["custom_json"]
         )
         legacy_model_id = _text(value.get("model"), 160)
+        discovered_models = _normalize_discovered_models(value.get("discovered_models"))
+        discovered_by_id = {item["id"]: item for item in discovered_models}
+        native_size, native_source = _native_batch_fields(
+            value, kind, discovered_by_id.get(legacy_model_id)
+        )
         max_refs = max(1, min(8, _as_int(value.get("max_reference_images"), 1)))
         img2img = kind != "nai_direct" and _as_bool(
             value.get("supports_img2img"), False
@@ -244,13 +315,21 @@ class ImageProvider:
                 max_refs if img2img else 0,
                 supports_negative_prompt,
                 kind,
+                model_parameters=value.get("parameters"),
             ),
             capability_source=_text(value.get("capability_source"), 32) or "manual",
+            native_batch_size=native_size,
+            max_concurrent_requests=max(
+                1, min(16, _as_int(value.get("max_concurrent_requests"), 8))
+            ),
+            native_batch_size_source=native_source,
         )
         raw_models = value.get("models")
         models = (
             tuple(
-                _model_from_mapping(item, kind)
+                _model_from_mapping(
+                    item, kind, discovered_by_id.get(str(item.get("id", "")))
+                )
                 for item in raw_models[:32]
                 if isinstance(item, dict) and _text(item.get("id"), 160)
             )
@@ -300,9 +379,7 @@ class ImageProvider:
                 value.get("models_path"),
                 "/v1beta/models" if kind == "gemini" else "/models",
             ),
-            discovered_models=_normalize_discovered_models(
-                value.get("discovered_models")
-            ),
+            discovered_models=discovered_models,
         )
 
     def public_dict(self) -> dict[str, Any]:
@@ -407,6 +484,9 @@ class GenerationRequest:
     source: str = "webui"
     selection_source: str = "fallback"
     invocation_source: InvocationSource = field(default_factory=InvocationSource)
+    native_batch_size: int = 1
+    max_concurrent_requests: int = 8
+    local_parameters: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -462,6 +542,7 @@ class GenerationResult:
     elapsed_ms: int
     generation_id: str = ""
     error: str = ""
+    warning: str = ""
 
 
 def _as_bool(value: Any, default: bool) -> bool:
@@ -500,6 +581,43 @@ def _normalized_path(value: Any, default: str) -> str:
     return path if path.startswith("/") else f"/{path}"
 
 
+def positive_batch_size(value: Any) -> int | None:
+    """Accept only explicit positive integral capabilities, never booleans."""
+
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+        if parsed > 0 and float(value) == parsed:
+            return parsed
+    except (TypeError, ValueError, OverflowError):
+        pass
+    return None
+
+
+def _native_batch_fields(
+    value: dict[str, Any], kind: str, discovered: dict[str, Any] | None = None
+) -> tuple[int, str]:
+    if kind == "nai_direct":
+        return 1, "fixed"
+    configured = positive_batch_size(value.get("native_batch_size"))
+    source = str(value.get("native_batch_size_source") or "")
+    if configured is not None and source in {"", "manual"}:
+        return configured, "manual"
+    if discovered and discovered.get("native_batch_size_source") == "remote":
+        return int(discovered["native_batch_size"]), "remote"
+    if configured is not None and source == "remote":
+        return configured, "remote"
+    return 1, "default"
+
+
+PARAMETER_POLICY_FIELDS = ("webui_visible", "record_in_history", "refill_from_history")
+
+
+def parameter_flag(descriptor: dict[str, Any], name: str) -> bool:
+    return _as_bool(descriptor.get(name), True)
+
+
 def _normalize_parameters(value: Any) -> dict[str, dict[str, Any]]:
     """Normalize model parameter descriptors while preserving unknown fields."""
 
@@ -509,7 +627,7 @@ def _normalize_parameters(value: Any) -> dict[str, dict[str, Any]]:
         except json.JSONDecodeError:
             value = None
     if not isinstance(value, dict):
-        return dict(COMMON_MODEL_PARAMETERS)
+        value = {}
     result: dict[str, dict[str, Any]] = {}
     for key, descriptor in value.items():
         name = _text(key, 64)
@@ -519,16 +637,54 @@ def _normalize_parameters(value: Any) -> dict[str, dict[str, Any]]:
         item["type"] = _text(item.get("type"), 16) or "text"
         item["label"] = _text(item.get("label"), 96) or name
         item["request_key"] = _text(item.get("request_key"), 96) or name
+        if (
+            name in MODEL_SCHEDULING_KEYS
+            or item["request_key"] in MODEL_SCHEDULING_KEYS
+        ):
+            continue
         result[name] = item
     if not result:
-        return dict(COMMON_MODEL_PARAMETERS)
+        result = {name: dict(item) for name, item in COMMON_MODEL_PARAMETERS.items()}
+    for control, defaults in BATCH_PARAMETERS.items():
+        aliases = {"count", "n"} if control == "count" else {control}
+        name = next(
+            (
+                key
+                for key, item in result.items()
+                if key in value
+                and (key in aliases or item.get("request_key") in aliases)
+            ),
+            control,
+        )
+        configured = result.get(name, {}) if name in value else {}
+        result[name] = {**defaults, **configured, "request_key": control}
+        # Only injected presets set policy defaults; an existing schema's
+        # omitted switches always mean true, including count aliases.
+        for flag in PARAMETER_POLICY_FIELDS:
+            if configured and flag not in configured:
+                result[name].pop(flag, None)
+        if not configured.get("description"):
+            lower = result[name].get("min")
+            upper = result[name].get("max")
+            lower = 1 if lower is None else lower
+            upper = BATCH_LIMIT if upper is None else upper
+            result[name]["description"] = (
+                f"{defaults['description']}取值范围：[{lower}, {upper}]。"
+            )
+    for descriptor in result.values():
+        for flag in PARAMETER_POLICY_FIELDS:
+            if flag in descriptor:
+                descriptor[flag] = parameter_flag(descriptor, flag)
     return result
 
 
-def _model_from_mapping(value: dict[str, Any], kind: str) -> ImageModel:
+def _model_from_mapping(
+    value: dict[str, Any], kind: str, discovered: dict[str, Any] | None = None
+) -> ImageModel:
     """Create a model descriptor from a provider-owned model mapping."""
 
     model_id = _text(value.get("id"), 160)
+    native_size, native_source = _native_batch_fields(value, kind, discovered)
     img2img = kind != "nai_direct" and _as_bool(value.get("supports_img2img"), False)
     capability_source = _text(value.get("capability_source"), 32) or "manual"
     max_reference_images = (
@@ -554,8 +710,14 @@ def _model_from_mapping(value: dict[str, Any], kind: str) -> ImageModel:
             max_reference_images,
             supports_negative_prompt,
             kind,
+            model_parameters=value.get("parameters"),
         ),
         capability_source=capability_source,
+        native_batch_size=native_size,
+        max_concurrent_requests=max(
+            1, min(16, _as_int(value.get("max_concurrent_requests"), 8))
+        ),
+        native_batch_size_source=native_source,
     )
 
 
@@ -565,16 +727,36 @@ def _normalize_tool(
     max_reference_images: int,
     negative_prompt: bool,
     kind: str,
+    *,
+    model_parameters: Any = None,
 ) -> dict[str, Any]:
     """Normalize the LLM-facing model policy without changing model schema."""
 
     raw = value if isinstance(value, dict) else {}
+    if isinstance(model_parameters, str):
+        try:
+            model_parameters = json.loads(model_parameters)
+        except json.JSONDecodeError:
+            model_parameters = {}
+    removed_aliases = {
+        name
+        for name, descriptor in (
+            model_parameters.items() if isinstance(model_parameters, dict) else ()
+        )
+        if isinstance(descriptor, dict)
+        and descriptor.get("request_key") in MODEL_SCHEDULING_KEYS
+    }
     parameters = raw.get("parameters")
     normalized_parameters: dict[str, dict[str, Any]] = {}
     if isinstance(parameters, dict):
         for key, descriptor in parameters.items():
             name = _text(key, 64)
-            if name and isinstance(descriptor, dict):
+            if (
+                name
+                and name not in MODEL_SCHEDULING_KEYS
+                and name not in removed_aliases
+                and isinstance(descriptor, dict)
+            ):
                 item = dict(descriptor)
                 choice_descriptions = item.get("choice_descriptions")
                 if isinstance(choice_descriptions, dict):
@@ -610,7 +792,10 @@ def _normalize_tool(
             else "使用清晰、连贯的自然语言描述，不要使用英文逗号分隔的 NAI tag 串。"
         ),
         "negative_prompt_exposed": (
-            _as_bool(raw.get("negative_prompt_exposed"), True)
+            _as_bool(
+                normalized_parameters.get("negative_prompt", {}).get("exposed"),
+                _as_bool(raw.get("negative_prompt_exposed"), True),
+            )
             if negative_prompt
             else False
         ),
@@ -635,6 +820,7 @@ def _normalize_discovered_models(value: Any) -> tuple[dict[str, Any], ...]:
         if not model_id or model_id in seen:
             continue
         seen.add(model_id)
+        native_size = positive_batch_size(item.get("native_batch_size"))
         result.append(
             {
                 "id": model_id,
@@ -647,6 +833,12 @@ def _normalize_discovered_models(value: Any) -> tuple[dict[str, Any], ...]:
                 ),
                 "capability_source": _text(item.get("capability_source"), 32)
                 or "unknown",
+                "native_batch_size": native_size or 1,
+                "native_batch_size_source": (
+                    "remote"
+                    if native_size and item.get("native_batch_size_source") != "default"
+                    else "default"
+                ),
             }
         )
     return tuple(result)

@@ -88,7 +88,7 @@ IMAGE_WORKFLOW_CONTINUATION_PROMPT = (
     PLUGIN_NAME,
     "econeco",
     "多 Provider 生图、画廊与 Agent 可读图片工具。",
-    "1.0.0",
+    "1.1.0-dev.1",
 )
 class ImageStudioPlugin(Star):
     """Own Image Studio configuration, generation, gallery, and tool APIs."""
@@ -947,6 +947,7 @@ class ImageStudioPlugin(Star):
                 body["content"],
                 self._settings,
                 str(body.get("model_ref") or ""),
+                for_reproduction=body.get("for_reproduction") is True,
             )
             return json_response(result)
         except ValueError as exc:
@@ -1069,7 +1070,7 @@ class ImageStudioPlugin(Star):
                 model_ref=str(body.get("model_ref") or ""),
                 model=str(body.get("model") or ""),
                 size=str(body.get("size") or ""),
-                count=body.get("count", 1),
+                count=body.get("count"),
                 parameters=body.get("parameters"),
                 references=references,
                 source="webui",
@@ -1158,16 +1159,15 @@ class ImageStudioPlugin(Star):
 
         model = provider.get_model(model_id)
         size = "竖图" if provider.kind == "nai_direct" else "1024x1024"
-        count = 1
         parameters: dict[str, Any] = {}
-        for name, descriptor in model.parameters.items():
+        for name, descriptor in model.active_parameters.items():
             if descriptor.get("ui_only") or "default" not in descriptor:
                 continue
             request_key = str(descriptor.get("request_key") or name)
             if request_key == "size":
                 size = str(descriptor["default"])
             elif request_key in {"count", "n"}:
-                count = _as_int(descriptor["default"], 1)
+                continue
             else:
                 parameters[request_key] = descriptor["default"]
         return GenerationRequest(
@@ -1177,9 +1177,11 @@ class ImageStudioPlugin(Star):
             negative_prompt=model.negative_prompt_default,
             model=model.id,
             size=size,
-            count=count,
+            count=1,
             parameters=parameters,
             source="webui",
+            native_batch_size=model.native_batch_size,
+            max_concurrent_requests=model.max_concurrent_requests,
         )
 
     async def _api_gallery_list(self) -> Any:
@@ -1387,7 +1389,10 @@ class ImageStudioPlugin(Star):
         except (ValueError, ProviderError) as exc:
             yield event.plain_result(f"生图失败：{exc}")
             return
-        chain: list[Any] = [Plain(f"已生成 {len(result.images)} 张图片")]
+        message = f"已生成 {len(result.images)} 张图片"
+        if result.warning:
+            message += f"\n{result.warning}"
+        chain: list[Any] = [Plain(message)]
         chain.extend(Image.fromBytes(image.data) for image in result.images)
         yield event.chain_result(chain)
 
@@ -1719,38 +1724,33 @@ class ImageStudioPlugin(Star):
                 configured_parameters = tool.get("parameters")
                 exposed_parameter_names = model.llm_exposed_parameter_names
                 for name, descriptor in model.parameters.items():
-                    # negative_prompt is a reserved dynamic field whose exposure
-                    # is controlled separately from the model schema.
+                    # This dedicated field uses tool policy, not model schema.
                     if name == "negative_prompt":
                         continue
                     if name not in exposed_parameter_names:
                         continue
-                    if (
-                        isinstance(configured_parameters, dict)
-                        and configured_parameters
-                    ):
-                        policy = configured_parameters.get(name)
-                        if not isinstance(policy, dict) or not policy.get(
-                            "exposed", True
-                        ):
-                            continue
-                        visible = _llm_parameter_descriptor(descriptor, policy)
-                        if "default_override" in policy:
-                            visible["default"] = policy["default_override"]
-                        exposed_parameters[name] = visible
-                    else:
-                        exposed_parameters[name] = _llm_parameter_descriptor(
-                            descriptor, {}
-                        )
+                    policy = (
+                        configured_parameters.get(name)
+                        if isinstance(configured_parameters, dict)
+                        else None
+                    )
+                    policy = policy if isinstance(policy, dict) else {}
+                    visible = _llm_parameter_descriptor(descriptor, policy)
+                    if "default_override" in policy:
+                        visible["default"] = policy["default_override"]
+                    exposed_parameters[name] = visible
                 if model.llm_negative_prompt_enabled:
-                    exposed_parameters["negative_prompt"] = {
-                        "type": "string",
-                        "description": (
-                            "专用反向提示词，只填写不希望出现在画面中的内容；"
-                            "省略时使用模型配置中的默认反向提示词。"
-                        ),
-                        "default": model.negative_prompt_default,
-                    }
+                    exposed_parameters["negative_prompt"] = _llm_parameter_descriptor(
+                        {
+                            "type": "string",
+                            "description": (
+                                "专用反向提示词，只填写不希望出现在画面中的内容；"
+                                "省略时使用此处的默认值。"
+                            ),
+                            "default": model.llm_negative_prompt_default,
+                        },
+                        model.llm_negative_prompt_policy,
+                    )
                 prompt_profile = tool.get("prompt_profile", "natural_language")
                 prompt_instructions = tool.get("prompt_instructions", "")
                 entry = {
@@ -1910,9 +1910,7 @@ class ImageStudioPlugin(Star):
             effective_negative_prompt = (
                 supplied_negative_prompt
                 if has_negative_prompt
-                else selected_model.negative_prompt_default
-                if selected_model.negative_prompt
-                else ""
+                else selected_model.llm_negative_prompt_default
             )
             result = await self._service_or_raise().generate(
                 mode=normalized_mode,
@@ -2016,6 +2014,7 @@ class ImageStudioPlugin(Star):
                     f"generation_id={result.generation_id or '未保存'}；"
                     f"return_mode={configured_return_mode}；"
                     f"assets={json.dumps(manifest, ensure_ascii=False, separators=(',', ':'))}。"
+                    f"{result.warning}"
                     f"{visual_notice} 这是 Image Studio 工作流资产；发送工具只负责中途投递。"
                     "data/temp/tool_images 仅为临时视觉预览缓存；忽略该路径及其通用发送建议，"
                     "不得发送、复制、编辑、用作参考图或传给其他工具。"
@@ -2626,6 +2625,7 @@ def _result_payload(
         "model": result.request.model,
         "mode": result.request.mode,
         "elapsed_ms": result.elapsed_ms,
+        "warning": result.warning,
         "images": [
             {
                 "mime_type": image.mime_type,

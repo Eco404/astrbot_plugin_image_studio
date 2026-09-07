@@ -12,12 +12,46 @@ from urllib.parse import quote
 
 import aiohttp
 
-from .models import GeneratedImage, GenerationRequest, ImageProvider
+from .models import (
+    GeneratedImage,
+    GenerationRequest,
+    ImageProvider,
+    positive_batch_size,
+)
 from .storage import detect_mime_type, image_data_url
 
 
 class ProviderError(RuntimeError):
     """A user-presentable upstream provider failure."""
+
+
+class ProviderBatchError(ProviderError):
+    """Carry all successful images through a partially failed split batch."""
+
+    def __init__(
+        self,
+        requested: int,
+        images: tuple[GeneratedImage, ...],
+        failures: tuple[tuple[int, str], ...],
+        *,
+        request_sizes: tuple[int, ...] = (),
+    ) -> None:
+        self.images = images
+        self.failures = failures
+        sizes = request_sizes or (1,) * requested
+        failed_images = sum(sizes[index - 1] for index, _ in failures)
+        details = "；".join(
+            f"第 {index} 次请求（计划 {sizes[index - 1]} 张）：{reason}"
+            for index, reason in failures
+        )
+        summary = (
+            f"本批目标 {requested} 张，发送 {len(sizes)} 次请求，"
+            f"成功 {len(sizes) - len(failures)} 次，失败 {len(failures)} 次"
+            f"（涉及目标图片 {failed_images} 张）；实际返回 {len(images)} 张，已全部保留。"
+        )
+        super().__init__(
+            summary + f"{details}。失败请求可能已消耗额度，请勿自动重试整个批次。"
+        )
 
 
 class ProviderExecutor:
@@ -221,6 +255,8 @@ class ProviderExecutor:
         ) or request.parameters.get("generation_config")
         if isinstance(raw_generation_config, dict):
             generation_config.update(raw_generation_config)
+        if request.count > 1 or "candidateCount" in generation_config:
+            generation_config["candidateCount"] = request.count
         image_config: dict[str, Any] = {}
         aspect_ratio = request.parameters.get(
             "aspectRatio", request.parameters.get("aspect_ratio")
@@ -259,36 +295,18 @@ class ProviderExecutor:
             raise ProviderError("NAI 第三方 GET 服务仅支持文生图")
         endpoint = _join_url(provider.base_url, provider.generate_path or "/generate")
         query = _nai_query(provider, request)
-        # The proxy accepts one image per request; command batches share the
-        # service's existing provider concurrency slot and history record.
-        count = request.count if request.source == "command" else 1
-        images: list[GeneratedImage] = []
-        for _ in range(count):
-            try:
-                async with self.session.get(
-                    endpoint,
-                    params=query,
-                    headers=_headers(provider, bearer=False),
-                    timeout=aiohttp.ClientTimeout(total=provider.timeout_seconds),
-                ) as response:
-                    images.extend(await self._read_response_images(response, provider))
-            except (ProviderError, aiohttp.ClientError, TimeoutError) as exc:
-                if request.source != "command":
-                    raise
-                reason = (
-                    str(exc)
-                    if isinstance(exc, ProviderError)
-                    else "请求超时"
-                    if isinstance(exc, TimeoutError)
-                    else "无法连接服务商"
-                )
-                partial = (
-                    f"；本批已完成 {len(images)} 张，但尚未保存或投递" if images else ""
-                )
-                raise ProviderError(
-                    f"NAI 生图失败：{reason}{partial}；部分请求可能已消耗额度，请核对后重试"
-                ) from exc
-        return tuple(images)
+        try:
+            async with self.session.get(
+                endpoint,
+                params=query,
+                headers=_headers(provider, bearer=False),
+                timeout=aiohttp.ClientTimeout(total=provider.timeout_seconds),
+            ) as response:
+                return await self._read_response_images(response, provider)
+        except TimeoutError as exc:
+            raise ProviderError("NAI 生图失败：请求超时，可能已消耗额度") from exc
+        except aiohttp.ClientError as exc:
+            raise ProviderError("NAI 生图失败：无法连接服务商") from exc
 
     async def _custom_json(
         self,
@@ -310,7 +328,9 @@ class ProviderExecutor:
                 template = json.loads(provider.request_template)
             except json.JSONDecodeError as exc:
                 raise ProviderError("自定义 Provider 的请求模板不是合法 JSON") from exc
-            payload = _substitute_template(template, payload)
+            payload = _substitute_template(
+                template, {**payload, "count": request.count}
+            )
         async with self.session.post(
             endpoint,
             headers=_headers(provider, bearer=True),
@@ -360,7 +380,7 @@ class ProviderExecutor:
             values = _collect_image_values(payload)
         images: list[GeneratedImage] = []
         seen: set[str] = set()
-        for value in values[:8]:
+        for value in values:
             if not isinstance(value, str) or not value or value in seen:
                 continue
             seen.add(value)
@@ -414,6 +434,7 @@ def _nai_query(provider: ImageProvider, request: GenerationRequest) -> dict[str,
     query = {
         str(key): str(value)
         for key, value in _safe_parameters(request.parameters).items()
+        if key not in {"count", "n", "concurrency"}
     }
     query.update(
         {
@@ -483,6 +504,14 @@ def _safe_parameters(value: dict[str, Any]) -> dict[str, Any]:
         "model",
         "prompt",
         "image",
+        "count",
+        "n",
+        "concurrency",
+        "batch_mode",
+        "native_count_supported",
+        "native_batch_size",
+        "native_batch_size_source",
+        "max_concurrent_requests",
     }
     return {
         str(key): item
@@ -519,6 +548,7 @@ def _discovered_model(item: dict[str, Any], kind: str) -> dict[str, Any]:
         max_reference_images = int(item.get("max_reference_images") or 0)
     except (TypeError, ValueError):
         max_reference_images = 0
+    native_size = _discovered_native_batch_size(item)
     return {
         "id": model_id,
         "name": name or model_id,
@@ -527,7 +557,43 @@ def _discovered_model(item: dict[str, Any], kind: str) -> dict[str, Any]:
         "supports_negative_prompt": bool(item.get("supports_negative_prompt")),
         "max_reference_images": max(0, min(8, max_reference_images)),
         "capability_source": "remote" if known else "unknown",
+        "native_batch_size": native_size or 1,
+        "native_batch_size_source": "remote" if native_size else "default",
     }
+
+
+def _discovered_native_batch_size(item: dict[str, Any]) -> int | None:
+    """Read explicit output-count limits; IDs and token limits are not evidence."""
+
+    for limits in (item, item.get("capabilities"), item.get("limits")):
+        if not isinstance(limits, dict):
+            continue
+        for key in (
+            "native_batch_size",
+            "max_batch_size",
+            "max_images_per_request",
+            "max_output_images",
+        ):
+            parsed = positive_batch_size(limits.get(key))
+            if parsed is not None:
+                return parsed
+    schemas = [item.get("parameters")]
+    for key in ("input_schema", "inputSchema", "request_schema"):
+        schema = item.get(key)
+        if isinstance(schema, dict):
+            schemas.append(schema.get("properties"))
+    for schema in schemas:
+        if not isinstance(schema, dict):
+            continue
+        for key in ("n", "num_images", "number_of_images"):
+            descriptor = schema.get(key)
+            if not isinstance(descriptor, dict):
+                continue
+            for bound in ("maximum", "max"):
+                parsed = positive_batch_size(descriptor.get(bound))
+                if parsed is not None:
+                    return parsed
+    return None
 
 
 def _json_value(value: Any) -> bool:

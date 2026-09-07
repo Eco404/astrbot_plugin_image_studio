@@ -76,7 +76,7 @@ class CommandService:
         self.generated.append(options)
         if options["mode"] == "img2img" and not options["references"]:
             raise ValueError("未读取到可用参考图")
-        return SimpleNamespace(images=(GeneratedImage(PNG, "image/png"),))
+        return SimpleNamespace(images=(GeneratedImage(PNG, "image/png"),), warning="")
 
 
 def plugin(service=None):
