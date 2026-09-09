@@ -53,6 +53,7 @@ async function verifyGrid(grid, count) {
     await page.route("**/gallery/detail/**", async route => {
       const response = await route.fetch();
       const detail = await response.json();
+      detail.source = "webui";
       detail.original_prompt = prompt;
       detail.parameters = { ...detail.parameters, negative_prompt: "blur", parameters: { steps: 24, sampler: "euler", scale: 6, long_note: prompt.slice(0, 500), seed: 42, enabled: false, guidance: 0.3 } };
       detail.images = detail.images.map(image => ({ ...image, metadata: {
@@ -72,6 +73,12 @@ async function verifyGrid(grid, count) {
     await page.waitForLoadState("networkidle");
     await settle(frame);
     const grid = frame.locator(".detail-parameter-grid").first();
+    const generated = frame.locator(".generated-parameters");
+    assert.equal(await generated.evaluate(element => element.open), false, "image generation metadata starts collapsed");
+    assert.equal(await generated.locator(".detail-parameter-row").first().isVisible(), false);
+    await generated.locator(":scope > summary").click();
+    await settle(frame);
+    await verifyGrid(generated.locator(".detail-parameter-grid"), 2);
     const desktop = await verifyGrid(grid, 2);
     const order = desktop.rows.map(row => row.key);
     assert.deepEqual(desktop.columns.slice(0, 4), [0, 1, 1, 1], "short fields must keep filling the right column below a tall prompt");
@@ -81,6 +88,8 @@ async function verifyGrid(grid, count) {
     await frame.evaluate(() => { window.__copied = []; Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async text => window.__copied.push(text) } }); });
     await grid.locator("[data-copy-field]").first().click();
     assert.equal(await frame.evaluate(() => window.__copied[0]), prompt, "copy values retain original field mapping");
+    await generated.locator("[data-copy-field]").first().click();
+    assert.equal(await frame.evaluate(() => window.__copied[1]), prompt, "expanded metadata fields remain copyable");
     await grid.evaluate(element => Array.from(element.children).forEach(row => { row.style.height = "50px"; row.style.overflow = "hidden"; }));
     await settle(frame);
     assert.deepEqual((await verifyGrid(grid, 2)).columns.slice(0, 5), [0, 1, 1, 0, 0], "equal heights keep the current column until it exceeds the other");
@@ -104,6 +113,14 @@ async function verifyGrid(grid, count) {
       const layout = await verifyGrid(grid, width === 390 ? 1 : 2);
       assert.deepEqual(layout.rows.map(row => row.key), order, "resizing does not reorder the DOM or keyboard navigation");
       await verifyGrid(stage.locator(".detail-parameter-grid"), width === 390 ? 1 : 2);
+      await verifyGrid(generated.locator(".detail-parameter-grid"), width === 390 ? 1 : 2);
+      await generated.locator(":scope > summary").click();
+      assert.equal(await generated.evaluate(element => element.open), false);
+      await generated.scrollIntoViewIfNeeded();
+      await page.screenshot({ path: path.join(output, `${engine}-${width}-metadata-collapsed.png`) });
+      await generated.locator(":scope > summary").click();
+      await settle(frame);
+      await verifyGrid(generated.locator(".detail-parameter-grid"), width === 390 ? 1 : 2);
       if (width === 390) {
         await grid.evaluate(element => { document.getElementById("drawerBody").scrollTop += element.getBoundingClientRect().top - document.getElementById("drawerBody").getBoundingClientRect().top; });
         await page.screenshot({ path: path.join(output, `${engine}-mobile.png`) });
@@ -114,11 +131,13 @@ async function verifyGrid(grid, count) {
     await page.waitForLoadState("networkidle");
     await settle(frame);
     await verifyGrid(frame.locator(".detail-parameter-grid").first(), 2);
+    assert.equal(await generated.evaluate(element => element.open), false, "navigating resets metadata to collapsed");
     await frame.locator("#closeDrawer").click();
     await frame.locator(".gallery-card .gallery-info").first().click();
     await page.waitForLoadState("networkidle");
     await settle(frame);
     await verifyGrid(frame.locator(".detail-parameter-grid").first(), 2);
+    assert.equal(await generated.evaluate(element => element.open), false, "reopening starts collapsed");
     assert.deepEqual(errors, [], "no runtime or ResizeObserver loop errors");
     console.log(`${engine}: height-driven columns, equal-height ties, resizing, nested stages, copying and navigation passed`);
     console.log(`Screenshots: ${output}`);

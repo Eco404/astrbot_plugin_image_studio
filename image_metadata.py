@@ -1,17 +1,19 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import math
 import re
 import warnings
+from collections.abc import Callable
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any
 
 from PIL import Image
 
-PARSER_VERSION = 5
+PARSER_VERSION = 7
 MAX_IMAGE_BYTES = 64 * 1024 * 1024
 MAX_METADATA_BYTES = 4 * 1024 * 1024
 MAX_PIXELS = 64_000_000
@@ -598,6 +600,265 @@ def _workflow_graph(workflow: dict, result: dict) -> dict:
     return graph
 
 
+def _display_text(value: Any) -> str | None:
+    """Read a single saved string, never stringify tensors or join output batches."""
+
+    for _ in range(4):
+        if isinstance(value, str):
+            return value if value.strip() else None
+        if not isinstance(value, list) or len(value) != 1:
+            return None
+        value = value[0]
+    return None
+
+
+def _comfy_display_snapshots(
+    graph: dict,
+    workflow: dict,
+    text_usages: dict,
+    selected_root: str,
+    resolve: Callable[[Any], Any],
+) -> list[dict]:
+    """Attach unverified display caches only to unresolved main-chain text ports."""
+
+    # Each adapter declares the observed input and the saved-text field. Generic
+    # names such as 'debug' or 'preview' are not evidence of a text observer.
+    adapters = {"easy showAnything": ("anything", "text")}
+    nodes = workflow.get("nodes", [])
+    ui_nodes = {}
+    duplicate_ids = set()
+    if isinstance(nodes, list) and len(nodes) <= MAX_NODES:
+        for node in nodes:
+            if not isinstance(node, dict) or "id" not in node:
+                continue
+            identifier = str(node["id"])
+            if identifier in ui_nodes:
+                duplicate_ids.add(identifier)
+            ui_nodes[identifier] = node
+    for identifier in duplicate_ids:
+        ui_nodes.pop(identifier, None)
+    links = {}
+    duplicate_links = set()
+    for item in (
+        workflow.get("links", []) if isinstance(workflow.get("links"), list) else []
+    ):
+        if not isinstance(item, list) or len(item) < 6:
+            continue
+        identifier = str(item[0])
+        if identifier in links:
+            duplicate_links.add(identifier)
+        links[identifier] = item
+    for identifier in duplicate_links:
+        links.pop(identifier, None)
+
+    def api_ref(value: Any) -> tuple[str, int] | None:
+        if (
+            isinstance(value, list)
+            and len(value) == 2
+            and str(value[0]) in graph
+            and type(value[1]) is int
+            and value[1] >= 0
+        ):
+            return str(value[0]), value[1]
+        return None
+
+    def ui_ref(node: dict, name: str | None = None) -> tuple[str, int] | None:
+        entries = node.get("inputs", [])
+        if not isinstance(entries, list):
+            return None
+        found = []
+        for index, entry in enumerate(entries):
+            if not isinstance(entry, dict) or (
+                name is not None and entry.get("name") != name
+            ):
+                continue
+            edge = links.get(str(entry.get("link")))
+            if (
+                edge
+                and str(edge[3]) == str(node.get("id"))
+                and edge[4] == index
+                and str(edge[1]) in ui_nodes
+                and type(edge[2]) is int
+                and edge[2] >= 0
+            ):
+                found.append((str(edge[1]), edge[2]))
+        return found[0] if len(found) == 1 else None
+
+    setters: dict[str, list[str]] = {}
+    for identifier, node in ui_nodes.items():
+        widgets = node.get("widgets_values")
+        if (
+            node.get("type") == "SetNode"
+            and isinstance(widgets, list)
+            and widgets
+            and isinstance(widgets[0], str)
+        ):
+            setters.setdefault(widgets[0], []).append(identifier)
+
+    def canonical_ui(
+        ref: tuple[str, int] | None, visited: frozenset = frozenset()
+    ) -> tuple[str, int] | None:
+        if ref is None or ref in visited or len(visited) >= MAX_DEPTH:
+            return None
+        identifier, port = ref
+        node = ui_nodes.get(identifier, {})
+        kind = node.get("type")
+        if identifier in graph and graph[identifier].get("class_type") != kind:
+            return None
+        if port == 0 and kind == "GetNode":
+            if identifier in graph:
+                # Only resolve frontend aliases erased from the executed graph.
+                return None
+            widgets = node.get("widgets_values")
+            matches = (
+                setters.get(widgets[0], [])
+                if isinstance(widgets, list) and widgets and isinstance(widgets[0], str)
+                else []
+            )
+            return (
+                canonical_ui((matches[0], 0), visited | {ref})
+                if len(matches) == 1
+                else None
+            )
+        if port == 0 and kind in {"SetNode", "Reroute"}:
+            source = canonical_ui(ui_ref(node), visited | {ref})
+            if identifier in graph:
+                data = graph[identifier].get("inputs", {})
+                sources = (
+                    [api_ref(value) for value in data.values()]
+                    if isinstance(data, dict)
+                    else []
+                )
+                sources = [value for value in sources if value is not None]
+                if len(sources) != 1 or sources[0] != source:
+                    return None
+            return source
+        if identifier in graph and graph[identifier].get("class_type") == kind:
+            return ref
+        return None
+
+    observations: dict[tuple[str, int], dict[str, list[dict]]] = {}
+    unresolved = {}
+
+    def collect(ref: tuple[str, int] | None, value: Any, origin: dict) -> None:
+        if ref not in text_usages:
+            return
+        # Unknown text transforms can consume non-text dependencies too. An
+        # observer of such a tensor is not a cache of the resulting string.
+        kind = graph[ref[0]].get("class_type", "")
+        if kind.startswith("Conditioning") or kind in {
+            "CLIPTextEncode",
+            "CLIPTextEncodeSDXL",
+            "CLIPTextEncodeSDXLRefiner",
+            "KSampler",
+            "KSamplerAdvanced",
+            "FaceDetailer",
+            "FaceDetailerPipe",
+            "DetailerForEach",
+            "CheckpointLoaderSimple",
+            "CLIPLoader",
+            "DualCLIPLoader",
+            "UNETLoader",
+            "VAELoader",
+            "VAEDecode",
+            "VAEEncode",
+            "LoraLoader",
+            "LoraLoaderModelOnly",
+            "EmptyLatentImage",
+            "EmptySD3LatentImage",
+        }:
+            return
+        ui = ui_nodes.get(ref[0], {})
+        outputs = ui.get("outputs")
+        if (
+            ui.get("type") == kind
+            and isinstance(outputs, list)
+            and ref[1] < len(outputs)
+        ):
+            output = outputs[ref[1]]
+            output_type = output.get("type") if isinstance(output, dict) else None
+            if isinstance(output_type, str) and output_type not in {"", "*", "STRING"}:
+                return
+        text = _display_text(value)
+        if text is None:
+            return
+        if ref not in unresolved:
+            unresolved[ref] = not isinstance(resolve(list(ref)), str)
+        if not unresolved[ref]:
+            return
+        origins = observations.setdefault(ref, {}).setdefault(text, [])
+        if origin not in origins:
+            origins.append(origin)
+
+    for identifier, node in graph.items():
+        kind = node.get("class_type")
+        if kind not in adapters:
+            continue
+        input_name, field = adapters[kind]
+        data = node.get("inputs", {})
+        if not isinstance(data, dict):
+            continue
+        collect(
+            api_ref(data.get(input_name)),
+            data.get(field),
+            {
+                "node_id": identifier,
+                "node_type": kind,
+                "source": "prompt",
+                "field": f"inputs.{field}",
+            },
+        )
+    for identifier, node in ui_nodes.items():
+        kind = node.get("type")
+        if kind not in adapters or (
+            identifier in graph and graph[identifier].get("class_type") != kind
+        ):
+            continue
+        input_name, _ = adapters[kind]
+        ref = canonical_ui(ui_ref(node, input_name))
+        if identifier in graph:
+            data = graph[identifier].get("inputs", {})
+            if not isinstance(data, dict) or api_ref(data.get(input_name)) != ref:
+                continue
+        collect(
+            ref,
+            node.get("widgets_values"),
+            {
+                "node_id": identifier,
+                "node_type": kind,
+                "source": "workflow",
+                "field": "widgets_values",
+            },
+        )
+
+    candidates = []
+    for ref, texts in observations.items():
+        usage = text_usages[ref]
+        source_ref = f"{ref[0]}:{ref[1]}"
+        roles = usage["roles"]
+        for text, origins in texts.items():
+            candidates.append(
+                {
+                    "id": f"display:{source_ref}:{hashlib.sha256(text.encode('utf-8')).hexdigest()[:16]}",
+                    "node_id": origins[0]["node_id"],
+                    "node_type": origins[0]["node_type"],
+                    "field": "display_text",
+                    "text": text,
+                    "output_node_ids": [selected_root],
+                    "stage_ids": list(usage["stage_ids"]),
+                    "role": "mixed" if len(roles) > 1 else next(iter(roles), "unknown"),
+                    "status": "display_snapshot",
+                    "freshness": "unverified",
+                    "source_ref": source_ref,
+                    "output_ports": [ref[1]],
+                    "observations": origins,
+                    "consumers": usage["consumers"],
+                    "conflicting": len(texts) > 1,
+                }
+            )
+    return candidates
+
+
 def _comfyui(fields: dict, result: dict, *, output_node_id: str = "") -> None:
     graph = _json(fields.get("prompt"))
     if not _is_api_graph(graph):
@@ -675,6 +936,36 @@ def _comfyui(fields: dict, result: dict, *, output_node_id: str = "") -> None:
     for root in roots:
         orders[root] = []
         visit(root, set(), set(), orders[root])
+
+    def match_digest(value: Any) -> str:
+        return hashlib.sha256(
+            json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
+    # Match the selected branch's wiring, not cached values or node numbers alone.
+    # Literal prompts, seeds, models and UI layout may vary between batch images.
+    node_shapes = {
+        identifier: match_digest(
+            [
+                node.get("class_type"),
+                [
+                    [name, ref_key(value)]
+                    for name, value in sorted(inputs(identifier).items())
+                ],
+            ]
+        )
+        for identifier, node in graph.items()
+    }
+    branch_keys = {
+        root: match_digest(
+            [
+                "comfy-branch-v1",
+                root,
+                [[identifier, node_shapes[identifier]] for identifier in sorted(order)],
+            ]
+        )
+        for root, order in orders.items()
+    }
     saves = [root for root in roots if graph[root].get("class_type") in save_types]
     if output_node_id and output_node_id not in saves:
         raise ValueError("所选节点不存在或不是保存图片输出")
@@ -1034,19 +1325,37 @@ def _comfyui(fields: dict, result: dict, *, output_node_id: str = "") -> None:
             "TextConcatenate",
         }
         usages: dict[str, dict] = {}
+        text_usages: dict[tuple[str, int], dict] = {}
 
         def collect_usage(value: Any, stage_id: str, role: str) -> None:
-            pending = [(value, role, False, 0)]
-            visited: set[tuple[str, int, str, bool]] = set()
+            pending = [(value, role, False, False, stage_id, role, 0)]
+            visited: set[tuple] = set()
             while pending:
-                value, incoming_role, unknown_path, depth = pending.pop()
+                (
+                    value,
+                    incoming_role,
+                    unknown_path,
+                    text_path,
+                    consumer,
+                    input_name,
+                    depth,
+                ) = pending.pop()
                 ref = reference(value)
                 if ref is None or ref[0] not in selected_nodes:
                     continue
                 identifier, port = ref
                 if depth > MAX_DEPTH:
                     raise ValueError("ComfyUI 文本候选依赖层数过多")
-                identity = identifier, port, incoming_role, unknown_path
+                if text_path:
+                    usage = text_usages.setdefault(
+                        ref, {"roles": set(), "stage_ids": {}, "consumers": []}
+                    )
+                    usage["roles"].add(incoming_role)
+                    usage["stage_ids"][stage_id] = None
+                    receiver = {"node_id": consumer, "input_name": input_name}
+                    if receiver not in usage["consumers"]:
+                        usage["consumers"].append(receiver)
+                identity = identifier, port, incoming_role, unknown_path, text_path
                 if identity in visited:
                     continue
                 visited.add(identity)
@@ -1085,7 +1394,18 @@ def _comfyui(fields: dict, result: dict, *, output_node_id: str = "") -> None:
                         else incoming_role
                     )
                     if reference(child):
-                        pending.append((child, child_role, unknown_path, depth + 1))
+                        child_text_path = text_path or name in text_fields.get(kind, ())
+                        pending.append(
+                            (
+                                child,
+                                child_role,
+                                unknown_path,
+                                child_text_path,
+                                identifier,
+                                name,
+                                depth + 1,
+                            )
+                        )
 
         stage_ancestors = {}
         for identifier in order:
@@ -1167,7 +1487,49 @@ def _comfyui(fields: dict, result: dict, *, output_node_id: str = "") -> None:
                         "output_ports": sorted(usage.get("ports", set())),
                     }
                 )
-        return candidates
+        snapshots = _comfy_display_snapshots(
+            graph, workflow, text_usages, selected_root, resolve
+        )
+        if snapshots:
+            _warning(
+                result,
+                "发现主链路同一输出端口的关联显示快照；未验证是否为本次执行结果，请核对后手动采用",
+            )
+            for source_ref in dict.fromkeys(
+                item["source_ref"] for item in snapshots if item["conflicting"]
+            ):
+                _warning(
+                    result,
+                    f"输出 {source_ref} 的显示快照存在不同文本，请选择一份，不要合并冲突结果",
+                )
+        for candidate in candidates + snapshots:
+            identity = (
+                [
+                    "display",
+                    candidate["source_ref"],
+                    sorted(
+                        (item["node_id"], item["input_name"])
+                        for item in candidate["consumers"]
+                    ),
+                ]
+                if candidate["status"] == "display_snapshot"
+                else [
+                    "field",
+                    candidate["node_id"],
+                    candidate["node_type"],
+                    candidate["field"],
+                ]
+            )
+            candidate["match_key"] = match_digest(
+                [
+                    "comfy-candidate-v1",
+                    branch_keys[selected_root],
+                    identity,
+                    candidate["role"],
+                    candidate["output_ports"],
+                ]
+            )
+        return candidates + snapshots
 
     stages, loras, models = [], [], []
     for identifier in order:
@@ -1360,6 +1722,7 @@ def _comfyui(fields: dict, result: dict, *, output_node_id: str = "") -> None:
             "node_id": root,
             "type": graph[root].get("class_type"),
             "kind": "save" if root in saves else "preview",
+            "match_key": branch_keys[root],
             "stage_ids": [
                 identifier
                 for identifier in orders[root]

@@ -61,6 +61,8 @@
     let importAddQueue = Promise.resolve();
     let importAddJobs = 0;
     let importEpoch = 0;
+    let importBatchJob = null;
+    let importBatchResult = null;
     let modalClose = null;
     let modalPending = false;
     let modalDismissOutside = true;
@@ -175,9 +177,10 @@
     function importCard(item) {
       const data = item.fields;
       const warnings = [...(item.parsed?.warnings || []), ...(item.warning ? [item.warning] : [])];
-      const disabled = importing || item.status === "reading";
+      const disabled = importing || !!importBatchJob || item.status === "reading";
       const saveOutputs = (item.parsed?.normalized?.outputs || []).filter((entry) => entry.kind === "save");
-      const outputChoice = saveOutputs.length > 1 ? `<label class="field field-wide">最终保存输出<select data-import-output aria-label="最终保存输出"><option value="">请选择保存输出</option>${saveOutputs.map((entry) => `<option value="${escape(entry.node_id)}" ${String(entry.node_id) === String(item.outputNodeId || "") ? "selected" : ""}>${escape(entry.type)} #${escape(entry.node_id)}</option>`).join("")}</select></label>` : "";
+      const selectedOutput = saveOutputs.find((entry) => String(entry.node_id) === String(item.outputNodeId || ""));
+      const outputChoice = saveOutputs.length > 1 ? `<div class="field field-wide"><label for="${item.id}-output">最终保存输出</label><div class="import-output-choice"><select id="${item.id}-output" data-import-output aria-label="最终保存输出"><option value="">请选择保存输出</option>${saveOutputs.map((entry) => `<option value="${escape(entry.node_id)}" ${String(entry.node_id) === String(item.outputNodeId || "") ? "selected" : ""}>${escape(entry.type)} #${escape(entry.node_id)}</option>`).join("")}</select><button class="quiet-button import-batch-button" data-batch-import-output type="button" aria-label="批量应用保存输出到其他匹配图片" title="将保存输出选择应用到本次导入的其他匹配图片" ${batchChoiceDisabled(item) || !selectedOutput?.match_key ? "disabled" : ""}>${icon("CheckCheck")}</button></div></div>` : "";
       return `<article class="import-card glass ${item.duplicateReason ? "is-duplicate" : ""}" data-import-id="${item.id}" data-import-sha256="${item.sha256}">
         <div class="import-card-header"><strong title="${escape(item.file.name)}">${escape(item.file.name)}</strong><button class="studio-icon-button is-danger" data-remove-import="${item.id}" type="button" aria-label="移除 ${escape(item.file.name)}" title="移除图片" ${importing ? "disabled" : ""}>${icon("X")}</button></div>
         <div class="import-card-preview"><img src="${item.url}" alt="${escape(item.file.name)}" /></div><div class="import-file-meta">${formatBytes(item.file.size)}${item.width ? ` · ${item.width} × ${item.height}` : ""}</div>
@@ -199,6 +202,51 @@
       return !!text && (`\n\n${normalize(value)}\n\n`).includes(`\n\n${text}\n\n`);
     }
 
+    function snapshotSelection(item, candidate, target) {
+      return candidate.status === "display_snapshot" && candidate.source_ref ? item.snapshotSelections?.[target]?.[candidate.source_ref] : null;
+    }
+
+    function candidateAction(item, candidate, target) {
+      const exists = hasPromptBlock(item.fields[target], candidate.text);
+      return { disabled: exists || importing || !!importBatchJob || item.status === "reading", label: `${exists ? "已填入" : snapshotSelection(item, candidate, target) ? "改用" : "添加到"}${target === "prompt" ? "正向" : "反向"}` };
+    }
+
+    function batchChoiceDisabled(item) { return importing || !!importBatchJob || item.status === "reading" || !imports.some((entry) => entry !== item); }
+
+    function snapshotMarkup(candidate) {
+      if (candidate.status !== "display_snapshot") return "";
+      const sources = [...new Set((candidate.observations || []).map((observation) => `${({ prompt: "API 执行图", workflow: "界面工作流" })[observation.source] || "图片元数据"} · ${observation.node_type} #${observation.node_id}`))];
+      return `<div class="prompt-candidate-meta">关联输出 ${escape(candidate.source_ref)}${sources.length ? `<br>${sources.map(escape).join("<br>")}` : ""}</div><p class="prompt-candidate-snapshot-note">未验证是否为本次结果${candidate.conflicting ? "。同一输出存在不同快照，请核对并选择其中一份。" : "，请核对后再填入。"}</p>`;
+    }
+
+    // Keep track of the exact block inserted by a snapshot, including subsequent
+    // user edits. This lets another snapshot replace that block without touching
+    // unrelated notes or mistaking edited text for the original cached value.
+    function updatePromptField(item, target, value) {
+      const before = item.fields[target] || "";
+      const selections = item.snapshotSelections?.[target] || {};
+      let start = 0, suffix = 0;
+      while (start < before.length && start < value.length && before[start] === value[start]) start++;
+      while (suffix < before.length - start && suffix < value.length - start && before[before.length - suffix - 1] === value[value.length - suffix - 1]) suffix++;
+      const oldEnd = before.length - suffix, newEnd = value.length - suffix, delta = value.length - before.length;
+      for (const [source, selection] of Object.entries(selections)) {
+        if (oldEnd <= selection.start) { selection.start += delta; selection.end += delta; }
+        else if (start < selection.end) {
+          selection.start = Math.min(selection.start, start);
+          selection.end = oldEnd >= selection.end ? newEnd : selection.end + delta;
+        }
+        if (!value || selection.end <= selection.start) delete selections[source];
+      }
+      item.fields[target] = value;
+    }
+
+    function snapshotBlockIntact(value, selection) {
+      const before = value.slice(0, selection.start), after = value.slice(selection.end);
+      return value.slice(selection.start, selection.end) === selection.text
+        && (!before.trim() || /\n[ \t]*\n[ \t]*$/.test(before))
+        && (!after.trim() || /^[ \t]*\n[ \t]*\n/.test(after));
+    }
+
     function promptCandidatesMarkup(item) {
       if (item.parsed?.format !== "comfyui") return "";
       const normalized = item.parsed.normalized || {};
@@ -206,13 +254,13 @@
       if (!candidates.length && !normalized.requires_output_selection) return "";
       const entries = candidates.map((candidate) => {
         const role = { positive: "正向链路", negative: "反向链路", mixed: "正反向链路", unknown: "方向未确定" }[candidate.role] || "方向未确定";
-        const status = { static: "静态文本", template: "动态模板", unknown_path: "途经未知节点" }[candidate.status] || "作用未确定";
+        const status = { static: "静态文本", template: "动态模板", unknown_path: "途经未知节点", display_snapshot: "关联显示快照" }[candidate.status] || "作用未确定";
         const actions = ["prompt", "negative_prompt"].map((target) => {
-          const exists = hasPromptBlock(item.fields[target], candidate.text);
+          const action = candidateAction(item, candidate, target);
           const direction = target === "prompt" ? "正向" : "反向";
-          return `<button class="quiet-button" data-candidate-id="${escape(candidate.id)}" data-candidate-target="${target}" type="button" ${exists || importing || item.status === "reading" ? "disabled" : ""}>${exists ? "已填入" : "添加到"}${direction}</button>`;
+          return `<div class="prompt-candidate-split"><button class="quiet-button" data-candidate-id="${escape(candidate.id)}" data-candidate-target="${target}" type="button" ${action.disabled ? "disabled" : ""}>${action.label}</button><button class="quiet-button import-batch-button" data-batch-candidate-id="${escape(candidate.id)}" data-batch-candidate-target="${target}" type="button" aria-label="批量应用${direction}候选到其他匹配图片" title="将此节点选择应用到其他匹配图片的${direction}提示词，使用各图片自己的文本" ${batchChoiceDisabled(item) || !candidate.match_key ? "disabled" : ""}>${icon("CheckCheck")}</button></div>`;
         }).join("");
-        return `<div class="prompt-candidate" data-prompt-candidate="${escape(candidate.id)}"><div class="prompt-candidate-title"><strong>${escape(candidate.node_type)} #${escape(candidate.node_id)}</strong><span>${escape(candidate.field)}</span></div><div class="prompt-candidate-meta">${role} · ${status}${candidate.stage_ids?.length ? ` · 阶段 ${candidate.stage_ids.map(escape).join("、")}` : ""}</div><details class="prompt-candidate-text"><summary>${escape(candidate.text)}</summary><pre>${escape(candidate.text)}</pre></details><div class="prompt-candidate-actions">${actions}</div></div>`;
+        return `<div class="prompt-candidate" data-prompt-candidate="${escape(candidate.id)}"><div class="prompt-candidate-title"><strong>${escape(candidate.node_type)} #${escape(candidate.node_id)}</strong><span>${escape(candidate.field)}</span></div><div class="prompt-candidate-meta">${role} · ${status}${candidate.stage_ids?.length ? ` · 阶段 ${candidate.stage_ids.map(escape).join("、")}` : ""}</div>${snapshotMarkup(candidate)}<details class="prompt-candidate-text"><summary>${escape(candidate.text)}</summary><pre>${escape(candidate.text)}</pre></details><div class="prompt-candidate-actions">${actions}</div></div>`;
       }).join("");
       return `<details class="import-prompt-candidates"><summary>候选提示词 · ${candidates.length} 项</summary>${normalized.requires_output_selection ? '<p class="field-hint">尚未选择最终保存输出</p>' : entries}</details>`;
     }
@@ -223,26 +271,151 @@
         const candidate = item.parsed?.normalized?.prompt_candidates?.find((entry) => entry.id === button.dataset.candidateId);
         if (!candidate) return;
         const target = button.dataset.candidateTarget;
-        const exists = hasPromptBlock(item.fields[target], candidate.text);
-        button.disabled = exists || importing || item.status === "reading";
-        button.textContent = `${exists ? "已填入" : "添加到"}${target === "prompt" ? "正向" : "反向"}`;
+        const action = candidateAction(item, candidate, target);
+        button.disabled = action.disabled;
+        button.textContent = action.label;
       });
+    }
+
+    function applyPromptCandidate(item, candidate, target) {
+      if (!candidate?.text) return { status: "mismatch", message: "对应节点没有可用文本" };
+      if (hasPromptBlock(item.fields[target], candidate.text)) return { status: "already", message: "该图片的对应文本已填入" };
+      const current = item.fields[target] || "";
+      const previous = snapshotSelection(item, candidate, target);
+      if (previous && !snapshotBlockIntact(current, previous)) {
+        return { status: "protected", message: "之前填入的显示快照已被手动修改。请先核对并删除该片段，或清空该方向的提示词，再选择其他快照。" };
+      }
+      const text = String(candidate.text).replace(/\r\n/g, "\n");
+      const start = previous ? previous.start : current ? current.length + 2 : 0;
+      const value = previous ? `${current.slice(0, previous.start)}${text}${current.slice(previous.end)}` : current ? `${current}\n\n${text}` : text;
+      updatePromptField(item, target, value);
+      if (candidate.status === "display_snapshot" && candidate.source_ref) {
+        item.snapshotSelections ||= {};
+        item.snapshotSelections[target] ||= {};
+        item.snapshotSelections[target][candidate.source_ref] = { id: candidate.id, text, start, end: start + text.length };
+      }
+      item.editedFields.add(target);
+      item.revision = (item.revision || 0) + 1;
+      return { status: "applied", message: `已${previous ? "替换" : "添加"}该图片的对应文本`, replaced: !!previous };
     }
 
     function addPromptCandidate(button) {
       const card = button.closest("[data-import-id]");
       const item = imports.find((entry) => entry.id === card?.dataset.importId);
       const target = button.dataset.candidateTarget;
-      if (!item || importing || item.status === "reading" || !["prompt", "negative_prompt"].includes(target)) return;
+      if (!item || importing || importBatchJob || item.status === "reading" || !["prompt", "negative_prompt"].includes(target)) return;
       const candidate = item.parsed?.normalized?.prompt_candidates?.find((entry) => entry.id === button.dataset.candidateId);
-      if (!candidate?.text || hasPromptBlock(item.fields[target], candidate.text)) return;
+      const result = applyPromptCandidate(item, candidate, target);
+      if (result.status === "already") return;
+      if (result.status !== "applied") { showNotice(result.message, "error"); return; }
       void discardImportGroup();
-      const current = item.fields[target] || "";
-      item.fields[target] = current ? `${current}\n\n${candidate.text}` : candidate.text;
-      item.editedFields.add(target);
       card.querySelector(`[data-import-field="${target}"]`).value = item.fields[target];
       syncCandidateButtons(card, item);
-      showNotice(`候选已添加到${target === "prompt" ? "正向" : "反向"}提示词。`, "success");
+      showNotice(`候选已${result.replaced ? "替换到" : "添加到"}${target === "prompt" ? "正向" : "反向"}提示词。`, "success");
+    }
+
+    function observationKey(observation) { return JSON.stringify([observation.source, observation.node_id, observation.node_type, observation.field]); }
+
+    function matchingPromptCandidate(item, source) {
+      if (!source.match_key) return { status: "mismatch", message: "来源节点没有可匹配的链路信息" };
+      if (item.parsed?.normalized?.requires_output_selection) return { status: "mismatch", message: "尚未选择保存分支，请先为该图片选择最终保存输出" };
+      let candidates = (item.parsed?.normalized?.prompt_candidates || []).filter((candidate) => candidate.match_key === source.match_key);
+      if (source.status === "display_snapshot") {
+        const origins = new Set((source.observations || []).map(observationKey));
+        candidates = candidates.filter((candidate) => (candidate.observations || []).some((observation) => origins.has(observationKey(observation))));
+      }
+      if (!candidates.length) return { status: "mismatch", message: "当前保存分支没有对应节点、端口或快照来源" };
+      if (candidates.length > 1) return { status: "conflict", message: "对应来源在该图片中存在多份冲突快照，请单独选择" };
+      return { candidate: candidates[0] };
+    }
+
+    function startImportBatch(source, title) {
+      if (!source || batchChoiceDisabled(source)) return null;
+      const job = { title, epoch: importEpoch, entries: imports.filter((item) => item !== source).map((item) => ({ item, revision: item.revision || 0, parsed: item.parsed, status: item.status })), results: [] };
+      importBatchJob = job;
+      importBatchResult = null;
+      renderImports();
+      return job;
+    }
+
+    function batchEntryChanged(job, entry) {
+      if (job.epoch !== importEpoch || !imports.includes(entry.item)) return "图片已移除或本次导入已取消";
+      if ((entry.item.revision || 0) !== entry.revision || entry.item.parsed !== entry.parsed) return "图片在操作期间已编辑或重新解析，保留当前内容";
+      if (entry.status === "reading") return "点击批量按钮时仍在读取图片，请读取完成后重试";
+      return "";
+    }
+
+    function batchResultSummary(result) {
+      const labels = { applied: "已应用", already: "已填入或已选择", mismatch: "节点不匹配", conflict: "快照冲突", protected: "手动修改保护", failed: "读取失败", skipped: "已跳过" };
+      const parts = Object.entries(labels).map(([status, label]) => { const count = result.results.filter((entry) => entry.status === status).length; return count ? `${label} ${count} 张` : ""; }).filter(Boolean);
+      const manual = result.results.filter((entry) => entry.manualReview).length;
+      if (manual) parts.push(`其中 ${manual} 张保留手动内容，请核对`);
+      return parts.join("，");
+    }
+
+    function finishImportBatch(job) {
+      if (importBatchJob === job) importBatchJob = null;
+      if (job.epoch === importEpoch) {
+        importBatchResult = job;
+        showNotice(batchResultSummary(job), job.results.some((entry) => entry.status === "applied") ? "success" : "info");
+      }
+      renderImports();
+    }
+
+    async function applyCandidateToOtherImports(button) {
+      const source = imports.find((item) => item.id === button.closest("[data-import-id]")?.dataset.importId);
+      const target = button.dataset.batchCandidateTarget;
+      const candidate = source?.parsed?.normalized?.prompt_candidates?.find((entry) => entry.id === button.dataset.batchCandidateId);
+      if (!candidate?.match_key || !["prompt", "negative_prompt"].includes(target)) return;
+      const job = startImportBatch(source, `批量应用${target === "prompt" ? "正向" : "反向"}候选`);
+      if (!job) return;
+      try {
+        await discardImportGroup();
+        for (const entry of job.entries) {
+          const changed = batchEntryChanged(job, entry);
+          const matched = changed ? { status: "skipped", message: changed } : matchingPromptCandidate(entry.item, candidate);
+          const result = matched.candidate ? applyPromptCandidate(entry.item, matched.candidate, target) : matched;
+          job.results.push({ filename: entry.item.file.name, ...result });
+        }
+      } finally { finishImportBatch(job); }
+    }
+
+    async function applyOutputToOtherImports(button) {
+      const source = imports.find((item) => item.id === button.closest("[data-import-id]")?.dataset.importId);
+      const output = source?.parsed?.normalized?.outputs?.find((entry) => entry.kind === "save" && String(entry.node_id) === String(source.outputNodeId || ""));
+      if (!output?.match_key) return;
+      const job = startImportBatch(source, "批量应用保存输出");
+      if (!job) return;
+      try {
+        await discardImportGroup();
+        const processEntry = async (entry) => {
+          const item = entry.item;
+          const record = (result) => { job.results.push({ filename: item.file.name, ...result }); };
+          let changed = batchEntryChanged(job, entry);
+          if (changed) { record({ status: "skipped", message: changed }); return; }
+          const matching = (item.parsed?.normalized?.outputs || []).filter((candidate) => candidate.kind === "save" && candidate.match_key === output.match_key);
+          if (matching.length !== 1) { record({ status: "mismatch", message: "没有唯一对应的保存输出和主管线" }); return; }
+          const outputNodeId = String(matching[0].node_id);
+          if (String(item.outputNodeId || item.parsed?.normalized?.selected_output_node || "") === outputNodeId) { record({ status: "already", message: "已选择相同保存输出" }); return; }
+          try {
+            const parsed = await apiPost("imports/inspect", { metadata: item.rawMetadata || item.parsed?.raw || {}, width: item.width, height: item.height, output_node_id: outputNodeId });
+            changed = batchEntryChanged(job, entry);
+            if (changed) { record({ status: "skipped", message: changed }); return; }
+            item.outputNodeId = outputNodeId;
+            applyImportMetadata(item, parsed); item.status = "ready"; item.error = "";
+            item.revision = (item.revision || 0) + 1;
+            record({ status: "applied", message: item.editedFields.size ? "输出已更新；手动填写内容已保留，请核对是否适用于该分支" : "已解析该图片的对应保存输出", manualReview: !!item.editedFields.size });
+          } catch (error) { record({ status: "failed", message: errorMessage(error, "保存输出读取失败，已保留原内容") }); }
+        };
+        for (let index = 0; index < job.entries.length; index += 3) await Promise.all(job.entries.slice(index, index + 3).map(processEntry));
+      } finally { finishImportBatch(job); }
+    }
+
+    function showImportBatchResult() {
+      const result = importBatchResult;
+      if (!result) return;
+      const labels = { applied: "已应用", already: "无需重复", mismatch: "节点不匹配", conflict: "快照冲突", protected: "保留手动修改", failed: "读取失败", skipped: "已跳过" };
+      void openModal(result.title, `<p class="field-hint">${escape(batchResultSummary(result))}</p><div class="import-batch-results">${result.results.map((entry) => `<div class="import-batch-result"><strong>${escape(entry.filename)}</strong><span>${escape(labels[entry.status] || entry.status)}</span><p>${escape(entry.message)}</p></div>`).join("")}</div>`, [{ label: "关闭", action: () => true }]);
     }
 
     function applyImportMetadata(item, parsed) {
@@ -253,7 +426,7 @@
     }
 
     async function chooseImportOutput(item, outputNodeId) {
-      if (!item || importing || item.status === "reading") return;
+      if (!item || importing || importBatchJob || item.status === "reading") return;
       item.status = "reading"; item.error = ""; renderImports();
       try {
         await discardImportGroup();
@@ -282,14 +455,19 @@
       }
       $("importDropzone").classList.toggle("is-compact", imports.length > 0);
       $("importDropzoneLabel").textContent = imports.length ? "继续添加图片" : "添加图片";
-      $("importSummary").textContent = importAddJobs ? `正在校验图片… 已选择 ${imports.length} 张` : imports.length ? `已选择 ${imports.length} 张图片` : "尚未选择图片";
-      $("confirmImportButton").disabled = importing || importAddJobs > 0 || !imports.length || imports.some((item) => item.status === "reading");
+      $("importSummary").textContent = importBatchJob ? `正在批量应用选择… ${importBatchJob.entries.length} 张` : importAddJobs ? `正在校验图片… 已选择 ${imports.length} 张` : imports.length ? `已选择 ${imports.length} 张图片` : "尚未选择图片";
+      const batchSummary = $("importBatchSummary");
+      if (batchSummary) {
+        batchSummary.classList.toggle("is-hidden", !importBatchResult || !!importBatchJob);
+        batchSummary.querySelector("span").textContent = importBatchResult ? batchResultSummary(importBatchResult) : "";
+      }
+      $("confirmImportButton").disabled = importing || !!importBatchJob || importAddJobs > 0 || !imports.length || imports.some((item) => item.status === "reading");
       $("cancelImportButton").disabled = importing; $("importDropzone").disabled = importing; $("importFiles").disabled = importing;
       $("importGroupOption").classList.toggle("is-hidden", imports.length < 2);
-      $("importAsGroup").disabled = importing || imports.length < 2;
+      $("importAsGroup").disabled = importing || !!importBatchJob || imports.length < 2;
       if (imports.length < 2) $("importAsGroup").checked = false;
       $("importMergeOption").classList.toggle("is-hidden", !imports.length);
-      $("importMergeExisting").disabled = importing || !imports.length;
+      $("importMergeExisting").disabled = importing || !!importBatchJob || !imports.length;
       if (!imports.length) $("importMergeExisting").checked = false;
       setCommandLabel("confirmImportButton", importing ? "正在导入…" : "确认导入");
     }
@@ -304,6 +482,7 @@
     function clearImports() {
       if (importing) return;
       importEpoch++; importAddJobs = 0;
+      importBatchJob = null; importBatchResult = null;
       void discardImportGroup();
       imports.forEach((item) => URL.revokeObjectURL(item.url)); imports = [];
       $("importProgress").textContent = ""; renderImports();
@@ -366,7 +545,7 @@
     }
 
     async function confirmImports() {
-      if (importing || importAddJobs || !imports.length || imports.some((item) => item.status === "reading")) return;
+      if (importing || importBatchJob || importAddJobs || !imports.length || imports.some((item) => item.status === "reading")) return;
       let preparedItems;
       let mergeEngine = "";
       try {
@@ -637,7 +816,7 @@
       if (metadata.format === "comfyui") for (const key of ["condition_nodes", "stages", "outputs", "prompt_candidates"]) { delete metadataRows[key]; if (detail.source === "import") delete requestRows[key]; }
       const raw = metadata.raw || {};
       const rawMarkup = Object.entries(raw).map(([name, value]) => `<details class="metadata-raw-field"><summary>${escape(name)}</summary>${parameterRows({ [name]: value })}</details>`).join("");
-      return `<div class="detail-block"><h3>${detail.source === "import" ? "导入信息" : "原始请求"}</h3><div class="detail-parameter-grid">${parameterRows(requestRows)}</div></div>${Object.keys(metadataRows).length ? `<div class="detail-block"><h3>图片生成参数 · ${escape(engineLabel(metadata.format))}</h3>${summaryStatus}<div class="detail-parameter-grid">${parameterRows(metadataRows)}</div></div>` : ""}${comfyDetailsMarkup(metadata, true)}${rawMarkup ? `<details class="detail-block raw-metadata"><summary>图片原始元数据</summary>${rawMarkup}</details>` : ""}`;
+      return `<div class="detail-block"><h3>${detail.source === "import" ? "导入信息" : "原始请求"}</h3><div class="detail-parameter-grid">${parameterRows(requestRows)}</div></div>${Object.keys(metadataRows).length ? `<details class="detail-block generated-parameters"><summary>图片生成参数 · ${escape(engineLabel(metadata.format))}</summary>${summaryStatus}<div class="detail-parameter-grid">${parameterRows(metadataRows)}</div></details>` : ""}${comfyDetailsMarkup(metadata, true)}${rawMarkup ? `<details class="detail-block raw-metadata"><summary>图片原始元数据</summary>${rawMarkup}</details>` : ""}`;
     }
 
     function detailWarningsMarkup(detail, image) {
@@ -909,13 +1088,28 @@
       for (const [id, other] of [["importAsGroup", "importMergeExisting"], ["importMergeExisting", "importAsGroup"]]) {
         $(id).addEventListener("change", () => { if ($(id).checked) $(other).checked = false; void discardImportGroup(); });
       }
-      $("importGrid").addEventListener("click", (event) => { const button = event.target.closest("[data-remove-import]"); if (button) removeImport(button.dataset.removeImport); const candidate = event.target.closest("[data-candidate-target]"); if (candidate) addPromptCandidate(candidate); });
+      const batchSummary = document.createElement("div"); batchSummary.id = "importBatchSummary"; batchSummary.className = "import-batch-summary is-hidden";
+      batchSummary.innerHTML = '<span role="status"></span><button class="quiet-button" type="button">查看结果</button>';
+      batchSummary.querySelector("button").addEventListener("click", showImportBatchResult);
+      $("importGrid").before(batchSummary);
+      $("importGrid").addEventListener("click", (event) => {
+        const button = event.target.closest("[data-remove-import]"); if (button) removeImport(button.dataset.removeImport);
+        const candidate = event.target.closest("[data-candidate-target]"); if (candidate) addPromptCandidate(candidate);
+        const batchCandidate = event.target.closest("[data-batch-candidate-target]"); if (batchCandidate) void applyCandidateToOtherImports(batchCandidate);
+        const batchOutput = event.target.closest("[data-batch-import-output]"); if (batchOutput) void applyOutputToOtherImports(batchOutput);
+      });
       $("importGrid").addEventListener("change", (event) => { if (!event.target.matches("[data-import-output]")) return; const item = imports.find((entry) => entry.id === event.target.closest("[data-import-id]").dataset.importId); void chooseImportOutput(item, event.target.value); });
       $("importGrid").addEventListener("input", (event) => {
         const key = event.target.dataset.importField; if (!key) return;
         void discardImportGroup();
         const card = event.target.closest("[data-import-id]");
-        const item = imports.find((entry) => entry.id === card.dataset.importId); if (item) { item.fields[key] = event.target.value; item.editedFields.add(key); if (["prompt", "negative_prompt"].includes(key)) syncCandidateButtons(card, item); }
+        const item = imports.find((entry) => entry.id === card.dataset.importId); if (item) {
+          if (["prompt", "negative_prompt"].includes(key)) updatePromptField(item, key, event.target.value);
+          else item.fields[key] = event.target.value;
+          item.editedFields.add(key);
+          item.revision = (item.revision || 0) + 1;
+          if (["prompt", "negative_prompt"].includes(key)) syncCandidateButtons(card, item);
+        }
       });
       for (const view of [$("galleryView"), $("importView")]) {
         view.addEventListener("dragover", (event) => { if (!Array.from(event.dataTransfer.types).includes("Files")) return; event.preventDefault(); view.classList.add("is-drop-target"); });

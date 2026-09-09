@@ -267,7 +267,7 @@ def test_converted_comfyui_exif_labels_keep_original_workflow(
     Image.new("RGB", (24, 32), "white").save(output, image_format, exif=exif)
     result = parse_image_metadata(output.getvalue())
     assert result["format"] == "comfyui"
-    assert result["parser_version"] == PARSER_VERSION == 5
+    assert result["parser_version"] == PARSER_VERSION == 7
     assert result["raw"]["ImageDescription"] == "Workflow: " + workflow
     assert result["raw"]["Make"] == "Prompt: " + prompt
     assert result["raw"]["workflow"] == workflow

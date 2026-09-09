@@ -30,7 +30,7 @@ graph={
  "8":{"class_type":"VAEDecode","inputs":{"samples":["7",0],"vae":["1",2]}},
  "9":{"class_type":"FaceDetailer","inputs":{"image":["8",0],"model":["1",0],"clip":["1",1],"vae":["1",2],"positive":["5",0],"negative":["4",0],"wildcard":wildcard,"steps":12,"cfg":4,"denoise":0.3}},
  "10":{"class_type":"SaveImage","inputs":{"images":["9",0],"filename_prefix":"safe_branch_one"}},
- "90":{"class_type":"easy showAnything","inputs":{"anything":["3",0],"text":"BYPASS_DEBUG_TEXT_MUST_NOT_BE_LISTED"}},
+ "90":{"class_type":"easy showAnything","inputs":{"anything":["3",0],"text":"ASSOCIATED_DISPLAY_SNAPSHOT"}},
  "99":{"class_type":"CLIPTextEncode","inputs":{"clip":["1",1],"text":"DISCONNECTED_DEBUG_TEXT_MUST_NOT_BE_LISTED"}}
 }
 second={
@@ -113,11 +113,12 @@ async function verifySingle(page, frame, inner, fixture, name) {
   const text = rows.find((row) => row.id === "2:text"); const wildcard = rows.find((row) => row.id === "9:wildcard");
   assert.ok(text); assert.equal(text.status, "unknown_path"); assert.equal(text.text, fixture.plain); assert.equal(wildcard.status, "template");
   assert.deepEqual(text.output_node_ids, ["10"]); assert.ok(text.stage_ids.includes("7")); assert.ok(text.output_ports.includes(0));
-  assert.ok(rows.every((row) => !["90", "99"].includes(row.node_id)));
+  assert.ok(rows.some((row) => row.node_id === "90" && row.status === "display_snapshot"));
+  assert.ok(rows.every((row) => row.node_id !== "99"));
   const card = frame.locator(".import-card").first();
   assert.equal(await candidates(card).evaluate((element) => element.open), false, "candidate section starts collapsed");
   await expandCandidates(card);
-  const visible = await candidates(card).textContent(); assert.doesNotMatch(visible, /BYPASS_DEBUG|DISCONNECTED_DEBUG/);
+  const visible = await candidates(card).textContent(); assert.match(visible, /ASSOCIATED_DISPLAY_SNAPSHOT/); assert.doesNotMatch(visible, /DISCONNECTED_DEBUG/);
   const prompt = card.locator('[data-import-field="prompt"]'); const negative = card.locator('[data-import-field="negative_prompt"]');
   await prompt.fill(""); await candidateButton(card, "2:text", "prompt").click();
   assert.equal(await prompt.inputValue(), fixture.plain);
