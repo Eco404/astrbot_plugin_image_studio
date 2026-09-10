@@ -12,6 +12,7 @@ from astrbot_plugin_image_studio.image_metadata import (
 )
 from astrbot_plugin_image_studio.tests.test_comfy_candidates import parse
 from astrbot_plugin_image_studio.tests.test_comfy_display_snapshots import (
+    conflicting_observer_workflow,
     dynamic_graph,
     observer_workflow,
     snapshots,
@@ -209,16 +210,15 @@ def test_display_snapshots_match_across_random_text_and_origin_merging() -> None
     assert a["match_key"] == b["match_key"]
     assert a["id"] != b["id"]
     assert a["text"] != b["text"]
-    assert len(a["observations"]) == 2 and len(b["observations"]) == 1
+    assert len(a["observations"]) == len(b["observations"]) == 1
+    assert a["snapshot_kind"] == "workflow" and b["snapshot_kind"] == "api_fallback"
     assert output_keys(first) == output_keys(second)
 
 
 def test_conflicting_snapshots_share_structure_key_but_keep_distinct_provenance() -> (
     None
 ):
-    normalized = parse(
-        dynamic_graph(), workflow=observer_workflow(["fixed, earlier random choice"])
-    )
+    normalized = parse(dynamic_graph(), workflow=conflicting_observer_workflow())
     candidates = snapshots(normalized)
     assert len(candidates) == 2
     assert len({item["match_key"] for item in candidates}) == 1
@@ -231,8 +231,8 @@ def test_conflicting_snapshots_share_structure_key_but_keep_distinct_provenance(
         )
         for item in candidates
     } == {
-        (("10", "prompt", "inputs.text"),),
         (("10", "workflow", "widgets_values"),),
+        (("11", "workflow", "widgets_values"),),
     }
 
 
@@ -292,7 +292,7 @@ def test_matching_metadata_is_opaque_and_does_not_modify_raw_workflows() -> None
 
 
 @pytest.mark.parametrize("output", ["188", "189"])
-def test_available_raffle_sample_matches_snapshot_structure_despite_text_conflict(
+def test_available_raffle_sample_matches_preferred_snapshot_structure(
     output: str,
 ) -> None:
     sample = Path(__file__).parents[1] / "data" / "image" / "Anima_00002_.png"
@@ -307,9 +307,9 @@ def test_available_raffle_sample_matches_snapshot_structure_despite_text_conflic
     assert len({item["match_key"] for item in saves}) == 2
     selected = parse_metadata_fields(metadata["raw"], output_node_id=output)
     observed = snapshots(selected["normalized"])
-    assert len(observed) == 2
+    assert len(observed) == 1
     assert len({item["match_key"] for item in observed}) == 1
-    assert len({item["id"] for item in observed}) == 2
+    assert len({item["id"] for item in observed}) == 1
     assert {item["source_ref"] for item in observed} == {"137:0"}
-    assert sorted(len(item["text"]) for item in observed) == [610, 1056]
+    assert [len(item["text"]) for item in observed] == [610]
     assert selected["raw"] == metadata["raw"]

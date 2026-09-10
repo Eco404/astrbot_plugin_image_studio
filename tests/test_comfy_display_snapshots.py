@@ -64,6 +64,20 @@ def observer_workflow(text: object, *, producer: int = 9, port: int = 0) -> dict
     }
 
 
+def conflicting_observer_workflow() -> dict:
+    workflow = observer_workflow(["fixed, first observed choice"])
+    workflow["nodes"].append(
+        {
+            "id": 11,
+            "type": "easy showAnything",
+            "inputs": [{"name": "anything", "type": "*", "link": 2}],
+            "widgets_values": [["fixed, second observed choice"]],
+        }
+    )
+    workflow["links"].append([2, 9, 0, 11, 0, "*"])
+    return workflow
+
+
 @pytest.mark.parametrize("role,consumer", [("positive", "2"), ("negative", "3")])
 def test_shared_output_observation_is_manual_and_carries_exact_provenance(
     role: str, consumer: str
@@ -75,6 +89,7 @@ def test_shared_output_observation_is_manual_and_carries_exact_provenance(
     assert candidate["text"] == "fixed, random choice"
     assert candidate["source_ref"] == "9:0"
     assert candidate["freshness"] == "unverified"
+    assert candidate["snapshot_kind"] == "api_fallback"
     assert candidate["role"] == role
     assert candidate["consumers"] == [{"node_id": consumer, "input_name": "text"}]
     assert candidate["observations"] == [
@@ -92,35 +107,56 @@ def test_shared_output_observation_is_manual_and_carries_exact_provenance(
     assert all(item["node_id"] != "8" for item in normalized["prompt_candidates"])
 
 
-def test_identical_api_and_workflow_snapshots_deduplicate_and_keep_both_sources() -> (
-    None
-):
+def test_identical_api_and_workflow_snapshots_prefer_workflow_source() -> None:
     graph = dynamic_graph()
     normalized = parse(graph, workflow=observer_workflow(["fixed, random choice"]))
     values = snapshots(normalized)
     assert len(values) == 1
     assert {item["source"] for item in values[0]["observations"]} == {
-        "prompt",
         "workflow",
     }
+    assert values[0]["snapshot_kind"] == "workflow"
     assert not values[0].get("conflicting", False)
     assert not normalized.get("prompt")
 
 
-def test_conflicting_snapshots_are_distinct_and_neither_is_automatically_adopted() -> (
+def test_workflow_writeback_replaces_previous_api_display_without_changing_raw() -> (
     None
 ):
     graph = dynamic_graph()
-    values = snapshots(
-        parse(graph, workflow=observer_workflow(["fixed, older choice"]))
-    )
+    fields = {
+        "prompt": json.dumps(graph),
+        "workflow": json.dumps(observer_workflow(["fixed, current choice"])),
+    }
+    result = parse_metadata_fields(fields)
+    values = snapshots(result["normalized"])
+    assert [item["text"] for item in values] == ["fixed, current choice"]
+    assert values[0]["snapshot_kind"] == "workflow"
+    assert not values[0]["conflicting"]
+    assert not result["normalized"].get("prompt")
+    assert result["raw"] == fields
+    assert "fixed, random choice" in result["raw"]["prompt"]
+
+
+@pytest.mark.parametrize("value", [None, [], "", " ", ["one", "two"]])
+def test_missing_or_invalid_workflow_text_keeps_labelled_api_fallback(value) -> None:
+    values = snapshots(parse(dynamic_graph(), workflow=observer_workflow(value)))
+    assert [item["text"] for item in values] == ["fixed, random choice"]
+    assert values[0]["snapshot_kind"] == "api_fallback"
+    assert values[0]["observations"][0]["source"] == "prompt"
+
+
+def test_distinct_observer_conflicts_are_not_automatically_adopted() -> None:
+    graph = dynamic_graph()
+    values = snapshots(parse(graph, workflow=conflicting_observer_workflow()))
     assert {item["text"] for item in values} == {
-        "fixed, random choice",
-        "fixed, older choice",
+        "fixed, first observed choice",
+        "fixed, second observed choice",
     }
     assert len({item["id"] for item in values}) == 2
     assert all(item["source_ref"] == "9:0" and item["conflicting"] for item in values)
     assert all(item["freshness"] == "unverified" for item in values)
+    assert all(item["snapshot_kind"] == "workflow" for item in values)
     assert all(len(item["observations"]) == 1 for item in values)
 
 
@@ -348,13 +384,13 @@ def test_import_export_and_resolve_keep_snapshot_manual_and_preserve_raw(
         assert detail["original_prompt"] == "fixed, chosen by user"
         assert detail["images"][0]["metadata"]["raw"] == raw
         assert not detail["images"][0]["metadata"]["normalized"].get("prompt")
-        assert len(snapshots(detail["images"][0]["metadata"]["normalized"])) == 2
+        assert len(snapshots(detail["images"][0]["metadata"]["normalized"])) == 1
         exported = export_parameters(detail)
         restored = resolve_parameters(
             exported["content"], settings(), "nai:nai-diffusion-4-5-full"
         )
         assert restored["draft"]["prompt"] == "fixed, chosen by user"
-        assert len(snapshots(restored["unmapped"])) == 2
+        assert len(snapshots(restored["unmapped"])) == 1
         assert (
             export_parameters(detail, format_name="workflow")["content"]
             == raw["workflow"]
@@ -368,19 +404,27 @@ def test_import_export_and_resolve_keep_snapshot_manual_and_preserve_raw(
 
 
 @pytest.mark.parametrize("output", ["188", "189"])
-def test_available_raffle_sample_keeps_both_full_prompt_snapshots(output: str) -> None:
+def test_available_raffle_sample_prefers_current_workflow_snapshot(output: str) -> None:
     sample = Path(__file__).parents[1] / "data" / "image" / "Anima_00002_.png"
     if not sample.exists():
         pytest.skip("本地参考样本不在发布仓库中")
     metadata = parse_image_metadata(sample.read_bytes())
     selected = parse_metadata_fields(metadata["raw"], output_node_id=output)
     values = snapshots(selected["normalized"])
-    assert sorted(len(item["text"]) for item in values) == [610, 1056]
+    assert [len(item["text"]) for item in values] == [610]
     assert all(item["source_ref"] == "137:0" for item in values)
-    assert all(item["conflicting"] for item in values)
+    assert all(
+        not item["conflicting"] and item["snapshot_kind"] == "workflow"
+        for item in values
+    )
     assert {
         observation["node_id"]
         for candidate in values
         for observation in candidate["observations"]
     } == {"143"}
+    assert {entry["id"] for entry in values[0].get("covered_candidates", [])} == {
+        "119:text",
+        "120:text",
+    }
+    assert selected["raw"] == metadata["raw"]
     assert not selected["normalized"].get("prompt")

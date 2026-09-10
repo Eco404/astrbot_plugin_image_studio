@@ -180,7 +180,7 @@
       const disabled = importing || !!importBatchJob || item.status === "reading";
       const saveOutputs = (item.parsed?.normalized?.outputs || []).filter((entry) => entry.kind === "save");
       const selectedOutput = saveOutputs.find((entry) => String(entry.node_id) === String(item.outputNodeId || ""));
-      const outputChoice = saveOutputs.length > 1 ? `<div class="field field-wide"><label for="${item.id}-output">最终保存输出</label><div class="import-output-choice"><select id="${item.id}-output" data-import-output aria-label="最终保存输出"><option value="">请选择保存输出</option>${saveOutputs.map((entry) => `<option value="${escape(entry.node_id)}" ${String(entry.node_id) === String(item.outputNodeId || "") ? "selected" : ""}>${escape(entry.type)} #${escape(entry.node_id)}</option>`).join("")}</select><button class="quiet-button import-batch-button" data-batch-import-output type="button" aria-label="批量应用保存输出到其他匹配图片" title="将保存输出选择应用到本次导入的其他匹配图片" ${batchChoiceDisabled(item) || !selectedOutput?.match_key ? "disabled" : ""}>${icon("CheckCheck")}</button></div></div>` : "";
+      const outputChoice = saveOutputs.length > 1 ? `<div class="field field-wide"><label for="${item.id}-output">最终保存输出</label><div class="import-output-choice"><select id="${item.id}-output" data-import-output aria-label="最终保存输出"><option value="">请选择保存输出</option>${saveOutputs.map((entry) => `<option value="${escape(entry.node_id)}" ${String(entry.node_id) === String(item.outputNodeId || "") ? "selected" : ""}>${escape(entry.type)} #${escape(entry.node_id)}</option>`).join("")}</select><button class="quiet-button import-batch-button" data-batch-import-output type="button" aria-label="批量应用保存输出到全部匹配图片" title="将保存输出选择应用到本次导入的全部匹配图片（含当前图片）" ${batchChoiceDisabled(item) || !selectedOutput?.match_key ? "disabled" : ""}>${icon("CheckCheck")}</button></div></div>` : "";
       return `<article class="import-card glass ${item.duplicateReason ? "is-duplicate" : ""}" data-import-id="${item.id}" data-import-sha256="${item.sha256}">
         <div class="import-card-header"><strong title="${escape(item.file.name)}">${escape(item.file.name)}</strong><button class="studio-icon-button is-danger" data-remove-import="${item.id}" type="button" aria-label="移除 ${escape(item.file.name)}" title="移除图片" ${importing ? "disabled" : ""}>${icon("X")}</button></div>
         <div class="import-card-preview"><img src="${item.url}" alt="${escape(item.file.name)}" /></div><div class="import-file-meta">${formatBytes(item.file.size)}${item.width ? ` · ${item.width} × ${item.height}` : ""}</div>
@@ -211,12 +211,13 @@
       return { disabled: exists || importing || !!importBatchJob || item.status === "reading", label: `${exists ? "已填入" : snapshotSelection(item, candidate, target) ? "改用" : "添加到"}${target === "prompt" ? "正向" : "反向"}` };
     }
 
-    function batchChoiceDisabled(item) { return importing || !!importBatchJob || item.status === "reading" || !imports.some((entry) => entry !== item); }
+    function batchChoiceDisabled(item) { return importing || !!importBatchJob || item.status === "reading" || !imports.includes(item); }
 
     function snapshotMarkup(candidate) {
       if (candidate.status !== "display_snapshot") return "";
-      const sources = [...new Set((candidate.observations || []).map((observation) => `${({ prompt: "API 执行图", workflow: "界面工作流" })[observation.source] || "图片元数据"} · ${observation.node_type} #${observation.node_id}`))];
-      return `<div class="prompt-candidate-meta">关联输出 ${escape(candidate.source_ref)}${sources.length ? `<br>${sources.map(escape).join("<br>")}` : ""}</div><p class="prompt-candidate-snapshot-note">未验证是否为本次结果${candidate.conflicting ? "。同一输出存在不同快照，请核对并选择其中一份。" : "，请核对后再填入。"}</p>`;
+      const sources = [...new Set((candidate.observations || []).map((observation) => `${({ prompt: "API 备用显示值", workflow: "工作流执行回写" })[observation.source] || "图片元数据"} · ${observation.node_type} #${observation.node_id}`))];
+      const kind = candidate.snapshot_kind === "api_fallback" ? "API 备用显示值，可能来自上一次运行。" : candidate.snapshot_kind === "workflow" ? "工作流执行回写候选。" : "";
+      return `<div class="prompt-candidate-meta">关联输出 ${escape(candidate.source_ref)}${sources.length ? `<br>${sources.map(escape).join("<br>")}` : ""}</div><p class="prompt-candidate-snapshot-note">${kind}未验证是否为本次结果${candidate.conflicting ? "。同一输出存在不同快照，请核对并选择其中一份。" : "，请核对后再填入。"}</p>`;
     }
 
     // Keep track of the exact block inserted by a snapshot, including subsequent
@@ -255,12 +256,13 @@
       const entries = candidates.map((candidate) => {
         const role = { positive: "正向链路", negative: "反向链路", mixed: "正反向链路", unknown: "方向未确定" }[candidate.role] || "方向未确定";
         const status = { static: "静态文本", template: "动态模板", unknown_path: "途经未知节点", display_snapshot: "关联显示快照" }[candidate.status] || "作用未确定";
+        const covered = (candidate.covered_candidates || []).map((entry) => `${entry.node_type} #${entry.node_id} · ${entry.field}`);
         const actions = ["prompt", "negative_prompt"].map((target) => {
           const action = candidateAction(item, candidate, target);
           const direction = target === "prompt" ? "正向" : "反向";
-          return `<div class="prompt-candidate-split"><button class="quiet-button" data-candidate-id="${escape(candidate.id)}" data-candidate-target="${target}" type="button" ${action.disabled ? "disabled" : ""}>${action.label}</button><button class="quiet-button import-batch-button" data-batch-candidate-id="${escape(candidate.id)}" data-batch-candidate-target="${target}" type="button" aria-label="批量应用${direction}候选到其他匹配图片" title="将此节点选择应用到其他匹配图片的${direction}提示词，使用各图片自己的文本" ${batchChoiceDisabled(item) || !candidate.match_key ? "disabled" : ""}>${icon("CheckCheck")}</button></div>`;
+          return `<div class="prompt-candidate-split"><button class="quiet-button" data-candidate-id="${escape(candidate.id)}" data-candidate-target="${target}" type="button" ${action.disabled ? "disabled" : ""}>${action.label}</button><button class="quiet-button import-batch-button" data-batch-candidate-id="${escape(candidate.id)}" data-batch-candidate-target="${target}" type="button" aria-label="批量应用${direction}候选到全部匹配图片" title="将此节点选择应用到全部匹配图片的${direction}提示词（含当前图片），使用各图片自己的文本" ${batchChoiceDisabled(item) || !candidate.match_key ? "disabled" : ""}>${icon("CheckCheck")}</button></div>`;
         }).join("");
-        return `<div class="prompt-candidate" data-prompt-candidate="${escape(candidate.id)}"><div class="prompt-candidate-title"><strong>${escape(candidate.node_type)} #${escape(candidate.node_id)}</strong><span>${escape(candidate.field)}</span></div><div class="prompt-candidate-meta">${role} · ${status}${candidate.stage_ids?.length ? ` · 阶段 ${candidate.stage_ids.map(escape).join("、")}` : ""}</div>${snapshotMarkup(candidate)}<details class="prompt-candidate-text"><summary>${escape(candidate.text)}</summary><pre>${escape(candidate.text)}</pre></details><div class="prompt-candidate-actions">${actions}</div></div>`;
+        return `<div class="prompt-candidate" data-prompt-candidate="${escape(candidate.id)}"><div class="prompt-candidate-title"><strong>${escape(candidate.node_type)} #${escape(candidate.node_id)}</strong><span>${escape(candidate.field)}</span></div><div class="prompt-candidate-meta">${role} · ${status}${candidate.stage_ids?.length ? ` · 阶段 ${candidate.stage_ids.map(escape).join("、")}` : ""}</div>${snapshotMarkup(candidate)}${covered.length ? `<div class="prompt-candidate-meta">已包含上游 ${covered.map(escape).join("、")}</div>` : ""}<details class="prompt-candidate-text"><summary>${escape(candidate.text)}</summary><pre>${escape(candidate.text)}</pre></details><div class="prompt-candidate-actions">${actions}</div></div>`;
       }).join("");
       return `<details class="import-prompt-candidates"><summary>候选提示词 · ${candidates.length} 项</summary>${normalized.requires_output_selection ? '<p class="field-hint">尚未选择最终保存输出</p>' : entries}</details>`;
     }
@@ -331,7 +333,7 @@
 
     function startImportBatch(source, title) {
       if (!source || batchChoiceDisabled(source)) return null;
-      const job = { title, epoch: importEpoch, entries: imports.filter((item) => item !== source).map((item) => ({ item, revision: item.revision || 0, parsed: item.parsed, status: item.status })), results: [] };
+      const job = { title, epoch: importEpoch, entries: imports.map((item) => ({ item, revision: item.revision || 0, parsed: item.parsed, status: item.status })), results: [] };
       importBatchJob = job;
       importBatchResult = null;
       renderImports();
@@ -362,7 +364,7 @@
       renderImports();
     }
 
-    async function applyCandidateToOtherImports(button) {
+    async function applyCandidateToImports(button) {
       const source = imports.find((item) => item.id === button.closest("[data-import-id]")?.dataset.importId);
       const target = button.dataset.batchCandidateTarget;
       const candidate = source?.parsed?.normalized?.prompt_candidates?.find((entry) => entry.id === button.dataset.batchCandidateId);
@@ -373,14 +375,14 @@
         await discardImportGroup();
         for (const entry of job.entries) {
           const changed = batchEntryChanged(job, entry);
-          const matched = changed ? { status: "skipped", message: changed } : matchingPromptCandidate(entry.item, candidate);
+          const matched = changed ? { status: "skipped", message: changed } : entry.item === source ? { candidate } : matchingPromptCandidate(entry.item, candidate);
           const result = matched.candidate ? applyPromptCandidate(entry.item, matched.candidate, target) : matched;
           job.results.push({ filename: entry.item.file.name, ...result });
         }
       } finally { finishImportBatch(job); }
     }
 
-    async function applyOutputToOtherImports(button) {
+    async function applyOutputToImports(button) {
       const source = imports.find((item) => item.id === button.closest("[data-import-id]")?.dataset.importId);
       const output = source?.parsed?.normalized?.outputs?.find((entry) => entry.kind === "save" && String(entry.node_id) === String(source.outputNodeId || ""));
       if (!output?.match_key) return;
@@ -1095,8 +1097,8 @@
       $("importGrid").addEventListener("click", (event) => {
         const button = event.target.closest("[data-remove-import]"); if (button) removeImport(button.dataset.removeImport);
         const candidate = event.target.closest("[data-candidate-target]"); if (candidate) addPromptCandidate(candidate);
-        const batchCandidate = event.target.closest("[data-batch-candidate-target]"); if (batchCandidate) void applyCandidateToOtherImports(batchCandidate);
-        const batchOutput = event.target.closest("[data-batch-import-output]"); if (batchOutput) void applyOutputToOtherImports(batchOutput);
+        const batchCandidate = event.target.closest("[data-batch-candidate-target]"); if (batchCandidate) void applyCandidateToImports(batchCandidate);
+        const batchOutput = event.target.closest("[data-batch-import-output]"); if (batchOutput) void applyOutputToImports(batchOutput);
       });
       $("importGrid").addEventListener("change", (event) => { if (!event.target.matches("[data-import-output]")) return; const item = imports.find((entry) => entry.id === event.target.closest("[data-import-id]").dataset.importId); void chooseImportOutput(item, event.target.value); });
       $("importGrid").addEventListener("input", (event) => {

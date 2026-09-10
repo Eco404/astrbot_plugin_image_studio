@@ -113,13 +113,17 @@ async function verifySingle(page, frame, inner, fixture, name) {
   const text = rows.find((row) => row.id === "2:text"); const wildcard = rows.find((row) => row.id === "9:wildcard");
   assert.ok(text); assert.equal(text.status, "unknown_path"); assert.equal(text.text, fixture.plain); assert.equal(wildcard.status, "template");
   assert.deepEqual(text.output_node_ids, ["10"]); assert.ok(text.stage_ids.includes("7")); assert.ok(text.output_ports.includes(0));
-  assert.ok(rows.some((row) => row.node_id === "90" && row.status === "display_snapshot"));
+  const snapshot = rows.find((row) => row.node_id === "90" && row.status === "display_snapshot");
+  assert.ok(snapshot); assert.equal(snapshot.snapshot_kind, "api_fallback"); assert.equal(snapshot.freshness, "unverified");
+  assert.ok(snapshot.observations.every((observation) => observation.source === "prompt"));
   assert.ok(rows.every((row) => row.node_id !== "99"));
   const card = frame.locator(".import-card").first();
   assert.equal(await candidates(card).evaluate((element) => element.open), false, "candidate section starts collapsed");
   await expandCandidates(card);
   const visible = await candidates(card).textContent(); assert.match(visible, /ASSOCIATED_DISPLAY_SNAPSHOT/); assert.doesNotMatch(visible, /DISCONNECTED_DEBUG/);
+  assert.match(visible, /API 备用显示值，可能来自上一次运行/); assert.match(visible, /未验证是否为本次结果/);
   const prompt = card.locator('[data-import-field="prompt"]'); const negative = card.locator('[data-import-field="negative_prompt"]');
+  assert.ok(!(await prompt.inputValue()).includes(snapshot.text), "API fallback must not auto-fill the prompt");
   await prompt.fill(""); await candidateButton(card, "2:text", "prompt").click();
   assert.equal(await prompt.inputValue(), fixture.plain);
   assert.equal(await candidateButton(card, "2:text", "prompt").isDisabled(), true);

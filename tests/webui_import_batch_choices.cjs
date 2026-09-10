@@ -32,7 +32,7 @@ for index,kind in enumerate(("source","target","conflict","origins","mismatch","
  }
  observers=("94",) if kind=="origins" else ("90","93")
  for node in observers:
-  graph[node]={"class_type":"easy showAnything","inputs":{"anything":["3",0],"text":f"rendered-{kind}"}}
+  graph[node]={"class_type":"easy showAnything","inputs":{"anything":["3",0],"text":f"PREVIOUS_RUN_API_DISPLAY-{kind}"}}
  nodes=[];links=[]
  for key,node in graph.items():
   inputs=[]
@@ -109,19 +109,24 @@ async function verify(browser, name, width) {
     assert.equal(await card("mismatch").locator("[data-import-output]").inputValue(), "", "same IDs with different output edges must not match");
     assert.equal(await card("failure").locator("[data-import-output]").inputValue(), "", "failed reparse retains original branch state");
     assert.match(await frame.locator("#importBatchSummary").textContent(), /已应用 3 张/);
+    assert.match(await frame.locator("#importBatchSummary").textContent(), /已填入或已选择 1 张/);
     assert.match(await frame.locator("#importBatchSummary").textContent(), /读取失败 1 张/);
     await frame.locator("#importBatchSummary button").click();
+    assert.match(await frame.locator("#studioModalBody").textContent(), /source\.png[\s\S]*已选择相同保存输出/);
     assert.match(await frame.locator("#studioModalBody").textContent(), /failure\.png[\s\S]*synthetic branch read failure/);
     await frame.locator("#studioModalClose").click();
     await noticeOff(frame); await card("source").locator(".import-output-choice").scrollIntoViewIfNeeded();
     await page.screenshot({ path: path.join(output, `${name}-output.png`) });
     await expand(card("source"));
+    assert.match(await card("source").locator(".import-prompt-candidates").textContent(), /工作流执行回写候选/);
+    assert.doesNotMatch(await card("source").locator(".import-prompt-candidates").textContent(), /PREVIOUS_RUN_API_DISPLAY/);
+    assert.equal(await card("conflict").locator(".prompt-candidate-snapshot-note").count(), 2, "distinct workflow observers retain conflicting snapshots");
     let snapshot = await rowByText(card("source"), "rendered-source");
-    await single(snapshot).click();
+    assert.equal(await field("source").inputValue(), "");
+    await bulk(snapshot).click(); await ready(frame);
+    assert.equal(await field("source").inputValue(), "rendered-source", "bulk must apply to its own source card too");
     assert.equal(await single(snapshot).isDisabled(), true);
     assert.equal(await bulk(snapshot).isEnabled(), true, "already adopted source must still support bulk action");
-    await bulk(snapshot).click(); await ready(frame);
-    assert.equal(await field("source").inputValue(), "rendered-source", "bulk acts only on other cards");
     assert.equal(await field("target").inputValue(), "manual composition note\n\nrendered-target", "target must receive its own snapshot, not source text");
     assert.equal(await field("conflict").inputValue(), "", "merged source provenance splitting on target is ambiguous");
     assert.equal(await field("origins").inputValue(), "", "different observer origin must not match merely by output");
@@ -131,15 +136,18 @@ async function verify(browser, name, width) {
     await frame.locator("#studioModalClose").click();
     snapshot = await rowByText(card("source"), "rendered-source");
     await bulk(snapshot).click(); await ready(frame);
+    assert.equal(await field("source").inputValue(), "rendered-source", "repeat must not duplicate source text");
     assert.equal((await field("target").inputValue()).split("rendered-target").length, 2, "repeat does not duplicate text");
     await field("target").fill("manual composition note\n\nrendered-target edited");
     await bulk(await rowByText(card("source"), "rendered-source")).click(); await ready(frame);
     assert.equal(await field("target").inputValue(), "manual composition note\n\nrendered-target edited");
     assert.match(await frame.locator("#importBatchSummary").textContent(), /手动修改保护 1 张/);
     await bulk(await rowByText(card("source"), "static-source")).click(); await ready(frame);
+    assert.equal(await field("source").inputValue(), "rendered-source\n\nstatic-source");
     assert.equal(await field("conflict").inputValue(), "static-conflict");
     assert.equal(await field("origins").inputValue(), "static-origins");
     await bulk(await rowByText(card("source"), "static-source"), "negative_prompt").click(); await ready(frame);
+    assert.equal(await field("source", "negative_prompt").inputValue(), "blur, watermark\n\nstatic-source");
     assert.equal(await field("conflict", "negative_prompt").inputValue(), "blur, watermark\n\nstatic-conflict");
     const splitBounds = await (await rowByText(card("source"), "static-source")).locator(".prompt-candidate-split").first().evaluate((node) => {
       const buttons = [...node.children].map((button) => { const box = button.getBoundingClientRect(); return { x: box.x, y: box.y, width: box.width, height: box.height }; });
@@ -154,7 +162,7 @@ async function verify(browser, name, width) {
     // Keep requests pending while cards are added, edited, removed and cancelled.
     await frame.locator("#cancelImportButton").click();
     fail = false;
-    await frame.locator("#importFiles").setInputFiles(["source", "target", "removed", "edited"].map((kind) => files[kind])); await ready(frame);
+    await frame.locator("#importFiles").setInputFiles(["target", "removed", "edited", "source"].map((kind) => files[kind])); await ready(frame);
     await chooseOutput(page, card("source"), "9");
     holdOutputs = true;
     await card("source").locator("[data-batch-import-output]").click();
@@ -182,6 +190,16 @@ async function verify(browser, name, width) {
     await frame.locator("#importFiles").setInputFiles(files.later); await ready(frame);
     assert.equal(await card("later").locator("[data-import-output]").inputValue(), "");
     assert.equal(await frame.locator("#importBatchSummary").isVisible(), false, "cancelled job cannot publish stale results");
+    await chooseOutput(page, card("later"), "9");
+    assert.equal(await card("later").locator("[data-batch-import-output]").isEnabled(), true, "apply all is valid for one pending image");
+    await card("later").locator("[data-batch-import-output]").click(); await ready(frame);
+    assert.match(await frame.locator("#importBatchSummary").textContent(), /已填入或已选择 1 张/);
+    await expand(card("later"));
+    snapshot = await rowByText(card("later"), "rendered-later");
+    await bulk(snapshot).click(); await ready(frame);
+    assert.equal(await field("later").inputValue(), "rendered-later", "single-image apply all must populate the current image");
+    await bulk(snapshot).click(); await ready(frame);
+    assert.equal(await field("later").inputValue(), "rendered-later");
     assert.equal(uploadCalls, 0, "all actions remain draft-only");
     const inner = page.frames().find((entry) => entry.url().includes("/ui/"));
     assert.ok(await inner.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1));

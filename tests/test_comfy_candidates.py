@@ -214,7 +214,6 @@ def test_available_dynamic_samples_offer_only_connected_candidates(name: str) ->
         item for item in candidates if item["status"] != "display_snapshot"
     ]
     assert [(item["id"], len(item["text"])) for item in static_candidates] == [
-        ("170:text", 105),
         ("171:text", 173),
         ("188:wildcard", 13),
     ]
@@ -222,14 +221,15 @@ def test_available_dynamic_samples_offer_only_connected_candidates(name: str) ->
     assert all(item["node_id"] not in {"69", "101", "102"} for item in candidates)
     assert len(candidates[0]["stage_ids"]) == 4
     snapshots = [item for item in candidates if item["status"] == "display_snapshot"]
-    assert len(snapshots) == 2
+    assert len(snapshots) == 1
     assert all(
         item["node_id"] == "90" and item["source_ref"] == "73:0" for item in snapshots
     )
     assert all(
-        item["conflicting"] and item["freshness"] == "unverified" for item in snapshots
+        not item["conflicting"] and item["freshness"] == "unverified"
+        for item in snapshots
     )
     assert {item["observations"][0]["source"] for item in snapshots} == {
-        "prompt",
         "workflow",
     }
+    assert {entry["id"] for entry in snapshots[0]["covered_candidates"]} == {"170:text"}
