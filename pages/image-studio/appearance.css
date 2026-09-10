@@ -43,8 +43,14 @@
   -webkit-backdrop-filter: blur(22px) saturate(115%);
 }
 .detail-drawer { -webkit-backdrop-filter: blur(24px) saturate(115%); }
-/* Share the drawer's backdrop; the tint adds only a small effective opacity difference. */
-.detail-footer { background: var(--detail-footer-tint); backdrop-filter: none; -webkit-backdrop-filter: none; }
+.studio-modal.is-import-editor { background: var(--glass); }
+/* Reuse the enclosing glass layer; nested surfaces add only a small tint. */
+.detail-footer, .studio-modal.is-import-editor > footer,
+.studio-modal.is-import-editor .import-card {
+  background: var(--detail-footer-tint);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
 html[data-appearance-pending="true"] body { visibility: hidden; }
 .quiet-glass-background { background-color: var(--page); background-image: linear-gradient(136deg, hsl(var(--accent-h) 20% 92%), hsl(216 24% 93%) 38%, hsl(26 22% 94%) 70%, hsl(188 20% 90%)); }
 :root[data-theme="dark"] .quiet-glass-background { background-color: var(--page); background-image: linear-gradient(136deg, hsl(var(--accent-h) 9% 14%), hsl(32 8% 11%) 42%, hsl(216 11% 15%) 72%, hsl(188 9% 12%)); }

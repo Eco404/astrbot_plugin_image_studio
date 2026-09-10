@@ -59,6 +59,10 @@ class ImportDuplicateError(ValueError):
         }
 
 
+class ImportEditConflictError(ValueError):
+    """The imported record changed after an editor read its snapshot."""
+
+
 class GenerationStore:
     """Store plugin-owned gallery files and queryable generation metadata."""
 
@@ -291,6 +295,17 @@ class GenerationStore:
                 for image_id, supplemental, _ in prepared
             ],
         )
+        GenerationStore._update_import_summary_sync(
+            conn, generation_id, record_supplemental, prepared
+        )
+
+    @staticmethod
+    def _update_import_summary_sync(
+        conn: sqlite3.Connection,
+        generation_id: str,
+        record_supplemental: dict[str, Any],
+        prepared: list[tuple[str, dict[str, Any], dict[str, Any]]],
+    ) -> None:
         first = prepared[0][1]
         modes = {supplemental["mode"] for _, supplemental, _ in prepared}
         engines = {supplemental["generation_engine"] for _, supplemental, _ in prepared}
@@ -1091,6 +1106,227 @@ class GenerationStore:
             self._cleanup_orphaned_thumbnails_sync()
             raise
 
+    @staticmethod
+    def _import_edit_rows_sync(
+        conn: sqlite3.Connection, generation_id: str
+    ) -> tuple[sqlite3.Row, list[sqlite3.Row]]:
+        if not isinstance(generation_id, str) or not _SAFE_ID_RE.fullmatch(
+            generation_id
+        ):
+            raise ValueError("导入记录 ID 无效")
+        record = conn.execute(
+            "SELECT * FROM generations WHERE id = ?", (generation_id,)
+        ).fetchone()
+        if record is None:
+            raise LookupError("导入记录不存在或已被删除")
+        if record["source"] != "import":
+            raise ValueError("只能编辑手动导入的图片记录")
+        rows = conn.execute(
+            "SELECT i.*, a.path, a.mime_type, a.size_bytes, a.id AS sha256, "
+            "a.width, a.height, a.file_state, m.metadata_json, "
+            "t.path AS thumbnail_path, t.mime_type AS thumbnail_mime_type "
+            "FROM generation_images i JOIN image_assets a ON a.id = i.asset_id "
+            "LEFT JOIN image_metadata m ON m.asset_id = i.asset_id "
+            "LEFT JOIN image_thumbnails t ON t.asset_id = i.asset_id "
+            "WHERE i.generation_id = ? ORDER BY i.ordinal, i.id",
+            (generation_id,),
+        ).fetchall()
+        if not rows:
+            raise ValueError("导入记录已无可编辑图片")
+        return record, rows
+
+    @staticmethod
+    def _import_edit_revision(record: sqlite3.Row, rows: list[sqlite3.Row]) -> str:
+        # Include stored JSON, not its display projection, so concurrent edits,
+        # metadata repairs, appends and deletions cannot silently replace changes.
+        snapshot = [
+            record["id"],
+            record["supplemental_json"],
+            [
+                [
+                    row[key]
+                    for key in (
+                        "id",
+                        "ordinal",
+                        "asset_id",
+                        "supplemental_json",
+                        "metadata_json",
+                    )
+                ]
+                for row in rows
+            ],
+        ]
+        return hashlib.sha256(
+            json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")).encode()
+        ).hexdigest()
+
+    @staticmethod
+    def _import_edit_previous(record: sqlite3.Row, row: sqlite3.Row) -> dict[str, Any]:
+        previous = _load_json(row["supplemental_json"]) or _load_json(
+            record["supplemental_json"]
+        )
+        if not previous:
+            # Very old single-image imports stored only record-level fields.
+            previous = {
+                "model": record["model"],
+                "mode": record["mode"],
+                "prompt": record["original_prompt"],
+                "generation_engine": record["generation_engine"],
+                "generated_at": record["generated_at"],
+            }
+        return previous
+
+    async def import_edit_snapshot(self, generation_id: str) -> dict[str, Any]:
+        """Read an edit snapshot without changing files, metadata, or import receipts."""
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._import_edit_snapshot_sync, generation_id
+            )
+
+    def _import_edit_snapshot_sync(self, generation_id: str) -> dict[str, Any]:
+        with self._connect() as conn:
+            conn.execute("BEGIN")
+            record, rows = self._import_edit_rows_sync(conn, generation_id)
+            revision = self._import_edit_revision(record, rows)
+        items = []
+        for row in rows:
+            previous = self._import_edit_previous(record, row)
+            metadata = _load_json(row["metadata_json"])
+            overrides = _import_edit_existing_overrides(previous, metadata)
+            metadata = project_import_metadata(metadata, overrides)
+            fields = _import_edit_fields(previous, metadata, overrides)
+            items.append(
+                {
+                    "image_id": row["id"],
+                    "filename": str(previous.get("original_filename") or row["id"]),
+                    "sha256": row["sha256"],
+                    "size_bytes": row["size_bytes"],
+                    "width": row["width"],
+                    "height": row["height"],
+                    "thumbnail_data_url": _path_data_url(
+                        self.data_dir / str(row["thumbnail_path"] or ""),
+                        str(row["thumbnail_mime_type"] or "image/webp"),
+                    ),
+                    "metadata": metadata,
+                    "fields": fields,
+                    "parameters_json": json.dumps(
+                        fields["parameters"], ensure_ascii=False, indent=2
+                    ),
+                    "edited_fields": list(overrides),
+                    "output_node_id": str(
+                        overrides.get("comfy_output_node")
+                        or previous.get("comfy_output_node")
+                        or metadata.get("normalized", {}).get("selected_output_node")
+                        or ""
+                    ),
+                }
+            )
+        return {"generation_id": generation_id, "revision": revision, "items": items}
+
+    async def edit_import(
+        self, generation_id: str, revision: str, items: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        """Atomically update supplemental parameters and the complete image order."""
+        if not isinstance(revision, str) or not _SHA256_RE.fullmatch(revision):
+            raise ValueError("编辑版本无效，请重新打开编辑窗口")
+        if not isinstance(items, list) or not 1 <= len(items) <= 100:
+            raise ValueError("编辑记录需要 1 至 100 张图片")
+        seen: set[str] = set()
+        for item in items:
+            if not isinstance(item, dict) or set(item) - {"image_id", "overrides"}:
+                raise ValueError("编辑项目格式无效")
+            image_id = item.get("image_id")
+            if (
+                not isinstance(image_id, str)
+                or not _SAFE_ID_RE.fullmatch(image_id)
+                or image_id in seen
+            ):
+                raise ValueError("编辑图片 ID 无效或重复")
+            seen.add(image_id)
+            _validate_import_edit_overrides(item.get("overrides", {}))
+        if len(json.dumps(items, ensure_ascii=False).encode()) > 4 * 1024 * 1024:
+            raise ValueError("编辑参数不能超过 4 MB")
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._edit_import_sync, generation_id, revision, items
+            )
+
+    def _edit_import_sync(
+        self, generation_id: str, revision: str, items: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            record, rows = self._import_edit_rows_sync(conn, generation_id)
+            if self._import_edit_revision(record, rows) != revision:
+                raise ImportEditConflictError(
+                    "记录已被修改、追加或删除图片，请重新打开编辑窗口后再保存"
+                )
+            by_id = {row["id"]: row for row in rows}
+            if {item["image_id"] for item in items} != set(by_id):
+                raise ValueError("编辑必须包含记录中的全部图片，不能增加或移除图片")
+            prepared = []
+            updates = []
+            for ordinal, item in enumerate(items):
+                image_id = item["image_id"]
+                row = by_id[image_id]
+                previous = self._import_edit_previous(record, row)
+                metadata = _load_json(row["metadata_json"])
+                overrides = _import_edit_existing_overrides(previous, metadata)
+                changes = item.get("overrides", {})
+                if changes:
+                    overrides = {**overrides, **changes}
+                    _validate_import_overrides(overrides)
+                    supplemental = {
+                        **previous,
+                        **_import_supplemental(
+                            str(previous.get("original_filename") or ""),
+                            overrides,
+                            metadata,
+                        ),
+                    }
+                    encoded = json.dumps(
+                        supplemental, ensure_ascii=False, separators=(",", ":")
+                    )
+                else:
+                    # Reordering never rewrites an unchanged per-image snapshot.
+                    supplemental = dict(previous)
+                    encoded = row["supplemental_json"]
+                metadata = project_import_metadata(metadata, overrides)
+                fields = _import_edit_fields(supplemental, metadata, overrides)
+                prepared.append(
+                    (
+                        image_id,
+                        {
+                            **supplemental,
+                            **{key: fields[key] for key in _IMPORT_EDIT_FIELDS},
+                        },
+                        metadata,
+                    )
+                )
+                updates.append((ordinal, encoded, image_id))
+            if any(
+                ordinal != by_id[image_id]["ordinal"]
+                or encoded != by_id[image_id]["supplemental_json"]
+                for ordinal, encoded, image_id in updates
+            ):
+                conn.executemany(
+                    "UPDATE generation_images SET ordinal = ?, supplemental_json = ? WHERE id = ?",
+                    updates,
+                )
+                self._update_import_summary_sync(
+                    conn,
+                    generation_id,
+                    _load_json(record["supplemental_json"]),
+                    prepared,
+                )
+                self._refresh_search_sync(conn, generation_id)
+            record, rows = self._import_edit_rows_sync(conn, generation_id)
+            return {
+                "generation_id": generation_id,
+                "revision": self._import_edit_revision(record, rows),
+                "image_ids": [row["id"] for row in rows],
+            }
+
     async def import_image(
         self,
         data: bytes,
@@ -1819,18 +2055,50 @@ class GenerationStore:
         where: list[str] = []
         args: list[Any] = []
         query = str(filters.get("query") or "").strip()[:240]
-        provider_id = str(filters.get("provider_id") or "").strip()[:64]
-        mode = str(filters.get("mode") or "").strip()[:20]
-        source = str(filters.get("source") or "").strip()[:30]
-        if provider_id:
-            where.append("g.provider_id = ?")
-            args.append(provider_id)
-        if mode in {"text2img", "img2img", "unknown"}:
-            where.append("g.mode = ?")
-            args.append(mode)
-        if source:
-            where.append("g.source = ?")
-            args.append(source)
+        for key, plural, limit in (
+            ("provider_id", "provider_ids", 64),
+            ("mode", "modes", 20),
+            ("source", "sources", 30),
+            ("generation_engine", "generation_engines", 80),
+        ):
+            if plural in filters:
+                values = filters[plural]
+                if isinstance(values, str):
+                    if len(values) > 32768:
+                        raise ValueError(f"{plural} 筛选内容过长")
+                    try:
+                        values = json.loads(values)
+                    except (ValueError, RecursionError) as exc:
+                        raise ValueError(f"{plural} 必须是 JSON 字符串数组") from exc
+                if not isinstance(values, list) or len(values) > 256:
+                    raise ValueError(f"{plural} 必须是最多 256 项的字符串数组")
+                if any(
+                    not isinstance(value, str) or len(value) > limit for value in values
+                ):
+                    raise ValueError(f"{plural} 每项必须是最多 {limit} 字符的字符串")
+                values = list(dict.fromkeys(value.strip() for value in values))
+            else:
+                value = str(filters.get(key) or "").strip()[:limit]
+                if (
+                    not value
+                    or key == "mode"
+                    and value not in {"text2img", "img2img", "unknown"}
+                ):
+                    continue
+                values = [value]
+            if not values:
+                where.append("0 = 1")
+                continue
+            column = f"g.{key}"
+            if key == "generation_engine":
+                values = list(
+                    dict.fromkeys(_canonical_engine(value) for value in values)
+                )
+                if "novelai" in values:
+                    values.append("nai")
+                column = "CASE WHEN lower(trim(g.generation_engine)) IN ('nai', 'novelai') THEN lower(trim(g.generation_engine)) ELSE g.generation_engine END"
+            where.append(f"{column} IN ({','.join('?' for _ in values)})")
+            args.extend(values)
         if filters.get("_merge_target_engine"):
             where.append(
                 "EXISTS (SELECT 1 FROM generation_images selected WHERE selected.generation_id = g.id) "
@@ -1840,13 +2108,6 @@ class GenerationStore:
                 "ELSE trim(COALESCE(json_extract(selected.supplemental_json, '$.generation_engine'), g.generation_engine)) END) != ?)"
             )
             args.append(filters["_merge_target_engine"])
-        if filters.get("generation_engine"):
-            engine = _canonical_engine(filters["generation_engine"])
-            if engine == "novelai":
-                where.append("lower(trim(g.generation_engine)) IN ('nai', 'novelai')")
-            else:
-                where.append("g.generation_engine = ?")
-                args.append(engine[:80])
         if filters.get("favorite") in (True, 1, "1", "true"):
             where.append("g.is_favorite = 1")
         if query:
@@ -3009,6 +3270,78 @@ def _validate_import_content(data: bytes) -> None:
                 raise ValueError("导入图片超过 6400 万像素限制")
     except (OSError, Image.DecompressionBombError) as exc:
         raise ValueError("无法读取导入图片或图片尺寸超出限制") from exc
+
+
+_IMPORT_EDIT_FIELDS = (
+    "generation_engine",
+    "model",
+    "mode",
+    "prompt",
+    "negative_prompt",
+    "generated_at",
+)
+
+
+def _validate_import_edit_overrides(overrides: Any) -> None:
+    _validate_import_overrides(overrides)
+    if set(overrides) - {*_IMPORT_EDIT_FIELDS, "parameters", "comfy_output_node"}:
+        raise ValueError("编辑参数包含不支持的字段")
+    for key in (*_IMPORT_EDIT_FIELDS[:-1], "comfy_output_node"):
+        if key in overrides and not isinstance(overrides[key], str):
+            raise ValueError(f"编辑字段 {key} 必须是字符串")
+    if len(overrides.get("generation_engine", "")) > 80:
+        raise ValueError("生图来源不能超过 80 个字符")
+    if "generated_at" in overrides and (
+        isinstance(overrides["generated_at"], bool)
+        or not isinstance(overrides["generated_at"], (str, int, float, type(None)))
+    ):
+        raise ValueError("原始生成时间无效")
+
+
+def _import_edit_existing_overrides(
+    previous: dict[str, Any], metadata: dict[str, Any]
+) -> dict[str, Any]:
+    saved = previous.get("overrides")
+    if isinstance(saved, dict):
+        return dict(saved)
+    # Legacy snapshots do not record manual provenance. Conservatively retain
+    # their current values when an edit first introduces an override snapshot.
+    result = {key: previous[key] for key in _IMPORT_EDIT_FIELDS if key in previous}
+    if previous.get("comfy_output_node"):
+        result["comfy_output_node"] = previous["comfy_output_node"]
+    normalized = project_import_metadata(metadata, result).get("normalized", {})
+    display = previous.get("display_parameters")
+    if isinstance(previous.get("parameters"), dict):
+        result["parameters"] = previous["parameters"]
+    elif isinstance(display, dict):
+        changes = {
+            key: value
+            for key, value in display.items()
+            if key not in _IMPORT_EDIT_FIELDS
+            and (key not in normalized or value != normalized[key])
+        }
+        if changes:
+            result["parameters"] = changes
+    return result
+
+
+def _import_edit_fields(
+    previous: dict[str, Any], metadata: dict[str, Any], overrides: dict[str, Any]
+) -> dict[str, Any]:
+    normalized = metadata.get("normalized", {})
+    fields = {
+        key: previous.get(key, overrides.get(key, normalized.get(key)))
+        for key in _IMPORT_EDIT_FIELDS
+    }
+    for key in ("model", "prompt", "negative_prompt"):
+        fields[key] = str(fields[key] or "")
+    fields["generation_engine"] = _canonical_engine(
+        fields["generation_engine"] or metadata.get("format")
+    )
+    fields["mode"] = fields["mode"] or "unknown"
+    parameters = overrides.get("parameters", normalized.get("parameters", {}))
+    fields["parameters"] = parameters if isinstance(parameters, dict) else {}
+    return fields
 
 
 def _validate_import_overrides(overrides: Any) -> None:

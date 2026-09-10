@@ -51,6 +51,7 @@ from .service import ImageGenerationService
 from .storage import (
     GenerationStore,
     ImportDuplicateError,
+    ImportEditConflictError,
     detect_mime_type,
     export_image_filename,
     image_data_url,
@@ -237,6 +238,12 @@ class ImageStudioPlugin(Star):
                 self._api_resolve_parameters,
                 ["POST"],
                 "Image Studio: resolve parameters",
+            ),
+            (
+                "gallery/import-edit/<generation_id>",
+                self._api_gallery_import_edit,
+                ["GET", "POST"],
+                "Image Studio: edit imported parameters and image order",
             ),
             (
                 "gallery/parameters/<generation_id>",
@@ -953,6 +960,27 @@ class ImageStudioPlugin(Star):
         except ValueError as exc:
             return error_response(str(exc), status_code=400)
 
+    async def _api_gallery_import_edit(self, generation_id: str) -> Any:
+        try:
+            if web_request.method == "GET":
+                return json_response(
+                    await self.store.import_edit_snapshot(generation_id)
+                )
+            body = await web_request.json(default={})
+            if not isinstance(body, dict) or set(body) != {"revision", "items"}:
+                raise ValueError("编辑请求必须包含 revision 和 items")
+            return json_response(
+                await self.store.edit_import(
+                    generation_id, body["revision"], body["items"]
+                )
+            )
+        except ImportEditConflictError as exc:
+            return error_response(str(exc), status_code=409)
+        except LookupError as exc:
+            return error_response(str(exc), status_code=404)
+        except (ValueError, TypeError, OverflowError, RecursionError) as exc:
+            return error_response(str(exc), status_code=400)
+
     async def _api_gallery_parameters(self, generation_id: str) -> Any:
         detail = await self.store.generation_detail(generation_id, include_assets=False)
         if detail is None:
@@ -1184,7 +1212,8 @@ class ImageStudioPlugin(Star):
             max_concurrent_requests=model.max_concurrent_requests,
         )
 
-    async def _api_gallery_list(self) -> Any:
+    @staticmethod
+    def _gallery_request_filters() -> dict[str, Any]:
         filters = {
             "query": web_request.query.get("query", ""),
             "provider_id": web_request.query.get("provider_id", ""),
@@ -1195,7 +1224,16 @@ class ImageStudioPlugin(Star):
             "limit": web_request.query.get("limit", 24),
             "offset": web_request.query.get("offset", 0),
         }
-        payload = await self.store.list_generations(filters)
+        for key in ("provider_ids", "modes", "sources", "generation_engines"):
+            if key in web_request.query:
+                filters[key] = web_request.query.get(key)
+        return filters
+
+    async def _api_gallery_list(self) -> Any:
+        try:
+            payload = await self.store.list_generations(self._gallery_request_filters())
+        except ValueError as exc:
+            return error_response(str(exc), status_code=400)
         retention = await self.store.retention_status(self._settings.history)
         candidates = set(retention.get("candidate_ids", []))
         for item in payload["items"]:
@@ -1225,15 +1263,12 @@ class ImageStudioPlugin(Star):
         )
 
     async def _api_gallery_image_sequence(self) -> Any:
-        filters = {
-            "query": web_request.query.get("query", ""),
-            "provider_id": web_request.query.get("provider_id", ""),
-            "mode": web_request.query.get("mode", ""),
-            "source": web_request.query.get("source", ""),
-            "generation_engine": web_request.query.get("generation_engine", ""),
-            "favorite": web_request.query.get("favorite", ""),
-        }
-        items = await self.store.gallery_image_sequence(filters)
+        try:
+            items = await self.store.gallery_image_sequence(
+                self._gallery_request_filters()
+            )
+        except ValueError as exc:
+            return error_response(str(exc), status_code=400)
         return json_response({"items": items, "total": len(items)})
 
     async def _api_gallery_image(self, image_id: str) -> Any:

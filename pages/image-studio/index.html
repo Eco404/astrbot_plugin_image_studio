@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="./vendor/photoswipe/photoswipe.css?v=5.4.4" />
   <link rel="stylesheet" href="./app.css?v=1.1.0-dev.1" />
   <link rel="stylesheet" href="./library.css?v=1.1.0-dev.1" />
+  <link rel="stylesheet" href="./sortable.css?v=1.1.0-dev.1" />
   <link rel="stylesheet" href="./detail-swipe.css?v=1.1.0-dev.1" />
   <link rel="stylesheet" href="./select.css?v=1.1.0-dev.1" />
   <link rel="stylesheet" href="./appearance.css?v=1.1.0-dev.1" />
@@ -79,10 +80,10 @@
       <section class="view" id="galleryView">
         <div class="gallery-toolbar">
           <div class="search-field"><label for="gallerySearch">搜索</label><div class="search-input-wrap"><input id="gallerySearch" placeholder="提示词、模型或生图服务商" /><button class="studio-icon-button" id="galleryClearSearch" type="button" aria-label="清空搜索" title="清空搜索" data-studio-icon="X" disabled></button></div></div>
-          <select id="galleryProvider" aria-label="按生图服务商筛选"><option value="">全部服务商</option></select>
-          <select id="galleryMode" aria-label="按模式筛选"><option value="">全部模式</option><option value="text2img">文生图</option><option value="img2img">图生图</option></select>
-          <select id="gallerySource" aria-label="按调用来源筛选"><option value="">全部来源</option><option value="webui">WebUI</option><option value="command">指令</option><option value="llm_tool">LLM 工具</option><option value="import">导入</option></select>
-          <select id="galleryEngine" aria-label="按生图来源筛选"><option value="">全部生图来源</option><option value="novelai">NovelAI</option><option value="comfyui">ComfyUI</option><option value="a1111">Stable Diffusion</option><option value="openai_images">OpenAI Images</option><option value="gemini">Gemini</option><option value="custom_json">自定义</option><option value="unknown">未知来源</option></select>
+          <select id="galleryProvider" multiple data-all-label="全部服务商" aria-label="按生图服务商筛选"><option value="" selected>未指定服务商</option></select>
+          <select id="galleryMode" multiple data-all-label="全部模式" aria-label="按模式筛选"><option value="text2img" selected>文生图</option><option value="img2img" selected>图生图</option><option value="unknown" selected>未知模式</option></select>
+          <select id="gallerySource" multiple data-all-label="全部来源" aria-label="按调用来源筛选"><option value="webui" selected>WebUI</option><option value="command" selected>指令</option><option value="llm_tool" selected>LLM 工具</option><option value="import" selected>导入</option></select>
+          <select id="galleryEngine" multiple data-all-label="全部生图来源" aria-label="按生图来源筛选"><option value="novelai" selected>NovelAI</option><option value="comfyui" selected>ComfyUI</option><option value="a1111" selected>Stable Diffusion</option><option value="openai_images" selected>OpenAI Images</option><option value="gemini" selected>Gemini</option><option value="custom_json" selected>自定义</option><option value="unknown" selected>未知来源</option></select>
           <button class="studio-icon-button gallery-tool-button" id="galleryFavorite" type="button" value="" aria-label="仅查看已收藏" aria-pressed="false" title="仅查看已收藏" data-studio-icon="Star"></button>
           <button class="studio-icon-button gallery-tool-button" id="galleryRefresh" type="button" aria-label="刷新画廊" title="刷新画廊" data-studio-icon="RefreshCw"></button>
         </div>
@@ -168,7 +169,7 @@
   <aside class="detail-drawer" id="detailDrawer" role="dialog" aria-modal="true" aria-label="生成详情" aria-hidden="true" tabindex="-1">
     <div class="drawer-head"><div><h2>生成详情</h2><p id="detailDate"></p></div><button class="icon-button" id="closeDrawer" type="button" aria-label="关闭详情"><span aria-hidden="true">×</span></button></div>
     <div class="drawer-body" id="drawerBody"></div>
-    <div class="detail-footer" id="detailFooter"><button class="studio-icon-button" id="detailFavorite" type="button" aria-label="收藏生成记录" title="收藏生成记录" data-studio-icon="Star"></button><button class="quiet-button detail-command" id="detailReproduce" type="button"><span data-studio-icon="RefreshCw" aria-hidden="true"></span><span>复现参数</span></button><div class="copy-format-control"><select id="detailCopyFormat" aria-label="复制参数格式"></select><button class="studio-icon-button" id="detailCopy" type="button" aria-label="复制完整参数" title="复制完整参数" data-studio-icon="Copy"></button></div><button class="studio-icon-button" id="detailWorkflowDownload" type="button" aria-label="下载工作流" title="下载工作流" data-studio-icon="Download" hidden></button><button class="quiet-button detail-command" id="detailUseReference" type="button" aria-label="将当前成图用作新参考图" title="将当前成图用作新参考图"><span data-studio-icon="ImagePlus" aria-hidden="true"></span><span>用作参考图</span></button><button class="studio-icon-button is-danger" id="detailDelete" type="button" aria-label="删除图片" title="删除图片" data-studio-icon="Trash2"></button></div>
+    <div class="detail-footer" id="detailFooter"><button class="studio-icon-button" id="detailFavorite" type="button" aria-label="收藏生成记录" title="收藏生成记录" data-studio-icon="Star"></button><button class="studio-icon-button" id="detailImportEdit" type="button" aria-label="编辑导入记录" title="编辑导入记录" data-studio-icon="Pencil" hidden></button><button class="quiet-button detail-command" id="detailReproduce" type="button"><span data-studio-icon="RefreshCw" aria-hidden="true"></span><span>复现参数</span></button><div class="copy-format-control"><select id="detailCopyFormat" aria-label="复制参数格式"></select><button class="studio-icon-button" id="detailCopy" type="button" aria-label="复制完整参数" title="复制完整参数" data-studio-icon="Copy"></button></div><button class="studio-icon-button" id="detailWorkflowDownload" type="button" aria-label="下载工作流" title="下载工作流" data-studio-icon="Download" hidden></button><button class="quiet-button detail-command" id="detailUseReference" type="button" aria-label="将当前成图用作新参考图" title="将当前成图用作新参考图"><span data-studio-icon="ImagePlus" aria-hidden="true"></span><span>用作参考图</span></button><button class="studio-icon-button is-danger" id="detailDelete" type="button" aria-label="删除图片" title="删除图片" data-studio-icon="Trash2"></button></div>
   </aside>
   <div class="scrim is-hidden" id="scrim"></div>
   <div class="studio-modal-root is-hidden" id="studioModalRoot"><div class="studio-modal-scrim"></div><section class="studio-modal glass" id="studioModal" role="dialog" aria-modal="true" aria-labelledby="studioModalTitle" tabindex="-1"><header><h2 id="studioModalTitle"></h2><button class="studio-icon-button" id="studioModalClose" type="button" aria-label="关闭窗口" title="关闭窗口" data-studio-icon="X"></button></header><div class="studio-modal-body" id="studioModalBody"></div><div class="studio-modal-error" id="studioModalError" role="alert"></div><footer id="studioModalFooter"></footer></section></div>
@@ -245,6 +246,7 @@
   <script src="./vendor/js-sha256/sha256.min.js?v=0.11.1"></script>
   <script src="./hash.js?v=1.1.0-dev.1" onerror="window.__reportImageStudioPageError(true)"></script>
   <script src="./select.js?v=1.1.0-dev.1" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./sortable.js?v=1.1.0-dev.1" onerror="window.__reportImageStudioPageError(true)"></script>
   <script src="./library.js?v=1.1.0-dev.1" onerror="window.__reportImageStudioPageError(true)"></script>
   <script src="./detail-swipe.js?v=1.1.0-dev.1" onerror="window.__reportImageStudioPageError(true)"></script>
   <script src="./backdrop.js?v=1.1.0-dev.1" onerror="window.__reportImageStudioPageError(true)"></script>

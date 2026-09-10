@@ -9,7 +9,7 @@
   let typeahead = "";
   let typeaheadAt = 0;
   let lastTouchY = 0;
-  const ATTRIBUTE_NAMES = ["disabled", "hidden", "class", "style", "selected", "label", "value", "required", "name", "title", "aria-label", "aria-labelledby", "aria-describedby", "tabindex", "list"];
+  const ATTRIBUTE_NAMES = ["disabled", "hidden", "class", "style", "selected", "multiple", "data-all-label", "label", "value", "required", "name", "title", "aria-label", "aria-labelledby", "aria-describedby", "tabindex", "list"];
   const SOURCE_SELECTOR = "select, input[list], input[data-studio-datalist]";
 
   function checkIcon() {
@@ -48,6 +48,7 @@
       index,
       value: option.value,
       label: option.label || option.textContent || option.value || "",
+      selected: !!option.selected,
       disabled: option.disabled || !!option.closest("optgroup")?.disabled,
       hidden: option.hidden || option.style.display === "none" || !!option.closest("optgroup")?.hidden || !!query && !`${option.value} ${option.label || option.textContent}`.toLocaleLowerCase().includes(query),
       group: option.parentElement?.tagName === "OPTGROUP" ? option.parentElement.label : "",
@@ -71,13 +72,14 @@
     const disabled = select.matches(":disabled");
     const hidden = select.hidden || select.classList.contains("is-hidden") || select.style.display === "none" || select.style.visibility === "hidden";
     const classes = Array.from(select.classList).filter((name) => !["studio-select-native", "is-hidden"].includes(name)).join(" ");
-    const fingerprint = JSON.stringify([select.selectedIndex, options, name, disabled, hidden, classes, select.required, select.getAttribute("aria-describedby"), select.title]);
+    const fingerprint = JSON.stringify([select.selectedIndex, options, select.multiple, select.dataset.allLabel, name, disabled, hidden, classes, select.required, select.getAttribute("aria-describedby"), select.title]);
     if (fingerprint === control.fingerprint) {
       if (opened === control && (!isVisible(control) || disabled)) close();
       return;
     }
     control.fingerprint = fingerprint;
     control.options = options;
+    control.multiple = select.multiple;
     trigger.disabled = disabled;
     wrapper.hidden = hidden;
     wrapper.className = `studio-select${classes ? ` ${classes}` : ""}${opened === control ? " is-open" : ""}`;
@@ -89,9 +91,12 @@
     const description = select.getAttribute("aria-describedby");
     if (description) trigger.setAttribute("aria-describedby", description);
     else trigger.removeAttribute("aria-describedby");
-    const selected = options.find((option) => option.index === select.selectedIndex);
-    control.valueElement.textContent = selected?.label || "请选择";
-    trigger.title = select.title || `${name}：${selected?.label || "未选择"}`;
+    const selected = options.filter((option) => option.selected);
+    const label = control.multiple
+      ? !selected.length ? "未选择" : selected.length === options.length ? select.dataset.allLabel || "全部" : selected.length === 1 ? selected[0].label : `已选 ${selected.length} 项`
+      : selected[0]?.label || "请选择";
+    control.valueElement.textContent = label;
+    trigger.title = select.title || `${name}：${selected.map((option) => option.label).join("、") || "未选择"}`;
     control.validation.textContent = select.validationMessage || "";
     if (select.validity.valid) { wrapper.classList.remove("is-invalid"); trigger.removeAttribute("aria-invalid"); }
     if (opened === control) {
@@ -222,7 +227,7 @@
   function markActive(control, index, scroll = false) {
     const option = control.options.find((entry) => entry.index === index);
     if (!option || option.disabled || option.hidden) {
-      if (control.editable) { control.activeIndex = -1; control.trigger.removeAttribute("aria-activedescendant"); control.menu?.querySelectorAll(".is-active").forEach((entry) => entry.classList.remove("is-active")); }
+      control.activeIndex = -1; control.trigger.removeAttribute("aria-activedescendant"); control.menu?.querySelectorAll(".is-active").forEach((entry) => entry.classList.remove("is-active"));
       return;
     }
     control.activeIndex = index;
@@ -235,22 +240,37 @@
     const menu = control.menu; if (!menu) return;
     const scrollTop = menu.scrollTop;
     menu.replaceChildren();
+    menu.classList.toggle("is-multiple", !!control.multiple);
+    menu.id = `${control.identifier}-${control.multiple ? "popup" : "menu"}`;
+    menu.setAttribute("role", control.multiple ? "group" : "listbox");
+    let listbox = menu;
+    if (control.multiple) {
+      const actions = document.createElement("div"); actions.className = "studio-select-actions";
+      const enabled = enabledOptions(control);
+      for (const [action, label, shortcut] of [["all", "全选", "Ctrl+A"], ["clear", "清空", "Ctrl+Shift+A"]]) {
+        const button = document.createElement("button"); button.type = "button"; button.tabIndex = -1; button.dataset.selectAction = action; button.textContent = label; button.title = `${label}（${shortcut}）`;
+        button.disabled = !enabled.some((option) => option.selected !== (action === "all"));
+        actions.appendChild(button);
+      }
+      listbox = document.createElement("div"); listbox.id = `${control.identifier}-menu`; listbox.setAttribute("role", "listbox"); listbox.setAttribute("aria-label", controlName(control.select)); listbox.setAttribute("aria-multiselectable", "true");
+      menu.append(actions, listbox);
+    }
     let group = "";
     const visible = control.options.filter((option) => !option.hidden);
     if (!visible.length) {
-      const empty = document.createElement("div"); empty.className = "studio-select-empty"; empty.textContent = control.editable ? "没有匹配选项，保留当前输入" : "暂无可选项"; menu.appendChild(empty);
+      const empty = document.createElement("div"); empty.className = "studio-select-empty"; empty.textContent = control.editable ? "没有匹配选项，保留当前输入" : "暂无可选项"; listbox.appendChild(empty);
     }
     for (const option of visible) {
       if (option.group && option.group !== group) {
-        const heading = document.createElement("div"); heading.className = "studio-select-group"; heading.textContent = option.group; heading.setAttribute("role", "presentation"); menu.appendChild(heading);
+        const heading = document.createElement("div"); heading.className = "studio-select-group"; heading.textContent = option.group; heading.setAttribute("role", "presentation"); listbox.appendChild(heading);
       }
       group = option.group;
       const row = document.createElement("div"); row.className = "studio-select-option"; row.id = `${control.identifier}-option-${option.index}`;
-      row.dataset.optionIndex = String(option.index); row.setAttribute("role", "option"); row.setAttribute("aria-selected", String(option.index === selectedIndex(control))); row.setAttribute("aria-disabled", String(option.disabled));
+      row.dataset.optionIndex = String(option.index); row.setAttribute("role", "option"); row.setAttribute("aria-selected", String(control.multiple ? option.selected : option.index === selectedIndex(control))); row.setAttribute("aria-disabled", String(option.disabled));
       const mark = document.createElement("span"); mark.className = "studio-select-mark"; mark.setAttribute("aria-hidden", "true"); mark.innerHTML = checkIcon();
       const label = document.createElement("span"); label.className = "studio-select-option-label"; label.textContent = option.label;
       if (control.editable && option.value !== option.label) { const detail = document.createElement("small"); detail.className = "studio-select-option-detail"; detail.textContent = option.value; label.appendChild(detail); }
-      row.append(mark, label); menu.appendChild(row);
+      row.append(mark, label); listbox.appendChild(row);
     }
     menu.scrollTop = scrollTop;
     markActive(control, control.activeIndex);
@@ -275,6 +295,8 @@
       const option = event.target.closest("[data-option-index]"); if (option) markActive(control, Number(option.dataset.optionIndex));
     });
     menu.addEventListener("click", (event) => {
+      const action = event.target.closest("[data-select-action]");
+      if (action && !action.disabled) { chooseAll(control, action.dataset.selectAction === "all"); return; }
       const option = event.target.closest("[data-option-index]"); if (option) choose(control, Number(option.dataset.optionIndex));
     });
     menu.addEventListener("touchstart", (event) => { if (event.touches.length === 1) lastTouchY = event.touches[0].clientY; }, { passive: true });
@@ -306,6 +328,13 @@
   function choose(control, index) {
     const option = control.options.find((entry) => entry.index === index);
     if (!option || option.hidden || option.disabled) return;
+    if (control.multiple) {
+      control.select.options[index].selected = !option.selected;
+      control.activeIndex = index;
+      update(control); control.trigger.focus({ preventScroll: true });
+      commitSelection(control);
+      return;
+    }
     const changed = control.editable ? control.select.value !== option.value : control.select.selectedIndex !== index;
     if (control.editable) control.select.value = option.value;
     else control.select.selectedIndex = index;
@@ -317,6 +346,29 @@
         if (control.select.isConnected && control.wrapper.contains(control.select) && control.select.value === option.value) control.select.dispatchEvent(new Event("change", { bubbles: true }));
       } finally { control.committing = false; }
     }
+    refresh();
+  }
+
+  function chooseAll(control, selected) {
+    if (!control.multiple) return;
+    let changed = false;
+    for (const option of enabledOptions(control)) {
+      if (option.selected === selected) continue;
+      control.select.options[option.index].selected = selected;
+      changed = true;
+    }
+    update(control); control.trigger.focus({ preventScroll: true });
+    if (changed) commitSelection(control);
+  }
+
+  function commitSelection(control) {
+    const selection = () => JSON.stringify(Array.from(control.select.options, (option) => [option.value, option.selected]));
+    const expected = selection();
+    control.committing = true;
+    try {
+      control.select.dispatchEvent(new Event("input", { bubbles: true }));
+      if (control.select.isConnected && control.wrapper.contains(control.select) && selection() === expected) control.select.dispatchEvent(new Event("change", { bubbles: true }));
+    } finally { control.committing = false; }
     refresh();
   }
 
@@ -413,6 +465,9 @@
     const control = opened; if (!control) return;
     if (event.isComposing) return;
     if (event.key === "Tab") { close(); return; }
+    if (control.multiple && event.key.toLocaleLowerCase() === "a" && (event.ctrlKey || event.metaKey) && !event.altKey) {
+      event.preventDefault(); event.stopImmediatePropagation(); chooseAll(control, !event.shiftKey); return;
+    }
     if (control.editable && !["Escape", "ArrowDown", "ArrowUp", "Enter"].includes(event.key)) return;
     if (control.editable && event.key === "Enter" && control.activeIndex < 0) { close(); return; }
     if (!["Escape", "ArrowDown", "ArrowUp", "Home", "End", "Enter", " "].includes(event.key) && (event.key.length !== 1 || event.ctrlKey || event.altKey || event.metaKey)) return;

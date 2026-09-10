@@ -12,7 +12,9 @@ async function select(frame, inner, id, value) {
   const optionIndex = await inner.locator(`#${id}`).evaluate((element, target) => Array.from(element.options).findIndex((option) => option.value === target), value);
   assert.ok(optionIndex >= 0);
   await frame.locator(`.studio-select-trigger[data-select-id="${id}"]`).click();
+  if (await inner.locator(`#${id}`).evaluate(element => element.multiple)) await frame.locator('.studio-select-menu [data-select-action="clear"]').click();
   await frame.locator(`.studio-select-menu [data-option-index="${optionIndex}"]`).click();
+  await frame.locator(`.studio-select-trigger[data-select-id="${id}"]`).press("Escape");
 }
 
 async function current(inner) {
@@ -68,7 +70,7 @@ async function swipe(page, inner, direction) {
         window.PhotoSwipe = class extends Original { constructor(options) { super(options); window.__testViewer = this; } };
       }, test.theme);
       await frame.locator('[data-view="gallery"]').click(); await frame.locator(".gallery-card").first().waitFor();
-      const natural = page.waitForResponse((response) => response.url().includes("/gallery/list") && new URL(response.url()).searchParams.get("provider_id") === "natural");
+      const natural = page.waitForResponse((response) => response.url().includes("/gallery/list") && new URL(response.url()).searchParams.get("provider_ids") === '["natural"]');
       await select(frame, inner, "galleryProvider", "natural"); await natural;
       await frame.locator(".gallery-card .gallery-info").first().click(); await openViewer(frame, inner); await waitLoaded(inner, 0);
       assert.equal(await frame.locator(".image-studio-controls-visible").count(), 0, "download button should start hidden");
@@ -154,7 +156,7 @@ async function swipe(page, inner, direction) {
       await oldRequest;
       await inner.evaluate(() => window.__testViewer.close()); await frame.locator(".pswp--open").waitFor({ state: "detached" }); await frame.locator("#closeDrawer").click();
       await inner.evaluate(() => window.scrollTo(0, 0));
-      const filtered = page.waitForResponse((response) => response.url().includes("/gallery/list") && new URL(response.url()).searchParams.get("source") === "command");
+      const filtered = page.waitForResponse((response) => response.url().includes("/gallery/list") && new URL(response.url()).searchParams.get("sources") === '["command"]');
       await select(frame, inner, "gallerySource", "command"); await filtered;
       await frame.locator(".gallery-card .gallery-info").first().click(); await openViewer(frame, inner); await waitLoaded(inner, 0);
       await inner.waitForFunction(() => !!window.__testViewer.options.dataSource[1].previewSrc);

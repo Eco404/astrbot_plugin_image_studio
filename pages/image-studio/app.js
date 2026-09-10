@@ -420,15 +420,33 @@
   }
 
   function galleryFilters() {
-    return { query: els.gallerySearch.value, provider_id: els.galleryProvider.value, mode: els.galleryMode.value, source: els.gallerySource.value, generation_engine: $("galleryEngine").value, favorite: $("galleryFavorite").value };
+    const filters = { query: els.gallerySearch.value, favorite: $("galleryFavorite").value };
+    for (const [id, key] of [["galleryProvider", "provider_ids"], ["galleryMode", "modes"], ["gallerySource", "sources"], ["galleryEngine", "generation_engines"]]) {
+      const select = $(id);
+      const values = Array.from(select.selectedOptions, (option) => option.value);
+      if (values.length !== select.options.length) filters[key] = JSON.stringify(values);
+    }
+    return filters;
+  }
+
+  function updateGalleryFilterOptions(select, entries) {
+    const previous = Array.from(select.options);
+    if (JSON.stringify(previous.map((option) => [option.value, option.label])) === JSON.stringify(entries)) return;
+    const all = previous.every((option) => option.selected);
+    const selected = new Set(previous.filter((option) => option.selected).map((option) => option.value));
+    select.replaceChildren(...entries.map(([value, label]) => new Option(label, value, all, all || selected.has(value))));
+    window.ImageStudioSelect?.refresh(select);
   }
 
   function renderGallery(payload) {
-    const currentProvider = els.galleryProvider.value;
-    const options = '<option value="">全部服务商</option>' + (payload.filters?.providers || []).map((item) => `<option value="${escape(item.id)}">${escape(item.name)}</option>`).join("");
-    if (els.galleryProvider.innerHTML !== options) els.galleryProvider.innerHTML = options;
-    els.galleryProvider.value = currentProvider;
+    updateGalleryFilterOptions(els.galleryProvider, [["", "未指定服务商"], ...(payload.filters?.providers || []).map((item) => [item.id, item.name || item.id])]);
+    const engineSelect = $("galleryEngine");
+    const engines = new Set(Array.from(engineSelect.options, (option) => option.value));
+    for (const engine of payload.filters?.generation_engines || []) engines.add(engine === "nai" ? "novelai" : engine);
+    updateGalleryFilterOptions(engineSelect, Array.from(engines, (engine) => [engine, library.engineLabel(engine)]));
     els.galleryEmpty.classList.toggle("is-hidden", state.galleryItems.length > 0);
+    const filters = galleryFilters();
+    els.galleryEmpty.textContent = filters.query || filters.favorite || Object.keys(filters).length > 2 ? "没有符合当前筛选条件的图片。" : "画廊中还没有保留的生成记录。";
     const existing = new Map(Array.from(els.galleryGrid.children, (card) => [card.dataset.galleryId, card]));
     const wanted = new Set(state.galleryItems.map((item) => item.id));
     for (const [id, card] of existing) if (!wanted.has(id)) card.remove();

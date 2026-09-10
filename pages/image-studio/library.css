@@ -109,6 +109,9 @@ html { scroll-padding-top: 112px; scroll-padding-bottom: calc(100px + env(safe-a
 .import-card.is-duplicate { box-shadow: var(--import-duplicate-shadow); }
 .import-card-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
 .import-card-header strong { font-size: 13px; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.import-card-header > strong { flex: 1; }
+.import-sort-handle { flex: 0 0 40px; width: 40px; height: 40px; min-height: 40px; }
+.import-order { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 .import-card-preview { position: relative; aspect-ratio: 4 / 3; width: 100%; overflow: hidden; background: var(--surface); border-radius: 8px; }
 .import-card-preview img { position: absolute; inset: 0; display: block; width: 100%; height: 100%; object-fit: contain; }
 .import-file-meta { padding: 9px 0 12px; color: var(--muted); font-size: 11px; }
@@ -196,6 +199,10 @@ html { scroll-padding-top: 112px; scroll-padding-bottom: calc(100px + env(safe-a
 .studio-modal-error { font-size: 12px; padding: 0 18px; overflow-wrap: anywhere; }
 .studio-modal-error:not(:empty) { padding-bottom: 12px; }
 .studio-modal.is-merge-picker { width: min(860px, 100%); }
+.studio-modal.is-import-editor { width: min(1240px, 100%); color: var(--text); }
+.import-edit-batch-summary { margin-bottom: 16px; font-size: 12px; color: var(--muted); }
+.import-edit-batch-summary > summary { cursor: pointer; min-height: 40px; align-content: center; }
+.is-import-editor .studio-modal-body { scroll-padding-block: 16px; }
 .merge-target-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
 .merge-target-card { display: flex; flex-direction: column; min-width: 0; padding: 8px; gap: 7px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); box-shadow: var(--shadow); cursor: pointer; }
 .merge-target-card:has(input:checked) { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
@@ -272,6 +279,7 @@ html { scroll-padding-top: 112px; scroll-padding-bottom: calc(100px + env(safe-a
   .merge-target-pagination .studio-icon-button { width: 44px; height: 44px; min-height: 44px; flex-basis: 44px; }
   .import-floatingbar button { min-height: 44px; }
   .detail-footer { --detail-button-size: min(44px, calc((100vw - 32px) / 7)); justify-content: space-around; gap: 0; padding: 7px 8px max(7px, env(safe-area-inset-bottom)); }
+  .detail-footer:has(#detailImportEdit:not([hidden])) { --detail-button-size: min(44px, calc((100vw - 32px) / 8)); }
   .detail-footer > :first-child { margin-right: 0; }
   .detail-footer .studio-icon-button, .detail-footer .detail-command { width: var(--detail-button-size); min-width: var(--detail-button-size); flex: 0 0 var(--detail-button-size); height: var(--detail-button-size); min-height: var(--detail-button-size); padding: 0; border-radius: 50%; }
   .detail-command > span:last-child { display: none; }

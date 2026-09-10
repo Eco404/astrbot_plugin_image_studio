@@ -23,6 +23,15 @@ select.studio-select-native { position: absolute !important; inset: auto !import
 .studio-select-mark { display: grid; width: 20px; height: 20px; place-items: center; visibility: hidden; }
 .studio-select-mark svg { display: block; }
 .studio-select-option[aria-selected="true"] .studio-select-mark { visibility: visible; }
+.studio-select-menu.is-multiple .studio-select-mark { width: 17px; height: 17px; visibility: visible; border: 1px solid var(--line); border-radius: 5px; background: var(--surface); }
+.studio-select-menu.is-multiple { scroll-padding-top: 50px; }
+.studio-select-menu.is-multiple .studio-select-mark svg { width: 13px; height: 13px; visibility: hidden; }
+.studio-select-menu.is-multiple [aria-selected="true"] .studio-select-mark { border-color: var(--control-accent, var(--accent)); background: var(--control-accent, var(--accent)); color: var(--on-control-accent, var(--surface)); }
+.studio-select-menu.is-multiple [aria-selected="true"] .studio-select-mark svg { visibility: visible; }
+.studio-select-actions { position: sticky; top: -5px; z-index: 1; display: flex; align-items: center; gap: 6px; margin: -5px -5px 5px; padding: 7px 9px; border-bottom: 1px solid var(--line); background: var(--surface); }
+.studio-select-actions button { min-height: 30px; padding: 4px 9px; border: 0; border-radius: 6px; background: transparent; color: var(--accent-strong); font: inherit; font-size: 12px; cursor: pointer; }
+.studio-select-actions button:hover:not(:disabled) { background: var(--accent-soft); }
+.studio-select-actions button:disabled { color: var(--muted); opacity: .55; cursor: default; }
 .studio-select-group, .studio-select-empty { padding: 8px 10px; color: var(--muted); font-size: 12px; }
 .studio-select-group { font-size: 11px; font-weight: 650; }
 .model-select-row > .studio-select { flex: 1 1 360px; }
@@ -40,6 +49,8 @@ select.studio-select-native { position: absolute !important; inset: auto !import
 @media (max-width: 540px) {
   .gallery-toolbar > .studio-select { flex-basis: 42%; }
   .studio-select-option { min-height: 44px; padding-block: 10px; }
+  .studio-select-actions button { min-height: 40px; }
+  .studio-select-menu.is-multiple { scroll-padding-top: 60px; }
   .copy-format-picker > .studio-select { position: absolute; inset: 0; width: var(--detail-button-size, 44px); max-width: var(--detail-button-size, 44px); height: var(--detail-button-size, 44px); }
   .copy-format-picker .studio-select-trigger { width: var(--detail-button-size, 44px); height: var(--detail-button-size, 44px); min-height: var(--detail-button-size, 44px); padding: 0; border: 0; border-radius: 50%; background: transparent; box-shadow: none; }
   .copy-format-picker .studio-select-value, .copy-format-picker .studio-select-chevron { display: none; }
