@@ -113,16 +113,19 @@ async function swipe(page, inner, locator, forward = true) {
 async function verifyStrip(page, frame, inner, groupId, summary, test) {
   const originalImages = (await api(page, "get", `gallery/assets/${groupId}`)).images;
   let releaseAssets; const assetsGate = new Promise((resolve) => { releaseAssets = resolve; });
-  const assetPath = `**/gallery/assets/${groupId}`;
-  const delayAssets = async (route) => { await assetsGate; try { await route.continue(); } catch (error) { if (!/already handled|closed|disposed/i.test(error.message)) throw error; } };
+  const assetPath = "**/gallery/image/*";
+  const delayAssets = async (route) => { if (new URL(route.request().url()).searchParams.get("detail") === "original") await assetsGate; try { await route.continue(); } catch (error) { if (!/already handled|closed|disposed/i.test(error.message)) throw error; } };
   await page.route(assetPath, delayAssets);
   try {
     await frame.locator(`[data-gallery-id="${groupId}"] .gallery-info`).click();
     await frame.locator(".detail-filmstrip").waitFor();
     assert.equal(await frame.locator(".detail-filmstrip-thumb").count(), 23);
     assert.equal(await frame.locator(".detail-image-frame .detail-carousel-dots").count(), 0, "detail dots should be replaced only in the detail carousel");
-    const thumbnails = await frame.locator(".detail-filmstrip-thumb img").evaluateAll((items) => items.map((image) => image.src));
-    assert.deepEqual(thumbnails, summary.images.map((image) => image.thumbnail_data_url));
+    const thumbnails = summary.images.map((image) => image.thumbnail_data_url);
+    const mountedThumbnails = await frame.locator(".detail-filmstrip-thumb img").evaluateAll((items) => items.map((image) => ({ index: Number(image.closest("[data-detail-dot]").dataset.detailDot), source: image.src })));
+    const hiddenWidth = await inner.locator(".detail-filmstrip").evaluate((strip) => strip.scrollWidth - strip.clientWidth);
+    if (hiddenWidth > 160) assert.ok(mountedThumbnails.length < thumbnails.length, "offscreen filmstrip thumbnails should remain lazy");
+    assert.ok(mountedThumbnails.every((image) => image.source === thumbnails[image.index]), "loaded filmstrip images must be thumbnails for their own position");
     await settle(inner);
     await backdropIdle(inner, thumbnails[0]);
     const originalScroll = await inner.locator("#drawerBody").evaluate((element) => element.scrollTop);
@@ -137,7 +140,7 @@ async function verifyStrip(page, frame, inner, groupId, summary, test) {
     await frame.locator('[data-detail-dot="3"]').click(); await selected(frame, 3);
     await unchangedScroll("click thumbnail 3");
     await backdropFade(page, frame, inner, thumbnails[0], thumbnails[3], `${test.name}-thumbnail-change`);
-    assert.match(await frame.locator("#drawerBody").textContent(), /image 3/);
+    await frame.locator(".detail-parameter-row").filter({ hasText: "image 3" }).first().waitFor();
     assert.equal(await frame.locator("#imagePreview:not(.is-hidden), .pswp--open").count(), 0, "thumbnail click must not open a viewer");
     await page.keyboard.press("End"); await selected(frame, 22); await unchangedScroll("End");
     await page.keyboard.press("ArrowRight"); await selected(frame, 22);
@@ -170,7 +173,8 @@ async function verifyStrip(page, frame, inner, groupId, summary, test) {
     assert.equal(await inner.evaluate(() => document.querySelector('.detail-filmstrip') === window.__filmstrip && Array.from(document.querySelectorAll('[data-detail-dot]')).every((button, index) => button === window.__filmstripButtons[index])), true, "same-group selections and original upgrades must keep the strip DOM");
     await selected(frame, 1);
     await unchangedScroll("original loaded");
-    assert.deepEqual(await frame.locator(".detail-filmstrip-thumb img").evaluateAll((items) => items.map((image) => image.src)), thumbnails, "original upgrade must not replace filmstrip thumbnails with originals");
+    const upgradedThumbnails = await frame.locator(".detail-filmstrip-thumb img").evaluateAll((items) => items.map((image) => ({ index: Number(image.closest("[data-detail-dot]").dataset.detailDot), source: image.src })));
+    assert.ok(upgradedThumbnails.every((image) => image.source === thumbnails[image.index]), "original upgrade must not replace filmstrip thumbnails with originals");
     await inner.waitForFunction(() => { const strip = document.querySelector('.detail-filmstrip').getBoundingClientRect(); const active = document.querySelector('[data-detail-dot][aria-current="true"]').getBoundingClientRect(); return active.left >= strip.left - 1 && active.right <= strip.right + 1; });
     await capture(page, inner, `${test.name}-filmstrip-upgraded`);
     await inner.evaluate(() => { for (const index of [2, 3, 4, 2, 1]) document.querySelector(`[data-detail-dot="${index}"]`).click(); });

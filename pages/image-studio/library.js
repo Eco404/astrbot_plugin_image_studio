@@ -69,6 +69,7 @@
     let modalPending = false;
     let modalDismissOutside = true;
     let detailCopies = [];
+    let detailDeferred = [];
     let detailParameterGrids = [];
     let detailParameterObserver = null;
     let detailParameterFrame = 0;
@@ -140,6 +141,7 @@
         const close = (result) => {
           if (modalPending) return;
           window.ImageStudioSelect?.close();
+          options.onClose?.();
           modalClose = null; $("studioModalRoot").classList.add("is-hidden");
           hooks.syncPageScrollLock(); previousFocus?.focus?.({ preventScroll: true }); resolve(result);
         };
@@ -209,8 +211,8 @@
           <label class="field">生成时间<input data-import-field="generated_at" type="datetime-local" step="0.001" value="${escape(data.generated_at || "")}" /></label>
           <label class="field field-wide">正向提示词${item.editedFields.has("prompt") ? "" : promptStatusMarkup(item.parsed?.normalized?.prompt_status)}<textarea data-import-field="prompt" rows="3">${escape(data.prompt)}</textarea></label>
           <label class="field field-wide">反向提示词${item.editedFields.has("negative_prompt") ? "" : promptStatusMarkup(item.parsed?.normalized?.negative_prompt_status)}<textarea data-import-field="negative_prompt" rows="2">${escape(data.negative_prompt)}</textarea></label>
-          <details class="field-wide advanced"><summary>补充参数</summary><textarea data-import-field="parameters" rows="5" spellcheck="false" aria-label="补充参数 JSON">${escape(data.parameters)}</textarea></details>
-        </fieldset>${promptCandidatesMarkup(item, context)}${comfyDetailsMarkup(item.parsed)}<div class="import-card-status ${item.status === "error" || item.duplicateReason ? "is-error" : ""}" role="status">${escape(item.duplicateReason || (item.status === "reading" ? "正在识别图片参数…" : item.error || (item.parsed?.format && item.parsed.format !== "unknown" ? `已识别 ${engineLabel(item.parsed.format)}` : "未检测到生图参数，可手动填写")))}</div>${warnings.length ? `<div class="import-warnings">${warnings.map(escape).join("<br>")}</div>` : ""}</article>`;
+          <details class="field-wide advanced" ${context.editing ? 'data-import-deferred="parameters"' : ""}><summary>补充参数</summary>${context.editing ? "" : `<textarea data-import-field="parameters" rows="5" spellcheck="false" aria-label="补充参数 JSON">${escape(data.parameters)}</textarea>`}</details>
+        </fieldset>${promptCandidatesMarkup(item, context)}${context.editing && item.parsed?.normalized?.stages?.length ? `<details class="comfy-workflow-info" data-import-deferred="workflow"><summary>采样阶段与条件 · ${item.parsed.normalized.stages.length} 个阶段</summary></details>` : comfyDetailsMarkup(item.parsed)}<div class="import-card-status ${item.status === "error" || item.duplicateReason ? "is-error" : ""}" role="status">${escape(item.duplicateReason || (item.status === "reading" ? "正在识别图片参数…" : item.error || (item.parsed?.format && item.parsed.format !== "unknown" ? `已识别 ${engineLabel(item.parsed.format)}` : "未检测到生图参数，可手动填写")))}</div>${warnings.length ? `<div class="import-warnings">${warnings.map(escape).join("<br>")}</div>` : ""}</article>`;
     }
 
     function hasPromptBlock(value, block) {
@@ -265,11 +267,12 @@
         && (!after.trim() || /^[ \t]*\n[ \t]*\n/.test(after));
     }
 
-    function promptCandidatesMarkup(item, context = importContext) {
+    function promptCandidatesMarkup(item, context = importContext, expanded = false) {
       if (item.parsed?.format !== "comfyui") return "";
       const normalized = item.parsed.normalized || {};
       const candidates = normalized.prompt_candidates || [];
       if (!candidates.length && !normalized.requires_output_selection) return "";
+      if (context.editing && !expanded) return `<details class="import-prompt-candidates" data-import-deferred="candidates"><summary>候选提示词 · ${candidates.length} 项</summary></details>`;
       const entries = candidates.map((candidate) => {
         const role = { positive: "正向链路", negative: "反向链路", mixed: "正反向链路", unknown: "方向未确定" }[candidate.role] || "方向未确定";
         const status = { static: "静态文本", template: "动态模板", unknown_path: "途经未知节点", display_snapshot: "关联显示快照" }[candidate.status] || "作用未确定";
@@ -350,7 +353,7 @@
 
     function startImportBatch(source, title, context = importContext) {
       if (!source || batchChoiceDisabled(source, context)) return null;
-      const job = { title, context, epoch: context.epoch, entries: context.items.map((item) => ({ item, revision: item.revision || 0, parsed: item.parsed, status: item.status })), results: [] };
+      const job = { title, context, epoch: context.epoch, entries: context.items.map((item) => ({ item, revision: item.revision || 0, parsed: item.parsed, status: item.status, hydrated: !context.editing || item.hydrated })), results: [], loaded: 0 };
       context.batchJob = job;
       context.batchResult = null;
       context.render();
@@ -362,6 +365,17 @@
       if ((entry.item.revision || 0) !== entry.revision || entry.item.parsed !== entry.parsed) return "图片在操作期间已编辑或重新解析，保留当前内容";
       if (entry.status === "reading") return "点击批量按钮时仍在读取图片，请读取完成后重试";
       return "";
+    }
+
+    async function hydrateBatchEntry(job, entry) {
+      if (!job.context.editing || entry.hydrated) return batchEntryChanged(job, entry);
+      if (job.epoch !== job.context.epoch || !job.context.active() || !job.context.items.includes(entry.item)) return "图片已移除或编辑已取消";
+      if ((entry.item.revision || 0) !== entry.revision) return "图片在操作期间已编辑，保留当前内容";
+      const loaded = await ensureImportEditorItem(job.context, entry.item);
+      if (!loaded) return entry.item.error || "图片读取失败，请重试";
+      if ((entry.item.revision || 0) !== entry.revision) return "图片在操作期间已编辑，保留当前内容";
+      entry.parsed = entry.item.parsed; entry.status = entry.item.status; entry.hydrated = true;
+      return batchEntryChanged(job, entry);
     }
 
     function batchResultSummary(result) {
@@ -390,12 +404,14 @@
       if (!job) return;
       try {
         await context.invalidate();
-        for (const entry of job.entries) {
-          const changed = batchEntryChanged(job, entry);
+        const processEntry = async (entry) => {
+          const changed = await hydrateBatchEntry(job, entry);
           const matched = changed ? { status: "skipped", message: changed } : entry.item === source ? { candidate } : matchingPromptCandidate(entry.item, candidate);
           const result = matched.candidate ? applyPromptCandidate(entry.item, matched.candidate, target) : matched;
           job.results.push({ filename: entry.item.file.name, ...result });
-        }
+          job.loaded++; context.render();
+        };
+        for (let index = 0; index < job.entries.length; index += 3) await Promise.all(job.entries.slice(index, index + 3).map(processEntry));
       } finally { finishImportBatch(job, context); }
     }
 
@@ -410,7 +426,7 @@
         const processEntry = async (entry) => {
           const item = entry.item;
           const record = (result) => { job.results.push({ filename: item.file.name, ...result }); };
-          let changed = batchEntryChanged(job, entry);
+          let changed = await hydrateBatchEntry(job, entry);
           if (changed) { record({ status: "skipped", message: changed }); return; }
           const matching = (item.parsed?.normalized?.outputs || []).filter((candidate) => candidate.kind === "save" && candidate.match_key === output.match_key);
           if (matching.length !== 1) { record({ status: "mismatch", message: "没有唯一对应的保存输出和主管线" }); return; }
@@ -426,7 +442,10 @@
             record({ status: "applied", message: item.editedFields.size ? "输出已更新；手动填写内容已保留，请核对是否适用于该分支" : "已解析该图片的对应保存输出", manualReview: !!item.editedFields.size });
           } catch (error) { record({ status: "failed", message: errorMessage(error, "保存输出读取失败，已保留原内容") }); }
         };
-        for (let index = 0; index < job.entries.length; index += 3) await Promise.all(job.entries.slice(index, index + 3).map(processEntry));
+        for (let index = 0; index < job.entries.length; index += 3) {
+          await Promise.all(job.entries.slice(index, index + 3).map(processEntry));
+          job.loaded = Math.min(index + 3, job.entries.length); context.render();
+        }
       } finally { finishImportBatch(job, context); }
     }
 
@@ -486,6 +505,7 @@
       context.sorter = window.ImageStudioSortable.bind(grid, {
         itemSelector: "[data-import-id]", handleSelector: "[data-sort-handle]",
         getId: (element) => element.dataset.importId, isEnabled: () => sortEnabled(context),
+        onDragEnd: () => { if (context.editing && context.active()) context.render(); },
         onReorder: (ids) => {
           if (!sortEnabled(context) || ids.length !== context.items.length || new Set(ids).size !== ids.length) return;
           const byId = new Map(context.items.map((item) => [item.id, item]));
@@ -497,11 +517,36 @@
         },
       });
       grid.addEventListener("click", (event) => {
+        const retry = event.target.closest("[data-import-load]");
+        if (retry && context.editing) {
+          const item = context.items.find((entry) => entry.id === retry.closest("[data-import-id]")?.dataset.importId);
+          if (item) { item.materialized = true; void ensureImportEditorItem(context, item); }
+        }
         const remove = event.target.closest("[data-remove-import]"); if (remove && !context.editing) removeImport(remove.dataset.removeImport);
         const candidate = event.target.closest("[data-candidate-target]"); if (candidate) addPromptCandidate(candidate, context);
         const batchCandidate = event.target.closest("[data-batch-candidate-target]"); if (batchCandidate) void applyCandidateToImports(batchCandidate, context);
         const batchOutput = event.target.closest("[data-batch-import-output]"); if (batchOutput) void applyOutputToImports(batchOutput, context);
       });
+      if (context.editing) grid.addEventListener("toggle", (event) => {
+        const section = event.target;
+        if (!section.open || !section.dataset.importDeferred) return;
+        const item = context.items.find((entry) => entry.id === section.closest("[data-import-id]")?.dataset.importId);
+        if (!item?.hydrated) return;
+        const kind = section.dataset.importDeferred;
+        delete section.dataset.importDeferred;
+        if (kind === "parameters") section.insertAdjacentHTML("beforeend", `<textarea data-import-field="parameters" rows="5" spellcheck="false" aria-label="补充参数 JSON">${escape(item.fields.parameters)}</textarea>`);
+        else if (kind === "stage" || kind === "conditions") {
+          const value = kind === "stage" ? { ...(item.parsed.normalized.stages || [])[Number(section.dataset.stageIndex)] } : { condition_nodes: item.parsed.normalized.condition_nodes };
+          delete value.node_id; delete value.type;
+          section.insertAdjacentHTML("beforeend", `<div class="detail-parameter-grid">${Object.entries(value).map(([key, value]) => `<div class="detail-parameter-row"><div class="detail-parameter-label"><span>${escape(key)}</span></div><pre>${escape(serial(value))}</pre></div>`).join("")}</div>`);
+        }
+        else {
+          const template = document.createElement("template");
+          template.innerHTML = kind === "candidates" ? promptCandidatesMarkup(item, context, true) : comfyDetailsMarkup(item.parsed, false, true);
+          const content = template.content.firstElementChild;
+          while (content?.children.length > 1) section.append(content.children[1]);
+        }
+      }, true);
       grid.addEventListener("change", (event) => {
         if (!event.target.matches("[data-import-output]")) return;
         const item = context.items.find((entry) => entry.id === event.target.closest("[data-import-id]").dataset.importId);
@@ -554,19 +599,126 @@
 
     function renderImportEditor(context) {
       if (!context.active()) return;
-      renderImportCards(context);
-      const busy = cardsBusy(context) || context.items.some((item) => item.status === "reading");
+      renderImportEditorCards(context);
+      const busy = context.loading || !!context.loadError || cardsBusy(context) || context.items.some((item) => item.status === "reading");
       $("importEditSave").disabled = busy;
-      $("importEditStatus").textContent = context.saving ? "正在保存…" : context.batchJob ? "正在批量应用选择…" : `${context.items.length} 张图片 · 拖动手柄或聚焦后按方向键调整顺序`;
+      $("importEditStatus").textContent = context.loading ? "正在读取图片列表…" : context.loadError ? context.loadError : context.saving ? "正在保存…" : context.batchJob ? `正在批量应用选择… ${context.batchJob.loaded} / ${context.batchJob.entries.length} 张` : `${context.items.length} 张图片 · 滚动读取参数，可拖动手柄或按方向键排序`;
+      $("importEditRetry").hidden = !context.loadError;
+      $("importEditLoading").hidden = !context.loading;
       const result = context.batchResult;
       const summary = $("importEditBatchSummary");
       summary.hidden = !result || !!context.batchJob;
-      summary.innerHTML = result ? `<summary>${escape(batchResultSummary(result))} · 查看结果</summary><div class="import-batch-results">${result.results.map((entry) => `<div class="import-batch-result"><strong>${escape(entry.filename)}</strong><p>${escape(entry.message)}</p></div>`).join("")}</div>` : "";
+      if (summary._result !== result) {
+        summary._result = result;
+        summary.innerHTML = result ? `<summary>${escape(batchResultSummary(result))} · 查看结果</summary><div class="import-batch-results">${result.results.map((entry) => `<div class="import-batch-result"><strong>${escape(entry.filename)}</strong><p>${escape(entry.message)}</p></div>`).join("")}</div>` : "";
+      }
+    }
+
+    function importEditorPlaceholder(item, index, context) {
+      return `<article class="import-card import-card-placeholder glass" data-import-id="${item.id}" data-import-sha256="${item.sha256}"><div class="import-card-header"><button class="studio-icon-button import-sort-handle" data-sort-handle type="button" aria-label="调整第 ${index + 1} 张图片顺序：${escape(item.file.name)}" title="拖动排序，也可聚焦后使用方向键" ${sortEnabled(context) ? "" : "disabled"}>${icon("GripVertical")}</button><span class="import-order">${index + 1}</span><strong title="${escape(item.file.name)}">${escape(item.file.name)}</strong></div><div class="import-card-preview import-preview-placeholder" data-sort-surface>${icon("Image")}</div><div class="import-file-meta">${formatBytes(item.file.size)}${item.width ? ` · ${item.width} × ${item.height}` : ""}</div><div class="import-fields-placeholder" aria-hidden="true"><span></span><span></span><span></span></div><p class="import-card-status" role="status"></p><button class="quiet-button" data-import-load type="button">读取参数</button></article>`;
+    }
+
+    function renderImportEditorCards(context) {
+      const grid = context.grid();
+      if (!grid || !context.active()) return;
+      if (context.sorter?.isDragging?.()) return;
+      const sorting = sortEnabled(context);
+      context.items.forEach((item, index) => {
+        let card = context.nodes.get(item.id);
+        const full = !!(item.hydrated && item.materialized);
+        if (!card || card._full !== full || full && card._parsed !== item.parsed) {
+          const template = document.createElement("template");
+          template.innerHTML = full ? importCard(item, index, context) : importEditorPlaceholder(item, index, context);
+          const replacement = template.content.firstElementChild;
+          // A card is replaced only when its own data first arrives or is reparsed.
+          // Unrelated drafts, focus, expanded sections, and DOM nodes stay intact.
+          if (card) { context.observer?.unobserve(card); card.replaceWith(replacement); }
+          else grid.append(replacement);
+          card = replacement; card._full = full; card._parsed = item.parsed;
+          context.nodes.set(item.id, card);
+          if (full) window.ImageStudioSelect?.refresh(card);
+          else context.observer?.observe(card);
+        }
+        if (grid.children[index] !== card) grid.insertBefore(card, grid.children[index] || null);
+        const handle = card.querySelector("[data-sort-handle]");
+        handle.disabled = !sorting;
+        handle.setAttribute("aria-label", `调整第 ${index + 1} 张图片顺序：${item.file.name}`);
+        const order = card.querySelector(".import-order"); order.textContent = index + 1; order.setAttribute("aria-label", `第 ${index + 1} 张`);
+        const status = card.querySelector(".import-card-status");
+        if (full) {
+          card.querySelector("fieldset").disabled = cardsBusy(context) || item.status === "reading";
+          card.querySelectorAll("[data-import-field]").forEach((field) => { if (field.value !== String(item.fields[field.dataset.importField] ?? "")) field.value = item.fields[field.dataset.importField] ?? ""; });
+          syncCandidateButtons(card, item, context);
+          card.querySelectorAll("[data-batch-candidate-target]").forEach((button) => { const candidate = item.parsed?.normalized?.prompt_candidates?.find((entry) => entry.id === button.dataset.batchCandidateId); button.disabled = batchChoiceDisabled(item, context) || !candidate?.match_key; });
+          const output = card.querySelector("[data-batch-import-output]");
+          if (output) output.disabled = batchChoiceDisabled(item, context) || !item.parsed?.normalized?.outputs?.some((entry) => entry.kind === "save" && String(entry.node_id) === String(item.outputNodeId) && entry.match_key);
+          status.textContent = item.status === "reading" ? "正在识别图片参数…" : item.error || (item.parsed?.format && item.parsed.format !== "unknown" ? `已识别 ${engineLabel(item.parsed.format)}` : "未检测到生图参数，可手动填写");
+        } else {
+          status.textContent = item.error || (item.hydrating ? "正在读取图片参数…" : "滚动到此处时读取图片参数");
+          const button = card.querySelector("[data-import-load]"); button.disabled = item.hydrating || context.saving; button.textContent = item.error ? "重试读取" : "读取参数";
+          card.setAttribute("aria-busy", String(!!item.hydrating));
+        }
+        status.classList.toggle("is-error", !!item.error);
+      });
+    }
+
+    function ensureImportEditorItem(context, item) {
+      if (!context.active()) return Promise.resolve(false);
+      if (item.hydrated) { context.render(); return Promise.resolve(true); }
+      if (item.hydrationPromise) return item.hydrationPromise;
+      item.hydrating = true; item.error = "";
+      item.hydrationPromise = new Promise((resolve) => context.queue.push({ item, resolve }));
+      pumpImportEditorItems(context); context.render();
+      return item.hydrationPromise;
+    }
+
+    function pumpImportEditorItems(context) {
+      while (context.active() && context.requests < 3 && context.queue.length) {
+        const { item, resolve } = context.queue.shift(); context.requests++;
+        void (async () => {
+          let loaded = false;
+          try {
+            const record = await apiGet(`gallery/import-edit/${context.generationId}`, { image_id: item.imageId, item_revision: item.itemRevision });
+            if (!context.active()) return;
+            const entry = record.items?.find((entry) => entry.image_id === item.imageId);
+            if (!entry?.fields) throw new Error("图片参数响应不完整，请重试。");
+            const fields = { generation_engine: entry.fields.generation_engine || "unknown", model: entry.fields.model ?? "", mode: entry.fields.mode || "unknown", prompt: entry.fields.prompt ?? "", negative_prompt: entry.fields.negative_prompt ?? "", generated_at: localDateTime(entry.fields.generated_at), parameters: entry.parameters_json ?? JSON.stringify(entry.fields.parameters || {}, null, 2) };
+            Object.assign(item, { url: entry.thumbnail_data_url || "", importedAt: entry.fields.generated_at, parsed: entry.metadata, rawMetadata: entry.metadata?.raw || {}, fields, initialFields: { ...fields }, editedFields: new Set(entry.edited_fields || []), outputNodeId: entry.output_node_id || "", initialOutputNodeId: String(entry.output_node_id || ""), status: "ready", hydrated: true });
+            loaded = true;
+          } catch (error) { if (context.active()) item.error = errorMessage(error, "图片参数读取失败，请重试"); }
+          finally {
+            item.hydrating = false; item.hydrationPromise = null; context.requests--; resolve(loaded);
+            if (context.active()) { context.render(); pumpImportEditorItems(context); }
+          }
+        })();
+      }
+    }
+
+    async function loadImportEditorManifest(context) {
+      if (!context.active() || context.loading) return;
+      context.loading = true; context.loadError = ""; context.render();
+      try {
+        const record = await apiGet(`gallery/import-edit/${context.generationId}`, { light: 1 });
+        if (!context.active()) return;
+        context.revision = record.revision;
+        context.items = record.items.map((entry) => ({ id: `edit_${entry.image_id}`, imageId: entry.image_id, itemRevision: entry.item_revision, sha256: entry.sha256, file: { name: entry.filename, size: entry.size_bytes }, width: entry.width, height: entry.height, fields: {}, initialFields: {}, editedFields: new Set(), status: "unloaded", hydrated: false, revision: 0 }));
+        context.loading = false; context.render();
+        if (!context.observer) {
+          const visible = () => {
+            if (!context.active()) return;
+            const bounds = $("studioModalBody").getBoundingClientRect();
+            context.items.forEach((item) => { const card = context.nodes.get(item.id); const box = card.getBoundingClientRect(); if (!item.materialized && box.bottom >= bounds.top - 300 && box.top <= bounds.bottom + 300) { item.materialized = true; void ensureImportEditorItem(context, item); } });
+          };
+          $("studioModalBody").addEventListener("scroll", visible, { passive: true }); context.fallbackVisible = visible; visible();
+        }
+      } catch (error) { if (context.active()) context.loadError = errorMessage(error, "图片列表读取失败，请重试"); }
+      finally { if (context.active()) { context.loading = false; context.render(); } }
     }
 
     async function saveImportEditor(context) {
-      if (!context.active() || cardsBusy(context) || context.items.some((item) => item.status === "reading")) return undefined;
+      if (!context.active() || context.loading || context.loadError || cardsBusy(context) || context.items.some((item) => item.status === "reading")) return undefined;
       const items = context.items.map((item) => {
+        if (!item.hydrated) return { image_id: item.imageId, overrides: {} };
         if (item.parsed?.normalized?.requires_output_selection) throw new Error(`${item.file.name} 包含多个保存输出，请先选择最终保存输出。`);
         const overrides = {};
         for (const key of item.editedFields) {
@@ -592,26 +744,36 @@
       if (detail?.source !== "import" || importEditLoading || importEditor) return;
       const viewedImageId = detail.images?.[state.detailImageIndex]?.id;
       importEditLoading = true; updateDetailActions(detail);
-      let context;
+      const context = {
+        editing: true, generationId: detail.id, revision: "", loading: false, loadError: "",
+        saving: false, addJobs: 0, epoch: 0, batchJob: null, batchResult: null, sorter: null,
+        items: [], nodes: new Map(), queue: [], requests: 0, closed: false, observer: null,
+        grid: () => $("importEditGrid"), active: () => importEditor === context && !context.closed,
+        invalidate: async () => {}, render: () => renderImportEditor(context),
+      };
+      const dispose = () => {
+        context.closed = true; context.epoch++; context.observer?.disconnect(); context.sorter?.destroy();
+        if (context.fallbackVisible) $("studioModalBody").removeEventListener("scroll", context.fallbackVisible);
+        for (const entry of context.queue.splice(0)) { entry.item.hydrating = false; entry.item.hydrationPromise = null; entry.resolve(false); }
+      };
+      importEditor = context;
       try {
-        const record = await apiGet(`gallery/import-edit/${detail.id}`);
-        if (state.detailId !== detail.id || !$("detailDrawer").classList.contains("is-open")) return;
-        context = {
-          editing: true, generationId: record.generation_id, revision: record.revision,
-          saving: false, addJobs: 0, epoch: 0, batchJob: null, batchResult: null, sorter: null,
-          grid: () => $("importEditGrid"), active: () => importEditor === context,
-          invalidate: async () => {}, render: () => renderImportEditor(context),
-          items: record.items.map((entry) => {
-            const fields = { generation_engine: entry.fields.generation_engine || "unknown", model: entry.fields.model ?? "", mode: entry.fields.mode || "unknown", prompt: entry.fields.prompt ?? "", negative_prompt: entry.fields.negative_prompt ?? "", generated_at: localDateTime(entry.fields.generated_at), parameters: entry.parameters_json ?? JSON.stringify(entry.fields.parameters || {}, null, 2) };
-            return { id: `edit_${entry.image_id}`, imageId: entry.image_id, sha256: entry.sha256, file: { name: entry.filename, size: entry.size_bytes }, url: entry.thumbnail_data_url || "", width: entry.width, height: entry.height, importedAt: entry.fields.generated_at, parsed: entry.metadata, rawMetadata: entry.metadata?.raw || {}, fields, initialFields: { ...fields }, editedFields: new Set(entry.edited_fields || []), outputNodeId: entry.output_node_id || "", initialOutputNodeId: String(entry.output_node_id || ""), status: "ready", revision: 0 };
-          }),
-        };
-        importEditor = context;
-        const saved = await openModal("编辑导入记录", '<p class="field-hint" id="importEditStatus" role="status"></p><details id="importEditBatchSummary" class="import-edit-batch-summary" hidden></details><div id="importEditGrid" class="import-grid" aria-label="编辑已导入图片"></div>', [
+        const saved = await openModal("编辑导入记录", '<p class="field-hint" id="importEditStatus" role="status">正在读取图片列表…</p><button id="importEditRetry" class="quiet-button" type="button" hidden>重试读取列表</button><div id="importEditLoading" class="import-edit-loading" aria-hidden="true"><span></span><span></span><span></span></div><details id="importEditBatchSummary" class="import-edit-batch-summary" hidden></details><div id="importEditGrid" class="import-grid" aria-label="编辑已导入图片"></div>', [
           { label: "取消", id: "importEditCancel", action: () => false },
           { label: "保存", id: "importEditSave", primary: true, action: () => saveImportEditor(context) },
-        ], { importEditor: true, dismissOutside: false, focus: "studioModalClose", onOpen: () => { bindImportCards(context); context.render(); } });
-        context.sorter?.destroy(); importEditor = null;
+        ], { importEditor: true, dismissOutside: false, focus: "studioModalClose", onClose: dispose, onOpen: () => {
+          bindImportCards(context);
+          if (window.IntersectionObserver) context.observer = new IntersectionObserver((entries) => {
+            if (!context.active()) return;
+            for (const entry of entries) if (entry.isIntersecting) {
+              const item = context.items.find((item) => item.id === entry.target.dataset.importId);
+              if (item && !item.materialized) { item.materialized = true; void ensureImportEditorItem(context, item); }
+            }
+          }, { root: $("studioModalBody"), rootMargin: "300px 0px" });
+          $("importEditRetry").addEventListener("click", () => void loadImportEditorManifest(context));
+          void loadImportEditorManifest(context);
+        } });
+        importEditor = null;
         if (saved) {
           showNotice("导入记录已保存。", "success");
           await hooks.loadGallery(state.galleryPage);
@@ -619,7 +781,7 @@
         }
       } catch (error) { showNotice(errorMessage(error, "导入记录读取失败"), "error"); }
       finally {
-        context?.sorter?.destroy();
+        dispose();
         if (importEditor === context) importEditor = null;
         importEditLoading = false; updateDetailActions(state.detailData);
       }
@@ -922,9 +1084,9 @@
     function parameterRows(values, prefix = "") {
       if (!values || typeof values !== "object") return "";
       return Object.entries(values).map(([key, value]) => {
-        const copyIndex = detailCopies.push(serial(value) ?? "null") - 1;
-        const label = prefix ? `${prefix}.${key}` : key;
         const content = serial(value) ?? "null";
+        const copyIndex = detailCopies.push(content) - 1;
+        const label = prefix ? `${prefix}.${key}` : key;
         return `<div class="detail-parameter-row"><div class="detail-parameter-label"><span>${escape(label)}</span><button class="studio-icon-button parameter-copy" data-copy-field="${copyIndex}" type="button" aria-label="复制 ${escape(label)}" title="复制 ${escape(label)}">${icon("Copy")}</button></div><pre>${escape(content)}</pre></div>`;
       }).join("");
     }
@@ -934,7 +1096,12 @@
       return label ? `<span class="comfy-summary-status">${escape(prefix)}${label}</span>` : "";
     }
 
-    function comfyDetailsMarkup(metadata, withCopy = false) {
+    function deferredDetailSection(className, title, content) {
+      const index = detailDeferred.push(content) - 1;
+      return `<details class="${className}" data-detail-deferred="${index}"><summary>${title}</summary></details>`;
+    }
+
+    function comfyDetailsMarkup(metadata, withCopy = false, lazy = false) {
       if (metadata?.format !== "comfyui") return "";
       const normalized = metadata.normalized || {}; const stages = normalized.stages || [];
       if (!stages.length) return "";
@@ -943,14 +1110,18 @@
       const stageMarkup = stages.map((stage, index) => {
         const fields = { ...stage }; delete fields.node_id; delete fields.type;
         for (const key of ["prompt_status", "negative_prompt_status"]) if (fields[key]) fields[key] = ({ exact: "直接文本", summary: "可读摘要，非等价条件", partial: "部分解析", missing: "未读取到文本" })[fields[key]] || fields[key];
-        return `<details class="comfy-stage" data-comfy-stage="${escape(stage.node_id)}"><summary>阶段 ${index + 1} · ${escape(stage.type)} #${escape(stage.node_id)}</summary><div class="detail-parameter-grid">${rows(fields)}</div></details>`;
+        const title = `阶段 ${index + 1} · ${escape(stage.type)} #${escape(stage.node_id)}`;
+        if (withCopy) return deferredDetailSection("comfy-stage", title, () => `<div class="detail-parameter-grid">${rows(fields)}</div>`).replace("<details ", `<details data-comfy-stage="${escape(stage.node_id)}" `);
+        return `<details class="comfy-stage" data-comfy-stage="${escape(stage.node_id)}" ${lazy ? `data-import-deferred="stage" data-stage-index="${index}"` : ""}><summary>${title}</summary>${lazy ? "" : `<div class="detail-parameter-grid">${rows(fields)}</div>`}</details>`;
       }).join("");
-      const conditions = normalized.condition_nodes && Object.keys(normalized.condition_nodes).length ? `<details class="comfy-conditions"><summary>条件组合结构</summary>${rows({ condition_nodes: normalized.condition_nodes })}</details>` : "";
+      const conditions = normalized.condition_nodes && Object.keys(normalized.condition_nodes).length ? withCopy ? deferredDetailSection("comfy-conditions", "条件组合结构", () => rows({ condition_nodes: normalized.condition_nodes })) : `<details class="comfy-conditions" ${lazy ? 'data-import-deferred="conditions"' : ""}><summary>条件组合结构</summary>${lazy ? "" : rows({ condition_nodes: normalized.condition_nodes })}</details>` : "";
       return `<details class="comfy-workflow-info"><summary>采样阶段与条件 · ${stages.length} 个阶段</summary><div class="comfy-output-list">${outputs}</div>${stageMarkup}${conditions}</details>`;
     }
 
     function detailMetadataMarkup(detail, image) {
       detailCopies = [];
+      detailDeferred = [];
+      if (detail.lightweight && !image?._metadataLoaded) return `<div class="detail-block detail-metadata-loading" role="status"><p>${image?._metadataError ? "图片参数读取失败。" : "正在读取当前图片参数…"}</p>${image?._metadataError ? '<button class="quiet-button" data-detail-metadata-retry type="button">重试读取参数</button>' : ""}</div>`;
       const metadata = image?.metadata || {};
       const normalized = metadata.normalized || {};
       const request = hooks.requestParameters(detail);
@@ -963,8 +1134,13 @@
       const summaryStatus = metadata.format === "comfyui" ? promptStatusMarkup(normalized.prompt_status, "正向：") + promptStatusMarkup(normalized.negative_prompt_status, "反向：") : "";
       if (metadata.format === "comfyui") for (const key of ["condition_nodes", "stages", "outputs", "prompt_candidates"]) { delete metadataRows[key]; if (detail.source === "import") delete requestRows[key]; }
       const raw = metadata.raw || {};
-      const rawMarkup = Object.entries(raw).map(([name, value]) => `<details class="metadata-raw-field"><summary>${escape(name)}</summary>${parameterRows({ [name]: value })}</details>`).join("");
-      return `<div class="detail-block"><h3>${detail.source === "import" ? "导入信息" : "原始请求"}</h3><div class="detail-parameter-grid">${parameterRows(requestRows)}</div></div>${Object.keys(metadataRows).length ? `<details class="detail-block generated-parameters"><summary>图片生成参数 · ${escape(engineLabel(metadata.format))}</summary>${summaryStatus}<div class="detail-parameter-grid">${parameterRows(metadataRows)}</div></details>` : ""}${comfyDetailsMarkup(metadata, true)}${rawMarkup ? `<details class="detail-block raw-metadata"><summary>图片原始元数据</summary>${rawMarkup}</details>` : ""}`;
+      const rawMarkup = Object.keys(raw).length ? deferredDetailSection("detail-block raw-metadata", "图片原始元数据", () => Object.entries(raw).map(([name, value]) => deferredDetailSection("metadata-raw-field", escape(name), () => parameterRows({ [name]: value }))).join("")) : "";
+      const generated = Object.keys(metadataRows).length ? deferredDetailSection("detail-block generated-parameters", `图片生成参数 · ${escape(engineLabel(metadata.format))}`, () => `${summaryStatus}<div class="detail-parameter-grid">${parameterRows(metadataRows)}</div>`) : "";
+      const workflow = metadata.format === "comfyui" && normalized.stages?.length ? deferredDetailSection("comfy-workflow-info", `采样阶段与条件 · ${normalized.stages.length} 个阶段`, () => {
+        const template = document.createElement("template"); template.innerHTML = comfyDetailsMarkup(metadata, true);
+        template.content.firstElementChild.querySelector("summary").remove(); return template.content.firstElementChild.innerHTML;
+      }) : "";
+      return `<div class="detail-block"><h3>${detail.source === "import" ? "导入信息" : "原始请求"}</h3><div class="detail-parameter-grid">${parameterRows(requestRows)}</div></div>${generated}${workflow}${rawMarkup}`;
     }
 
     function detailWarningsMarkup(detail, image) {
@@ -990,12 +1166,12 @@
       $("detailFavorite").title = detail?.is_favorite ? "取消收藏" : "收藏生成记录";
       $("detailFavorite").setAttribute("aria-label", $("detailFavorite").title);
       $("detailFavorite").disabled = favoritePending || !detail;
-      $("detailUseReference").disabled = !state.detailAssetsLoaded || !image?.data_url;
+      $("detailUseReference").disabled = !image?.data_url || !(image._originalLoaded || !detail?.lightweight && state.detailAssetsLoaded);
       $("detailReproduce").disabled = !detail;
       $("detailDelete").disabled = !detail || !(detail.images || []).length;
       $("detailImportEdit").hidden = detail?.source !== "import";
       $("detailImportEdit").disabled = importEditLoading || !detail || !(detail.images || []).length;
-      $("detailCopy").disabled = !detail;
+      $("detailCopy").disabled = !detail || !!detail.lightweight && !image?._metadataLoaded;
       window.ImageStudioSelect?.refresh($("detailCopyFormat"));
     }
 
@@ -1078,8 +1254,9 @@
       const detail = state.detailData; if (!detail) return;
       const images = detail.images || []; if (!images.length) return;
       const selected = new Set(images.map((image) => image.id));
-      const body = images.length === 1 ? "<p>永久删除这张图片及对应生成记录？</p>" : `<p>选择要从本条生成记录中删除的图片。</p><button class="quiet-button" id="deleteImagesSelectAll" type="button">取消全选</button><div class="delete-image-grid">${images.map((image, index) => `<label class="delete-image-choice"><img src="${escape(image.thumbnail_data_url || image.data_url || "")}" alt="第 ${index + 1} 张图片" /><input type="checkbox" data-delete-image="${escape(image.id)}" checked /><span>第 ${index + 1} 张</span></label>`).join("")}</div>`;
+      const body = images.length === 1 ? "<p>永久删除这张图片及对应生成记录？</p>" : `<p>选择要从本条生成记录中删除的图片。</p><button class="quiet-button" id="deleteImagesSelectAll" type="button">取消全选</button><div class="delete-image-grid">${images.map((image, index) => `<label class="delete-image-choice"><img data-delete-preview="${escape(image.id)}" ${image.thumbnail_data_url || image.data_url ? `src="${escape(image.thumbnail_data_url || image.data_url)}"` : ""} alt="第 ${index + 1} 张图片" /><input type="checkbox" data-delete-image="${escape(image.id)}" checked /><span>第 ${index + 1} 张</span></label>`).join("")}</div>`;
       const consequence = `${detail.is_favorite ? "<p>此记录已收藏。</p>" : ""}<p>删除全部成图会同时移除本条记录及其参考图关联。</p>`;
+      let active = true, observer;
       await openModal("删除图片", body + consequence, [{ label: "取消", action: () => false }, { label: `删除 ${images.length} 张`, danger: true, id: "deleteImagesAccept", action: async () => {
         if (!selected.size) throw new Error("请至少选择一张图片。");
         const currentImageId = images[state.detailImageIndex]?.id;
@@ -1095,10 +1272,22 @@
         else await hooks.openDetail(detail.id, nextIndex);
         showNotice(`已删除 ${Array.isArray(result.deleted) ? result.deleted.length : result.deleted ?? selected.size} 张图片。`, "success"); return true;
       } }], { onOpen: () => {
+        const loadPreview = async (element) => {
+          const image = images.find(image => image.id === element.dataset.deletePreview);
+          if (!image || element.hasAttribute("src") || element.dataset.loading) return;
+          element.dataset.loading = "true";
+          try { const src = await hooks.ensureDetailPreview(image, () => active && element.isConnected); if (src && active && element.isConnected) element.src = src; }
+          catch { element.alt += "（预览暂不可用）"; }
+          finally { delete element.dataset.loading; }
+        };
+        if (window.IntersectionObserver) {
+          observer = new IntersectionObserver(entries => { for (const entry of entries) if (entry.isIntersecting) void loadPreview(entry.target); }, { root: $("studioModalBody"), rootMargin: "100px" });
+          $("studioModalBody").querySelectorAll('[data-delete-preview]:not([src])').forEach(element => observer.observe(element));
+        } else $("studioModalBody").querySelectorAll('[data-delete-preview]:not([src])').forEach(element => void loadPreview(element));
         const update = () => { $("deleteImagesAccept").textContent = `删除 ${selected.size} 张`; $("deleteImagesAccept").disabled = !selected.size; if ($("deleteImagesSelectAll")) $("deleteImagesSelectAll").textContent = selected.size === images.length ? "取消全选" : "全选"; };
         $("studioModalBody").querySelectorAll("[data-delete-image]").forEach((input) => input.addEventListener("change", () => { input.checked ? selected.add(input.dataset.deleteImage) : selected.delete(input.dataset.deleteImage); update(); }));
         $("deleteImagesSelectAll")?.addEventListener("click", () => { const all = selected.size !== images.length; selected.clear(); $("studioModalBody").querySelectorAll("[data-delete-image]").forEach((input) => { input.checked = all; if (all) selected.add(input.dataset.deleteImage); }); update(); });
-      } });
+      } }).finally(() => { active = false; observer?.disconnect(); });
     }
 
     async function resolveParameters(content, modelRef, options = {}) {
@@ -1264,7 +1453,15 @@
       $("detailUseReference").addEventListener("click", () => { const image = state.detailData?.images?.[state.detailImageIndex]; if (image?.data_url) void hooks.useDataUrlAsReference(image.data_url, "gallery-output-reference.png"); });
       $("detailDelete").addEventListener("click", () => void deleteDetailImages());
       $("drawerBody").addEventListener("click", (event) => { const button = event.target.closest("[data-copy-field]"); if (button) void copyText(detailCopies[Number(button.dataset.copyField)]); });
-      $("drawerBody").addEventListener("toggle", scheduleDetailParameterLayout, true);
+      $("drawerBody").addEventListener("toggle", (event) => {
+        const section = event.target;
+        if (section.open && section.hasAttribute("data-detail-deferred")) {
+          const render = detailDeferred[Number(section.dataset.detailDeferred)];
+          delete section.dataset.detailDeferred;
+          if (render) section.insertAdjacentHTML("beforeend", render());
+          layoutDetailParameters();
+        } else scheduleDetailParameterLayout();
+      }, true);
       window.addEventListener("resize", scheduleDetailParameterLayout, { passive: true });
       window.addEventListener("beforeunload", clearDetailParameterLayout);
       $("studioModalClose").addEventListener("click", () => modalClose?.(false));

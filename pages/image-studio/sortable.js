@@ -116,6 +116,7 @@
           grid.insertBefore(current.item, current.after ? target.nextSibling : target);
           announceAndCommit(current.item);
         } else if (current.started) live.textContent = "已取消图片移动";
+        options.onDragEnd?.();
       }
 
       function announceAndCommit(item) {
@@ -172,7 +173,7 @@
       window.addEventListener("pointercancel", pointerCancel);
       window.addEventListener("blur", cancel);
       window.addEventListener("keydown", keyDown, true);
-      const binding = { cancel, destroy() {
+      const binding = { cancel, isDragging: () => !!drag, destroy() {
         cancel(); live.remove();
         grid.removeEventListener("pointerdown", pointerDown);
         grid.removeEventListener("dragstart", nativeDrag);

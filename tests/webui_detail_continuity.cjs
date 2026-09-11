@@ -102,8 +102,9 @@ async function run(browserName, width) {
   let releaseAssets;
   const assetsGate = new Promise((resolve) => { releaseAssets = resolve; });
   const assetRequests = [];
-  await page.route("**/gallery/assets/*", async (route) => {
-    assetRequests.push(route.request().url().split("/").pop()); await assetsGate;
+  page.on("request", (request) => { if (request.url().includes("/gallery/assets/")) assetRequests.push(request.url()); });
+  await page.route("**/gallery/image/*", async (route) => {
+    if (new URL(route.request().url()).searchParams.get("detail") === "original") await assetsGate;
     try { await route.continue(); } catch (error) { if (!/handled|closed|disposed/i.test(error.message)) throw error; }
   });
   try {
@@ -126,14 +127,14 @@ async function run(browserName, width) {
         await inner.locator('.detail-swipe-pane[data-swipe-offset="1"] img').waitFor();
         assert.equal(await inner.locator(".detail-image-frame").getAttribute("data-generation-id"), group, "drag preview must not commit metadata");
         assert.equal(await inner.locator(".detail-filmstrip-thumb").count(), 3);
-        assert.ok(assetRequests.every((id) => id === group), "adjacent records must not preload whole original groups");
+        assert.deepEqual(assetRequests, [], "adjacent records must not preload whole original groups");
         await page.screenshot({ path: path.join(output, `${browserName}-${width}-cross-drag.png`) });
       });
     } else await inner.locator('[data-detail-nav="1"]').click();
     await selected(inner, neighbor.generation_id, 0); await persistent(inner);
     assert.equal(await inner.locator(".detail-filmstrip").count(), 0);
     const adjacentSummary = await api(page, "get", `gallery/detail/${neighbor.generation_id}?assets=0`);
-    assert.ok((await inner.locator("#drawerBody").textContent()).includes(adjacentSummary.original_prompt), "new image must display its own record parameters");
+    await inner.locator(".detail-parameter-row").filter({ hasText: adjacentSummary.original_prompt }).first().waitFor();
     if (width <= 540) await swipe(inner, -1); else await inner.locator("#detailDrawer").press("ArrowLeft");
     await selected(inner, group, 2); await persistent(inner);
     assert.equal(await inner.locator(".detail-filmstrip-thumb").count(), 3);

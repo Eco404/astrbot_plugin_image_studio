@@ -203,6 +203,14 @@ html { scroll-padding-top: 112px; scroll-padding-bottom: calc(100px + env(safe-a
 .import-edit-batch-summary { margin-bottom: 16px; font-size: 12px; color: var(--muted); }
 .import-edit-batch-summary > summary { cursor: pointer; min-height: 40px; align-content: center; }
 .is-import-editor .studio-modal-body { scroll-padding-block: 16px; }
+.import-card-placeholder { min-height: 940px; }
+.import-preview-placeholder { display: grid; place-items: center; color: var(--muted); }
+.import-preview-placeholder > svg { width: 42px; height: 42px; opacity: .35; }
+.import-fields-placeholder { display: grid; gap: 18px; padding-block: 18px; }
+.import-fields-placeholder > span, .import-edit-loading > span { display: block; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; min-height: 56px; }
+.import-fields-placeholder > span:last-child { min-height: 128px; }
+.import-edit-loading { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; padding-top: 12px; }
+.import-edit-loading > span { min-height: 320px; }
 .merge-target-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
 .merge-target-card { display: flex; flex-direction: column; min-width: 0; padding: 8px; gap: 7px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); box-shadow: var(--shadow); cursor: pointer; }
 .merge-target-card:has(input:checked) { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
@@ -272,6 +280,9 @@ html { scroll-padding-top: 112px; scroll-padding-bottom: calc(100px + env(safe-a
   #saveSettingsButton { width: 44px; min-height: 44px; }
   .import-grid { grid-template-columns: minmax(0, 1fr); }
   .import-card { padding: 12px; }
+  .import-card-placeholder { min-height: 1050px; }
+  .import-edit-loading { grid-template-columns: minmax(0, 1fr); }
+  .import-edit-loading > span:not(:first-child) { display: none; }
   .import-card-fields { grid-template-columns: minmax(0, 1fr); }
   .import-toolbar { gap: 8px; }
   .import-options { width: 100%; margin-left: 0; gap: 4px 16px; }

@@ -355,6 +355,18 @@ class ImageStudioPlugin(Star):
                 "Image Studio: gallery image data",
             ),
             (
+                "gallery/image-info/<image_id>",
+                self._api_gallery_image_info,
+                ["GET"],
+                "Image Studio: gallery image metadata",
+            ),
+            (
+                "gallery/reference-image/<reference_id>",
+                self._api_gallery_reference_image,
+                ["GET"],
+                "Image Studio: gallery reference preview",
+            ),
+            (
                 "gallery/download/<image_id>",
                 self._api_gallery_image_download,
                 ["GET"],
@@ -964,7 +976,13 @@ class ImageStudioPlugin(Star):
         try:
             if web_request.method == "GET":
                 return json_response(
-                    await self.store.import_edit_snapshot(generation_id)
+                    await self.store.import_edit_snapshot(
+                        generation_id,
+                        light=str(web_request.query.get("light", "")).lower()
+                        in {"1", "true", "yes"},
+                        image_id=str(web_request.query.get("image_id", "")),
+                        item_revision=str(web_request.query.get("item_revision", "")),
+                    )
                 )
             body = await web_request.json(default={})
             if not isinstance(body, dict) or set(body) != {"revision", "items"}:
@@ -1248,7 +1266,10 @@ class ImageStudioPlugin(Star):
             "no",
         }
         detail = await self.store.generation_detail(
-            generation_id, include_assets=include_assets
+            generation_id,
+            include_assets=include_assets,
+            light=str(web_request.query.get("light", "")).lower()
+            in {"1", "true", "yes"},
         )
         if detail is None:
             return error_response("生成记录不存在", status_code=404)
@@ -1288,6 +1309,18 @@ class ImageStudioPlugin(Star):
             return error_response("生成图片不存在", status_code=404)
         path, mime_type, filename = image
         return file_response(path, filename=filename, content_type=mime_type)
+
+    async def _api_gallery_image_info(self, image_id: str) -> Any:
+        image = await self.store.gallery_image_info(image_id)
+        if image is None:
+            return error_response("生成图片不存在", status_code=404)
+        return json_response(image)
+
+    async def _api_gallery_reference_image(self, reference_id: str) -> Any:
+        image = await self.store.gallery_reference_image(reference_id)
+        if image is None:
+            return error_response("参考图片不存在", status_code=404)
+        return json_response(image)
 
     async def _api_gallery_reproduce(self, generation_id: str) -> Any:
         try:

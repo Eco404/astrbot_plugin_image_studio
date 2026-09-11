@@ -46,7 +46,12 @@ async function get(page, endpoint) {
   const response = await page.request.get(root + endpoint); assert.ok(response.ok(), await response.text()); return response.json();
 }
 async function noticeOff(frame) { await frame.locator("#appNoticeClose").evaluate((node) => node.click()); }
+async function revealCard(card) {
+  await card.evaluate((node) => node.scrollIntoView({ block: "start" }));
+  await card.locator('[data-import-field="prompt"]').waitFor({ state: "attached" });
+}
 async function chooseOutput(page, frame, card, value) {
+  await revealCard(card);
   const select = card.locator("[data-import-output]");
   const index = await select.evaluate((node, target) => Array.from(node.options).findIndex((option) => option.value === target), value);
   const response = page.waitForResponse((item) => item.url().endsWith("/imports/inspect") && item.request().postDataJSON()?.output_node_id === value);
@@ -128,7 +133,10 @@ async function verify(browser, name, width) {
     const grid = frame.locator("#importEditGrid"), cards = grid.locator(".import-card");
     await cards.nth(2).waitFor();
     assert.equal(await grid.locator("[data-remove-import]").count(), 0);
+    await revealCard(cards.first());
+    await cards.first().locator(".advanced > summary").click();
     assert.match(await cards.first().locator('[data-import-field="parameters"]').inputValue(), /9007199254740993123/);
+    await revealCard(cards.nth(1));
     assert.equal(await cards.nth(1).locator('[data-import-field="generated_at"]').inputValue(), "");
     assert.equal(await frame.locator("body").evaluate((node) => getComputedStyle(node).overflow), "hidden");
     await cards.first().locator('[data-import-field="prompt"]').fill("discard this edit");
@@ -148,6 +156,7 @@ async function verify(browser, name, width) {
     assert.deepEqual(await pendingSnapshot(frame), pending);
     await frame.locator("#detailImportEdit:not(:disabled)").click();
     await cards.nth(2).waitFor();
+    await revealCard(cards.first());
     assert.equal(await cards.first().locator('[data-import-field="prompt"]').inputValue(), `${marker} original 1`);
     assert.equal(await cards.first().getAttribute("data-import-id"), `edit_${snapshot.items[0].image_id}`);
     const updatedPrompt = `${marker} searchable edited landscape`;
@@ -157,7 +166,7 @@ async function verify(browser, name, width) {
     await candidate.click();
     await frame.locator("#importEditSave:not(:disabled)").waitFor();
     assert.equal(await frame.locator("#importEditBatchSummary").isVisible(), true);
-    for (let index = 0; index < 3; index++) assert.match(await cards.nth(index).locator('[data-import-field="prompt"]').inputValue(), /candidate landscape/);
+    for (let index = 0; index < 3; index++) { await revealCard(cards.nth(index)); assert.match(await cards.nth(index).locator('[data-import-field="prompt"]').inputValue(), /candidate landscape/); }
     await cards.first().locator("[data-sort-handle]").press("End");
     const order = [snapshot.items[1].image_id, snapshot.items[2].image_id, snapshot.items[0].image_id];
     const geometry = await grid.evaluate((node) => ({ page: document.documentElement.scrollWidth, viewport: document.documentElement.clientWidth, grid: node.scrollWidth, client: node.clientWidth, handle: node.querySelector("[data-sort-handle]").getBoundingClientRect().height }));
@@ -183,6 +192,7 @@ async function verify(browser, name, width) {
     await frame.locator("#detailImportEdit").click();
     await cards.nth(2).waitFor();
     assert.deepEqual(await cards.evaluateAll((nodes) => nodes.map((node) => node.dataset.importId)), order.map((imageId) => `edit_${imageId}`));
+    await revealCard(cards.nth(2));
     assert.match(await cards.nth(2).locator('[data-import-field="prompt"]').inputValue(), /searchable edited landscape/);
     let releaseInspect;
     await page.route("**/imports/inspect", async (route) => {
@@ -194,6 +204,7 @@ async function verify(browser, name, width) {
     assert.equal(await frame.locator("#importEditSave").isDisabled(), true);
     assert.ok((await grid.locator("[data-sort-handle]").evaluateAll((nodes) => nodes.map((node) => node.disabled))).every(Boolean));
     const concurrentPrompt = `${marker} retained while another branch is reading`;
+    await revealCard(cards.nth(1));
     await cards.nth(1).locator('[data-import-field="prompt"]').fill(concurrentPrompt);
     releaseInspect(); await inspecting;
     assert.equal(await cards.nth(1).locator('[data-import-field="prompt"]').inputValue(), concurrentPrompt);
@@ -210,6 +221,7 @@ async function verify(browser, name, width) {
     assert.deepEqual(await pendingSnapshot(frame), pending);
     await page.unroute("**/imports/inspect");
     await frame.locator("#detailImportEdit:not(:disabled)").click(); await cards.nth(2).waitFor();
+    await revealCard(cards.first());
     // A stale save must keep the draft visible with the backend's conflict message.
     const external = await page.request.post(root + `gallery/import-edit/${id}`, { data: { revision: saved.revision, items: saved.items.map((item, index) => ({ image_id: item.image_id, overrides: index ? {} : { negative_prompt: "external update" } })) } });
     assert.ok(external.ok(), await external.text());

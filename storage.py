@@ -10,8 +10,10 @@ import json
 import os
 import re
 import sqlite3
+import threading
 import time
 import uuid
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +37,10 @@ _IMAGE_SUFFIXES = {
 }
 _SAFE_ID_RE = re.compile(r"^[a-f0-9]{32}$")
 _SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
+_COMFY_PROJECTION_CACHE_LIMIT = 64
+_COMFY_PROJECTION_CACHE_BYTES = 16 * 1024 * 1024
+_COMFY_PROJECTION_CACHE: OrderedDict[tuple[Any, ...], bytes] = OrderedDict()
+_COMFY_PROJECTION_CACHE_LOCK = threading.Lock()
 
 
 class ImportDuplicateError(ValueError):
@@ -1108,15 +1114,28 @@ class GenerationStore:
 
     @staticmethod
     def _import_edit_rows_sync(
-        conn: sqlite3.Connection, generation_id: str
+        conn: sqlite3.Connection, generation_id: str, image_id: str = ""
     ) -> tuple[sqlite3.Row, list[sqlite3.Row]]:
         if not isinstance(generation_id, str) or not _SAFE_ID_RE.fullmatch(
             generation_id
         ):
             raise ValueError("导入记录 ID 无效")
-        record = conn.execute(
-            "SELECT * FROM generations WHERE id = ?", (generation_id,)
-        ).fetchone()
+        if image_id:
+            # Modern imports carry complete per-image snapshots. Do not transfer
+            # the group's potentially large manifest for an individual editor tab.
+            record = conn.execute(
+                "SELECT g.id, g.source, g.model, g.mode, g.original_prompt, "
+                "g.generation_engine, g.generated_at, CASE WHEN EXISTS ("
+                "SELECT 1 FROM generation_images i WHERE i.id = ? "
+                "AND trim(i.supplemental_json) NOT IN ('', '{}', 'null')) "
+                "THEN '{}' ELSE g.supplemental_json END AS supplemental_json "
+                "FROM generations g WHERE g.id = ?",
+                (image_id, generation_id),
+            ).fetchone()
+        else:
+            record = conn.execute(
+                "SELECT * FROM generations WHERE id = ?", (generation_id,)
+            ).fetchone()
         if record is None:
             raise LookupError("导入记录不存在或已被删除")
         if record["source"] != "import":
@@ -1124,14 +1143,22 @@ class GenerationStore:
         rows = conn.execute(
             "SELECT i.*, a.path, a.mime_type, a.size_bytes, a.id AS sha256, "
             "a.width, a.height, a.file_state, m.metadata_json, "
+            "COALESCE(NULLIF(json_extract(i.supplemental_json, '$.original_filename'), ''), "
+            "CASE WHEN trim(i.supplemental_json) IN ('', '{}', 'null') THEN "
+            "(SELECT json_extract(g.supplemental_json, '$.original_filename') "
+            "FROM generations g WHERE g.id = i.generation_id) END, i.id) AS original_filename, "
             "t.path AS thumbnail_path, t.mime_type AS thumbnail_mime_type "
             "FROM generation_images i JOIN image_assets a ON a.id = i.asset_id "
             "LEFT JOIN image_metadata m ON m.asset_id = i.asset_id "
             "LEFT JOIN image_thumbnails t ON t.asset_id = i.asset_id "
-            "WHERE i.generation_id = ? ORDER BY i.ordinal, i.id",
-            (generation_id,),
+            "WHERE i.generation_id = ? "
+            + ("AND i.id = ? " if image_id else "")
+            + "ORDER BY i.ordinal, i.id",
+            (generation_id, image_id) if image_id else (generation_id,),
         ).fetchall()
         if not rows:
+            if image_id:
+                raise LookupError("导入图片不存在或已被删除")
             raise ValueError("导入记录已无可编辑图片")
         return record, rows
 
@@ -1176,18 +1203,97 @@ class GenerationStore:
             }
         return previous
 
-    async def import_edit_snapshot(self, generation_id: str) -> dict[str, Any]:
-        """Read an edit snapshot without changing files, metadata, or import receipts."""
-        async with self._lock:
-            return await asyncio.to_thread(
-                self._import_edit_snapshot_sync, generation_id
+    @staticmethod
+    def _import_edit_item_revision(record: sqlite3.Row, row: sqlite3.Row) -> str:
+        snapshot = [
+            record["id"],
+            [
+                row[key]
+                for key in (
+                    "id",
+                    "ordinal",
+                    "asset_id",
+                    "supplemental_json",
+                    "metadata_json",
+                )
+            ],
+        ]
+        if str(row["supplemental_json"] or "").strip() in {"", "{}", "null"}:
+            snapshot.append(
+                [
+                    record[key]
+                    for key in (
+                        "supplemental_json",
+                        "model",
+                        "mode",
+                        "original_prompt",
+                        "generation_engine",
+                        "generated_at",
+                    )
+                ]
             )
+        return hashlib.sha256(
+            json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")).encode()
+        ).hexdigest()
 
-    def _import_edit_snapshot_sync(self, generation_id: str) -> dict[str, Any]:
+    async def import_edit_snapshot(
+        self,
+        generation_id: str,
+        *,
+        light: bool = False,
+        image_id: str = "",
+        item_revision: str = "",
+    ) -> dict[str, Any]:
+        """Read an edit snapshot without changing files, metadata, or import receipts."""
+        if image_id:
+            if not _SAFE_ID_RE.fullmatch(image_id):
+                raise ValueError("导入图片 ID 无效")
+            if not _SHA256_RE.fullmatch(item_revision):
+                raise ValueError("图片编辑版本无效，请重新打开编辑窗口")
+        # The read transaction provides a coherent snapshot. Projection and
+        # thumbnail IO must not hold the store's mutation lock.
+        return await asyncio.to_thread(
+            self._import_edit_snapshot_sync,
+            generation_id,
+            light,
+            image_id,
+            item_revision,
+        )
+
+    def _import_edit_snapshot_sync(
+        self,
+        generation_id: str,
+        light: bool = False,
+        image_id: str = "",
+        item_revision: str = "",
+    ) -> dict[str, Any]:
         with self._connect() as conn:
             conn.execute("BEGIN")
-            record, rows = self._import_edit_rows_sync(conn, generation_id)
-            revision = self._import_edit_revision(record, rows)
+            record, rows = self._import_edit_rows_sync(conn, generation_id, image_id)
+            revision = "" if image_id else self._import_edit_revision(record, rows)
+        if image_id:
+            current_revision = self._import_edit_item_revision(record, rows[0])
+            if item_revision != current_revision:
+                raise ImportEditConflictError(
+                    "图片已被修改或重新排序，请重新打开编辑窗口"
+                )
+        if light and not image_id:
+            return {
+                "generation_id": generation_id,
+                "revision": revision,
+                "items": [
+                    {
+                        "image_id": row["id"],
+                        "filename": str(row["original_filename"]),
+                        "sha256": row["sha256"],
+                        "size_bytes": row["size_bytes"],
+                        "width": row["width"],
+                        "height": row["height"],
+                        "item_revision": self._import_edit_item_revision(record, row),
+                    }
+                    for row in rows
+                ],
+            }
         items = []
         for row in rows:
             previous = self._import_edit_previous(record, row)
@@ -1221,6 +1327,13 @@ class GenerationStore:
                     ),
                 }
             )
+        if image_id:
+            items[0]["item_revision"] = current_revision
+            return {
+                "generation_id": generation_id,
+                "item_revision": current_revision,
+                "items": items,
+            }
         return {"generation_id": generation_id, "revision": revision, "items": items}
 
     async def edit_import(
@@ -2176,13 +2289,166 @@ class GenerationStore:
         }
 
     async def generation_detail(
-        self, generation_id: str, *, include_assets: bool = True
+        self, generation_id: str, *, include_assets: bool = True, light: bool = False
     ) -> dict[str, Any] | None:
         """Return a generation plus its result and reference assets."""
 
+        if light:
+            return await asyncio.to_thread(
+                self._generation_manifest_sync, generation_id
+            )
         return await asyncio.to_thread(
             self._generation_detail_sync, generation_id, include_assets
         )
+
+    def _generation_manifest_sync(self, generation_id: str) -> dict[str, Any] | None:
+        if not _SAFE_ID_RE.fullmatch(generation_id):
+            return None
+        with self._connect() as conn:
+            conn.execute("BEGIN")
+            record = conn.execute(
+                "SELECT id, created_at, source, status, mode, provider_id, provider_name, "
+                "provider_kind, model, elapsed_ms, error_message, is_favorite, cleanup_protected_until, "
+                "generation_engine, generated_at, context_type, platform_name, platform_id, "
+                "group_id, group_name, user_id, user_name FROM generations WHERE id = ?",
+                (generation_id,),
+            ).fetchone()
+            if record is None:
+                return None
+            rows = conn.execute(
+                "SELECT i.id, i.generation_id, i.ordinal, a.mime_type, a.size_bytes, "
+                "a.id AS sha256, a.width, a.height, a.file_state, a.path, "
+                "json_extract(i.supplemental_json, '$.model') AS model, "
+                "json_extract(i.supplemental_json, '$.mode') AS mode "
+                "FROM generation_images i JOIN image_assets a ON a.id = i.asset_id "
+                "WHERE i.generation_id = ? ORDER BY i.ordinal, i.id",
+                (generation_id,),
+            ).fetchall()
+            references = conn.execute(
+                "SELECT r.id, r.filename, r.mime_type, r.size_bytes, r.available, r.deleted_at, "
+                "a.file_state FROM generation_references r LEFT JOIN image_assets a ON a.id = r.asset_id "
+                "WHERE r.generation_id = ? ORDER BY r.ordinal, r.id",
+                (generation_id,),
+            ).fetchall()
+        result = self._generation_header(dict(record))
+        result["lightweight"] = True
+        result["images"] = []
+        used_stems: set[str] = set()
+        for index, row in enumerate(rows, start=1):
+            item = dict(row)
+            for key in ("model", "mode"):
+                if item[key] is None:
+                    item[key] = result[key]
+            item["download_filename"] = export_image_filename(
+                {**result, **item},
+                image_index=index,
+                image_count=len(rows),
+                mime_type=item["mime_type"],
+                suffix=Path(item.pop("path")).suffix,
+                used_stems=used_stems,
+            )
+            result["images"].append(item)
+        result["references"] = [
+            {
+                **dict(row),
+                "available": bool(row["available"])
+                and row["file_state"] == "available",
+            }
+            for row in references
+        ]
+        return result
+
+    @staticmethod
+    def _generation_header(result: dict[str, Any]) -> dict[str, Any]:
+        if "parameters_json" in result:
+            result["parameters"] = _load_json(result.pop("parameters_json"))
+        if "supplemental_json" in result:
+            result["supplemental"] = _canonical_supplemental(
+                _load_json(result.pop("supplemental_json"))
+            )
+        result["generation_engine"] = _canonical_engine(result["generation_engine"])
+        result["is_favorite"] = bool(result["is_favorite"])
+        result.pop("search_text", None)
+        result.pop("import_key", None)
+        result["invocation_source"] = {
+            key: str(result.pop(key, "") or "")
+            for key in (
+                "context_type",
+                "platform_name",
+                "platform_id",
+                "group_id",
+                "group_name",
+                "user_id",
+                "user_name",
+            )
+        }
+        return result
+
+    async def gallery_image_info(self, image_id: str) -> dict[str, Any] | None:
+        if not _SAFE_ID_RE.fullmatch(image_id):
+            return None
+        return await asyncio.to_thread(self._gallery_image_info_sync, image_id)
+
+    def _gallery_image_info_sync(self, image_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            conn.execute("BEGIN")
+            row = conn.execute(
+                "SELECT i.*, a.path, a.mime_type, a.size_bytes, a.id AS sha256, "
+                "a.width, a.height, a.file_state, m.metadata_json, "
+                "t.path AS thumbnail_path, t.mime_type AS thumbnail_mime_type "
+                "FROM generation_images i JOIN image_assets a ON a.id = i.asset_id "
+                "LEFT JOIN image_metadata m ON m.asset_id = i.asset_id "
+                "LEFT JOIN image_thumbnails t ON t.asset_id = i.asset_id WHERE i.id = ?",
+                (image_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            record = conn.execute(
+                "SELECT * FROM generations WHERE id = ?", (row["generation_id"],)
+            ).fetchone()
+            position = conn.execute(
+                "SELECT COUNT(*) AS image_count, COALESCE(SUM(ordinal < ?), 0) + 1 AS image_index "
+                "FROM generation_images WHERE generation_id = ?",
+                (row["ordinal"], row["generation_id"]),
+            ).fetchone()
+        detail = self._generation_header(dict(record))
+        detail["supplemental"].pop("group_manifest", None)
+        image = self._asset_item(dict(row), preview_full=False)
+        if detail["source"] == "import" and not image["supplemental"]:
+            image["supplemental"] = detail["supplemental"]
+        image["generation_id"] = row["generation_id"]
+        image["ordinal"] = row["ordinal"]
+        image["download_filename"] = export_image_filename(
+            {
+                **detail,
+                **{
+                    key: image["supplemental"].get(key, detail[key])
+                    for key in ("mode", "model")
+                },
+            },
+            image_index=position["image_index"],
+            image_count=position["image_count"],
+            mime_type=image["mime_type"],
+            suffix=Path(image["path"]).suffix,
+            used_stems=set(),
+        )
+        return {"image": image, "detail_fields": detail}
+
+    async def gallery_reference_image(self, reference_id: str) -> dict[str, Any] | None:
+        if not _SAFE_ID_RE.fullmatch(reference_id):
+            return None
+        return await asyncio.to_thread(self._gallery_reference_image_sync, reference_id)
+
+    def _gallery_reference_image_sync(self, reference_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT r.*, a.path, a.file_state, t.path AS thumbnail_path, "
+                "t.mime_type AS thumbnail_mime_type FROM generation_references r "
+                "LEFT JOIN image_assets a ON a.id = r.asset_id "
+                "LEFT JOIN image_thumbnails t ON t.asset_id = r.asset_id WHERE r.id = ?",
+                (reference_id,),
+            ).fetchone()
+        return self._reference_item(dict(row)) if row is not None else None
 
     async def gallery_image_sequence(
         self, filters: dict[str, Any]
@@ -2255,28 +2521,33 @@ class GenerationStore:
     def _gallery_image_file_sync(self, image_id: str) -> tuple[Path, str, str] | None:
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT generation_id FROM generation_images WHERE id = ?",
+                "SELECT a.path, a.mime_type, g.created_at, g.provider_id, "
+                "COALESCE(json_extract(i.supplemental_json, '$.model'), g.model) AS model, "
+                "COALESCE(json_extract(i.supplemental_json, '$.mode'), g.mode) AS mode, "
+                "(SELECT COUNT(*) FROM generation_images n WHERE n.generation_id = i.generation_id) AS image_count, "
+                "(SELECT COUNT(*) + 1 FROM generation_images n WHERE n.generation_id = i.generation_id "
+                "AND n.ordinal < i.ordinal) AS image_index "
+                "FROM generation_images i JOIN generations g ON g.id = i.generation_id "
+                "JOIN image_assets a ON a.id = i.asset_id WHERE i.id = ?",
                 (image_id,),
             ).fetchone()
         if row is None:
             return None
-        detail = self._generation_detail_sync(
-            str(row["generation_id"]), include_assets=False
-        )
-        if detail is None:
-            return None
-        image = next(
-            (item for item in detail["images"] if item["id"] == image_id), None
-        )
-        if image is None:
-            return None
-        path = self.data_dir / str(image["path"])
+        item = dict(row)
+        path = self.data_dir / str(item["path"])
         if not path.is_file() or not _is_within(path, self.assets_dir):
             return None
         return (
             path,
-            str(image["mime_type"]),
-            str(image["download_filename"]),
+            str(item["mime_type"]),
+            export_image_filename(
+                item,
+                image_index=item["image_index"],
+                image_count=item["image_count"],
+                mime_type=item["mime_type"],
+                suffix=path.suffix,
+                used_stems=set(),
+            ),
         )
 
     def _gallery_image_data_sync(
@@ -2393,27 +2664,7 @@ class GenerationStore:
                 "WHERE r.generation_id = ? ORDER BY r.ordinal",
                 (generation_id,),
             ).fetchall()
-        result = dict(row)
-        result["parameters"] = _load_json(result.pop("parameters_json", "{}"))
-        result["supplemental"] = _canonical_supplemental(
-            _load_json(result.pop("supplemental_json", "{}"))
-        )
-        result["generation_engine"] = _canonical_engine(result["generation_engine"])
-        result["is_favorite"] = bool(result["is_favorite"])
-        result.pop("search_text", None)
-        result.pop("import_key", None)
-        result["invocation_source"] = {
-            key: str(result.pop(key, "") or "")
-            for key in (
-                "context_type",
-                "platform_name",
-                "platform_id",
-                "group_id",
-                "group_name",
-                "user_id",
-                "user_name",
-            )
-        }
+        result = self._generation_header(dict(row))
         result["images"] = [
             self._asset_item(dict(item), preview_full=include_assets)
             for item in image_rows
@@ -3403,7 +3654,7 @@ def project_import_metadata(
         return metadata
     if metadata.get("format") != "comfyui":
         raise ValueError("仅 ComfyUI 图片支持选择输出节点")
-    from .image_metadata import parse_metadata_fields
+    from .image_metadata import PARSER_VERSION, parse_metadata_fields
 
     raw = metadata.get("raw")
     if not isinstance(raw, dict):
@@ -3414,12 +3665,43 @@ def project_import_metadata(
     dimensions = normalized.get("file_dimensions") or {}
     if not isinstance(dimensions, dict):
         raise ValueError("图片尺寸信息必须是对象")
-    return parse_metadata_fields(
+    # Cache only the parser's pure projection. Manual prompt/model/parameter
+    # overrides are applied by callers and never become shared cached state.
+    raw_bytes = json.dumps(
+        raw, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+    ).encode()
+    key = (
+        PARSER_VERSION,
+        metadata.get("parser_version"),
+        hashlib.sha256(raw_bytes).digest(),
+        dimensions.get("width", 0),
+        dimensions.get("height", 0),
+        output_node,
+    )
+    with _COMFY_PROJECTION_CACHE_LOCK:
+        cached = _COMFY_PROJECTION_CACHE.get(key)
+        if cached is not None:
+            _COMFY_PROJECTION_CACHE.move_to_end(key)
+    if cached is not None:
+        return json.loads(cached)
+    projected = parse_metadata_fields(
         raw,
         width=dimensions.get("width", 0),
         height=dimensions.get("height", 0),
         output_node_id=output_node,
     )
+    encoded = json.dumps(projected, ensure_ascii=False, separators=(",", ":")).encode()
+    if len(encoded) <= _COMFY_PROJECTION_CACHE_BYTES:
+        with _COMFY_PROJECTION_CACHE_LOCK:
+            _COMFY_PROJECTION_CACHE[key] = encoded
+            _COMFY_PROJECTION_CACHE.move_to_end(key)
+            while (
+                len(_COMFY_PROJECTION_CACHE) > _COMFY_PROJECTION_CACHE_LIMIT
+                or sum(map(len, _COMFY_PROJECTION_CACHE.values()))
+                > _COMFY_PROJECTION_CACHE_BYTES
+            ):
+                _COMFY_PROJECTION_CACHE.popitem(last=False)
+    return projected
 
 
 def _import_supplemental(
