@@ -161,6 +161,7 @@ class ImageStudioPlugin(Star):
         self._service = None
         self._imports.clear()
         self._import_groups.clear()
+        await self.store.close()
 
     async def _maintenance_loop(self) -> None:
         while True:
@@ -975,6 +976,15 @@ class ImageStudioPlugin(Star):
     async def _api_gallery_import_edit(self, generation_id: str) -> Any:
         try:
             if web_request.method == "GET":
+                if "output_node_id" in web_request.query:
+                    return json_response(
+                        await self.store.project_import_edit_image(
+                            generation_id,
+                            str(web_request.query.get("image_id", "")),
+                            str(web_request.query.get("item_revision", "")),
+                            str(web_request.query.get("output_node_id", "")),
+                        )
+                    )
                 return json_response(
                     await self.store.import_edit_snapshot(
                         generation_id,
@@ -982,6 +992,10 @@ class ImageStudioPlugin(Star):
                         in {"1", "true", "yes"},
                         image_id=str(web_request.query.get("image_id", "")),
                         item_revision=str(web_request.query.get("item_revision", "")),
+                        include_preview=str(
+                            web_request.query.get("include_preview", "1")
+                        ).lower()
+                        not in {"0", "false", "no"},
                     )
                 )
             body = await web_request.json(default={})
@@ -1000,13 +1014,14 @@ class ImageStudioPlugin(Star):
             return error_response(str(exc), status_code=400)
 
     async def _api_gallery_parameters(self, generation_id: str) -> Any:
-        detail = await self.store.generation_detail(generation_id, include_assets=False)
-        if detail is None:
-            return error_response("生成记录不存在", status_code=404)
+        image_id = str(web_request.query.get("image_id") or "")
         try:
+            detail = await self.store.generation_image_context(generation_id, image_id)
+            if detail is None:
+                return error_response("生成记录不存在", status_code=404)
             result = export_parameters(
                 detail,
-                str(web_request.query.get("image_id") or ""),
+                image_id,
                 str(web_request.query.get("format") or "studio"),
             )
             return json_response(result)
@@ -1252,7 +1267,7 @@ class ImageStudioPlugin(Star):
             payload = await self.store.list_generations(self._gallery_request_filters())
         except ValueError as exc:
             return error_response(str(exc), status_code=400)
-        retention = await self.store.retention_status(self._settings.history)
+        retention = await self.store.gallery_retention_status(self._settings.history)
         candidates = set(retention.get("candidate_ids", []))
         for item in payload["items"]:
             item["cleanup_warning"] = item["id"] in candidates
@@ -1260,6 +1275,8 @@ class ImageStudioPlugin(Star):
         return json_response(payload)
 
     async def _api_gallery_detail(self, generation_id: str) -> Any:
+        light = str(web_request.query.get("light", "")).lower() in {"1", "true", "yes"}
+        revision = await self.store.gallery_revision() if light else ""
         include_assets = str(web_request.query.get("assets", "1")).lower() not in {
             "0",
             "false",
@@ -1268,11 +1285,12 @@ class ImageStudioPlugin(Star):
         detail = await self.store.generation_detail(
             generation_id,
             include_assets=include_assets,
-            light=str(web_request.query.get("light", "")).lower()
-            in {"1", "true", "yes"},
+            light=light,
         )
         if detail is None:
             return error_response("生成记录不存在", status_code=404)
+        if light:
+            detail["gallery_revision"] = revision
         return json_response(detail)
 
     async def _api_gallery_assets(self, generation_id: str) -> Any:
@@ -1285,12 +1303,15 @@ class ImageStudioPlugin(Star):
 
     async def _api_gallery_image_sequence(self) -> Any:
         try:
+            revision = await self.store.gallery_revision()
             items = await self.store.gallery_image_sequence(
                 self._gallery_request_filters()
             )
         except ValueError as exc:
             return error_response(str(exc), status_code=400)
-        return json_response({"items": items, "total": len(items)})
+        return json_response(
+            {"items": items, "total": len(items), "revision": revision}
+        )
 
     async def _api_gallery_image(self, image_id: str) -> Any:
         detail = str(web_request.query.get("detail", "preview")).strip().lower()
@@ -1311,7 +1332,11 @@ class ImageStudioPlugin(Star):
         return file_response(path, filename=filename, content_type=mime_type)
 
     async def _api_gallery_image_info(self, image_id: str) -> Any:
-        image = await self.store.gallery_image_info(image_id)
+        image = await self.store.gallery_image_info(
+            image_id,
+            include_preview=str(web_request.query.get("include_preview", "1")).lower()
+            not in {"0", "false", "no"},
+        )
         if image is None:
             return error_response("生成图片不存在", status_code=404)
         return json_response(image)

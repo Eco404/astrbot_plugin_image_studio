@@ -87,6 +87,59 @@
     let selectionScrollFrame = 0;
     let importEditor = null;
     let importEditLoading = false;
+    // Serialized server snapshots are immutable and separate from editable drafts.
+    // Each reopen validates item revisions with a fresh lightweight manifest.
+    const editSnapshots = new Map();
+    const editSnapshotReads = new Map();
+    let editSnapshotBytes = 0;
+    const EDIT_SNAPSHOT_LIMIT = 16 * 1024 * 1024;
+    const EDIT_SNAPSHOT_COUNT = 64;
+
+    function editMediaItem(item) { return { id: item.imageId, sha256: item.sha256, thumbnail_revision: item.thumbnailRevision }; }
+    function editSnapshotKey(context, item) { return `${context.generationId}:${item.imageId}:${item.itemRevision}`; }
+
+    function removeEditSnapshot(key) {
+      const value = editSnapshots.get(key);
+      if (value) { editSnapshotBytes -= value.bytes; editSnapshots.delete(key); }
+    }
+
+    function rememberEditSnapshot(context, item, entry) {
+      const snapshot = { ...entry };
+      if (hooks.cacheImageMedia && snapshot.thumbnail_data_url) {
+        hooks.cacheImageMedia(editMediaItem(item), "preview", snapshot.thumbnail_data_url);
+        delete snapshot.thumbnail_data_url;
+      }
+      const text = JSON.stringify(snapshot), bytes = text.length * 2;
+      const key = editSnapshotKey(context, item);
+      removeEditSnapshot(key);
+      if (bytes > EDIT_SNAPSHOT_LIMIT) return snapshot;
+      while (editSnapshots.size && (editSnapshotBytes + bytes > EDIT_SNAPSHOT_LIMIT || editSnapshots.size >= EDIT_SNAPSHOT_COUNT)) removeEditSnapshot(editSnapshots.keys().next().value);
+      editSnapshots.set(key, { text, bytes }); editSnapshotBytes += bytes;
+      return JSON.parse(text);
+    }
+
+    async function readEditSnapshot(context, item) {
+      const key = editSnapshotKey(context, item);
+      const cached = editSnapshots.get(key);
+      if (cached) {
+        editSnapshots.delete(key); editSnapshots.set(key, cached);
+        return JSON.parse(cached.text);
+      }
+      let pending = editSnapshotReads.get(key);
+      if (!pending) {
+        pending = (async () => {
+          const preview = hooks.getImageMedia?.(editMediaItem(item), "preview");
+          const record = await apiGet(`gallery/import-edit/${context.generationId}`, { image_id: item.imageId, item_revision: item.itemRevision, ...(preview ? { include_preview: 0 } : {}) });
+          const entry = record.items?.find((entry) => entry.image_id === item.imageId);
+          if (!entry?.fields || entry.item_revision !== item.itemRevision) throw new Error("图片参数响应不完整或版本已变化，请重新打开编辑器。");
+          return rememberEditSnapshot(context, item, entry);
+        })();
+        editSnapshotReads.set(key, pending);
+        void pending.finally(() => { if (editSnapshotReads.get(key) === pending) editSnapshotReads.delete(key); }).catch(() => {});
+      }
+      // Concurrent/reopened editors must never share mutable nested metadata.
+      return JSON.parse(JSON.stringify(await pending));
+    }
     // Uploads and persisted edits share controls, but never share draft state.
     const importContext = {
       get items() { return imports; }, set items(value) { imports = value; },
@@ -433,7 +486,7 @@
           const outputNodeId = String(matching[0].node_id);
           if (String(item.outputNodeId || item.parsed?.normalized?.selected_output_node || "") === outputNodeId) { record({ status: "already", message: "已选择相同保存输出" }); return; }
           try {
-            const parsed = await apiPost("imports/inspect", { metadata: item.rawMetadata || item.parsed?.raw || {}, width: item.width, height: item.height, output_node_id: outputNodeId });
+            const parsed = await inspectImportOutput(item, outputNodeId, context);
             changed = batchEntryChanged(job, entry);
             if (changed) { record({ status: "skipped", message: changed }); return; }
             item.outputNodeId = outputNodeId;
@@ -463,13 +516,19 @@
       for (const [key, value] of Object.entries(fields)) if (!item.editedFields.has(key)) item.fields[key] = value;
     }
 
+    async function inspectImportOutput(item, outputNodeId, context) {
+      if (!context.editing) return apiPost("imports/inspect", { metadata: item.rawMetadata || item.parsed?.raw || {}, width: item.width, height: item.height, output_node_id: outputNodeId });
+      const parsed = await apiGet(`gallery/import-edit/${context.generationId}`, { image_id: item.imageId, item_revision: item.itemRevision, output_node_id: outputNodeId });
+      return { ...parsed, raw: item.rawMetadata || item.parsed?.raw || {} };
+    }
+
     async function chooseImportOutput(item, outputNodeId, context = importContext) {
       if (!item || cardsBusy(context) || item.status === "reading") return;
       item.status = "reading"; item.error = ""; context.render();
       try {
         await context.invalidate();
         if (!context.active() || !context.items.includes(item)) return;
-        const parsed = await apiPost("imports/inspect", { metadata: item.rawMetadata || item.parsed?.raw || {}, width: item.width, height: item.height, output_node_id: outputNodeId });
+        const parsed = await inspectImportOutput(item, outputNodeId, context);
         if (!context.active() || !context.items.includes(item)) return;
         item.outputNodeId = outputNodeId;
         applyImportMetadata(item, parsed); item.status = "ready";
@@ -640,6 +699,9 @@
           else context.observer?.observe(card);
         }
         if (grid.children[index] !== card) grid.insertBefore(card, grid.children[index] || null);
+        const renderState = [index, sorting, cardsBusy(context), item.revision, item.status, item.hydrating, item.error, item.parsed, full];
+        if (card._renderState?.every((value, position) => value === renderState[position])) return;
+        card._renderState = renderState;
         const handle = card.querySelector("[data-sort-handle]");
         handle.disabled = !sorting;
         handle.setAttribute("aria-label", `调整第 ${index + 1} 张图片顺序：${item.file.name}`);
@@ -678,12 +740,16 @@
         void (async () => {
           let loaded = false;
           try {
-            const record = await apiGet(`gallery/import-edit/${context.generationId}`, { image_id: item.imageId, item_revision: item.itemRevision });
+            const entry = await readEditSnapshot(context, item);
             if (!context.active()) return;
-            const entry = record.items?.find((entry) => entry.image_id === item.imageId);
-            if (!entry?.fields) throw new Error("图片参数响应不完整，请重试。");
+            let preview = hooks.getImageMedia?.(editMediaItem(item), "preview") || entry.thumbnail_data_url || "";
+            if (!preview && hooks.loadImageMedia) {
+              try { preview = await hooks.loadImageMedia(editMediaItem(item), "preview"); }
+              catch { /* Missing media must not hide otherwise editable metadata. */ }
+            }
+            if (!context.active()) return;
             const fields = { generation_engine: entry.fields.generation_engine || "unknown", model: entry.fields.model ?? "", mode: entry.fields.mode || "unknown", prompt: entry.fields.prompt ?? "", negative_prompt: entry.fields.negative_prompt ?? "", generated_at: localDateTime(entry.fields.generated_at), parameters: entry.parameters_json ?? JSON.stringify(entry.fields.parameters || {}, null, 2) };
-            Object.assign(item, { url: entry.thumbnail_data_url || "", importedAt: entry.fields.generated_at, parsed: entry.metadata, rawMetadata: entry.metadata?.raw || {}, fields, initialFields: { ...fields }, editedFields: new Set(entry.edited_fields || []), outputNodeId: entry.output_node_id || "", initialOutputNodeId: String(entry.output_node_id || ""), status: "ready", hydrated: true });
+            Object.assign(item, { url: preview, importedAt: entry.fields.generated_at, parsed: entry.metadata, rawMetadata: entry.metadata?.raw || {}, fields, initialFields: { ...fields }, editedFields: new Set(entry.edited_fields || []), outputNodeId: entry.output_node_id || "", initialOutputNodeId: String(entry.output_node_id || ""), status: "ready", hydrated: true });
             loaded = true;
           } catch (error) { if (context.active()) item.error = errorMessage(error, "图片参数读取失败，请重试"); }
           finally {
@@ -701,7 +767,9 @@
         const record = await apiGet(`gallery/import-edit/${context.generationId}`, { light: 1 });
         if (!context.active()) return;
         context.revision = record.revision;
-        context.items = record.items.map((entry) => ({ id: `edit_${entry.image_id}`, imageId: entry.image_id, itemRevision: entry.item_revision, sha256: entry.sha256, file: { name: entry.filename, size: entry.size_bytes }, width: entry.width, height: entry.height, fields: {}, initialFields: {}, editedFields: new Set(), status: "unloaded", hydrated: false, revision: 0 }));
+        context.items = record.items.map((entry) => ({ id: `edit_${entry.image_id}`, imageId: entry.image_id, itemRevision: entry.item_revision, sha256: entry.sha256, thumbnailRevision: entry.thumbnail_revision, file: { name: entry.filename, size: entry.size_bytes }, width: entry.width, height: entry.height, fields: {}, initialFields: {}, editedFields: new Set(), status: "unloaded", hydrated: false, revision: 0 }));
+        const validKeys = new Set(context.items.map((item) => editSnapshotKey(context, item)));
+        for (const key of editSnapshots.keys()) if (key.startsWith(`${context.generationId}:`) && !validKeys.has(key)) removeEditSnapshot(key);
         context.loading = false; context.render();
         if (!context.observer) {
           const visible = () => {
@@ -1149,6 +1217,7 @@
     }
 
     function updateDetailActions(detail) {
+      if (detail?._manifestPending) detail = null;
       const identity = `${detail?.id || ""}:${state.detailImageIndex}`;
       const changed = detailIdentity !== identity; detailIdentity = identity;
       const image = detail?.images?.[state.detailImageIndex];

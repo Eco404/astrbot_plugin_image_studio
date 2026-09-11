@@ -128,7 +128,11 @@ async def assert_selection(gallery, filters, expected_keys):
     assert api_listing["offset"] == offset
     assert api_listing["limit"] == limit
     assert [item["id"] for item in api_listing["items"]] == expected_page
-    assert api_sequence == {"items": sequence, "total": len(expected_sequence)}
+    assert api_sequence == {
+        "items": sequence,
+        "total": len(expected_sequence),
+        "revision": api_listing["revision"],
+    }
     # Options remain available even when selections currently match no records.
     unfiltered = await store.list_generations({})
     assert api_listing["filters"] == listing["filters"] == unfiltered["filters"]

@@ -480,7 +480,7 @@ class ImageGenerationService:
 
         from .parameter_exchange import export_parameters, resolve_parameters
 
-        detail = await self.store.generation_detail(generation_id, include_assets=False)
+        detail = await self.store.generation_image_context(generation_id, image_id)
         if detail is None:
             raise ValueError("历史生成记录不存在")
         copied = export_parameters(detail, image_id)

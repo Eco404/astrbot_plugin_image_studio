@@ -24,6 +24,17 @@
   let detailImagePaintRevision = 0;
   let detailNavigationSession = null;
   let detailAssetsTimer = 0;
+  // Only reusable encoded content lives here; displayed DOM/drafts own their
+  // references, so LRU eviction never replaces an image that is on screen.
+  const imageMedia = new Map();
+  const imageMediaLoads = new Map();
+  const IMAGE_MEDIA_BYTES = 32 * 1024 * 1024;
+  let imageMediaBytes = 0;
+  const browseSequences = new Map();
+  const browseSequenceLoads = new Map();
+  const BROWSE_SEQUENCE_TTL = 30_000;
+  let galleryDataRevision = "";
+  let browseEpoch = 0;
   const decodedDisplayImages = new Map();
   let mobileImageViewer = null;
   let mobileImageSequence = [];
@@ -63,7 +74,107 @@
     return client;
   }
   async function apiGet(path, params) { return (await bridge()).apiGet(path, params); }
-  async function apiPost(path, body) { return (await bridge()).apiPost(path, body); }
+  async function apiPost(path, body) {
+    const result = await (await bridge()).apiPost(path, body);
+    if (/^(?:studio\/generate|settings\/save|storage\/maintenance|gallery\/(?:delete|images\/delete|reference\/delete|favorite|import-edit\/[^/]+)|imports\/group\/[^/]+\/commit)$/.test(path)) invalidateBrowseCache();
+    return result;
+  }
+
+  function imageMediaKey(image, detail) {
+    const identity = image?.sha256 || image?.image_id || image?.imageId || image?.id;
+    if (!identity) return "";
+    return `${identity}:${detail}:${detail === "preview" ? image.thumbnail_revision || "legacy" : "original"}`;
+  }
+
+  function getImageMedia(image, detail) {
+    const key = imageMediaKey(image, detail), value = imageMedia.get(key);
+    if (!value) return "";
+    imageMedia.delete(key); imageMedia.set(key, value);
+    return value;
+  }
+
+  function cacheImageMedia(image, detail, source) {
+    const key = imageMediaKey(image, detail);
+    if (!key || !source) return source || "";
+    const previous = imageMedia.get(key);
+    if (previous) { imageMediaBytes -= previous.length * 2; imageMedia.delete(key); }
+    // Count UTF-16 conservatively, including base64 overhead. Oversized assets
+    // may be displayed but must not displace the whole reusable preview cache.
+    if (source.length * 2 > IMAGE_MEDIA_BYTES / 2) return source;
+    imageMedia.set(key, source); imageMediaBytes += source.length * 2;
+    while (imageMediaBytes > IMAGE_MEDIA_BYTES || imageMedia.size > 256) {
+      const oldest = imageMedia.keys().next().value;
+      imageMediaBytes -= imageMedia.get(oldest).length * 2; imageMedia.delete(oldest);
+    }
+    return source;
+  }
+
+  function discardImageMediaSource(source) {
+    for (const [key, value] of imageMedia) if (value === source) {
+      imageMediaBytes -= value.length * 2; imageMedia.delete(key);
+    }
+    const groups = new Set([state.detailData, ...(detailNavigationSession?.summaries.values() || [])]);
+    for (const group of groups) for (const image of group?.images || []) {
+      if (image.data_url === source) { delete image.data_url; image._originalLoaded = false; }
+      if (image.thumbnail_data_url === source) delete image.thumbnail_data_url;
+    }
+    for (const item of mobileViewerSession?.items || []) {
+      if (item.originalSrc === source) item.originalSrc = "";
+      if (item.previewSrc === source) item.previewSrc = "";
+    }
+  }
+
+  async function loadImageMedia(image, detail) {
+    image = { ...image };
+    const cached = getImageMedia(image, detail);
+    if (cached) return cached;
+    const key = imageMediaKey(image, detail);
+    const id = image?.image_id || image?.imageId || image?.id;
+    if (!key || !id) throw new Error("缺少图片标识，无法读取图片。");
+    if (!imageMediaLoads.has(key)) {
+      const promise = apiGet(`gallery/image/${id}`, { detail }).then(payload => {
+        if (!payload?.data_url) throw new Error("图片接口没有返回可用内容。");
+        // Store under the requested revision only: a late request must never
+        // overwrite a newer preview after thumbnail settings were changed.
+        return cacheImageMedia(image, detail, payload.data_url);
+      }).finally(() => { if (imageMediaLoads.get(key) === promise) imageMediaLoads.delete(key); });
+      imageMediaLoads.set(key, promise);
+    }
+    return imageMediaLoads.get(key);
+  }
+
+  function reuseImageMedia(detail) {
+    for (const image of detail?.images || []) {
+      image.thumbnail_data_url ||= getImageMedia(image, "preview");
+      const original = getImageMedia(image, "original");
+      if (original) { image.data_url = original; image._originalLoaded = true; }
+    }
+    return detail;
+  }
+
+  function browseFilterKey(filters) {
+    return JSON.stringify(Object.keys(filters).sort().map(key => {
+      let value = filters[key];
+      if (key.endsWith("s") && typeof value === "string" && value.startsWith("[")) {
+        try { value = JSON.parse(value).sort(); } catch { /* Keep invalid input for the API to explain. */ }
+      }
+      return [key, value];
+    }));
+  }
+
+  function invalidateBrowseCache() {
+    browseEpoch++; browseSequences.clear(); browseSequenceLoads.clear();
+    if (detailNavigationSession?.active) refreshDetailSequence(detailNavigationSession, false);
+  }
+
+  function observeGalleryRevision(revision) {
+    const value = String(revision || "");
+    if (!value || value === galleryDataRevision) return false;
+    const [instance, version] = value.split(":"), [previousInstance, previousVersion] = galleryDataRevision.split(":");
+    if (instance === previousInstance && Number(version) < Number(previousVersion)) return false;
+    galleryDataRevision = value; invalidateBrowseCache();
+    return true;
+  }
 
   function configuredReferenceLimit(value, maximum = 8) { const number = Number(value); return Math.max(1, Math.min(maximum, Number.isFinite(number) ? Math.trunc(number) : 1)); }
   function referenceLimitForModel(model) { return model?.supports_img2img ? configuredReferenceLimit(model.max_reference_images) : 0; }
@@ -410,8 +521,11 @@
       const totalPages = Math.max(1, Math.ceil(total / limit));
       if (total > 0 && requestedPage >= totalPages) { state.galleryPage = totalPages - 1; return await loadGallery(state.galleryPage); }
       state.galleryPage = Math.min(requestedPage, totalPages - 1); state.galleryLimit = limit; state.galleryTotal = total;
+      const dataChanged = payload.revision ? observeGalleryRevision(payload.revision) : true;
+      if (!payload.revision) invalidateBrowseCache();
       state.galleryItems = payload.items || []; renderGallery(payload);
-      if (detailNavigationSession?.active) refreshDetailSequence(detailNavigationSession);
+      if (detailNavigationSession?.active && browseFilterKey(detailNavigationSession.filters) !== browseFilterKey(galleryFilters())) refreshDetailSequence(detailNavigationSession);
+      else if (dataChanged && detailNavigationSession?.active) void warmDetailNeighbors(detailNavigationSession);
       return true;
     } catch (error) {
       showNotice(errorMessage(error, "画廊加载失败"), "error");
@@ -452,9 +566,11 @@
     for (const [id, card] of existing) if (!wanted.has(id)) card.remove();
     // Unchanged records keep their decoded images, focus and hover state across refreshes.
     state.galleryItems.forEach((item, index) => {
-      const signature = JSON.stringify(item);
+      cacheImageMedia(item, "preview", item.thumbnail_data_url);
+      const { thumbnail_data_url: thumbnail, ...fields } = item;
+      const signature = JSON.stringify(fields);
       let card = existing.get(item.id);
-      if (!card || card.gallerySignature !== signature) {
+      if (!card || card.gallerySignature !== signature || card.galleryThumbnail !== thumbnail) {
         const template = document.createElement("template");
         template.innerHTML = library.renderGalleryCard(item, index);
         const updated = template.content.firstElementChild;
@@ -464,7 +580,7 @@
           oldImage.alt = newImage.alt; newImage.replaceWith(oldImage);
         }
         if (card) card.replaceWith(updated);
-        card = updated; card.gallerySignature = signature;
+        card = updated; card.gallerySignature = signature; card.galleryThumbnail = thumbnail;
       }
       card.classList.toggle("is-selected", state.selectedIds.has(item.id));
       card.querySelector("[data-select-id]").checked = state.selectedIds.has(item.id);
@@ -571,7 +687,7 @@
 
   function createDetailNavigation() {
     stopDetailNavigation();
-    return detailNavigationSession = { active: true, filters: galleryFilters(), sequence: null, sequencePromise: null, epoch: 0, summaries: new Map(), loads: new Map(), reads: new Map(), queue: [], reading: 0 };
+    return detailNavigationSession = { active: true, filters: galleryFilters(), sequence: null, sequenceAt: 0, sequencePromise: null, epoch: 0, summaries: new Map(), loads: new Map(), reads: new Map(), queue: [], reading: 0 };
   }
 
   function queueDetailRead(session, key, run, wanted = () => true, priority = false) {
@@ -618,11 +734,12 @@
   }
 
   async function loadDetailPreview(detail, image, session = detailNavigationSession, wanted = () => true) {
+    image.thumbnail_data_url ||= getImageMedia(image, "preview");
     if (image.thumbnail_data_url) return image.thumbnail_data_url;
     const epoch = session?.epoch;
-    const payload = await queueDetailRead(session, `preview:${image.id}`, () => apiGet(`gallery/image/${image.id}`, { detail: "preview" }), wanted, isCurrentDetailImage(detail, image, session));
-    if (!payload || !currentDetailSession(session) || session.epoch !== epoch) return "";
-    image.thumbnail_data_url = payload.data_url || "";
+    const source = await queueDetailRead(session, `preview:${image.id}`, () => loadImageMedia(image, "preview"), wanted, isCurrentDetailImage(detail, image, session));
+    if (!source || !currentDetailSession(session) || session.epoch !== epoch) return "";
+    image.thumbnail_data_url = source;
     updateFilmstripPreview(detail, image);
     return image.thumbnail_data_url;
   }
@@ -630,9 +747,9 @@
   async function loadDetailMetadata(detail, image, session = detailNavigationSession) {
     if (image._metadataLoaded) { image._access = Date.now(); return image; }
     const epoch = session?.epoch;
-    const payload = await queueDetailRead(session, `metadata:${image.id}`, () => apiGet(`gallery/image-info/${image.id}`), () => isCurrentDetailImage(detail, image, session), true);
+    const payload = await queueDetailRead(session, `metadata:${image.id}`, () => apiGet(`gallery/image-info/${image.id}`, { include_preview: "0" }), () => isCurrentDetailImage(detail, image, session), true);
     if (!payload || !currentDetailSession(session) || session.epoch !== epoch) return null;
-    Object.assign(image, payload.image, { data_url: image.data_url || payload.image?.data_url || "", _metadataLoaded: true, _access: Date.now() });
+    Object.assign(image, payload.image, { data_url: image.data_url || payload.image?.data_url || "", thumbnail_data_url: image.thumbnail_data_url || payload.image?.thumbnail_data_url || "", _metadataLoaded: true, _access: Date.now() });
     Object.assign(detail, payload.detail_fields || {}, { lightweight: true });
     delete image._metadataError;
     updateFilmstripPreview(detail, image);
@@ -641,17 +758,20 @@
   }
 
   async function loadDetailOriginal(detail, image, session = detailNavigationSession) {
+    const cached = getImageMedia(image, "original");
+    if (cached) { image.data_url = cached; image._originalLoaded = true; }
     if (image._originalLoaded && image.data_url) return image;
     const epoch = session?.epoch;
-    const payload = await queueDetailRead(session, `original:${image.id}`, () => apiGet(`gallery/image/${image.id}`, { detail: "original" }), () => isCurrentDetailImage(detail, image, session), true);
-    if (!payload || !currentDetailSession(session) || session.epoch !== epoch || !isCurrentDetailImage(detail, image, session)) return null;
-    image.data_url = payload.data_url; image._originalLoaded = !!payload.data_url;
+    const source = await queueDetailRead(session, `original:${image.id}`, () => loadImageMedia(image, "original"), () => isCurrentDetailImage(detail, image, session), true);
+    if (!source || !currentDetailSession(session) || session.epoch !== epoch || !isCurrentDetailImage(detail, image, session)) return null;
+    image.data_url = source; image._originalLoaded = !!source;
     pruneDetailImages(session);
     return image;
   }
 
   async function ensureDetailMetadata() {
     const detail = state.detailData, image = detail?.images?.[state.detailImageIndex];
+    if (detail?._manifestPending) return null;
     if (!detail?.lightweight || !image) return image;
     return loadDetailMetadata(detail, image);
   }
@@ -696,21 +816,40 @@
     if (next) next.disabled = state.detailImageIndex >= count - 1 && !hasAdjacentGalleryRecord(1);
   }
 
-  function refreshDetailSequence(session) {
-    session.epoch++; session.filters = galleryFilters(); session.sequence = null; session.sequencePromise = null;
+  function refreshDetailSequence(session, warm = true) {
+    session.epoch++; session.filters = galleryFilters(); session.sequence = null; session.sequenceAt = 0; session.sequencePromise = null;
     session.summaries.clear(); session.loads.clear();
     session.reads.clear();
-    void warmDetailNeighbors(session);
+    if (warm) void warmDetailNeighbors(session);
   }
 
   async function ensureDetailSequence(session) {
     if (!currentDetailSession(session)) return [];
-    if (session.sequence) return session.sequence;
+    if (session.sequence && Date.now() - session.sequenceAt < BROWSE_SEQUENCE_TTL) return session.sequence;
     if (session.sequencePromise) return session.sequencePromise;
     const epoch = session.epoch;
-    const promise = apiGet("gallery/image-sequence", session.filters).then((payload) => {
+    const cacheEpoch = browseEpoch;
+    const key = `${galleryDataRevision}:${browseFilterKey(session.filters)}`;
+    const cached = browseSequences.get(key);
+    let read;
+    if (cached && Date.now() - cached.at < BROWSE_SEQUENCE_TTL) read = Promise.resolve(cached);
+    else {
+      if (!browseSequenceLoads.has(key)) {
+        const request = apiGet("gallery/image-sequence", session.filters).then(payload => {
+          const entry = { items: Array.isArray(payload.items) ? payload.items : [], at: Date.now(), revision: payload.revision || galleryDataRevision };
+          if (cacheEpoch === browseEpoch && (!payload.revision || !galleryDataRevision || payload.revision === galleryDataRevision)) {
+            browseSequences.set(key, entry);
+            while (browseSequences.size > 3) browseSequences.delete(browseSequences.keys().next().value);
+          }
+          return entry;
+        }).finally(() => { if (browseSequenceLoads.get(key) === request) browseSequenceLoads.delete(key); });
+        browseSequenceLoads.set(key, request);
+      }
+      read = browseSequenceLoads.get(key);
+    }
+    const promise = read.then((entry) => {
       if (!currentDetailSession(session) || epoch !== session.epoch) return [];
-      session.sequence = Array.isArray(payload.items) ? payload.items : [];
+      session.sequence = entry.items; session.sequenceAt = entry.at; session.sequenceRevision = entry.revision;
       updateDetailNavigationButtons(); return session.sequence;
     }).finally(() => { if (session.sequencePromise === promise) session.sequencePromise = null; });
     session.sequencePromise = promise;
@@ -733,8 +872,38 @@
     if (!cursor) return null;
     const detail = String(cursor.generation_id) === String(state.detailId) ? state.detailData : detailNavigationSession?.summaries.get(String(cursor.generation_id));
     const image = detail?.images?.find((item) => String(item.id) === String(cursor.image_id));
-    const src = image?.thumbnail_data_url || image?.data_url;
+    const src = image?.thumbnail_data_url || getImageMedia(cursor, "preview") || image?.data_url || getImageMedia(cursor, "original");
     return src ? { src, cursor } : null;
+  }
+
+  function readDetailSummary(id, session) {
+    const cached = session.summaries.get(id);
+    if (cached) return Promise.resolve(cached);
+    if (!session.loads.has(id)) {
+      const epoch = session.epoch;
+      const promise = apiGet(`gallery/detail/${id}`, { light: "1" }).then(summary => {
+        reuseImageMedia(summary);
+        if (currentDetailSession(session) && epoch === session.epoch) {
+          session.summaries.set(id, summary);
+          while (session.summaries.size > 3) session.summaries.delete(session.summaries.keys().next().value);
+        }
+        return summary;
+      }).finally(() => { if (session.loads.get(id) === promise) session.loads.delete(id); });
+      session.loads.set(id, promise);
+    }
+    return session.loads.get(id);
+  }
+
+  function provisionalDetail(cursor, session) {
+    const id = String(cursor.generation_id);
+    const entries = session.sequence?.filter(item => String(item.generation_id) === id) || [];
+    if (!entries.length || !entries.some(item => String(item.image_id) === String(cursor.image_id))) return null;
+    const card = state.galleryItems.find(item => String(item.id) === id);
+    return reuseImageMedia({
+      ...(card || {}), id, created_at: cursor.created_at, lightweight: true,
+      gallery_revision: session.sequenceRevision, _manifestPending: true, references: [],
+      images: entries.map(item => ({ ...item, id: item.image_id, ordinal: item.image_index })),
+    });
   }
 
   async function prepareDetailTarget(cursor, session) {
@@ -742,19 +911,10 @@
     const epoch = session.epoch;
     const id = String(cursor.generation_id);
     let detail = String(state.detailId) === id ? state.detailData : session.summaries.get(id);
-    if (!detail) {
-      if (!session.loads.has(id)) {
-        const promise = apiGet(`gallery/detail/${id}`, { light: "1" }).then((summary) => {
-          if (currentDetailSession(session) && epoch === session.epoch) {
-            session.summaries.set(id, summary);
-            while (session.summaries.size > 3) session.summaries.delete(session.summaries.keys().next().value);
-          }
-          return summary;
-        }).finally(() => { if (session.loads.get(id) === promise) session.loads.delete(id); });
-        session.loads.set(id, promise);
-      }
-      detail = await session.loads.get(id);
-    }
+    if (!detail) detail = provisionalDetail(cursor, session) || await readDetailSummary(id, session);
+    // The preview can be shown independently of the group manifest. Even a
+    // slow/failing speculative manifest must not hold up a cached image.
+    if (detail._manifestPending) void readDetailSummary(id, session).catch(() => {});
     if (!currentDetailSession(session) || epoch !== session.epoch) return null;
     const index = detail.images?.findIndex((item) => String(item.id) === String(cursor.image_id));
     if (!(index >= 0)) throw new Error("目标图片已删除或不再可用，请刷新画廊后重试。");
@@ -769,6 +929,11 @@
   }
 
   async function prepareDetailNeighbor(direction, session = detailNavigationSession) {
+    const cursor = detailNeighborCursor(direction, session);
+    if (cursor) {
+      void ensureDetailSequence(session).catch(() => {});
+      return prepareDetailTarget(cursor, session);
+    }
     await ensureDetailSequence(session);
     return prepareDetailTarget(detailNeighborCursor(direction, session), session);
   }
@@ -780,6 +945,54 @@
       if (!currentDetailSession(session) || mobileImageViewer || mobileViewerOpening) return;
       await Promise.all([-1, 1].map((direction) => prepareDetailTarget(detailNeighborCursor(direction, session), session).catch(() => null)));
     } catch { /* A failed speculative read is retried and explained only on navigation. */ }
+  }
+
+  function loadDetailManifest(detail, session) {
+    const current = () => currentDetailSession(session) && state.detailData === detail;
+    if (!current()) return;
+    if (detail._manifestEpoch !== session.epoch) {
+      delete detail._manifestReady; delete detail._manifestError; delete detail._manifestErrorRendered;
+      detail._manifestEpoch = session.epoch;
+    }
+    const frame = els.drawerBody.querySelector(".detail-image-frame");
+    const busy = frame?.dataset.detailSwipeState || state.detailNavigating || mobileViewerSession?.active;
+    if (detail._manifestReady && !busy) {
+      const summary = detail._manifestReady;
+      const imageId = detail.images[state.detailImageIndex]?.id;
+      const index = summary.images?.findIndex(image => String(image.id) === String(imageId));
+      if (index >= 0) {
+        state.detailRequestedImageIndex = index;
+        if (state.imagePreviewContext?.type === "detail" && String(state.imagePreviewContext.generationId) === String(detail.id)) {
+          state.imagePreviewItems = normalizePreviewItems(detailDisplayImages(summary), "", "");
+          state.imagePreviewIndex = index; state.imagePreviewContext.imageIndex = index;
+        }
+        void renderDetail(summary, state.detailFallbackThumbnail);
+        if (state.imagePreviewContext?.type === "detail" && String(state.imagePreviewContext.generationId) === String(detail.id) && !els.imagePreview.classList.contains("is-hidden")) renderImagePreview();
+        return;
+      }
+      delete detail._manifestReady;
+      detail._manifestError = "目标图片已删除或不再可用，请刷新画廊后重试。";
+    }
+    if (detail._manifestError && !busy) {
+      if (!detail._manifestErrorRendered) {
+        detail._manifestErrorRendered = true;
+        void renderDetail(detail, state.detailFallbackThumbnail);
+      }
+      return;
+    }
+    if (detail._manifestReady || detail._manifestError) {
+      scheduleDetailAssets(detail.id, detail, state.detailFallbackThumbnail); return;
+    }
+    if (detail._manifestTask) return;
+    const epoch = session.epoch;
+    detail._manifestTask = readDetailSummary(String(detail.id), session).then(summary => {
+      if (current() && session.epoch === epoch) detail._manifestReady = summary;
+    }).catch(error => {
+      if (current() && session.epoch === epoch) detail._manifestError = errorMessage(error, "生成详情加载失败");
+    }).finally(() => {
+      delete detail._manifestTask;
+      if (current()) scheduleDetailAssets(detail.id, detail, state.detailFallbackThumbnail);
+    });
   }
 
   function scheduleDetailAssets(id, summary, fallbackThumbnail) {
@@ -829,7 +1042,11 @@
       entry.promise = image.decode().then(() => {
         if (!image.naturalWidth || !image.naturalHeight) throw new Error("图片内容无法解码。");
         entry.ready = true; return image;
-      }).catch((error) => { if (decodedDisplayImages.get(source) === entry) decodedDisplayImages.delete(source); throw error; });
+      }).catch((error) => {
+        if (decodedDisplayImages.get(source) === entry) decodedDisplayImages.delete(source);
+        discardImageMediaSource(source);
+        throw error;
+      });
       decodedDisplayImages.set(source, entry);
       while (decodedDisplayImages.size > 8) decodedDisplayImages.delete(decodedDisplayImages.keys().next().value);
     }
@@ -966,6 +1183,7 @@
   }
 
   function renderDetail(detail, fallbackThumbnail = "") {
+    reuseImageMedia(detail);
     const scrollTop = els.drawerBody.scrollTop;
     const images = Array.isArray(detail.images) ? detail.images : [];
     const displayImages = detailDisplayImages(detail, fallbackThumbnail);
@@ -990,7 +1208,9 @@
     const imageFrame = currentImage ? previousFrame || createDetailImageFrame(detail.id) : null;
     if (imageFrame) imageFrame.dataset.generationId = String(detail.id);
     const carousel = currentImage ? `<div class="detail-images"><div data-detail-frame-mount></div>${stripMount}</div>` : '<div class="detail-loading">正在读取生成图片…</div>';
-    const metadata = `${library.detailMetadataMarkup(detail, currentImage)}<div class="detail-block"><h3>信息</h3><pre>${escape(JSON.stringify({ 服务商: detail.provider_name, 模型: detail.model, 模式: library.modeLabel(detail.mode), 生图来源: library.engineLabel(detail.generation_engine), 来源: sourceLabel(detail.source), 调用来源身份: sourceIdentity, 记录时间: formatDate(detail.created_at), 图片数量: images.length, 文件大小: formatBytes(totalBytes), 耗时毫秒: detail.elapsed_ms }, null, 2))}</pre></div><div class="detail-block"><h3>参考图</h3><div class="detail-references" data-detail-references>${detailReferenceMarkup(refs)}</div></div>${library.detailWarningsMarkup(detail, currentImage)}`;
+    const metadata = detail._manifestPending
+      ? `<div class="detail-block detail-manifest-loading" role="status"><p>${detail._manifestError ? escape(detail._manifestError) : "正在读取本组生成详情…"}</p>${detail._manifestError ? '<button class="quiet-button" data-detail-manifest-retry type="button">重试读取详情</button>' : ""}</div>`
+      : `${library.detailMetadataMarkup(detail, currentImage)}<div class="detail-block"><h3>信息</h3><pre>${escape(JSON.stringify({ 服务商: detail.provider_name, 模型: detail.model, 模式: library.modeLabel(detail.mode), 生图来源: library.engineLabel(detail.generation_engine), 来源: sourceLabel(detail.source), 调用来源身份: sourceIdentity, 记录时间: formatDate(detail.created_at), 图片数量: images.length, 文件大小: formatBytes(totalBytes), 耗时毫秒: detail.elapsed_ms }, null, 2))}</pre></div><div class="detail-block"><h3>参考图</h3><div class="detail-references" data-detail-references>${detailReferenceMarkup(refs)}</div></div>${library.detailWarningsMarkup(detail, currentImage)}`;
     // The foreground and fixed backdrop stay attached across both image and group changes.
     if (imageFrame && imageFrame === previousFrame) {
       const media = imageFrame.parentElement;
@@ -1012,6 +1232,11 @@
     library.layoutDetailParameters();
     bindDetailReferenceEvents(detail);
     watchDetailReferences(detail);
+    els.drawerBody.querySelector('[data-detail-manifest-retry]')?.addEventListener("click", () => {
+      delete detail._manifestError; delete detail._manifestErrorRendered;
+      detailNavigationSession?.summaries.delete(String(detail.id));
+      void renderDetail(detail, fallbackThumbnail);
+    });
     els.drawerBody.querySelector('[data-detail-metadata-retry]')?.addEventListener("click", () => { const image = detail.images[state.detailImageIndex]; delete image._metadataError; void loadDetailAssets(detail.id, detail, fallbackThumbnail); });
     els.drawerBody.querySelector("[data-reproduce]")?.addEventListener("click", () => void reproduce(detail.id));
     els.drawerBody.querySelector("[data-copy-request]")?.addEventListener("click", () => void copyRequestParameters(detail));
@@ -1025,11 +1250,35 @@
   }
 
   async function loadDetailAssets(id, summary, fallbackThumbnail) {
+    if (summary._manifestPending) {
+      const session = detailNavigationSession, image = summary.images?.[state.detailImageIndex];
+      if (!image || !isCurrentDetailImage(summary, image, session)) return;
+      const current = () => isCurrentDetailImage(summary, image, session) && !mobileViewerSession?.active;
+      // Filmstrip selection can jump to a preview that was not preloaded.
+      // It must remain independent of the still-pending group manifest too.
+      if (!image.thumbnail_data_url && !image._previewTask) image._previewTask = loadDetailPreview(summary, image, session, current).then(source => {
+        if (source && current()) void paintDetailImage(els.drawerBody.querySelector(".detail-image-frame"), detailDisplayImages(summary, fallbackThumbnail)[state.detailImageIndex], state.detailImageIndex);
+      }).catch(error => {
+        if (!current()) return;
+        els.drawerBody.querySelector(".detail-image-frame")?.removeAttribute("aria-busy");
+        showNotice(errorMessage(error, "图片预览加载失败"), "error");
+      }).finally(() => { delete image._previewTask; });
+      // Do not hydrate synchronously inside renderDetail: its pending preview
+      // paint would otherwise run after the hydrated group's newer paint.
+      queueMicrotask(() => loadDetailManifest(summary, session)); return;
+    }
     if (summary.lightweight) {
       const session = detailNavigationSession;
       const image = summary.images?.[state.detailImageIndex];
       if (!image || !isCurrentDetailImage(summary, image, session) || mobileViewerSession?.active) return;
       const current = () => isCurrentDetailImage(summary, image, session) && !mobileViewerSession?.active;
+      const loadEpoch = session.epoch;
+      const settled = key => {
+        delete image[key];
+        // A gallery mutation can supersede a pending read. Resume the selected
+        // image once, using the new epoch, instead of leaving its shell loading.
+        if (current() && session.epoch !== loadEpoch) void loadDetailAssets(id, summary, fallbackThumbnail);
+      };
       const paint = () => {
         if (!current()) return;
         state.detailAssetsLoaded = !!image._originalLoaded;
@@ -1040,17 +1289,17 @@
           renderImagePreview();
         }
       };
-      if (!image.thumbnail_data_url) void loadDetailPreview(summary, image, session, current).then(paint).catch(() => {});
-      if (!image._originalLoaded && !image._originalError) void loadDetailOriginal(summary, image, session).then(paint).catch(error => {
-        if (!current()) return;
+      if (!image.thumbnail_data_url && !image._previewTask) image._previewTask = loadDetailPreview(summary, image, session, current).then(paint).catch(() => {}).finally(() => settled("_previewTask"));
+      if (!image._originalLoaded && !image._originalError && !image._originalTask) image._originalTask = loadDetailOriginal(summary, image, session).then(paint).catch(error => {
+        if (!current() || session.epoch !== loadEpoch) return;
         image._originalError = errorMessage(error, "原图加载失败"); showNotice(image._originalError, "error");
-      });
-      if (!image._metadataLoaded && !image._metadataError) void loadDetailMetadata(summary, image, session).then(result => {
+      }).finally(() => settled("_originalTask"));
+      if (!image._metadataLoaded && !image._metadataError && !image._metadataTask) image._metadataTask = loadDetailMetadata(summary, image, session).then(result => {
         if (result && current()) void renderDetail(summary, fallbackThumbnail);
       }).catch(error => {
-        if (!current()) return;
+        if (!current() || session.epoch !== loadEpoch) return;
         image._metadataError = errorMessage(error, "图片参数加载失败"); void renderDetail(summary, fallbackThumbnail);
-      });
+      }).finally(() => settled("_metadataTask"));
       return;
     }
     const revision = detailRequestRevision;
@@ -1121,6 +1370,12 @@
     try {
       const summary = await apiGet(`gallery/detail/${id}`, { light: "1" });
       if (revision !== detailRequestRevision || state.detailId !== id) return;
+      observeGalleryRevision(summary.gallery_revision);
+      if (options.imageId) {
+        const index = summary.images?.findIndex(image => String(image.id) === String(options.imageId));
+        if (!(index >= 0)) throw new Error("目标图片已删除或不再可用，请刷新画廊后重试。");
+        state.detailRequestedImageIndex = index;
+      }
       state.detailData = summary; await renderDetail(summary, state.detailFallbackThumbnail);
       if (revision !== detailRequestRevision || state.detailId !== id) return;
       void warmDetailNeighbors(session);
@@ -1144,6 +1399,10 @@
       if (!expected || String(expected.image_id) !== String(target.cursor.image_id)) return false;
       const crossGroup = String(target.cursor.generation_id) !== String(originId);
       if (crossGroup) {
+        if (!state.detailData._manifestPending) {
+          session.summaries.set(String(originId), state.detailData);
+          while (session.summaries.size > 3) session.summaries.delete(session.summaries.keys().next().value);
+        }
         detailRequestRevision++; detailImagePaintRevision++;
         state.detailId = String(target.cursor.generation_id); state.detailAssetsLoaded = false;
         state.detailFallbackThumbnail = target.detail.images?.[0]?.thumbnail_data_url || "";
@@ -1166,6 +1425,8 @@
   }
 
   function mobileSourceForSequenceItem(sequenceItem, fallbackDataUrl, context, knownImages, galleryById) {
+    const cachedPreview = getImageMedia(sequenceItem, "preview");
+    if (cachedPreview) return { src: cachedPreview, detail: "preview" };
     const sameRecord = String(state.detailId) === String(sequenceItem.generation_id);
     const known = sameRecord ? knownImages.get(String(sequenceItem.image_id)) || knownImages.get(`index:${sequenceItem.image_index}`) : null;
     if (known?.thumbnail_data_url) return { src: known.thumbnail_data_url, detail: "preview" };
@@ -1273,19 +1534,18 @@
         && Math.abs(session.viewer.currIndex - index) <= (detail === "original" ? 0 : 1);
       const pending = queueMobileWork(session, `load:${key}`, async () => {
         if (!relevant()) return;
-        const available = detail === "original" ? item.originalSrc : (item.previewSrc || item.originalSrc);
+        const available = detail === "original" ? item.originalSrc : item.previewSrc;
         const known = detail === "original" && String(state.detailId) === String(item.generation_id)
           ? state.detailData?.images?.find((image) => String(image.id) === String(item.image_id)) : null;
         const knownOriginal = known?._originalLoaded || (!state.detailData?.lightweight && state.detailAssetsLoaded) ? known?.data_url : "";
-        const payload = available || knownOriginal
-          ? { id: item.image_id, data_url: available || knownOriginal }
-          : await apiGet(`gallery/image/${item.image_id}`, { detail });
+        const source = available || knownOriginal || await loadImageMedia(item, detail);
+        const payload = { id: item.image_id, data_url: source };
+        if (source) cacheImageMedia(item, detail, source);
         if (!relevant()) return;
         if (!payload?.data_url) throw new Error("图片接口没有返回可用内容。");
-        const resolvedDetail = available && !item.previewSrc && item.originalSrc ? "original" : detail;
         // A response or decode may finish during a later gesture; gate both stages separately.
         await queueMobileWork(session, `decode:${key}`, () => relevant() ? decodeDisplayImage(payload.data_url) : undefined);
-        await queueMobileWork(session, `paint:${key}`, () => { if (relevant()) updateMobileImageSource(index, payload, resolvedDetail, session); });
+        await queueMobileWork(session, `paint:${key}`, () => { if (relevant()) updateMobileImageSource(index, payload, detail, session); });
         return payload;
       }).finally(() => { if (loads.get(key) === pending) loads.delete(key); });
       loads.set(key, pending);
@@ -1370,11 +1630,14 @@
     const targetPage = Math.floor(Math.max(0, Number(item.generation_position || 0)) / state.galleryLimit);
     if (targetPage !== state.galleryPage && !await loadGallery(targetPage)) return;
     if (revision !== mobileDetailSyncRevision || detailRevision !== detailRequestRevision || !current()) return;
-    if (String(state.detailId) !== String(item.generation_id) || !state.detailData) {
-      await openDetail(item.generation_id, item.image_index, { focus: false, resetScroll: false, deferAssets: true });
+    const imageIndex = state.detailData?.images?.findIndex(image => String(image.id) === String(item.image_id));
+    const expectedRevision = session?.sequenceRevision || galleryDataRevision;
+    const staleManifest = expectedRevision && state.detailData?.gallery_revision !== expectedRevision;
+    if (String(state.detailId) !== String(item.generation_id) || !state.detailData || !(imageIndex >= 0) || staleManifest) {
+      await openDetail(item.generation_id, item.image_index, { focus: false, resetScroll: false, deferAssets: true, imageId: item.image_id });
       return;
     }
-    state.detailRequestedImageIndex = item.image_index;
+    state.detailRequestedImageIndex = imageIndex;
     await renderDetail(state.detailData, state.detailFallbackThumbnail);
   }
 
@@ -1415,11 +1678,11 @@
     mobileViewerOpening = true;
     const openingRevision = ++mobileViewerOpenRevision;
     const requestedDetailRevision = detailRequestRevision;
+    const requestedImageId = state.detailData?.images?.[context.imageIndex]?.id;
     try {
-      const payload = await apiGet("gallery/image-sequence", galleryFilters());
+      const sequence = await ensureDetailSequence(detailNavigationSession);
       if (openingRevision !== mobileViewerOpenRevision || requestedDetailRevision !== detailRequestRevision || String(state.detailId) !== String(context.generationId)) return true;
-      const sequence = Array.isArray(payload.items) ? payload.items : [];
-      const initialIndex = sequence.findIndex((item) => String(item.generation_id) === String(context.generationId) && Number(item.image_index) === Number(context.imageIndex));
+      const initialIndex = sequence.findIndex((item) => String(item.generation_id) === String(context.generationId) && (requestedImageId ? String(item.image_id) === String(requestedImageId) : Number(item.image_index) === Number(context.imageIndex)));
       if (initialIndex < 0 || !sequence.length) return false;
       mobileDetailSyncRevision++;
       mobileImageSequence = sequence;
@@ -1428,9 +1691,12 @@
       const galleryById = new Map(state.galleryItems.map((item) => [String(item.id), item]));
       mobileImageDataSource = sequence.map((item) => {
         const known = mobileSourceForSequenceItem(item, dataUrl, context, knownImages, galleryById);
-        return { ...item, src: known.src, msrc: known.src, width: Math.max(1, Number(item.width || 1)), height: Math.max(1, Number(item.height || 1)), previewSrc: known.detail === "preview" ? known.src : "", originalSrc: known.detail === "original" ? known.src : "", loadedDetail: known.detail, alt: "生成结果" };
+        const preview = known.detail === "preview" ? known.src : "";
+        const original = known.detail === "original" ? known.src : getImageMedia(item, "original");
+        return { ...item, src: original || known.src, msrc: preview || original || known.src, width: Math.max(1, Number(item.width || 1)), height: Math.max(1, Number(item.height || 1)), previewSrc: preview, originalSrc: original, loadedDetail: original ? "original" : known.detail, alt: "生成结果" };
       });
       const session = { active: true, sequence, items: mobileImageDataSource, loads: mobileImageLoads, retryTimers: new Set(), viewer: null, backdrop: null, status: null, retrying: false, workQueue: new Map(), workTimer: 0, pointerIds: new Set(), touchCount: 0, originalIndices: new Set(mobileImageDataSource.flatMap((item, index) => item.originalSrc ? [index] : [])), preparingDetail: false, detailSyncIndex: -1, detailSyncPromise: null, entryAnimation: null };
+      session.sequenceRevision = detailNavigationSession?.sequenceRevision || galleryDataRevision;
       // PhotoSwipe blocks input during its opening animation; the visual fade is independent.
       const pswp = new window.PhotoSwipe({ dataSource: mobileImageDataSource, index: initialIndex, loop: false, closeOnVerticalDrag: true, pinchToClose: false, tapAction: toggleMobileImageControls, imageClickAction: toggleMobileImageControls, bgClickAction: toggleMobileImageControls, doubleTapAction: "zoom", initialZoomLevel: "fit", secondaryZoomLevel: 2.5, maxZoomLevel: 4, preload: [1, 1], arrowPrev: false, arrowNext: false, close: false, zoom: false, counter: false, bgOpacity: 1, showHideAnimationType: "fade", showAnimationDuration: 0, hideAnimationDuration: 220, zoomAnimationDuration: 220, errorMsg: "图片暂时无法加载，请重试。", mainClass: "image-studio-pswp" });
       session.viewer = pswp;
@@ -1662,7 +1928,7 @@
         const payload = await apiGet(`gallery/parameters/${id}`, { image_id: state.detailData.images?.[state.detailImageIndex]?.id, format: "studio" });
         await library.resolveParameters(typeof payload.content === "string" ? payload.content : JSON.stringify(payload.content), undefined, { forReproduction: true });
       } else {
-        const draft = await apiPost(`gallery/reproduce/${id}`, {});
+        const draft = await apiPost(`gallery/reproduce/${id}`, { image_id: String(state.detailId) === String(id) ? state.detailData?.images?.[state.detailImageIndex]?.id : undefined });
         if (draft.requires_model_selection) {
           const payload = await apiGet(`gallery/parameters/${id}`, { image_id: state.detailData?.images?.[state.detailImageIndex]?.id, format: "studio" });
           await library.resolveParameters(typeof payload.content === "string" ? payload.content : JSON.stringify(payload.content), undefined, { forReproduction: true, references: draft.references || [] });
@@ -2178,7 +2444,7 @@
     document.addEventListener("keydown", (event) => { if (mobileImageViewer || library.modalOpen()) return; if (event.key === "Escape") { if (!els.parameterDialog.classList.contains("is-hidden")) closeToolParameterDialog(); else if (!els.imagePreview.classList.contains("is-hidden")) closeImagePreview(); else if (els.detailDrawer.classList.contains("is-open") && !activeConfirmation) closeDetail(); return; } if (event.target.closest('input,textarea,select,[role="combobox"],[contenteditable=true]')) return; if (!els.imagePreview.classList.contains("is-hidden")) { if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); void navigateImagePreview(event.key === "ArrowLeft" ? -1 : 1); } return; } if (!els.detailDrawer.classList.contains("is-open") || activeConfirmation) return; if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); void navigateDetail(event.key === "ArrowLeft" ? -1 : 1); } });
   }
 
-  const library = window.ImageStudioLibrary({ state, escape, apiGet, apiPost, bridge, showNotice, errorMessage, formatDate, formatBytes, sourceLabel, syncPageScrollLock, switchView, requestParameters, loadGallery, clearGallerySelection, openDetail, closeDetail, reproduce, applyDraft, useDataUrlAsReference, ensureDetailMetadata, ensureDetailPreview });
+  const library = window.ImageStudioLibrary({ state, escape, apiGet, apiPost, bridge, showNotice, errorMessage, formatDate, formatBytes, sourceLabel, syncPageScrollLock, switchView, requestParameters, loadGallery, clearGallerySelection, openDetail, closeDetail, reproduce, applyDraft, useDataUrlAsReference, ensureDetailMetadata, ensureDetailPreview, getImageMedia, cacheImageMedia, loadImageMedia });
 
   async function start() {
     bindEvents();

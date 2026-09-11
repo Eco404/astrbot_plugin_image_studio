@@ -54,7 +54,7 @@ async function chooseOutput(page, frame, card, value) {
   await revealCard(card);
   const select = card.locator("[data-import-output]");
   const index = await select.evaluate((node, target) => Array.from(node.options).findIndex((option) => option.value === target), value);
-  const response = page.waitForResponse((item) => item.url().endsWith("/imports/inspect") && item.request().postDataJSON()?.output_node_id === value);
+  const response = page.waitForResponse((item) => item.url().endsWith("/imports/inspect") && item.request().postDataJSON()?.output_node_id === value || item.url().includes("/gallery/import-edit/") && new URL(item.url()).searchParams.get("output_node_id") === value);
   await card.locator(".import-output-choice .studio-select-trigger").click();
   await frame.locator(`.studio-select-menu [data-option-index="${index}"]`).click();
   await response;
@@ -195,8 +195,9 @@ async function verify(browser, name, width) {
     await revealCard(cards.nth(2));
     assert.match(await cards.nth(2).locator('[data-import-field="prompt"]').inputValue(), /searchable edited landscape/);
     let releaseInspect;
-    await page.route("**/imports/inspect", async (route) => {
-      if (route.request().postDataJSON()?.output_node_id === "19" && !releaseInspect) await new Promise((resolve) => { releaseInspect = resolve; });
+    const inspectRoute = `**/gallery/import-edit/${id}*`;
+    await page.route(inspectRoute, async (route) => {
+      if (new URL(route.request().url()).searchParams.get("output_node_id") === "19" && !releaseInspect) await new Promise((resolve) => { releaseInspect = resolve; });
       await route.continue();
     });
     const inspecting = chooseOutput(page, frame, cards.first(), "19");
@@ -219,7 +220,7 @@ async function verify(browser, name, width) {
     assert.match(saved.items[2].parameters_json, /9007199254740993123/);
     assert.equal(uploads, uploadCount); assert.equal(prepares, prepareCount);
     assert.deepEqual(await pendingSnapshot(frame), pending);
-    await page.unroute("**/imports/inspect");
+    await page.unroute(inspectRoute);
     await frame.locator("#detailImportEdit:not(:disabled)").click(); await cards.nth(2).waitFor();
     await revealCard(cards.first());
     // A stale save must keep the draft visible with the backend's conflict message.
