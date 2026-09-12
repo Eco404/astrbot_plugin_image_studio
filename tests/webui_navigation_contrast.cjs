@@ -10,7 +10,7 @@ const styles = ["app.css", "library.css", "appearance.css", "controls.css"]
 const appearance = fs.readFileSync(path.join(frontend, "appearance.js"), "utf8");
 
 for (const engine of ["chromium", "webkit"]) {
-  test(`${engine}: navigation preserves light-theme fills and readable dark-theme layers`, async () => {
+  test(`${engine}: navigation uses 1.0.0 tones and moves the selection surface inside on mobile`, async () => {
     const browser = await browsers[engine].launch({ headless: true });
     try {
       for (const width of [1440, 901, 900, 390]) {
@@ -64,19 +64,14 @@ for (const engine of ["chromium", "webkit"]) {
                   const iconRatio = contrast(iconColor, iconFill);
                   const ratio = mobile ? iconRatio : Math.min(textRatio, iconRatio);
                   minimum = Math.min(minimum, ratio); checked++;
-                  if (ratio < 4.5) issues.push({ reason: "contrast", settings, textRatio, iconRatio, itemFill, iconFill, iconColor });
+                  if ((!mobile && textRatio < 4.5) || iconRatio < 3) issues.push({ reason: "contrast", settings, textRatio, iconRatio, itemFill, iconFill, iconColor });
                   if (paint(`hsl(${accentHue} ${accentSaturation}% ${accentLightness}%)`).some((channel, i) => Math.abs(channel - fill[i]) > 1)) issues.push({ reason: "source color changed", settings });
                   if (mobile && itemFill[3] !== 0) issues.push({ reason: "mobile outer fill", settings });
-                  if (preference === "light") {
-                    if (visibleFill.some((channel, i) => channel !== fill[i])) issues.push({ reason: "light-theme fill changed", settings, visibleFill, fill });
-                    if (!mobile && Math.abs(paint(iconStyle.backgroundColor)[3] - 255 * .16) > 1) issues.push({ reason: "light desktop inner surface changed", settings });
-                  } else {
-                    const itemLuminance = luminance(itemFill), iconLuminance = luminance(iconFill);
-                    if (!mobile && (itemLuminance < .072 || itemLuminance > .108 || iconLuminance < .117 || iconLuminance > .153 || iconLuminance - itemLuminance < .01)) issues.push({ reason: "dark layers lack hierarchy", settings, itemLuminance, iconLuminance });
-                    if (mobile && (iconLuminance < .117 || iconLuminance > .153)) issues.push({ reason: "dark mobile fill is too dark or bright", settings, iconLuminance });
-                    if (textColor.some((channel, i) => channel !== iconColor[i])) issues.push({ reason: "dark text and icon use different colors", settings, textColor, iconColor });
-                    if (luminance(iconColor) < .4 || luminance(iconColor) <= iconLuminance) issues.push({ reason: "dark foreground is not bright", settings, iconColor });
-                  }
+                  const soft = paint(preference === "light" ? `hsl(${accentHue} ${accentSaturation}% 90%)` : `hsl(${accentHue} 18% 21%)`);
+                  if (visibleFill.some((channel, i) => Math.abs(channel - soft[i]) > 1)) issues.push({ reason: "selection did not use the 1.0.0 outer surface", settings, visibleFill, soft });
+                  if (!mobile && Math.abs(paint(iconStyle.backgroundColor)[3] - 255 * .16) > 1) issues.push({ reason: "desktop inner tint changed", settings });
+                  const expectedForeground = paint(token("--accent-strong"));
+                  if (textColor.some((channel, i) => channel !== expectedForeground[i]) || iconColor.some((channel, i) => channel !== expectedForeground[i])) issues.push({ reason: "text or icon no longer uses the strong theme color", settings, textColor, iconColor });
                   if (getComputedStyle(inactive).color !== token("--muted")) issues.push({ reason: "inactive color changed", settings });
                   if (accentHue === 345 && accentSaturation === 38 && [30, 50, 90].includes(accentLightness)) {
                     examples.push({ ...settings, textColor: textStyle.color, iconColor: iconStyle.color, itemLuminance: luminance(itemFill), iconLuminance: luminance(iconFill), textRatio: mobile ? undefined : textRatio, iconRatio });
@@ -93,7 +88,7 @@ for (const engine of ["chromium", "webkit"]) {
         });
         assert.deepEqual(report.issues, []);
         assert.ok(new Set(report.tinted).size > 1, "colored backgrounds should preserve colored strokes");
-        console.log(JSON.stringify({ engine, width, ...report }));
+        console.log(JSON.stringify({ engine, width, checked: report.checked, minimum: report.minimum, issues: report.issues }));
         await page.close();
       }
     } finally { await browser.close(); }

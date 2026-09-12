@@ -75,8 +75,8 @@ async function checkHeader(page, frame, inner, view, test) {
     const alpha = (element) => { context.clearRect(0, 0, 1, 1); context.fillStyle = getComputedStyle(element).backgroundColor; context.fillRect(0, 0, 1, 1); return context.getImageData(0, 0, 1, 1).data[3]; };
     const inner = button.querySelector(".nav-icon");
     const probe = document.createElement("span");
-    probe.style.background = innerWidth <= 900 ? "var(--nav-mobile-active-background)" : "var(--nav-active-background)";
-    probe.style.color = innerWidth <= 900 ? "var(--nav-active-foreground)" : "var(--nav-active-icon-foreground)";
+    probe.style.background = "var(--accent-soft)";
+    probe.style.color = "var(--accent-strong)";
     button.append(probe);
     const themed = getComputedStyle(innerWidth <= 900 ? inner : button).backgroundColor === getComputedStyle(probe).backgroundColor;
     const rgb = color => { context.clearRect(0, 0, 1, 1); context.fillStyle = color; context.fillRect(0, 0, 1, 1); return Array.from(context.getImageData(0, 0, 1, 1).data); };

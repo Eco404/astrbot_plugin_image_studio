@@ -19,7 +19,6 @@
   let sampleRevision = 0;
   let sampledColor = "";
   let resolveReady;
-  let navigationColorContext;
   const ready = new Promise((resolve) => { resolveReady = resolve; });
 
   function normalize(value) {
@@ -75,58 +74,6 @@
     return dark ? 100 : 0;
   }
 
-  function navigationForeground(hue, saturation, start, backgrounds, dark) {
-    const targets = backgrounds.map(luminance);
-    let bestColor = null, bestContrast = 0;
-    // Prefer the theme's direction against the selected item's actual fill.
-    // Light mode retains unrestricted custom fills and may need the fallback.
-    for (const direction of dark ? [1, -1] : [-1, 1]) {
-      for (let step = 0; step <= 100; step++) {
-        const lightness = Math.max(0, Math.min(100, start + step * direction));
-        const rgb = hslRgb(hue, saturation, lightness), value = luminance(rgb);
-        const contrast = Math.min(...targets.map((target) => (Math.max(value, target) + .05) / (Math.min(value, target) + .05)));
-        // Leave room for browser rounding while compositing the icon surface.
-        if (contrast >= 4.65) return colorHex(rgb);
-        if (contrast > bestContrast) { bestContrast = contrast; bestColor = colorHex(rgb); }
-        if ((direction < 0 && lightness === 0) || (direction > 0 && lightness === 100)) break;
-      }
-    }
-    // Middle-luminance fills may peak just below the usual rounding margin.
-    // Keep a shared color whenever its best result is still safely readable.
-    return targets.length === 1 || bestContrast >= 4.55 ? bestColor : null;
-  }
-
-  function navigationIconBackground(fill, hue, saturation, lightness) {
-    if (navigationColorContext === undefined) {
-      const canvas = document.createElement?.("canvas");
-      if (canvas) canvas.width = canvas.height = 1;
-      navigationColorContext = canvas?.getContext("2d", { willReadFrequently: true }) || null;
-    }
-    if (navigationColorContext) {
-      // Sample the actual 8-bit composition, including browser rounding. A
-      // numeric average can choose the wrong stroke near middle luminance.
-      navigationColorContext.fillStyle = colorHex(fill);
-      navigationColorContext.fillRect(0, 0, 1, 1);
-      navigationColorContext.fillStyle = `hsl(${hue} ${saturation}% ${lightness}% / .16)`;
-      navigationColorContext.fillRect(0, 0, 1, 1);
-      return [...navigationColorContext.getImageData(0, 0, 1, 1).data].slice(0, 3);
-    }
-    const tint = hslRgb(hue, saturation, lightness);
-    return fill.map((value, index) => value * .84 + tint[index] * .16);
-  }
-
-  function navigationTone(hue, saturation, target) {
-    // Equal HSL lightness makes yellow much brighter than blue. Limit the
-    // rendered luminance so each accent keeps the same quiet dark hierarchy.
-    let low = 0, high = 100;
-    for (let step = 0; step < 12; step++) {
-      const middle = (low + high) / 2;
-      if (luminance(hslRgb(hue, saturation, middle)) < target) low = middle;
-      else high = middle;
-    }
-    return hslRgb(hue, saturation, (low + high) / 2);
-  }
-
   function apply() {
     const resolved = settings.preference === "system" ? (scheme.matches ? "dark" : "light") : settings.preference;
     if (root.dataset.theme !== resolved) root.dataset.theme = resolved;
@@ -155,18 +102,6 @@
     const foreground = [[22, 33, 28], [255, 255, 255], [0, 0, 0]].find((rgb) => contrast(rgb) >= 4.5) || [0, 0, 0];
     root.style.setProperty("--control-accent", colorHex(fill));
     root.style.setProperty("--on-control-accent", colorHex(foreground));
-    // Dark navigation uses three related tones rather than a bright raw fill
-    // that forces black labels. Other controls retain the exact chosen color.
-    const navFill = dark ? navigationTone(h, Math.min(s, 48), .075 + settings.accentLightness * .0003) : fill;
-    const iconFill = dark ? navigationTone(h, Math.min(s, 48), .12 + settings.accentLightness * .0003) : navigationIconBackground(fill, h, s, accent);
-    root.style.setProperty("--nav-active-background", colorHex(navFill));
-    root.style.setProperty("--nav-active-icon-background", dark ? colorHex(iconFill) : "color-mix(in srgb, var(--accent) 16%, transparent)");
-    root.style.setProperty("--nav-mobile-active-background", colorHex(dark ? iconFill : fill));
-    const navSaturation = Math.min(100, s + (dark ? 6 : 8));
-    const navStart = dark ? Math.max(86, strong) : strong;
-    const commonNavigation = navigationForeground(h, navSaturation, navStart, [navFill, iconFill], dark);
-    root.style.setProperty("--nav-active-foreground", commonNavigation || navigationForeground(h, navSaturation, navStart, [navFill], dark));
-    root.style.setProperty("--nav-active-icon-foreground", commonNavigation || navigationForeground(h, navSaturation, navStart, [iconFill], dark));
     syncControls();
   }
 

@@ -15,11 +15,6 @@
   --on-accent: #fff;
   --control-accent: var(--accent);
   --on-control-accent: var(--on-accent);
-  --nav-active-background: var(--control-accent);
-  --nav-active-icon-background: color-mix(in srgb, var(--accent) 16%, transparent);
-  --nav-mobile-active-background: var(--control-accent);
-  --nav-active-foreground: var(--on-control-accent);
-  --nav-active-icon-foreground: var(--nav-active-foreground);
   --control-accent-hover: var(--control-accent);
   --on-control-accent-hover: var(--on-control-accent);
 }
@@ -34,10 +29,6 @@
   --warning: #d0a361;
   --warning-soft: rgba(190, 139, 66, .17);
   --on-accent: #16211c;
-  --nav-active-background: hsl(var(--accent-h) 22% 30%);
-  --nav-active-icon-background: hsl(var(--accent-h) 22% 37%);
-  --nav-mobile-active-background: var(--nav-active-icon-background);
-  --nav-active-foreground: hsl(var(--accent-h) 30% 90%);
 }
 @supports (background: color-mix(in srgb, white 50%, transparent)) and ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
   :root, :root[data-theme="dark"] {
@@ -76,12 +67,10 @@
 .primary-button { background: var(--control-accent); color: var(--on-control-accent); }
 .primary-button:hover:not(:disabled) { background: var(--control-accent-hover); color: var(--on-control-accent-hover); }
 .primary-button:disabled { background: var(--control-accent); color: var(--on-control-accent); }
-.nav-item.is-active { background: var(--nav-active-background); color: var(--nav-active-foreground); }
-.nav-item.is-active .nav-icon { background: var(--nav-active-icon-background); color: var(--nav-active-icon-foreground); }
 @media (max-width: 900px) {
   .nav-list { flex: 1; justify-content: space-around; }
-  .nav-item.is-active { background: transparent; }
-  .nav-item.is-active .nav-icon { background: var(--nav-mobile-active-background); color: var(--nav-active-foreground); }
+  /* Use the desktop selection surface on the icon alone. */
+  .nav-item.is-active .nav-icon { background: var(--accent-soft); }
 }
 .gallery-selection input:checked + span { background: var(--control-accent); color: var(--on-control-accent); }
 .gallery-card input[type="checkbox"], .delete-image-choice input,
