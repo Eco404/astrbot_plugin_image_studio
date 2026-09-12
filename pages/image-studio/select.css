@@ -12,7 +12,8 @@ select.studio-select-native { position: absolute !important; inset: auto !import
 .studio-select.is-invalid { flex-wrap: wrap; }
 .studio-select.is-invalid .studio-select-trigger { border-color: var(--danger); }
 .studio-select.is-invalid .studio-select-validation { display: block; width: 100%; padding-top: 6px; color: var(--danger); font-size: 11px; line-height: 1.4; }
-.studio-select-menu { position: fixed; z-index: 50; box-sizing: border-box; min-width: 0; max-height: 300px; padding: 5px; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; touch-action: pan-y; border: 1px solid var(--line); border-radius: 10px; background: var(--topbar-glass); color: var(--text); box-shadow: 0 12px 30px color-mix(in srgb, var(--text) 14%, transparent), inset 0 1px 0 var(--line); backdrop-filter: blur(22px) saturate(112%); -webkit-backdrop-filter: blur(22px) saturate(112%); font: inherit; font-size: 13px; line-height: 1.45; letter-spacing: 0; scrollbar-width: thin; animation: studio-select-appear 100ms ease; }
+.studio-select-menu { position: fixed; z-index: 50; display: flex; flex-direction: column; box-sizing: border-box; min-width: 0; max-height: 300px; padding: 0; overflow: hidden; overscroll-behavior: contain; touch-action: pan-y; border: 1px solid var(--line); border-radius: 10px; background: var(--glass); color: var(--text); box-shadow: 0 12px 30px color-mix(in srgb, var(--text) 14%, transparent), inset 0 1px 0 var(--line); backdrop-filter: blur(var(--glass-blur, 22px)) saturate(var(--glass-saturation, 115%)); -webkit-backdrop-filter: blur(var(--glass-blur, 22px)) saturate(var(--glass-saturation, 115%)); font: inherit; font-size: 13px; line-height: 1.45; letter-spacing: 0; animation: studio-select-appear 100ms ease; }
+.studio-select-options { flex: 1 1 auto; min-height: 0; padding: 5px; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; touch-action: pan-y; scrollbar-width: thin; }
 .studio-select-option { display: grid; grid-template-columns: 20px minmax(0, 1fr); align-items: center; gap: 7px; min-height: 36px; padding: 7px 9px; border-radius: 7px; color: var(--text); cursor: pointer; }
 .studio-select-option.is-active { background: var(--surface-hover); }
 .studio-select-option[aria-selected="true"] { background: var(--accent-soft); color: var(--accent-strong); }
@@ -24,12 +25,11 @@ select.studio-select-native { position: absolute !important; inset: auto !import
 .studio-select-mark svg { display: block; }
 .studio-select-option[aria-selected="true"] .studio-select-mark { visibility: visible; }
 .studio-select-menu.is-multiple .studio-select-mark { width: 17px; height: 17px; visibility: visible; border: 1px solid var(--line); border-radius: 5px; background: var(--surface); }
-.studio-select-menu.is-multiple { scroll-padding-top: 50px; }
 .studio-select-menu.is-multiple .studio-select-mark svg { width: 13px; height: 13px; visibility: hidden; }
 .studio-select-menu.is-multiple [aria-selected="true"] .studio-select-mark { border-color: var(--control-accent, var(--accent)); background: var(--control-accent, var(--accent)); color: var(--on-control-accent, var(--surface)); }
 .studio-select-menu.is-multiple [aria-selected="true"] .studio-select-mark svg { visibility: visible; }
-.studio-select-actions { position: sticky; top: -5px; z-index: 1; display: flex; align-items: center; gap: 6px; margin: -5px -5px 5px; padding: 7px 9px; border-bottom: 1px solid var(--line); background: var(--surface); }
-.studio-select-actions button { min-height: 30px; padding: 4px 9px; border: 0; border-radius: 6px; background: transparent; color: var(--accent-strong); font: inherit; font-size: 12px; cursor: pointer; }
+.studio-select-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 4px; padding: 7px 6px; border-bottom: 1px solid var(--line); background: transparent; }
+.studio-select-actions button { min-height: 30px; padding: 4px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--accent-strong); font: inherit; font-size: 12px; white-space: nowrap; cursor: pointer; }
 .studio-select-actions button:hover:not(:disabled) { background: var(--accent-soft); }
 .studio-select-actions button:disabled { color: var(--muted); opacity: .55; cursor: default; }
 .studio-select-group, .studio-select-empty { padding: 8px 10px; color: var(--muted); font-size: 12px; }
@@ -50,7 +50,6 @@ select.studio-select-native { position: absolute !important; inset: auto !import
   .gallery-toolbar > .studio-select { flex-basis: 42%; }
   .studio-select-option { min-height: 44px; padding-block: 10px; }
   .studio-select-actions button { min-height: 40px; }
-  .studio-select-menu.is-multiple { scroll-padding-top: 60px; }
   .copy-format-picker > .studio-select { position: absolute; inset: 0; width: var(--detail-button-size, 44px); max-width: var(--detail-button-size, 44px); height: var(--detail-button-size, 44px); }
   .copy-format-picker .studio-select-trigger { width: var(--detail-button-size, 44px); height: var(--detail-button-size, 44px); min-height: var(--detail-button-size, 44px); padding: 0; border: 0; border-radius: 50%; background: transparent; box-shadow: none; }
   .copy-format-picker .studio-select-value, .copy-format-picker .studio-select-chevron { display: none; }

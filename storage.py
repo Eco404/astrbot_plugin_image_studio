@@ -3021,11 +3021,14 @@ class GenerationStore:
     @staticmethod
     def _gallery_filters(filters: dict[str, Any]) -> tuple[str, list[Any]]:
         where: list[str] = [
+            "EXISTS (SELECT 1 FROM generation_images visible_image "
+            "JOIN image_assets visible_asset ON visible_asset.id=visible_image.asset_id "
+            "WHERE visible_image.generation_id=g.id)",
             "(g.source != 'external' OR EXISTS (SELECT 1 FROM external_records e "
             "JOIN external_sources s ON s.id=e.source_id WHERE e.generation_id=g.id "
             "AND s.enabled=1 AND e.available=1 AND NOT EXISTS (SELECT 1 FROM generation_images local_image "
             "JOIN generations local_generation ON local_generation.id=local_image.generation_id "
-            "WHERE local_image.asset_id=e.asset_id AND local_generation.source != 'external')))"
+            "WHERE local_image.asset_id=e.asset_id AND local_generation.source != 'external')))",
         ]
         args: list[Any] = []
         query = str(filters.get("query") or "").strip()[:240]
@@ -3063,14 +3066,18 @@ class GenerationStore:
             if not values:
                 where.append("0 = 1")
                 continue
-            column = f"g.{key}"
+            column = f"trim(g.{key})"
             if key == "generation_engine":
                 values = list(
                     dict.fromkeys(_canonical_engine(value) for value in values)
                 )
-                if "novelai" in values:
-                    values.append("nai")
-                column = "CASE WHEN lower(trim(g.generation_engine)) IN ('nai', 'novelai') THEN lower(trim(g.generation_engine)) ELSE g.generation_engine END"
+                column = (
+                    "CASE WHEN lower(trim(g.generation_engine)) IN ('nai', 'novelai') "
+                    "THEN 'novelai' ELSE COALESCE(NULLIF(trim(g.generation_engine), ''), 'unknown') END"
+                )
+            elif key in {"mode", "source"}:
+                values = list(dict.fromkeys(value or "unknown" for value in values))
+                column = f"COALESCE(NULLIF(trim(g.{key}), ''), 'unknown')"
             where.append(f"{column} IN ({','.join('?' for _ in values)})")
             args.extend(values)
         if filters.get("_merge_target_engine"):
@@ -3089,18 +3096,91 @@ class GenerationStore:
                 "(g.original_prompt LIKE ? OR g.final_prompt LIKE ? OR g.provider_name LIKE ? OR g.model LIKE ? "
                 "OR g.platform_name LIKE ? OR g.platform_id LIKE ? OR g.group_id LIKE ? "
                 "OR g.group_name LIKE ? OR g.user_id LIKE ? OR g.user_name LIKE ? "
-                "OR g.search_text LIKE ? OR g.generation_engine LIKE ?)"
+                "OR g.search_text LIKE ? OR g.generation_engine LIKE ? "
+                "OR g.context_type LIKE ? "
+                "OR (CASE g.context_type WHEN 'group' THEN '群聊' WHEN 'private' THEN '私聊' ELSE '' END) LIKE ? "
+                "OR (CASE lower(g.platform_name) WHEN 'aiocqhttp' THEN 'OneBot v11 OneBotV11' "
+                "WHEN 'qq_official' THEN 'QQ 官方 QQ官方' ELSE '' END) LIKE ?)"
             )
             token = f"%{query}%"
-            args.extend([token] * 12)
+            args.extend([token] * 15)
         clause = f"WHERE {' AND '.join(where)}" if where else ""
         return clause, args
+
+    @staticmethod
+    def _gallery_order(filters: dict[str, Any]) -> tuple[str, str]:
+        sort = filters.get("sort", "created")
+        if sort not in ("created", "latest_content"):
+            raise ValueError("画廊排序方式必须是 created 或 latest_content")
+        if sort == "created":
+            return "", "g.created_at"
+        # Calculate each group's image time once, including for the flat image
+        # cursor. Asset creation times cannot be used: content hashes are shared
+        # across records. External records already use their selected source time.
+        image_time = "json_extract(latest_image.supplemental_json, '$.generated_at')"
+        join = (
+            "LEFT JOIN (SELECT latest_image.generation_id, MAX(CASE "
+            "WHEN latest_generation.source = 'external' THEN latest_generation.created_at "
+            "WHEN json_type(latest_image.supplemental_json, '$.generated_at') IN ('integer', 'real') "
+            f"AND {image_time} >= 0 AND {image_time} < 253402300800 THEN {image_time} "
+            "ELSE latest_generation.created_at END) AS sort_time "
+            "FROM generation_images latest_image JOIN generations latest_generation "
+            "ON latest_generation.id=latest_image.generation_id "
+            "GROUP BY latest_image.generation_id) gallery_order ON gallery_order.generation_id=g.id "
+        )
+        return join, "COALESCE(gallery_order.sort_time, g.created_at)"
+
+    @staticmethod
+    def _gallery_facet_order(value: str) -> tuple[bool, str]:
+        return (
+            value.strip().lower()
+            in {"", "unknown", "unspecified", "未知", "未指定", "未记录"},
+            value.casefold(),
+        )
+
+    def _gallery_facets_sync(self, conn: sqlite3.Connection) -> dict[str, Any]:
+        # Facets describe the entire visible gallery, not the current selection.
+        # Disabled/duplicate external entries and image-less records must not
+        # keep otherwise empty options alive.
+        clause, args = self._gallery_filters({})
+        rows = conn.execute(
+            "SELECT DISTINCT g.provider_id, g.provider_name, g.mode, g.source, g.generation_engine "
+            f"FROM generations g {clause}",
+            args,
+        ).fetchall()
+        providers: dict[str, str] = {}
+        modes, sources, engines = set(), set(), set()
+        for row in rows:
+            provider_id = str(row["provider_id"] or "").strip()
+            name = str(row["provider_name"] or "").strip() if provider_id else "未指定"
+            providers[provider_id] = max(providers.get(provider_id, ""), name)
+            modes.add(str(row["mode"] or "").strip() or "unknown")
+            sources.add(str(row["source"] or "").strip() or "unknown")
+            engines.add(_canonical_engine(row["generation_engine"]))
+        return {
+            "providers": [
+                {"id": provider_id, "name": name or provider_id}
+                for provider_id, name in sorted(
+                    providers.items(),
+                    key=lambda item: (
+                        self._gallery_facet_order(item[0])[0]
+                        or self._gallery_facet_order(item[1])[0],
+                        (item[1] or item[0]).casefold(),
+                        item[0],
+                    ),
+                )
+            ],
+            "modes": sorted(modes, key=self._gallery_facet_order),
+            "sources": sorted(sources, key=self._gallery_facet_order),
+            "generation_engines": sorted(engines, key=self._gallery_facet_order),
+        }
 
     def _list_generations_sync(self, filters: dict[str, Any]) -> dict[str, Any]:
         revision = self._gallery_revision_sync()
         limit = max(1, min(60, _as_int(filters.get("limit"), 24)))
         offset = max(0, _as_int(filters.get("offset"), 0))
         clause, args = self._gallery_filters(filters)
+        order_join, sort_time = self._gallery_order(filters)
         with self._connect() as conn:
             total = int(
                 conn.execute(
@@ -3108,7 +3188,7 @@ class GenerationStore:
                 ).fetchone()[0]
             )
             rows = conn.execute(
-                f"SELECT g.id, g.created_at, g.source, g.mode, g.provider_id, g.provider_name, "
+                f"SELECT g.id, g.created_at, {sort_time} AS sort_time, g.source, g.mode, g.provider_id, g.provider_name, "
                 f"g.model, g.original_prompt, g.elapsed_ms, g.context_type, g.platform_name, "
                 f"g.platform_id, g.group_id, g.group_name, g.user_id, g.user_name, "
                 f"g.is_favorite, g.cleanup_protected_until, g.generation_engine, g.generated_at, "
@@ -3120,23 +3200,10 @@ class GenerationStore:
                 f"AND i.id = (SELECT cover.id FROM generation_images cover WHERE cover.generation_id = g.id ORDER BY cover.ordinal, cover.id LIMIT 1) "
                 f"JOIN image_assets a ON a.id = i.asset_id "
                 f"LEFT JOIN image_thumbnails t ON t.asset_id = a.id "
-                f"{clause} ORDER BY g.created_at DESC, g.id DESC LIMIT ? OFFSET ?",
+                f"{order_join}{clause} ORDER BY sort_time DESC, g.created_at DESC, g.id DESC LIMIT ? OFFSET ?",
                 [*args, limit, offset],
             ).fetchall()
-            provider_options = [
-                dict(row)
-                for row in conn.execute(
-                    "SELECT provider_id AS id, MAX(provider_name) AS name FROM generations WHERE provider_id != '' GROUP BY provider_id ORDER BY name"
-                ).fetchall()
-            ]
-            engines = sorted(
-                {
-                    _canonical_engine(row[0])
-                    for row in conn.execute(
-                        "SELECT DISTINCT generation_engine FROM generations ORDER BY generation_engine"
-                    ).fetchall()
-                }
-            )
+            facets = self._gallery_facets_sync(conn)
         items = [self._gallery_item(dict(row)) for row in rows]
         return {
             "items": items,
@@ -3144,12 +3211,7 @@ class GenerationStore:
             "total": total,
             "offset": offset,
             "limit": limit,
-            "filters": {
-                "providers": provider_options,
-                "modes": ["text2img", "img2img", "unknown"],
-                "sources": ["webui", "command", "llm_tool", "import", "external"],
-                "generation_engines": engines,
-            },
+            "filters": facets,
         }
 
     async def generation_detail(
@@ -3419,9 +3481,10 @@ class GenerationStore:
         self, filters: dict[str, Any]
     ) -> list[dict[str, Any]]:
         clause, args = self._gallery_filters(filters)
+        order_join, sort_time = self._gallery_order(filters)
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT g.id AS generation_id, g.created_at, g.source, "
+                f"SELECT g.id AS generation_id, g.created_at, {sort_time} AS sort_time, g.source, "
                 "COALESCE(json_extract(i.supplemental_json, '$.mode'), g.mode) AS mode, g.provider_id, "
                 "COALESCE(json_extract(i.supplemental_json, '$.model'), g.model) AS model, "
                 "i.id AS image_id, i.ordinal, a.mime_type, a.size_bytes, "
@@ -3431,7 +3494,7 @@ class GenerationStore:
                 "FROM generations g JOIN generation_images i ON i.generation_id = g.id "
                 "JOIN image_assets a ON a.id = i.asset_id "
                 "LEFT JOIN image_thumbnails t ON t.asset_id = a.id "
-                f"{clause} ORDER BY g.created_at DESC, g.id DESC, i.ordinal ASC",
+                f"{order_join}{clause} ORDER BY sort_time DESC, g.created_at DESC, g.id DESC, i.ordinal ASC, i.id ASC",
                 args,
             ).fetchall()
         used_stems: dict[str, set[str]] = {}
@@ -4044,6 +4107,7 @@ class GenerationStore:
             **self._external_display_sync(row["id"], row["source"]),
             "id": row["id"],
             "created_at": row["created_at"],
+            "sort_time": row["sort_time"],
             "source": row["source"],
             "generation_engine": _canonical_engine(row["generation_engine"]),
             "is_favorite": bool(row["is_favorite"]),
@@ -4707,7 +4771,7 @@ def _validate_import_overrides(overrides: Any) -> None:
 
 
 def _canonical_engine(value: Any) -> str:
-    engine = str(value or "unknown").strip()
+    engine = str(value or "unknown").strip() or "unknown"
     return "novelai" if engine.lower() in {"nai", "novelai"} else engine
 
 

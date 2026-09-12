@@ -44,6 +44,12 @@ from .config import (
     save_studio_settings,
 )
 from .external_gallery import ExternalGalleryManager
+from .gallery_preferences import (
+    GALLERY_PREFERENCES_COOKIE,
+    decode_gallery_preferences,
+    encode_gallery_preferences,
+    merge_gallery_preferences,
+)
 from .models import ImageProvider, InvocationSource, ReferenceImage
 from .image_metadata import parse_metadata_fields
 from .parameter_exchange import export_parameters, resolve_parameters
@@ -205,6 +211,18 @@ class ImageStudioPlugin(Star):
                 self._api_set_appearance,
                 ["POST"],
                 "Image Studio: save browser appearance cookie",
+            ),
+            (
+                "gallery/preferences",
+                self._api_get_gallery_preferences,
+                ["GET"],
+                "Image Studio: browser gallery preferences",
+            ),
+            (
+                "gallery/preferences",
+                self._api_set_gallery_preferences,
+                ["POST"],
+                "Image Studio: save browser gallery preferences",
             ),
             (
                 "imports/inspect",
@@ -468,6 +486,37 @@ class ImageStudioPlugin(Star):
         response.set_cookie(
             APPEARANCE_COOKIE,
             encode_appearance_cookie(settings),
+            max_age=365 * 24 * 60 * 60,
+            httponly=True,
+            samesite="lax",
+            path="/",
+        )
+        return response
+
+    async def _api_get_gallery_preferences(self) -> Any:
+        value = decode_gallery_preferences(
+            web_request.cookies.get(GALLERY_PREFERENCES_COOKIE)
+        )
+        response = json_response(value)
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    async def _api_set_gallery_preferences(self) -> Any:
+        try:
+            current = decode_gallery_preferences(
+                web_request.cookies.get(GALLERY_PREFERENCES_COOKIE)
+            )
+            settings = merge_gallery_preferences(
+                current, await web_request.json(default={})
+            )
+            encoded = encode_gallery_preferences(settings)
+        except (ValueError, TypeError, RecursionError) as exc:
+            return error_response(str(exc), status_code=400)
+        response = json_response(settings)
+        response.headers["Cache-Control"] = "no-store"
+        response.set_cookie(
+            GALLERY_PREFERENCES_COOKIE,
+            encoded,
             max_age=365 * 24 * 60 * 60,
             httponly=True,
             samesite="lax",
@@ -1375,6 +1424,7 @@ class ImageStudioPlugin(Star):
             "source": web_request.query.get("source", ""),
             "generation_engine": web_request.query.get("generation_engine", ""),
             "favorite": web_request.query.get("favorite", ""),
+            "sort": web_request.query.get("sort", "created"),
             "limit": web_request.query.get("limit", 24),
             "offset": web_request.query.get("offset", 0),
         }

@@ -42,6 +42,21 @@ html { scroll-padding-top: 112px; scroll-padding-bottom: calc(100px + env(safe-a
 .topbar.is-selection-replaced { transform: none; opacity: var(--selection-title-opacity, 1); filter: blur(var(--selection-title-blur, 0px)); transition: none; animation: none; }
 .gallery-pagination span { min-width: 140px; }
 .gallery-pagination button { min-width: 40px; }
+.gallery-pagination .gallery-page-label { min-width: 150px; min-height: 40px; padding: 6px 8px; border: 0; border-radius: 8px; background: transparent; box-shadow: none; color: var(--muted); font: inherit; font-size: 12px; text-align: center; font-variant-numeric: tabular-nums; }
+.gallery-page-label:hover, .gallery-page-label[aria-expanded="true"] { background: var(--surface-hover); }
+.gallery-page-label:focus-visible, .gallery-page-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.gallery-page-picker { position: absolute; left: 0; right: 0; bottom: calc(100% + 8px); display: flex; align-items: center; gap: 12px; min-width: 0; padding: 10px; border: 1px solid var(--line); border-radius: 12px; background: var(--glass); color: var(--text); box-shadow: var(--shadow); backdrop-filter: blur(22px) saturate(115%); -webkit-backdrop-filter: blur(22px) saturate(115%); }
+.gallery-page-cards { flex: 1 1 auto; min-width: 0; overflow-x: auto; overflow-y: hidden; overscroll-behavior: contain; touch-action: pan-x; padding-block: 3px; scrollbar-width: thin; }
+#galleryPageTrack { position: relative; height: 44px; min-width: 100%; }
+.gallery-page-card { position: absolute; top: 0; display: grid; place-items: center; width: 44px; min-width: 44px; height: 44px; padding: 0; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); color: var(--text); font: inherit; font-size: 12px; font-variant-numeric: tabular-nums; }
+.gallery-page-card[aria-current="page"] { border-color: var(--control-accent, var(--accent)); background: var(--control-accent, var(--accent)); color: var(--on-control-accent, white); }
+.gallery-page-jump { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; margin: 0; color: var(--muted); font-size: 12px; }
+.gallery-page-jump input { width: 74px; height: 38px; min-height: 38px; }
+.gallery-page-jump button { min-height: 38px; }
+.appearance-gallery-sort { padding-top: 16px; border-top: 1px solid var(--line); }
+#externalSourcesPanel > .section-heading { flex-flow: row nowrap; align-items: flex-start; }
+#externalSourcesPanel > .section-heading > div { flex: 1 1 auto; min-width: 0; }
+#externalSourcesPanel #addExternalSource { flex: 0 0 auto; align-self: flex-start; }
 .gallery-toolbar .search-field { flex: 2 1 240px; }
 .generation-mode-row { display: flex; align-items: center; gap: 12px; }
 .generation-mode-row > .studio-icon-button { flex: 0 0 40px; width: 40px; height: 40px; }
@@ -118,6 +133,7 @@ html { scroll-padding-top: 112px; scroll-padding-bottom: calc(100px + env(safe-a
 .settings-savebar { margin: 0; }
 .settings-savebar .inline-error { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
 #settingsDirtyStatus { flex: 0 1 auto; color: var(--warning); font-size: 12px; white-space: nowrap; }
+#settingsDirtyStatus.is-saved { color: var(--success); }
 #saveSettingsButton.is-dirty { color: var(--warning); background: var(--warning-soft); box-shadow: var(--warning-shadow); }
 .import-toolbar { display: flex; gap: 14px; align-items: center; margin-bottom: 16px; }
 .import-toolbar { flex-wrap: wrap; }
@@ -225,6 +241,8 @@ html { scroll-padding-top: 112px; scroll-padding-bottom: calc(100px + env(safe-a
 .studio-modal-error:not(:empty) { padding-bottom: 12px; }
 .studio-modal.is-merge-picker { width: min(860px, 100%); }
 .studio-modal.is-import-editor { width: min(1240px, 100%); color: var(--text); }
+.studio-modal.is-external-editor { background: var(--glass); color: var(--text); backdrop-filter: blur(24px) saturate(115%); -webkit-backdrop-filter: blur(24px) saturate(115%); }
+.studio-modal.is-external-editor > footer { background: var(--detail-footer-tint); backdrop-filter: none; -webkit-backdrop-filter: none; }
 .import-edit-batch-summary { margin-bottom: 16px; font-size: 12px; color: var(--muted); }
 .import-edit-batch-summary > summary { cursor: pointer; min-height: 40px; align-content: center; }
 .is-import-editor .studio-modal-body { scroll-padding-block: 16px; }
@@ -284,7 +302,13 @@ html { scroll-padding-top: 112px; scroll-padding-bottom: calc(100px + env(safe-a
   .brand { gap: 6px; }
   .brand strong { font-size: 12px; }
   .brand span { font-size: 10px; }
-  .gallery-toolbar .search-field { flex-basis: 100%; min-width: 0; }
+  .gallery-toolbar { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: end; }
+  .gallery-toolbar .search-field { grid-column: 1 / -1; grid-row: 1; min-width: 0; }
+  .gallery-toolbar .search-input-wrap { margin-right: 104px; }
+  .gallery-toolbar .search-input-wrap > input, .gallery-toolbar .search-input-wrap > button { height: 44px; min-height: 44px; }
+  .gallery-toolbar > .gallery-tool-button { grid-column: 2; grid-row: 1; justify-self: end; align-self: end; }
+  .gallery-toolbar > #galleryFavorite { margin-right: 52px; }
+  .gallery-toolbar > .studio-select { width: 100%; }
   .gallery-toolbar select { flex-basis: 42%; }
   .gallery-selection > span { width: 28px; height: 28px; }
   .gallery-source-label { right: 7px; top: 8px; padding: 4px 6px; }
@@ -293,6 +317,10 @@ html { scroll-padding-top: 112px; scroll-padding-bottom: calc(100px + env(safe-a
   .floatingbar { bottom: max(10px, env(safe-area-inset-bottom)); padding: 7px 9px; gap: 6px; }
   .gallery-pagination { width: 100%; justify-content: space-between; gap: 6px; }
   .gallery-pagination span { min-width: 0; }
+  .gallery-floatingbar .gallery-pagination { flex: 1 1 100%; }
+  .gallery-pagination .gallery-page-label { flex: 1 1 auto; min-width: 0; min-height: 44px; padding-inline: 2px; }
+  .gallery-page-picker { padding: 7px 9px; }
+  .gallery-page-jump { display: none; }
   .responsive-command { min-width: 44px; width: 44px; height: 44px; min-height: 44px; padding: 0; border-radius: 50%; }
   .responsive-command > span { display: none; }
   .selection-bar { gap: 5px; }

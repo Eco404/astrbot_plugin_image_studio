@@ -17,6 +17,13 @@ async function verify(browser, name, width) {
   try {
     const initial = await (await page.request.get(`${base}/astrbot_plugin_image_studio/gallery/list?limit=60`)).json();
     assert.ok(initial.total > 24);
+    assert.equal(initial.items.length, initial.total, "the fixture must fit one verification response");
+    const facetValues = {
+      galleryProvider: initial.filters.providers.map(item => item.id),
+      galleryMode: initial.filters.modes,
+      gallerySource: initial.filters.sources,
+      galleryEngine: initial.filters.generation_engines,
+    };
     await page.goto(base);
     const frame = page.frameLocator("#studio");
     await frame.locator("#modelChoice:not(:disabled)").waitFor();
@@ -29,7 +36,17 @@ async function verify(browser, name, width) {
       const defaults = await frame.locator(`#${id}`).evaluate(select => ({ multiple: select.multiple, all: [...select.options].every(option => option.selected), label: select.dataset.allLabel }));
       assert.ok(defaults.multiple && defaults.all, `${id} must default to all selected`);
       assert.equal(await trigger(id).locator(".studio-select-value").textContent(), defaults.label);
+      assert.deepEqual(await selected(id), facetValues[id], `${id} must contain only categories backed by visible gallery records`);
+      const entries = await frame.locator(`#${id}`).evaluate(select => [...select.options].map(option => [option.value, option.label]));
+      let reachedUnknown = false;
+      for (const [value, label] of entries) {
+        const unknown = !value || ["unknown", "unspecified"].includes(value) || /^(未知|未指定)/.test(label);
+        assert.ok(!reachedUnknown || unknown, `${id}: known options must precede unknown/unspecified`);
+        reachedUnknown ||= unknown;
+      }
     }
+    assert.ok(!facetValues.galleryProvider.includes(""), "harness records all have providers; no phantom unspecified provider");
+    assert.ok(!facetValues.gallerySource.includes("import") && !facetValues.gallerySource.includes("external"), "unpopulated import/external categories must be hidden");
 
     async function change(id, action, values) {
       if (await trigger(id).getAttribute("aria-expanded") !== "true") await trigger(id).click();
@@ -56,14 +73,12 @@ async function verify(browser, name, width) {
 
     await frame.locator("#galleryNext").click();
     await frame.locator("#galleryPageLabel").filter({ hasText: "第 2" }).waitFor();
-    let payload = await toggle("gallerySource", "webui", ["command", "llm_tool", "import", "external"]);
+    const remainingSources = facetValues.gallerySource.filter(source => source !== "webui");
+    let payload = await toggle("gallerySource", "webui", remainingSources);
     assert.equal(payload.total, initial.items.filter(item => item.source !== "webui").length);
-    await toggle("gallerySource", "import", ["command", "llm_tool", "external"]);
     await page.screenshot({ path: path.join(output, `${name}-sources.png`) });
     await close("gallerySource");
 
-    payload = await toggle("galleryProvider", "", ["nai", "natural"]);
-    assert.equal(payload.total, initial.items.filter(item => item.source !== "webui").length);
     payload = await toggle("galleryProvider", "nai", ["natural"]);
     const expected = initial.items.filter(item => item.source !== "webui" && item.provider_id === "natural");
     assert.equal(payload.total, expected.length);
@@ -72,13 +87,13 @@ async function verify(browser, name, width) {
     const refresh = page.waitForResponse(response => response.url().includes("/gallery/list"));
     await frame.locator("#galleryRefresh").click(); await refresh;
     assert.deepEqual(await selected("galleryProvider"), ["natural"]);
-    assert.deepEqual(await selected("gallerySource"), ["command", "llm_tool", "external"]);
+    assert.deepEqual(await selected("gallerySource"), remainingSources);
 
     const sequenceResponse = page.waitForResponse(response => response.url().includes("/gallery/image-sequence"));
     await frame.locator(".gallery-card .gallery-info").first().click();
     const sequence = await sequenceResponse;
     const sequenceParams = new URL(sequence.url()).searchParams;
-    assert.equal(sequenceParams.get("sources"), '["command","llm_tool","external"]');
+    assert.equal(sequenceParams.get("sources"), JSON.stringify(remainingSources));
     assert.equal(sequenceParams.get("provider_ids"), '["natural"]');
     const sequenceItems = (await sequence.json()).items;
     assert.deepEqual([...new Set(sequenceItems.map(item => item.generation_id))], expected.map(item => item.id));
@@ -88,17 +103,19 @@ async function verify(browser, name, width) {
     assert.equal(payload.total, 0);
     await frame.locator("#galleryEmpty").filter({ hasText: "没有符合当前筛选条件" }).waitFor();
     await page.screenshot({ path: path.join(output, `${name}-none.png`) });
-    payload = await toggle("galleryMode", "text2img", ["text2img"]);
+    assert.deepEqual(facetValues.galleryMode, ["text2img"]);
+    payload = await toggle("galleryMode", "text2img", null);
     assert.equal(payload.total, expected.length);
-    await change("galleryMode", menu => menu.locator('[data-select-action="all"]').click(), null);
+    assert.equal(await menu("galleryMode").locator('[data-select-action="all"]').isDisabled(), true, "selecting the only real mode is already all");
     await close("galleryMode");
 
     await change("galleryEngine", menu => menu.locator('[data-select-action="clear"]').click(), []);
     payload = await toggle("galleryEngine", "openai_images", ["openai_images"]);
     assert.equal(payload.total, expected.length);
-    payload = await toggle("galleryEngine", "novelai", ["novelai", "openai_images"]);
+    payload = await toggle("galleryEngine", "novelai", null);
     assert.equal(payload.total, expected.length);
-    await change("galleryEngine", menu => menu.locator('[data-select-action="all"]').click(), null);
+    assert.deepEqual(await selected("galleryEngine"), facetValues.galleryEngine);
+    assert.equal(await menu("galleryEngine").locator('[data-select-action="all"]').isDisabled(), true, "selecting every populated engine is already all");
     await close("galleryEngine");
     await change("galleryProvider", menu => menu.locator('[data-select-action="all"]').click(), null);
     await close("galleryProvider");
@@ -118,11 +135,29 @@ async function verify(browser, name, width) {
     await frame.locator('#galleryProvider option[value="fresh-provider"]').waitFor({ state: "attached" });
     assert.ok((await selected("galleryProvider")).includes("fresh-provider"));
     assert.ok((await selected("galleryEngine")).includes("mixed"));
-    await toggle("galleryProvider", "fresh-provider", ["", "nai", "natural"]);
+    await toggle("galleryProvider", "fresh-provider", facetValues.galleryProvider);
     await close("galleryProvider");
     const again = page.waitForResponse(response => response.url().includes("/gallery/list"));
     await frame.locator("#galleryRefresh").click(); await again;
-    assert.deepEqual(await selected("galleryProvider"), ["", "nai", "natural"]);
+    assert.deepEqual(await selected("galleryProvider"), facetValues.galleryProvider);
+    await page.unroute("**/gallery/list?*");
+    const removedOptions = page.waitForResponse(response => response.url().includes("/gallery/list"));
+    await frame.locator("#galleryRefresh").click();
+    assert.equal(new URL((await removedOptions).url()).searchParams.get("provider_ids"), JSON.stringify(facetValues.galleryProvider), "removing a facet must not silently promote an explicit subset to all");
+    await frame.locator('#galleryProvider option[value="fresh-provider"]').waitFor({ state: "detached" });
+    assert.deepEqual(await selected("galleryProvider"), facetValues.galleryProvider);
+    await page.route("**/gallery/list?*", async route => {
+      const response = await route.fetch(); const body = await response.json();
+      body.filters.providers.push({ id: "later-provider", name: "后来发现的服务商" });
+      await route.fulfill({ response, json: body });
+    });
+    const laterOptions = page.waitForResponse(response => response.url().includes("/gallery/list"));
+    await frame.locator("#galleryRefresh").click(); await laterOptions;
+    await frame.locator('#galleryProvider option[value="later-provider"]').waitFor({ state: "attached" });
+    assert.deepEqual(await selected("galleryProvider"), facetValues.galleryProvider, "an explicit subset must still exclude later categories after it temporarily covered all visible options");
+    await change("galleryProvider", menu => menu.locator('[data-select-action="all"]').click(), null);
+    assert.ok((await selected("galleryProvider")).includes("later-provider"), "explicit all must include the newly discovered category");
+    await close("galleryProvider");
     await page.unroute("**/gallery/list?*");
     const inner = page.frames().find(frame => frame.url().includes("/ui/"));
     assert.ok(await inner.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1));

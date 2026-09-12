@@ -18,6 +18,9 @@
   const PROVIDER_QUOTA_TTL = 30_000;
   let providerQuotaTimer = 0;
   let galleryRequestRevision = 0;
+  const galleryFilterFields = [["galleryProvider", "provider_ids"], ["galleryMode", "modes"], ["gallerySource", "sources"], ["galleryEngine", "generation_engines"]];
+  const galleryFilterSelections = new Map();
+  let gallerySort = "created";
   let detailRequestRevision = 0;
   let detailFilmstripScrollFrame = 0;
   let detailBackdropSource = "";
@@ -511,6 +514,7 @@
   }
 
   async function loadGallery(page = state.galleryPage) {
+    library.closeGalleryPagePicker();
     if (state.view === "gallery") state.galleryLimit = library.galleryPageSize();
     const requestedPage = Math.max(0, Number.isFinite(Number(page)) ? Math.floor(Number(page)) : 0);
     const revision = ++galleryRequestRevision;
@@ -535,33 +539,36 @@
   }
 
   function galleryFilters() {
-    const filters = { query: els.gallerySearch.value, favorite: $("galleryFavorite").value };
-    for (const [id, key] of [["galleryProvider", "provider_ids"], ["galleryMode", "modes"], ["gallerySource", "sources"], ["galleryEngine", "generation_engines"]]) {
-      const select = $(id);
-      const values = Array.from(select.selectedOptions, (option) => option.value);
-      if (values.length !== select.options.length) filters[key] = JSON.stringify(values);
+    const filters = { query: els.gallerySearch.value, favorite: $("galleryFavorite").value, sort: gallerySort };
+    for (const [id, key] of galleryFilterFields) {
+      const selection = galleryFilterSelections.get(id);
+      if (selection?.mode === "values") filters[key] = JSON.stringify(selection.values);
     }
     return filters;
   }
 
   function updateGalleryFilterOptions(select, entries) {
+    // Facets describe all visible records. An absent category is removed from
+    // the menu, while explicit saved selections retain their filtering intent.
+    const unknown = ([value, label]) => !value || ["unknown", "unspecified"].includes(value) || /^(未知|未指定)/.test(label);
+    entries = Array.from(new Map(entries.map(([value, label]) => [String(value), [String(value), label]])).values()).sort((left, right) => Number(unknown(left)) - Number(unknown(right)));
     const previous = Array.from(select.options);
     if (JSON.stringify(previous.map((option) => [option.value, option.label])) === JSON.stringify(entries)) return;
-    const all = previous.every((option) => option.selected);
-    const selected = new Set(previous.filter((option) => option.selected).map((option) => option.value));
+    const selection = galleryFilterSelections.get(select.id) || { mode: "all" };
+    const all = selection.mode === "all";
+    const selected = new Set(selection.values || []);
     select.replaceChildren(...entries.map(([value, label]) => new Option(label, value, all, all || selected.has(value))));
     window.ImageStudioSelect?.refresh(select);
   }
 
   function renderGallery(payload) {
-    updateGalleryFilterOptions(els.galleryProvider, [["", "未指定服务商"], ...(payload.filters?.providers || []).map((item) => [item.id, item.name || item.id])]);
-    const engineSelect = $("galleryEngine");
-    const engines = new Set(Array.from(engineSelect.options, (option) => option.value));
-    for (const engine of payload.filters?.generation_engines || []) engines.add(engine === "nai" ? "novelai" : engine);
-    updateGalleryFilterOptions(engineSelect, Array.from(engines, (engine) => [engine, library.engineLabel(engine)]));
+    updateGalleryFilterOptions(els.galleryProvider, (payload.filters?.providers || []).map((item) => [item.id, item.name || item.id || "未指定服务商"]));
+    updateGalleryFilterOptions(els.galleryMode, (payload.filters?.modes || []).map(value => [value, library.modeLabel(value)]));
+    updateGalleryFilterOptions(els.gallerySource, (payload.filters?.sources || []).map(value => [value, sourceLabel(value)]));
+    updateGalleryFilterOptions($("galleryEngine"), (payload.filters?.generation_engines || []).map(value => [value === "nai" ? "novelai" : value, library.engineLabel(value)]));
     els.galleryEmpty.classList.toggle("is-hidden", state.galleryItems.length > 0);
     const filters = galleryFilters();
-    els.galleryEmpty.textContent = filters.query || filters.favorite || Object.keys(filters).length > 2 ? "没有符合当前筛选条件的图片。" : "画廊中还没有保留的生成记录。";
+    els.galleryEmpty.textContent = filters.query || filters.favorite || Object.keys(filters).length > 3 ? "没有符合当前筛选条件的图片。" : "画廊中还没有保留的生成记录。";
     const existing = new Map(Array.from(els.galleryGrid.children, (card) => [card.dataset.galleryId, card]));
     const wanted = new Set(state.galleryItems.map((item) => item.id));
     for (const [id, card] of existing) if (!wanted.has(id)) card.remove();
@@ -2421,6 +2428,7 @@
   function updateSettingsDirty() {
     const dirty = !!state.settings && !!settingsBaseline && (settingsFingerprint(settingsDraft()) !== settingsBaseline || !!$("settingsView").querySelector("input:invalid, textarea:invalid, select:invalid"));
     els.saveSettingsButton.classList.toggle("is-dirty", dirty); $("settingsDirtyStatus").textContent = dirty ? "有未保存的更改" : state.settings ? "已保存" : "";
+    $("settingsDirtyStatus").classList.toggle("is-saved", !dirty && !!state.settings);
     renderStorageQuotas();
   }
 
@@ -2482,6 +2490,40 @@
   function bindEvents() {
     if (eventsBound) return;
     eventsBound = true;
+    for (const [id] of galleryFilterFields) {
+      const select = $(id);
+      const selection = window.ImageStudioSelect?.getGalleryDefault(id) || { mode: "all" };
+      galleryFilterSelections.set(id, selection);
+      for (const option of select.options) option.selected = selection.mode === "all" || selection.values.includes(option.value);
+      // Register before other change handlers can issue a gallery request.
+      select.addEventListener("change", () => {
+        const values = Array.from(select.selectedOptions, option => option.value);
+        galleryFilterSelections.set(id, select.options.length && values.length === select.options.length ? { mode: "all" } : { mode: "values", values });
+      });
+    }
+    window.addEventListener("image-studio-gallery-default-saved", event => {
+      const { id, selection } = event.detail || {};
+      if (galleryFilterSelections.has(id) && selection && event.detail.selectionUnchanged !== false) {
+        galleryFilterSelections.set(id, selection);
+        if (state.view === "gallery") void loadGallery(0);
+      }
+      showNotice("已设为此浏览器的默认筛选。", "success");
+    });
+    window.addEventListener("image-studio-gallery-default-error", event => showNotice(event.detail?.message || "默认筛选保存失败。", "error"));
+    const bindGallerySort = () => {
+      const select = $("gallerySort");
+      if (!select || select.dataset.bound) return;
+      select.dataset.bound = "true"; select.value = gallerySort;
+      select.addEventListener("change", () => {
+        gallerySort = select.value === "latest_content" ? "latest_content" : "created";
+        void window.ImageStudioGalleryPreferences.setSort(gallerySort).catch(() => showNotice("排序已应用，但浏览器未能保存该设置。", "error"));
+        invalidateBrowseCache(); state.galleryPage = 0;
+        if (state.view === "gallery") void loadGallery(0);
+      });
+      window.ImageStudioSelect?.refresh(select);
+    };
+    bindGallerySort();
+    window.addEventListener("image-studio-display-settings-ready", bindGallerySort);
     library.bind();
     const refreshQuota = () => refreshProviderQuota();
     providerQuotaTimer = window.setInterval(refreshQuota, PROVIDER_QUOTA_TTL);
@@ -2513,6 +2555,10 @@
   const library = window.ImageStudioLibrary({ state, escape, apiGet, apiPost, bridge, showNotice, errorMessage, formatDate, formatBytes, sourceLabel, syncPageScrollLock, switchView, requestParameters, loadGallery, clearGallerySelection, openDetail, closeDetail, reproduce, applyDraft, useDataUrlAsReference, useGalleryImageAsReference, ensureDetailMetadata, ensureDetailPreview, getImageMedia, cacheImageMedia, loadImageMedia, checkGalleryAction });
 
   async function start() {
+    try {
+      await window.ImageStudioGalleryPreferences.ready(await bridge());
+      gallerySort = window.ImageStudioGalleryPreferences.getSort();
+    } catch { showNotice("未能读取此浏览器的画廊偏好，暂用默认显示。", "error"); }
     bindEvents();
     try { await bootstrap(); }
     catch (error) { const message = errorMessage(error, "页面初始化失败"); els.runtimeStatus.textContent = "页面初始化失败"; showNotice(message, "error"); }

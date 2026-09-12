@@ -275,7 +275,7 @@
     panel = document.getElementById("appearanceSettings");
     if (!panel) return;
     panel.setAttribute("aria-labelledby", "appearanceTitle");
-    panel.innerHTML = `<div class="section-heading appearance-heading"><h2 id="appearanceTitle">主题</h2><button type="button" class="quiet-button appearance-reset" aria-expanded="false" aria-controls="appearanceResetConfirmation">${icon("RefreshCw")}恢复默认</button></div>
+    panel.innerHTML = `<div class="section-heading appearance-heading"><h2 id="appearanceTitle">主题与显示</h2><button type="button" class="quiet-button appearance-reset" aria-expanded="false" aria-controls="appearanceResetConfirmation">${icon("RefreshCw")}恢复默认</button></div>
       <fieldset class="appearance-fieldset"><legend>显示模式</legend><div class="appearance-modes">${modes.map(([value, title]) => `<label><input type="radio" name="appearanceMode" value="${value}"><span>${title}</span></label>`).join("")}</div></fieldset>
       <fieldset class="appearance-fieldset"><legend>强调色</legend><div class="appearance-swatches">${swatches.map(([hue, title]) => `<label title="${title}" style="--swatch-h:${hue}"><input type="radio" name="appearanceAccent" value="${hue}" aria-label="${title}"><span>${icon("Check")}</span></label>`).join("")}</div></fieldset>
       <div class="appearance-custom-color"><input type="color" id="appearanceColor" aria-label="自选强调色" title="自选颜色"><input type="text" id="appearanceHex" aria-label="强调色 HEX 色值" maxlength="7" spellcheck="false" autocapitalize="off" autocomplete="off"><button type="button" id="appearanceEyedropper" class="studio-icon-button" aria-label="吸取颜色" title="吸取颜色">${icon("Pipette")}</button></div>
@@ -288,7 +288,9 @@
       <label class="appearance-range"><span>强调色饱和度<output data-appearance-value="accentSaturation"></output></span><input type="range" min="0" max="100" step="1" data-appearance-field="accentSaturation" aria-label="强调色饱和度"></label>
       <label class="appearance-range"><span>玻璃不透明度<output data-appearance-value="glassOpacity"></output></span><input type="range" min="20" max="100" step="1" data-appearance-field="glassOpacity" aria-label="玻璃不透明度"></label>
       <div id="appearanceResetConfirmation" class="appearance-reset-confirmation" role="group" aria-label="恢复默认主题" hidden><span>恢复默认主题？</span><div><button type="button" class="quiet-button" data-appearance-reset="cancel">取消</button><button type="button" class="quiet-button" data-appearance-reset="confirm">恢复</button></div></div>
-      <p class="appearance-status" role="status" aria-live="polite"></p>`;
+      <p class="appearance-status" role="status" aria-live="polite"></p>
+      <div class="field appearance-gallery-sort"><label for="gallerySort">画廊排序方式</label><select id="gallerySort"><option value="created">按创建时间</option><option value="latest_content">按最新内容</option></select><p class="field-hint">按最新内容时，以图组中最新的图片时间排序。</p></div>`;
+    window.dispatchEvent(new CustomEvent("image-studio-display-settings-ready"));
     panel.querySelectorAll('[name="appearanceMode"]').forEach((input) => input.addEventListener("change", () => update({ preference: input.value })));
     panel.querySelectorAll('[name="appearanceAccent"]').forEach((input) => input.addEventListener("change", () => update({ accentHue: Number(input.value), accentLightness: 50 })));
     const colorInput = panel.querySelector("#appearanceColor"), hexInput = panel.querySelector("#appearanceHex");

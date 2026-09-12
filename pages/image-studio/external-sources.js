@@ -139,7 +139,7 @@
       const result = await hooks.openModal(existing ? "编辑外部图库" : "添加外部图库", body, [
         ...(existing ? [{ label: "移除图库", danger: true, id: "externalEditorRemove", action: () => ({ remove: true }) }] : []),
         { label: "取消", action: () => false }, { label: "确认", primary: true, id: "externalEditorApply", action: () => ({ value: readEditor() }) },
-      ], { focus: "externalEditorName", onOpen: () => {
+      ], { externalEditor: true, focus: "externalEditorName", onOpen: () => {
         $("externalEditorType").addEventListener("change", () => updateEditorType(true));
         $("externalEditorScan").addEventListener("click", () => void scan(id));
         $("studioModalBody").querySelectorAll("input, select").forEach(input => input.addEventListener("input", renderEditorStatus));
