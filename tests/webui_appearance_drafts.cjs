@@ -45,7 +45,10 @@ function mount({ initial, blocked = false, bridge } = {}) {
   return {
     api: window.ImageStudioAppearance, root, writes,
     stored: () => JSON.parse(data.get(key)),
-    initialize: () => documentHandlers.get("DOMContentLoaded")(),
+    initialize: () => {
+      documentHandlers.get("DOMContentLoaded")();
+      return window.ImageStudioAppearance.ready;
+    },
     storage: (value) => handlers.get("storage")({ key, newValue: JSON.stringify(value) }),
     changes: () => changes,
   };

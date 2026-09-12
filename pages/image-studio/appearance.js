@@ -179,6 +179,7 @@
   function finish() {
     if (initialized) return;
     initialized = true;
+    window.__imageStudioAppearanceGate?.reveal();
     delete root.dataset.appearancePending;
     root.dataset.appearanceReady = "true";
     resolveReady({ ...settings });
@@ -443,25 +444,34 @@
   }
 
   async function initialize() {
-    mount();
     const bridge = window.AstrBotPluginPage;
     bridge?.onContext?.(apply);
     bridge?.onThemeChange?.(apply);
-    if (local) { finish(); return; }
+    const gate = window.__imageStudioAppearanceGate;
     const startingRevision = storageRevision;
-    const timeout = setTimeout(() => {
+    const onTimeout = () => {
+      if (initialized) return;
       if (storageRevision === startingRevision) setStatus("未能读取已保存的主题，暂用当前主题。", true);
       finish();
-    }, 4000);
+    };
+    // Production starts its deadline before any external script. Standalone
+    // consumers without the HTML gate retain the same bounded initialization.
+    if (gate?.expired) { onTimeout(); return; }
+    if (local) { finish(); return; }
+    const timeout = gate ? null : setTimeout(onTimeout, 4000);
+    if (gate) gate.ready.then((expired) => { if (expired) onTimeout(); });
     try {
       if (!bridge?.apiGet) throw new Error("页面通信不可用");
       await bridge.ready();
+      if (initialized || gate?.expired) return;
       const saved = await bridge.apiGet("appearance");
+      if (initialized || gate?.expired) return;
       if (storageRevision === startingRevision) acceptSaved(saved);
+      clearTimeout(timeout);
+      finish();
     } catch {
       if (storageRevision === startingRevision) setStatus("未能读取已保存的主题，暂用当前主题。", true);
     }
-    finally { clearTimeout(timeout); finish(); }
   }
 
   try {
@@ -493,6 +503,9 @@
     acceptSaved(value);
   });
   window.ImageStudioAppearance = Object.freeze({ ready, get: () => ({ ...settings }), set: update, isDirty, discard, save, defaults, normalize, saved: () => saveChain });
-  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", initialize, { once: true });
-  else void initialize();
+  // Theme I/O must not wait for the gallery, viewer and editor scripts. Only
+  // mounting the settings controls needs the parsed document.
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", mount, { once: true });
+  else mount();
+  void initialize();
 })();
