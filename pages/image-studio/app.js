@@ -2854,7 +2854,7 @@
   }
 
   const externalSources = window.ImageStudioExternalSources({ state, apiGet, apiPost, escape, formatBytes, formatDate, showNotice, errorMessage, updateSettingsDirty, invalidateBrowseCache, openModal: (...args) => library.openModal(...args) });
-  const library = window.ImageStudioLibrary({ state, escape, apiGet, apiPost, bridge, showNotice, errorMessage, formatDate, formatBytes, sourceLabel, syncPageScrollLock, switchView, requestParameters, loadGallery, clearGallerySelection, openDetail, closeDetail, reproduce, applyDraft, useDataUrlAsReference, useGalleryImageAsReference, ensureDetailMetadata, ensureDetailPreview, getImageMedia, cacheImageMedia, loadImageMedia, checkGalleryAction });
+  const library = window.ImageStudioLibrary({ state, escape, apiGet, apiPost, bridge, showNotice, errorMessage, formatDate, formatBytes, sourceLabel, getGallerySort: () => gallerySort, syncPageScrollLock, switchView, requestParameters, loadGallery, clearGallerySelection, openDetail, closeDetail, reproduce, applyDraft, useDataUrlAsReference, useGalleryImageAsReference, ensureDetailMetadata, ensureDetailPreview, getImageMedia, cacheImageMedia, loadImageMedia, checkGalleryAction });
 
   async function start() {
     try {

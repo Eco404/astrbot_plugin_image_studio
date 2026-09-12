@@ -56,7 +56,7 @@
   }
 
   window.ImageStudioLibrary = function (hooks) {
-    const { state, escape, apiGet, apiPost, bridge, showNotice, errorMessage, formatDate, formatBytes } = hooks;
+    const { state, escape, apiGet, apiPost, bridge, showNotice, errorMessage, formatDate, formatBytes, getGallerySort } = hooks;
     let imports = [];
     let importing = false;
     let importSequence = 0;
@@ -1022,7 +1022,7 @@
 
     async function chooseImportMergeTarget(engine) {
       const limit = 12;
-      const getPage = (offset) => apiGet("imports/merge-targets", { generation_engine: engine, limit, offset });
+      const getPage = (offset) => apiGet("imports/merge-targets", { generation_engine: engine, limit, offset, sort: getGallerySort?.() || "created" });
       let page = await getPage(0);
       if (!page.total) {
         showNotice("暂无同源的已导入图组，请选择“作为图组导入”；单张图片可关闭合并后直接导入。", "error");

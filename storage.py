@@ -2609,7 +2609,13 @@ class GenerationStore:
         return assets, thumbnails
 
     async def list_import_merge_targets(
-        self, engine: str, *, limit: int = 24, offset: int = 0, query: str = ""
+        self,
+        engine: str,
+        *,
+        limit: int = 24,
+        offset: int = 0,
+        query: str = "",
+        sort: str = "created",
     ) -> dict[str, Any]:
         """List imported records whose surviving images all have the requested source."""
 
@@ -2623,6 +2629,7 @@ class GenerationStore:
                     "limit": limit,
                     "offset": offset,
                     "query": query,
+                    "sort": sort,
                 },
             )
 

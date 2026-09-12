@@ -773,6 +773,7 @@ class ImageStudioPlugin(Star):
                 limit=limit,
                 offset=offset,
                 query=str(web_request.query.get("query", ""))[:240],
+                sort=str(web_request.query.get("sort", "created")),
             )
             return json_response(result)
         except (ValueError, TypeError, OverflowError) as exc:
