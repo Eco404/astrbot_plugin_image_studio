@@ -483,6 +483,17 @@ class ImageGenerationService:
         detail = await self.store.generation_image_context(generation_id, image_id)
         if detail is None:
             raise ValueError("历史生成记录不存在")
+        if (
+            detail.get("source") == "external"
+            and not detail.get("original_prompt")
+            and not detail.get("model")
+            and not detail.get("parameters")
+            and all(
+                image.get("metadata", {}).get("format", "unknown") == "unknown"
+                for image in detail.get("images", [])
+            )
+        ):
+            raise ValueError("这张外部图片没有可恢复的生成参数，可直接用作参考图")
         copied = export_parameters(detail, image_id)
         resolved = resolve_parameters(
             copied["content"], self.settings, for_reproduction=True

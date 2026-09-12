@@ -10,8 +10,6 @@ import zipfile
 from pathlib import Path
 
 import pytest
-from PIL import Image
-
 from astrbot_plugin_image_studio.config import HistorySettings
 from astrbot_plugin_image_studio.models import (
     GeneratedImage,
@@ -19,6 +17,7 @@ from astrbot_plugin_image_studio.models import (
     ImageProvider,
 )
 from astrbot_plugin_image_studio.storage import ExternalDeleteError, GenerationStore
+from PIL import Image
 
 
 def image_bytes(color="red"):
@@ -481,6 +480,213 @@ def test_deleting_local_duplicate_reveals_external_without_retaining_owned_copy(
             "generation_id"
         ]
         assert (await store.gallery_image_file(external["image_id"]))[0] == path
+        await store.close()
+
+    asyncio.run(run())
+
+
+def test_source_options_preserve_index_until_scan_scope_changes(tmp_path):
+    async def run():
+        store, root = await setup(tmp_path)
+        external, original = await add(store, root)
+        await store.set_favorite(external["generation_id"], True)
+        settings = await store.configure_external_source(
+            "nai", "Renamed", root, True, permissions={"delete": False}
+        )
+        assert settings["name"] == "Renamed" and settings["path"] == str(root)
+        assert settings["type"] == "nai" and settings["permissions"]["delete"] is False
+        assert (await store.generation_detail(external["generation_id"], light=True))[
+            "is_favorite"
+        ]
+        assert (await store.external_scan_snapshot("nai"))[original.name][
+            "generation_id"
+        ] == external["generation_id"]
+        await store.configure_external_source(
+            "nai", "Renamed", root, True, recursive=True
+        )
+        assert not await store.external_scan_snapshot("nai")
+        assert original.exists() and not list(store.thumbnails_dir.iterdir())
+        await add(store, root)
+        settings = await store.configure_external_source(
+            "nai", "Folder", root, True, source_type="directory"
+        )
+        assert settings["permissions"] == {
+            "favorite": True,
+            "delete": False,
+            "download": True,
+            "reference": True,
+        }
+        assert not await store.external_scan_snapshot("nai")
+        assert original.exists()
+        await store.close()
+
+    asyncio.run(run())
+
+
+def test_remove_external_source_preserves_original_and_independent_local_references(
+    tmp_path,
+):
+    async def run():
+        store, root = await setup(tmp_path)
+        external, original = await add(store, root)
+        staged = await store.stage_gallery_reference(external["image_id"])
+        await store.configure_external_source("nai", "NAI", root, False)
+        imported = await store.import_image(original.read_bytes(), "local.png", {})
+        await store.remove_external_source("nai")
+        assert await store.external_sources_status() == []
+        assert original.exists()
+        assert (await store.load_staged_references([staged["id"]]))[
+            0
+        ].data == original.read_bytes()
+        local_detail = await store.generation_detail(
+            imported["generation_id"], light=True
+        )
+        assert await store.gallery_image_file(local_detail["images"][0]["id"])
+        assert (await store.list_generations({}))["total"] == 1
+        # The remaining local record still owns the shared thumbnail.
+        assert list(store.thumbnails_dir.iterdir())
+        await store.close()
+
+    asyncio.run(run())
+
+
+def test_time_policy_reindexes_sort_time_without_losing_identity_or_favorite(tmp_path):
+    async def run():
+        store, root = await setup(tmp_path)
+        external, original = await add(store, root)
+        await store.set_favorite(external["generation_id"], True)
+        stamp = fingerprint(original)
+        for time_source, timestamp in (("btime", 123.0), ("metadata", 456.0)):
+            current = await store.upsert_external_image(
+                "nai",
+                original.name,
+                original.read_bytes(),
+                fingerprint=json.dumps(stamp),
+                sidecar_fingerprint="{}",
+                size_bytes=stamp["size_bytes"],
+                mtime_ns=stamp["mtime_ns"],
+                created_at=timestamp,
+                time_source=time_source,
+                metadata_created_at=456.0 if time_source == "metadata" else None,
+                file_birthtime=123.0,
+                time_policy_version=1,
+            )
+            assert current == external
+            detail = await store.generation_detail(
+                external["generation_id"], light=True
+            )
+            assert detail["is_favorite"] and detail["created_at"] == timestamp
+            assert detail["generated_at"] == (
+                timestamp if time_source == "metadata" else None
+            )
+            assert detail["time_source"] == time_source
+            snapshot = (await store.external_scan_snapshot("nai"))[original.name]
+            assert snapshot["time_policy_version"] == 1
+            assert snapshot["file_birthtime"] == 123.0
+        await store.close()
+
+    asyncio.run(run())
+
+
+def test_external_plain_images_and_unresolved_comfy_outputs_are_indexable(tmp_path):
+    from astrbot_plugin_image_studio.tests.test_import_groups import (
+        comfy_multi_output_image,
+    )
+
+    async def run():
+        store, root = await setup(tmp_path)
+        await store.configure_external_source(
+            "folder", "Images", root, True, source_type="directory"
+        )
+        for name, data, engine in (
+            ("plain.png", image_bytes(), "unknown"),
+            ("workflow.png", comfy_multi_output_image()[0], "comfyui"),
+        ):
+            path = root / name
+            path.write_bytes(data)
+            stamp = fingerprint(path)
+            result = await store.upsert_external_image(
+                "folder",
+                name,
+                data,
+                fingerprint=json.dumps(stamp),
+                sidecar_fingerprint="{}",
+                size_bytes=stamp["size_bytes"],
+                mtime_ns=stamp["mtime_ns"],
+                time_source="mtime",
+                time_policy_version=1,
+            )
+            detail = await store.generation_detail(result["generation_id"])
+            assert detail["generation_engine"] == engine
+            assert detail["generated_at"] is None
+            assert detail["images"][0]["data_url"]
+            if engine == "unknown":
+                assert detail["model"] == detail["original_prompt"] == ""
+                assert detail["images"][0]["metadata"]["warnings"] == []
+            else:
+                assert detail["images"][0]["metadata"]["normalized"][
+                    "requires_output_selection"
+                ]
+        await store.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("model", [123, "long-model-" * 30])
+def test_external_malformed_model_keeps_image_and_raw_metadata(tmp_path, model):
+    from PIL.PngImagePlugin import PngInfo
+
+    async def run():
+        store, root = await setup(tmp_path)
+        await store.configure_external_source(
+            "folder", "Images", root, True, source_type="directory"
+        )
+        metadata = PngInfo()
+        metadata.add_text("Software", "NovelAI")
+        comment = {"model": model, "prompt": "a cat"}
+        metadata.add_text("Comment", json.dumps(comment))
+        output = io.BytesIO()
+        Image.new("RGB", (32, 48), "red").save(output, "PNG", pnginfo=metadata)
+        path = root / "metadata.png"
+        path.write_bytes(output.getvalue())
+        stamp = fingerprint(path)
+        external = await store.upsert_external_image(
+            "folder",
+            path.name,
+            path.read_bytes(),
+            fingerprint=json.dumps(stamp),
+            sidecar_fingerprint="{}",
+            size_bytes=stamp["size_bytes"],
+            mtime_ns=stamp["mtime_ns"],
+            time_source="mtime",
+            time_policy_version=1,
+        )
+        detail = await store.generation_detail(external["generation_id"])
+        assert detail["original_prompt"] == "a cat"
+        assert detail["images"][0]["data_url"]
+        assert len(detail["model"]) <= 240
+        assert detail["images"][0]["metadata"]["raw"]["Comment"] == json.dumps(comment)
+        assert detail["images"][0]["metadata"]["warnings"]
+        await store.close()
+
+    asyncio.run(run())
+
+
+def test_changed_source_parent_symlink_cannot_bypass_original_path_validation(tmp_path):
+    async def run():
+        store, root = await setup(tmp_path)
+        external, original = await add(store, root)
+        moved = tmp_path / "moved-nai"
+        root.parent.rename(moved)
+        root.parent.symlink_to(moved, target_is_directory=True)
+        # The inode/fingerprint and resolved content are unchanged, but the newly
+        # linked parent is outside the scanner's accepted directory identity.
+        assert await store.gallery_image_file(external["image_id"]) is None
+        with pytest.raises(ExternalDeleteError, match="符号链接"):
+            await store.delete_generation(external["generation_id"])
+        assert original.is_file()
+        await store.remove_external_source("nai")
+        assert original.is_file()
         await store.close()
 
     asyncio.run(run())

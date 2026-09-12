@@ -4,15 +4,15 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Image Studio 生图工作台</title>
-  <script src="./appearance.js?v=1.1.0-dev.2"></script>
+  <script src="./appearance.js?v=1.1.0-dev.2-sources2"></script>
   <link rel="stylesheet" href="./vendor/photoswipe/photoswipe.css?v=5.4.4" />
-  <link rel="stylesheet" href="./app.css?v=1.1.0-dev.2" />
-  <link rel="stylesheet" href="./library.css?v=1.1.0-dev.2" />
-  <link rel="stylesheet" href="./sortable.css?v=1.1.0-dev.2" />
-  <link rel="stylesheet" href="./detail-swipe.css?v=1.1.0-dev.2" />
-  <link rel="stylesheet" href="./select.css?v=1.1.0-dev.2" />
-  <link rel="stylesheet" href="./appearance.css?v=1.1.0-dev.2" />
-  <link rel="stylesheet" href="./controls.css?v=1.1.0-dev.2" />
+  <link rel="stylesheet" href="./app.css?v=1.1.0-dev.2-sources2" />
+  <link rel="stylesheet" href="./library.css?v=1.1.0-dev.2-sources2" />
+  <link rel="stylesheet" href="./sortable.css?v=1.1.0-dev.2-sources2" />
+  <link rel="stylesheet" href="./detail-swipe.css?v=1.1.0-dev.2-sources2" />
+  <link rel="stylesheet" href="./select.css?v=1.1.0-dev.2-sources2" />
+  <link rel="stylesheet" href="./appearance.css?v=1.1.0-dev.2-sources2" />
+  <link rel="stylesheet" href="./controls.css?v=1.1.0-dev.2-sources2" />
 </head>
 <body>
   <main class="app-shell quiet-glass-background">
@@ -145,8 +145,9 @@
             <div class="field"><label for="historyMegabytes">最大图片容量 MB（0 表示不限）</label><input id="historyMegabytes" type="number" min="0" max="10240" /></div>
           </section>
           <section class="settings-panel glass" id="externalSourcesPanel">
-            <div class="section-heading"><div><h2>外部图库</h2><p>在画廊中查看其他插件的历史图片，原图由来源插件保管。</p></div></div>
+            <div class="section-heading"><div><h2>外部图库</h2><p>将其他插件或目录中的图片加入画廊，原图保留在来源目录。</p></div><button class="studio-icon-button" id="addExternalSource" type="button" aria-label="添加外部图库" title="添加外部图库" data-studio-icon="Plus"></button></div>
             <div id="externalSourcesList"></div>
+            <p class="field-hint" id="externalSourcesEmpty">尚未添加外部图库。</p>
             <p class="inline-error" id="externalSourcesError" role="status"></p>
           </section>
           <section class="settings-panel glass">
@@ -250,13 +251,13 @@
   <script src="./vendor/exifreader/exif-reader.js?v=4.44.1"></script>
   <script src="./vendor/lucide/icons.js?v=0.468.0-studio2"></script>
   <script src="./vendor/js-sha256/sha256.min.js?v=0.11.1"></script>
-  <script src="./hash.js?v=1.1.0-dev.2" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./select.js?v=1.1.0-dev.2" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./sortable.js?v=1.1.0-dev.2" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./library.js?v=1.1.0-dev.2" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./detail-swipe.js?v=1.1.0-dev.2" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./backdrop.js?v=1.1.0-dev.2" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./external-sources.js?v=1.1.0-dev.2" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./app.js?v=1.1.0-dev.2" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./hash.js?v=1.1.0-dev.2-sources2" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./select.js?v=1.1.0-dev.2-sources2" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./sortable.js?v=1.1.0-dev.2-sources2" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./library.js?v=1.1.0-dev.2-sources2" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./detail-swipe.js?v=1.1.0-dev.2-sources2" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./backdrop.js?v=1.1.0-dev.2-sources2" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./external-sources.js?v=1.1.0-dev.2-sources2" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./app.js?v=1.1.0-dev.2-sources2" onerror="window.__reportImageStudioPageError(true)"></script>
 </body>
 </html>

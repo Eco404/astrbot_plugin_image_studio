@@ -32,10 +32,26 @@ class MemoryStore:
         self.reconciled = []
         self.reports = []
 
-    async def configure_external_source(self, source_id, name, root_path, enabled):
+    async def configure_external_source(
+        self, source_id, name, root_path, enabled, **settings
+    ):
+        old = self.sources.get(source_id, {})
+        if old and any(
+            old.get(key) != value
+            for key, value in {
+                "root_path": root_path,
+                "source_type": settings.get("source_type"),
+                "recursive": settings.get("recursive"),
+            }.items()
+        ):
+            self.images.clear()
         self.sources.setdefault(source_id, {}).update(
-            id=source_id, name=name, root_path=root_path, enabled=enabled
+            id=source_id, name=name, root_path=root_path, enabled=enabled, **settings
         )
+
+    async def remove_external_source(self, source_id):
+        self.sources.pop(source_id, None)
+        self.images.clear()
 
     async def external_sources_status(self):
         return [
@@ -589,6 +605,200 @@ def test_malformed_sidecar_keeps_file_identity_for_explicit_deletion(tmp_path):
             assert identity["__parse_error__"] is True
             assert await store.delete_generation(snapshot["generation_id"])
             assert not original.exists() and not sidecar.exists()
+        finally:
+            await manager.close()
+            await store.close()
+
+    asyncio.run(run())
+
+
+def directory_setting(path, **changes):
+    return {
+        "type": "directory",
+        "name": "普通图片",
+        "path": str(path),
+        "enabled": True,
+        **changes,
+    }
+
+
+def test_custom_directory_reads_mixed_images_without_sidecars_and_recurses_when_enabled(
+    tmp_path,
+):
+    async def run():
+        store, manager, _ = manager_fixture(tmp_path)
+        root = tmp_path / "photos"
+        nested = root / "nested"
+        nested.mkdir(parents=True)
+        (root / "ordinary.jpeg").write_bytes(b"one")
+        (root / "ordinary.yaml").write_text("tag: should not be read")
+        (root / "animation.gif").write_bytes(b"two")
+        (nested / "more.webp").write_bytes(b"three")
+        await manager.configure({"photos": directory_setting(root)})
+        await manager.request_scan("photos")
+        await manager._tasks["photos"]
+        assert set(store.images) == {"ordinary.jpeg", "animation.gif"}
+        assert all(not item[1]["parameters"] for item in store.writes)
+        assert all(
+            not json.loads(item[1]["sidecar_fingerprint"]) for item in store.writes
+        )
+        assert all(item[1]["generation_engine"] == "unknown" for item in store.writes)
+        await manager.configure({"photos": directory_setting(root, recursive=True)})
+        await manager.request_scan("photos")
+        await manager._tasks["photos"]
+        assert "nested/more.webp" in store.images
+        assert (await manager.status())[0]["status"] == "complete"
+        await manager.close()
+
+    asyncio.run(run())
+
+
+def test_custom_missing_root_can_be_saved_and_does_not_purge(tmp_path):
+    async def run():
+        store, manager, _ = manager_fixture(tmp_path)
+        root = tmp_path / "offline_mount"
+        await manager.configure({"photos": directory_setting(root)})
+        store.images["old.png"] = {"size_bytes": 20}
+        await manager.request_scan("photos")
+        await manager._tasks["photos"]
+        assert (await manager.status())[0]["status"] == "unavailable"
+        assert "old.png" in store.images and not store.reconciled
+        assert not root.exists()
+        await manager.close()
+
+    asyncio.run(run())
+
+
+def test_configuration_rejects_duplicates_overlaps_own_data_and_symlink_paths(tmp_path):
+    _, manager, _ = manager_fixture(tmp_path)
+    root = tmp_path / "photos"
+    root.mkdir()
+    child = root / "nested"
+    for config in (
+        {"a": directory_setting(root), "b": directory_setting(root, enabled=False)},
+        {"a": directory_setting(root, recursive=True), "b": directory_setting(child)},
+        {"a": directory_setting(manager.data_dir / "history" / "assets")},
+        {"a": directory_setting(manager.data_dir.parent, recursive=True)},
+        {"a": directory_setting("/")},
+        {"a": directory_setting("relative")},
+    ):
+        with pytest.raises(ValueError):
+            manager.validate_configuration(config)
+    manager.validate_configuration(
+        {"a": directory_setting(root), "b": directory_setting(child)}
+    )
+    manager.validate_configuration({"a": directory_setting(manager.data_dir.parent)})
+    link = tmp_path / "link"
+    link.symlink_to(root, target_is_directory=True)
+    with pytest.raises((ValueError, NotADirectoryError), match="符号链接"):
+        manager.validate_configuration({"a": directory_setting(link / "nested")})
+
+
+def test_remove_source_cancels_inflight_scan_without_deleting_originals(
+    tmp_path, monkeypatch
+):
+    async def run():
+        store, manager, root = manager_fixture(tmp_path)
+        root.mkdir(parents=True)
+        original = root / "nai_one.png"
+        original.write_bytes(b"one")
+        entered, release = threading.Event(), threading.Event()
+        reader = external_gallery._load_entry
+
+        def blocked(*args):
+            entered.set()
+            assert release.wait(5)
+            return reader(*args)
+
+        monkeypatch.setattr(external_gallery, "_load_entry", blocked)
+        try:
+            await manager.configure({"nai": True})
+            await manager.start()
+            assert await asyncio.to_thread(entered.wait, 5)
+            await manager.configure({})
+            release.set()
+            assert await manager.status() == []
+            assert not store.sources and not store.writes and not manager._tasks
+            assert original.exists()
+            with pytest.raises(ValueError, match="未知"):
+                await manager.request_scan("nai")
+        finally:
+            release.set()
+            await manager.close()
+
+    asyncio.run(run())
+
+
+def test_restart_removes_stale_database_sources_and_has_no_fixed_nai_row(tmp_path):
+    async def run():
+        store, manager, _ = manager_fixture(tmp_path)
+        store.sources["nai"] = {"id": "nai", "enabled": True}
+        await manager.configure({})
+        assert await manager.status() == [] and not store.sources
+        assert {kind["id"] for kind in manager.source_types()} == {"nai", "directory"}
+        await manager.close()
+
+    asyncio.run(run())
+
+
+def test_time_policy_upgrade_reindexes_once_but_name_and_permissions_do_not(tmp_path):
+    async def run():
+        store, manager, root = manager_fixture(tmp_path)
+        root.mkdir(parents=True)
+        original = root / "nai_1700000000000000000.png"
+        original.write_bytes(b"one")
+        await manager.configure({"nai": True})
+        await scan(manager)
+        store.images[original.name]["time_policy_version"] = 0
+        assert (await scan(manager))["skipped"] == 0
+        assert (await scan(manager))["skipped"] == 1
+        writes = len(store.writes)
+        await manager.configure(
+            {
+                "nai": {
+                    "name": "新名称",
+                    "enabled": True,
+                    "permissions": {"delete": False},
+                }
+            }
+        )
+        assert (await scan(manager))["skipped"] == 1
+        assert len(store.writes) == writes
+        report = (await manager.status())[0]
+        assert report["name"] == "新名称" and not report["permissions"]["delete"]
+        await manager.close()
+
+    asyncio.run(run())
+
+
+def test_real_custom_gallery_metadata_free_image_has_no_fake_generation_parameters(
+    tmp_path,
+):
+    async def run():
+        data_dir = tmp_path / "plugin_data" / "astrbot_plugin_image_studio"
+        root = tmp_path / "ordinary_photos"
+        root.mkdir()
+        output = io.BytesIO()
+        Image.new("RGB", (32, 24), "green").save(output, "PNG")
+        original = root / "ordinary.png"
+        original.write_bytes(output.getvalue())
+        original.with_suffix(".json").write_text('{"tag":"ignore", "model":"wrong"}')
+        store = GenerationStore(data_dir)
+        await store.initialize()
+        manager = ExternalGalleryManager(store, data_dir)
+        try:
+            await manager.configure({"photos": directory_setting(root)})
+            await manager.request_scan("photos")
+            await manager._tasks["photos"]
+            assert (await manager.status())[0]["status"] == "complete"
+            gallery = await store.list_generations({})
+            assert gallery["total"] == 1
+            detail = await store.generation_detail(gallery["items"][0]["id"])
+            assert not detail["original_prompt"]
+            assert detail["generation_engine"] == "unknown"
+            assert not detail.get("generated_at")
+            assert not detail["parameters"].get("generated_at")
+            assert original.exists()
         finally:
             await manager.close()
             await store.close()

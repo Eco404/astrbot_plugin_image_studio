@@ -210,7 +210,7 @@ def test_final_development_promotion_preserves_all_business_rows_files_and_resto
             assert tuple(conn.execute("SELECT * FROM schema_meta").fetchone()) == (
                 1,
                 2,
-                1,
+                2,
             )
             assert business_rows(conn) == before
             assert conn.execute("PRAGMA foreign_key_check").fetchall() == []

@@ -51,6 +51,7 @@ from .providers import ProviderError, ProviderExecutor
 from .service import ImageGenerationService
 from .storage import (
     ExternalDeleteError,
+    ExternalPermissionError,
     GenerationStore,
     ImportDuplicateError,
     ImportEditConflictError,
@@ -545,6 +546,13 @@ class ImageStudioPlugin(Star):
             )
             if errors:
                 return error_response("；".join(errors), status_code=400)
+            try:
+                await asyncio.to_thread(
+                    self._external_gallery.validate_configuration,
+                    candidate["external_sources"],
+                )
+            except (ValueError, OSError) as exc:
+                return error_response(str(exc), status_code=400)
             candidate["revision"] = current_revision + 1
             candidate["ui"]["settings_revision"] = candidate["revision"]
             base = body.get("base") if isinstance(body.get("base"), dict) else {}
@@ -590,7 +598,12 @@ class ImageStudioPlugin(Star):
         return json_response(report)
 
     async def _api_external_status(self) -> Any:
-        return json_response({"sources": await self._external_gallery.status()})
+        return json_response(
+            {
+                "types": self._external_gallery.source_types(),
+                "sources": await self._external_gallery.status(),
+            }
+        )
 
     async def _api_external_scan(self) -> Any:
         body = await web_request.json(default={})
@@ -612,6 +625,8 @@ class ImageStudioPlugin(Star):
             result = await self.store.stage_gallery_reference(
                 str(body.get("image_id") or "")
             )
+        except ExternalPermissionError as exc:
+            return error_response(str(exc), status_code=403)
         except (ValueError, OSError) as exc:
             return error_response(str(exc), status_code=400)
         return json_response(result)
@@ -1112,6 +1127,8 @@ class ImageStudioPlugin(Star):
                 return json_response(
                     await self.store.toggle_favorites(body["generation_ids"])
                 )
+            except ExternalPermissionError as exc:
+                return error_response(str(exc), status_code=403)
             except ValueError as exc:
                 return error_response(str(exc), status_code=400)
         if not isinstance(body, dict) or not isinstance(body.get("favorite"), bool):
@@ -1121,6 +1138,8 @@ class ImageStudioPlugin(Star):
                 str(body.get("generation_id") or ""), body["favorite"]
             )
             return json_response(result)
+        except ExternalPermissionError as exc:
+            return error_response(str(exc), status_code=403)
         except ValueError as exc:
             return error_response(str(exc), status_code=400)
 
@@ -1142,9 +1161,14 @@ class ImageStudioPlugin(Star):
         if not 1 <= len(body["image_ids"]) <= 100:
             return error_response("请选择 1 至 100 张图片", status_code=400)
         try:
-            preview = await self.store.external_delete_preview(
-                [str(body.get("generation_id") or "")]
+            preview = await self.store.external_action_preview(
+                [str(body.get("generation_id") or "")], "delete"
             )
+            if not preview["allowed"]:
+                return error_response(
+                    "；".join(item["message"] for item in preview["denied"]),
+                    status_code=403,
+                )
             if preview["external_count"] and body.get("confirm_external") is not True:
                 return error_response(
                     "本次删除包含外部资源，将删除来源插件中的原图，请确认后重试",
@@ -1166,6 +1190,8 @@ class ImageStudioPlugin(Star):
                     }
                 )
             return error_response(str(exc), status_code=409)
+        except ExternalPermissionError as exc:
+            return error_response(str(exc), status_code=403)
         except ValueError as exc:
             return error_response(str(exc), status_code=400)
 
@@ -1420,7 +1446,10 @@ class ImageStudioPlugin(Star):
         return json_response(image)
 
     async def _api_gallery_image_download(self, image_id: str) -> Any:
-        image = await self.store.gallery_image_file(image_id)
+        try:
+            image = await self.store.gallery_image_file(image_id)
+        except ValueError as exc:
+            return error_response(str(exc), status_code=403)
         if image is None:
             return error_response("生成图片不存在", status_code=404)
         path, mime_type, filename = image
@@ -1459,48 +1488,35 @@ class ImageStudioPlugin(Star):
         if not isinstance(ids, list) or not 1 <= len(ids) <= 200:
             return error_response("请选择 1 至 200 条生成记录", status_code=400)
         try:
-            preview = await self.store.external_delete_preview(ids)
+            preview = await self.store.external_action_preview(ids, "delete")
         except ValueError as exc:
             return error_response(str(exc), status_code=400)
+        if not preview["allowed"]:
+            return error_response(
+                "；".join(item["message"] for item in preview["denied"]),
+                status_code=403,
+            )
         if preview["external_count"] and body.get("confirm_external") is not True:
             return error_response(
                 "本次删除包含外部资源，将删除来源插件中的原图，请确认后重试",
                 status_code=409,
             )
-        deleted: list[str] = []
-        failed: list[str] = []
-        errors: list[dict[str, Any]] = []
-        for generation_id in dict.fromkeys(ids):
-            try:
-                if await self.store.delete_generation(str(generation_id or "")):
-                    deleted.append(str(generation_id))
-                else:
-                    failed.append(str(generation_id))
-                    errors.append(
-                        {"id": str(generation_id), "message": "记录不存在或已删除"}
-                    )
-            except ExternalDeleteError as exc:
-                if exc.as_dict().get("generation_deleted"):
-                    deleted.append(str(generation_id))
-                else:
-                    failed.append(str(generation_id))
-                errors.append(
-                    {**exc.as_dict(), "id": str(generation_id), "message": str(exc)}
-                )
-            except (ValueError, OSError) as exc:
-                failed.append(str(generation_id))
-                errors.append({"id": str(generation_id), "message": str(exc)})
-        return json_response({"deleted": deleted, "failed": failed, "errors": errors})
+        try:
+            return json_response(await self.store.delete_generations(ids))
+        except ValueError as exc:
+            return error_response(str(exc), status_code=403)
 
     async def _api_gallery_delete_preview(self) -> Any:
         body = await web_request.json(default={})
         if not isinstance(body, dict):
             return error_response("请求体必须是 JSON 对象", status_code=400)
-        if not isinstance(body.get("ids"), list) or not 1 <= len(body["ids"]) <= 200:
-            return error_response("请选择 1 至 200 条生成记录", status_code=400)
+        action = str(body.get("action") or "delete")
+        limit = 1000 if action == "favorite" else 200
+        if not isinstance(body.get("ids"), list) or not 1 <= len(body["ids"]) <= limit:
+            return error_response(f"请选择 1 至 {limit} 条生成记录", status_code=400)
         try:
             return json_response(
-                await self.store.external_delete_preview(body.get("ids"))
+                await self.store.external_action_preview(body.get("ids"), action)
             )
         except ValueError as exc:
             return error_response(str(exc), status_code=400)
@@ -1523,6 +1539,8 @@ class ImageStudioPlugin(Star):
             path = await self.store.export_generations(
                 [str(item or "") for item in ids]
             )
+        except ExternalPermissionError as exc:
+            return error_response(str(exc), status_code=403)
         except ValueError as exc:
             return error_response(str(exc), status_code=400)
         await self.store.cleanup_exports()

@@ -23,9 +23,9 @@ def test_create_and_upgrade_share_layout_and_repeat_without_writes(tmp_path, exi
             conn.commit()
         before = dump(conn)
         backup = schema.ensure_development_schema(conn, backup_dir=tmp_path / "backups")
-        assert schema.DATABASE_VERSION == "2-dev.1"
+        assert schema.DATABASE_VERSION == "2-dev.2"
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
-        assert conn.execute("SELECT * FROM schema_meta").fetchall() == [(1, 2, 1)]
+        assert conn.execute("SELECT * FROM schema_meta").fetchall() == [(1, 2, 2)]
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
         if existing:
             assert backup and backup.is_file()
@@ -112,3 +112,72 @@ def test_backup_failure_blocks_dev_upgrade(tmp_path, monkeypatch):
         with pytest.raises(OSError, match="full disk"):
             schema.ensure_development_schema(conn, backup_dir=tmp_path / "backups")
         assert dump(conn) == before
+
+
+def old_external_database(conn):
+    for statement in (*schema.SCHEMA_STATEMENTS, *schema.DEVELOPMENT_V1_STATEMENTS):
+        conn.execute(statement)
+    conn.execute("PRAGMA user_version=1")
+    conn.execute("INSERT INTO schema_meta VALUES (1,2,1)")
+    conn.execute(
+        "INSERT INTO external_sources VALUES ('nai','NAI 插件图库','/fixture/nai',1,'{}')"
+    )
+    conn.execute(
+        "INSERT INTO generations(id,created_at,source,status,mode,provider_id,provider_name,provider_kind,model,original_prompt,final_prompt,parameters_json,elapsed_ms,is_favorite) VALUES ('g',123,'external','succeeded','text2img','','','','m','p','p','{}',0,1)"
+    )
+    conn.execute(
+        "INSERT INTO image_assets VALUES ('a','external/a.png','image/png',10,1,1,123,'available')"
+    )
+    conn.execute("INSERT INTO generation_images VALUES ('i','g',0,'a','{}')")
+    conn.execute(
+        "INSERT INTO external_records VALUES ('g','nai','nai_123.png','a','{}','{}',10,123,1)"
+    )
+    conn.commit()
+
+
+def test_previous_dev_upgrade_preserves_favorites_links_and_schedules_time_backfill(
+    tmp_path,
+):
+    with closing(sqlite3.connect(tmp_path / "history.sqlite3")) as conn:
+        old_external_database(conn)
+        before = dump(conn)
+        backup = schema.ensure_development_schema(conn, backup_dir=tmp_path / "backups")
+        assert backup
+        with closing(sqlite3.connect(backup)) as old:
+            assert dump(old) == before
+        assert conn.execute("SELECT * FROM schema_meta").fetchall() == [(1, 2, 2)]
+        assert conn.execute(
+            "SELECT created_at,is_favorite FROM generations WHERE id='g'"
+        ).fetchone() == (123, 1)
+        assert conn.execute(
+            "SELECT type,recursive FROM external_sources WHERE id='nai'"
+        ).fetchone() == ("nai", 0)
+        assert conn.execute(
+            "SELECT time_source,time_policy_version,metadata_created_at,file_birthtime FROM external_records"
+        ).fetchone() == ("", 0, None, None)
+        assert conn.execute(
+            "SELECT generation_id,asset_id FROM generation_images"
+        ).fetchone() == ("g", "a")
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert (
+            schema.ensure_development_schema(conn, backup_dir=tmp_path / "backups")
+            is None
+        )
+
+
+def test_previous_dev_failed_upgrade_rolls_back_columns_and_version(
+    tmp_path, monkeypatch
+):
+    with closing(sqlite3.connect(tmp_path / "history.sqlite3")) as conn:
+        old_external_database(conn)
+        before = dump(conn)
+
+        def fail(target):
+            target.execute("UPDATE schema_meta SET dev_revision=2")
+            raise RuntimeError("interrupted upgrade")
+
+        monkeypatch.setattr(schema, "_stamp_development", fail)
+        with pytest.raises(RuntimeError, match="interrupted upgrade"):
+            schema.ensure_development_schema(conn, backup_dir=tmp_path / "backups")
+        assert dump(conn) == before
+        assert len(list((tmp_path / "backups").glob("*.sqlite3"))) == 1

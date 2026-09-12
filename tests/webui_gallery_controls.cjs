@@ -90,7 +90,11 @@ async function checkMenu(frame, expectedSelected = 1) {
       await checkMenu(frame);
       if (test.width <= 540) {
         const trigger = await frame.locator('.studio-select-trigger[data-select-id="detailCopyFormat"]').boundingBox();
-        assert.equal(trigger.width, 44); assert.equal(trigger.height, 44);
+        // Earlier cases import a new record, which may be the first gallery
+        // card now. Its edit action adds one control to the responsive footer.
+        const actionSlots = await frame.locator("#detailImportEdit").isVisible() ? 8 : 7;
+        const expectedSize = Math.min(44, (test.width - 32) / actionSlots);
+        assert.ok(Math.abs(trigger.width - expectedSize) < 1); assert.ok(Math.abs(trigger.height - expectedSize) < 1);
       }
       await page.screenshot({ path: path.join(output, `${test.width}-${test.theme}-detail-menu.png`) });
       await frame.locator('.studio-select-trigger[data-select-id="detailCopyFormat"]').press("Escape");

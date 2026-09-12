@@ -1197,7 +1197,9 @@
     if (state.detailAssetsLoaded) state.detailRequestedImageIndex = imageIndex;
     const refs = Array.isArray(detail.references) ? detail.references : [];
     const totalBytes = images.reduce((sum, item) => sum + Number(item.size_bytes || 0), 0);
-    els.detailDate.textContent = formatDate(detail.created_at);
+    const externalTimeLabels = { nai_filename: "NAI 保存时间", metadata: "元数据创建时间", btime: "文件创建时间", birthtime: "文件创建时间", mtime: "文件修改时间" };
+    const sortTimeLabel = detail.is_external ? externalTimeLabels[detail.time_source] || "排序时间" : "记录时间";
+    els.detailDate.textContent = `${detail.is_external ? `${sortTimeLabel}：` : ""}${formatDate(detail.created_at)}`;
     const sourceIdentity = invocationSourceLabel(detail.invocation_source);
     const canPrevious = imageIndex > 0 || hasAdjacentGalleryRecord(-1);
     const canNext = imageIndex < displayImages.length - 1 || hasAdjacentGalleryRecord(1);
@@ -1211,7 +1213,7 @@
     const carousel = currentImage ? `<div class="detail-images"><div data-detail-frame-mount></div>${stripMount}</div>` : '<div class="detail-loading">正在读取生成图片…</div>';
     const metadata = detail._manifestPending
       ? `<div class="detail-block detail-manifest-loading" role="status"><p>${detail._manifestError ? escape(detail._manifestError) : "正在读取本组生成详情…"}</p>${detail._manifestError ? '<button class="quiet-button" data-detail-manifest-retry type="button">重试读取详情</button>' : ""}</div>`
-      : `${library.detailMetadataMarkup(detail, currentImage)}<div class="detail-block"><h3>信息</h3><pre>${escape(JSON.stringify({ 服务商: detail.provider_name, 模型: detail.model, 模式: library.modeLabel(detail.mode), 生图来源: library.engineLabel(detail.generation_engine), 来源: sourceLabel(detail.source), 调用来源身份: sourceIdentity, 记录时间: formatDate(detail.created_at), 图片数量: images.length, 文件大小: formatBytes(totalBytes), 耗时毫秒: detail.elapsed_ms }, null, 2))}</pre></div><div class="detail-block"><h3>参考图</h3><div class="detail-references" data-detail-references>${detailReferenceMarkup(refs)}</div></div>${library.detailWarningsMarkup(detail, currentImage)}`;
+      : `${library.detailMetadataMarkup(detail, currentImage)}<div class="detail-block"><h3>信息</h3><pre>${escape(JSON.stringify({ 服务商: detail.provider_name, 模型: detail.model, 模式: library.modeLabel(detail.mode), 生图来源: library.engineLabel(detail.generation_engine), 来源: sourceLabel(detail.source), 调用来源身份: sourceIdentity, [sortTimeLabel]: formatDate(detail.created_at), 图片数量: images.length, 文件大小: formatBytes(totalBytes), 耗时毫秒: detail.elapsed_ms }, null, 2))}</pre></div><div class="detail-block"><h3>参考图</h3><div class="detail-references" data-detail-references>${detailReferenceMarkup(refs)}</div></div>${library.detailWarningsMarkup(detail, currentImage)}`;
     // The foreground and fixed backdrop stay attached across both image and group changes.
     if (imageFrame && imageFrame === previousFrame) {
       const media = imageFrame.parentElement;
@@ -1661,7 +1663,7 @@
 
   async function downloadMobileImage() {
     const item = mobileImageSequence[mobileImageViewer?.currIndex ?? -1];
-    if (!item) return;
+    if (!item || item.allowed_actions?.download === false) return;
     try {
       const client = await bridge();
       await client.download(`gallery/download/${item.image_id}`, {}, item.download_filename);
@@ -1712,6 +1714,8 @@
       });
       pswp.on("change", () => {
         if (!isCurrentMobileSession(session)) return;
+        const download = pswp.element?.querySelector(".pswp__button--image-studio-download");
+        if (download) download.hidden = session.items[pswp.currIndex]?.allowed_actions?.download === false;
         if (session.preparingDetail) { mobileDetailSyncRevision++; detailRequestRevision++; detailImagePaintRevision++; }
         session.preparingDetail = false; session.detailSyncIndex = -1; session.detailSyncPromise = null;
         warmMobileImages(pswp.currIndex, session);
@@ -1725,6 +1729,8 @@
         void prepareMobileDetail(session);
       });
       pswp.on("afterInit", () => {
+        const download = pswp.element?.querySelector(".pswp__button--image-studio-download");
+        if (download) download.hidden = session.items[pswp.currIndex]?.allowed_actions?.download === false;
         const backgroundLayer = document.createElement("div"); backgroundLayer.className = "image-studio-viewer-background"; backgroundLayer.setAttribute("aria-hidden", "true");
         const background = document.createElement("img"); background.className = "image-studio-viewer-backdrop"; background.alt = ""; background.setAttribute("aria-hidden", "true");
         backgroundLayer.appendChild(background); pswp.bg?.appendChild(backgroundLayer); session.backdrop = background;
@@ -1799,6 +1805,7 @@
     els.imagePreviewTitle.textContent = title;
     els.downloadImageButton.href = dataUrl;
     els.downloadImageButton.download = filename;
+    els.downloadImageButton.hidden = item.allowed_actions?.download === false;
     const canCrossPrevious = state.imagePreviewContext?.type === "detail" && hasAdjacentGalleryRecord(-1);
     const canCrossNext = state.imagePreviewContext?.type === "detail" && hasAdjacentGalleryRecord(1);
     const hasCarousel = items.length > 1 || canCrossPrevious || canCrossNext;
@@ -1854,6 +1861,7 @@
       const item = state.imagePreviewItems[state.imagePreviewIndex];
       if (!item?.id) return;
       event.preventDefault();
+      if (item.allowed_actions?.download === false) return;
       try { await (await bridge()).download(`gallery/download/${item.id}`, {}, item.download_filename); }
       catch (error) { showNotice(errorMessage(error, "图片下载失败"), "error"); }
     });
@@ -2376,7 +2384,7 @@
       } else {
         state.settings.webui.revision = server.webui.revision;
         state.settings.webui.external_sources = server.webui.external_sources;
-        externalSources.settingsLoaded(true);
+        externalSources.settingsLoaded(true, draft.studio.external_sources);
         settingsBaseline = settingsFingerprint({ base: server.base, studio: server.webui });
       }
       const warnings = Array.isArray(saved?.warnings) ? saved.warnings.filter(Boolean) : [];
@@ -2417,17 +2425,25 @@
   }
 
   function dataUrlToFile(dataUrl, name) { const [head, encoded] = dataUrl.split(",", 2); const type = (head.match(/data:([^;]+)/) || [])[1] || "image/png"; const bytes = Uint8Array.from(atob(encoded), (char) => char.charCodeAt(0)); return new File([bytes], name, { type }); }
-  async function exportSelected() { try { const result = await apiPost("gallery/export", { ids: Array.from(state.selectedIds) }); const client = await bridge(); await client.download(result.download_endpoint, {}, result.filename); showNotice("导出文件已开始下载。", "success"); } catch (error) { showNotice(errorMessage(error, "画廊导出失败"), "error"); } }
+  async function checkGalleryAction(ids, action) {
+    const preview = await apiPost("gallery/delete/preview", { ids, action });
+    if (preview.allowed === false || preview.denied?.length) {
+      const messages = (preview.denied || []).map(item => item.message || `${item.source_name || item.source_id || "外部图库"}未允许此操作`);
+      throw new Error(Array.from(new Set(messages)).join("；") || "所选图片包含未允许此操作的外部资源。");
+    }
+    return preview;
+  }
+  async function exportSelected() { try { const ids = Array.from(state.selectedIds); await checkGalleryAction(ids, "download"); const result = await apiPost("gallery/export", { ids }); const client = await bridge(); await client.download(result.download_endpoint, {}, result.filename); showNotice("导出文件已开始下载。", "success"); } catch (error) { showNotice(errorMessage(error, "画廊导出失败"), "error"); } }
   async function deleteSelected() {
     const ids = Array.from(state.selectedIds); if (!ids.length || $("deleteButton").disabled) return;
     $("deleteButton").disabled = true;
     try {
       // Selections survive paging, so visible cards cannot establish whether
       // the whole operation includes external originals.
-      const preview = await apiPost("gallery/delete/preview", { ids });
+      const preview = await checkGalleryAction(ids, "delete");
       const external = Number(preview.external_count || 0) > 0;
       const names = (preview.external_sources || []).map(source => typeof source === "string" ? source : source.name || source.id).filter(Boolean).join("、");
-      const warning = external ? `其中包含 ${preview.external_count} 条外部记录${names ? `（${names}）` : ""}，会永久删除来源插件中的原图及关联参数文件，无法恢复。` : "";
+      const warning = external ? `其中包含 ${preview.external_count} 条外部记录${names ? `（${names}）` : ""}，会永久删除来源目录中的原图及已确认关联的参数文件，无法恢复。` : "";
       if (!await confirmAction(`永久删除 ${ids.length} 条生成记录及其结果图？${warning}`)) return;
       const result = await apiPost("gallery/delete", { ids, confirm_external: external });
       const errors = result.errors || [];
@@ -2455,7 +2471,7 @@
   }
 
   async function useGalleryImageAsReference(image) {
-    if (!image?.id) return;
+    if (!image?.id || image.allowed_actions?.reference === false || state.detailData?.allowed_actions?.reference === false) return;
     $("detailUseReference").disabled = true;
     try { applyUploadedReference(await apiPost("studio/reference/from-gallery", { image_id: image.id })); }
     catch (error) { showNotice(errorMessage(error, "添加参考图失败"), "error"); }
@@ -2493,8 +2509,8 @@
     document.addEventListener("keydown", (event) => { if (mobileImageViewer || library.modalOpen()) return; if (event.key === "Escape") { if (!els.parameterDialog.classList.contains("is-hidden")) closeToolParameterDialog(); else if (!els.imagePreview.classList.contains("is-hidden")) closeImagePreview(); else if (els.detailDrawer.classList.contains("is-open") && !activeConfirmation) closeDetail(); return; } if (event.target.closest('input,textarea,select,[role="combobox"],[contenteditable=true]')) return; if (!els.imagePreview.classList.contains("is-hidden")) { if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); void navigateImagePreview(event.key === "ArrowLeft" ? -1 : 1); } return; } if (!els.detailDrawer.classList.contains("is-open") || activeConfirmation) return; if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); void navigateDetail(event.key === "ArrowLeft" ? -1 : 1); } });
   }
 
-  const externalSources = window.ImageStudioExternalSources({ state, apiGet, apiPost, escape, formatBytes, formatDate, showNotice, errorMessage, updateSettingsDirty, invalidateBrowseCache });
-  const library = window.ImageStudioLibrary({ state, escape, apiGet, apiPost, bridge, showNotice, errorMessage, formatDate, formatBytes, sourceLabel, syncPageScrollLock, switchView, requestParameters, loadGallery, clearGallerySelection, openDetail, closeDetail, reproduce, applyDraft, useDataUrlAsReference, useGalleryImageAsReference, ensureDetailMetadata, ensureDetailPreview, getImageMedia, cacheImageMedia, loadImageMedia });
+  const externalSources = window.ImageStudioExternalSources({ state, apiGet, apiPost, escape, formatBytes, formatDate, showNotice, errorMessage, updateSettingsDirty, invalidateBrowseCache, openModal: (...args) => library.openModal(...args) });
+  const library = window.ImageStudioLibrary({ state, escape, apiGet, apiPost, bridge, showNotice, errorMessage, formatDate, formatBytes, sourceLabel, syncPageScrollLock, switchView, requestParameters, loadGallery, clearGallerySelection, openDetail, closeDetail, reproduce, applyDraft, useDataUrlAsReference, useGalleryImageAsReference, ensureDetailMetadata, ensureDetailPreview, getImageMedia, cacheImageMedia, loadImageMedia, checkGalleryAction });
 
   async function start() {
     bindEvents();

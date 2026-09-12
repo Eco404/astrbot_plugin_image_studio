@@ -11,9 +11,9 @@ from pathlib import Path
 from typing import Any
 
 RELEASE_VERSION = 1
-DATABASE_VERSION = "2-dev.1"
+DATABASE_VERSION = "2-dev.2"
 DEVELOPMENT_TARGET = 2
-DEVELOPMENT_REVISION = 1
+DEVELOPMENT_REVISION = 2
 
 SCHEMA_STATEMENTS = (
     """CREATE TABLE generations (
@@ -131,7 +131,7 @@ _TABLES = (
 
 # Keep the published v1 definition above immutable. At release time this single
 # additive migration becomes v1 -> v2; intermediate dev revisions are not releases.
-DEVELOPMENT_STATEMENTS = (
+DEVELOPMENT_V1_STATEMENTS = (
     """CREATE TABLE external_sources (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -158,6 +158,16 @@ DEVELOPMENT_STATEMENTS = (
         dev_revision INTEGER NOT NULL
     )""",
 )
+DEVELOPMENT_V2_UPGRADE = (
+    "ALTER TABLE external_sources ADD COLUMN type TEXT NOT NULL DEFAULT 'nai'",
+    "ALTER TABLE external_sources ADD COLUMN recursive INTEGER NOT NULL DEFAULT 0",
+    """ALTER TABLE external_sources ADD COLUMN permissions_json TEXT NOT NULL DEFAULT '{"favorite":true,"delete":true,"download":true,"reference":true}'""",
+    "ALTER TABLE external_records ADD COLUMN time_source TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE external_records ADD COLUMN metadata_created_at REAL",
+    "ALTER TABLE external_records ADD COLUMN file_birthtime REAL",
+    "ALTER TABLE external_records ADD COLUMN time_policy_version INTEGER NOT NULL DEFAULT 0",
+)
+DEVELOPMENT_STATEMENTS = (*DEVELOPMENT_V1_STATEMENTS, *DEVELOPMENT_V2_UPGRADE)
 _DEVELOPMENT_TABLES = ("external_sources", "external_records", "schema_meta")
 
 
@@ -308,10 +318,15 @@ def ensure_release_schema(conn: sqlite3.Connection, *, backup_dir: Path) -> Path
     return backup
 
 
-@lru_cache(maxsize=1)
-def _development_shapes() -> dict[str, tuple[Any, ...]]:
+@lru_cache(maxsize=2)
+def _development_shapes(
+    revision: int = DEVELOPMENT_REVISION,
+) -> dict[str, tuple[Any, ...]]:
     with closing(sqlite3.connect(":memory:")) as conn:
-        for statement in (*SCHEMA_STATEMENTS, *DEVELOPMENT_STATEMENTS):
+        statements = (
+            DEVELOPMENT_V1_STATEMENTS if revision == 1 else DEVELOPMENT_STATEMENTS
+        )
+        for statement in (*SCHEMA_STATEMENTS, *statements):
             conn.execute(statement)
         return {table: _table_shape(conn, table) for table in _DEVELOPMENT_TABLES}
 
@@ -325,20 +340,23 @@ def _development_kind(conn: sqlite3.Connection) -> str:
         for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
     }
     if version == RELEASE_VERSION and "schema_meta" in tables:
-        for table, expected in _development_shapes().items():
-            if _table_shape(conn, table) != expected:
-                raise RuntimeError(f"图库数据库开发结构不符：{table}；未执行升级")
+        if _table_shape(conn, "schema_meta") != _development_shapes()["schema_meta"]:
+            raise RuntimeError("图库数据库开发结构不符：schema_meta；未执行升级")
         rows = conn.execute(
             "SELECT id, target_version, dev_revision FROM schema_meta"
         ).fetchall()
-        if len(rows) != 1 or tuple(rows[0]) != (
-            1,
-            DEVELOPMENT_TARGET,
-            DEVELOPMENT_REVISION,
+        if (
+            len(rows) != 1
+            or tuple(rows[0][:2]) != (1, DEVELOPMENT_TARGET)
+            or rows[0][2] not in {1, DEVELOPMENT_REVISION}
         ):
             raise RuntimeError("不支持的图库数据库开发修订；请使用对应开发版本")
+        revision = int(rows[0][2])
+        for table, expected in _development_shapes(revision).items():
+            if _table_shape(conn, table) != expected:
+                raise RuntimeError(f"图库数据库开发结构不符：{table}；未执行升级")
         _validate_release_layout(conn)
-        return "development"
+        return "development_upgrade" if revision == 1 else "development"
     if set(_DEVELOPMENT_TABLES[:2]) & tables:
         raise RuntimeError("图库数据库存在未登记的外部图库结构；未执行升级")
     return _database_kind(conn)
@@ -347,7 +365,8 @@ def _development_kind(conn: sqlite3.Connection) -> str:
 def _stamp_development(conn: sqlite3.Connection) -> None:
     conn.execute(f"PRAGMA user_version = {RELEASE_VERSION}")
     conn.execute(
-        "INSERT INTO schema_meta(id, target_version, dev_revision) VALUES (1, ?, ?)",
+        "INSERT INTO schema_meta(id, target_version, dev_revision) VALUES (1, ?, ?) "
+        "ON CONFLICT(id) DO UPDATE SET target_version=excluded.target_version,dev_revision=excluded.dev_revision",
         (DEVELOPMENT_TARGET, DEVELOPMENT_REVISION),
     )
 
@@ -379,7 +398,12 @@ def ensure_development_schema(
                     raise
         elif kind == "promotion":
             conn.execute("DROP TABLE schema_meta")
-        for statement in DEVELOPMENT_STATEMENTS:
+        statements = (
+            DEVELOPMENT_V2_UPGRADE
+            if kind == "development_upgrade"
+            else DEVELOPMENT_STATEMENTS
+        )
+        for statement in statements:
             conn.execute(statement)
         _stamp_development(conn)
         _development_kind(conn)

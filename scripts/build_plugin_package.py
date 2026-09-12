@@ -21,6 +21,7 @@ RUNTIME_FILES = (
     "config.py",
     "database_schema.py",
     "external_gallery.py",
+    "external_timestamps.py",
     "image_metadata.py",
     "models.py",
     "parameter_exchange.py",

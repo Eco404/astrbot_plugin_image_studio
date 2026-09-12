@@ -278,7 +278,7 @@ def test_database_release_version_is_explicit_and_future_versions_are_rejected(
             assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
             assert conn.execute(
                 "SELECT target_version,dev_revision FROM schema_meta"
-            ).fetchone() == (2, 1)
+            ).fetchone() == (2, 2)
             conn.execute("PRAGMA user_version = 2")
         with pytest.raises(RuntimeError, match="正式版本"):
             await GenerationStore(tmp_path).initialize()

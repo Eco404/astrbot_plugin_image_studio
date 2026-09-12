@@ -37,10 +37,9 @@ def test_settings_scan_reference_and_external_delete_confirmation(tmp_path):
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:
-                status = (await client.get(PREFIX + "external/status")).json()[
-                    "sources"
-                ][0]
-                assert status["enabled"] is False
+                status = (await client.get(PREFIX + "external/status")).json()
+                assert status["sources"] == []
+                assert {item["id"] for item in status["types"]} == {"nai", "directory"}
                 assert (
                     await client.post(
                         PREFIX + "external/scan", json={"source_id": "nai"}
@@ -248,7 +247,7 @@ def test_saved_settings_revision_survives_external_configuration_failure(
                 transport=httpx.ASGITransport(app=app), base_url="http://test"
             ) as client:
                 settings = (await client.get(PREFIX + "settings/get")).json()["webui"]
-                settings["external_sources"]["nai"]["enabled"] = True
+                settings["external_sources"]["nai"] = {"enabled": True}
                 result = await client.post(
                     PREFIX + "settings/save",
                     json={"settings_revision": settings["revision"], "webui": settings},

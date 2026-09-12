@@ -7,7 +7,6 @@ import json
 import logging
 import math
 import os
-import re
 import stat
 import time
 from dataclasses import dataclass
@@ -16,6 +15,11 @@ from typing import Any
 
 import yaml
 
+from .external_timestamps import (
+    TIME_POLICY_VERSION,
+    external_image_times,
+    nai_filename_timestamp,
+)
 from .image_metadata import MAX_IMAGE_BYTES
 
 MAX_SIDECAR_BYTES = 1024 * 1024
@@ -76,8 +80,12 @@ class ExternalGalleryAdapter:
     plugin_directory: str
     history_directory: str
     generation_engine: str = "unknown"
+    root_path: str = ""
+    recursive: bool = False
 
     def resolve_root(self, data_dir: Path) -> Path:
+        if self.root_path:
+            return Path(self.root_path)
         return data_dir.parent / self.plugin_directory / self.history_directory
 
     def accepts(self, filename: str) -> bool:
@@ -91,6 +99,22 @@ class ExternalGalleryAdapter:
 
     def created_at(self, filename: str, mtime_ns: int) -> float:
         return mtime_ns / 1_000_000_000
+
+
+class DirectoryGalleryAdapter(ExternalGalleryAdapter):
+    def __init__(
+        self, source_id: str, name: str, path: str, recursive: bool = False
+    ) -> None:
+        super().__init__(source_id, name, "", "", "unknown", path, recursive)
+
+    def accepts(self, filename: str) -> bool:
+        return Path(filename).suffix.lower() in {
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".webp",
+            ".gif",
+        }
 
 
 class NAIGalleryAdapter(ExternalGalleryAdapter):
@@ -111,13 +135,19 @@ class NAIGalleryAdapter(ExternalGalleryAdapter):
         }
     )
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        source_id: str = "nai",
+        name: str = "NAI 插件图库",
+        recursive: bool = False,
+    ) -> None:
         super().__init__(
-            "nai",
-            "NAI 插件图库",
+            source_id,
+            name,
             "astrbot_plugin_nai_image",
             "image_history",
             "novelai",
+            recursive=recursive,
         )
 
     def accepts(self, filename: str) -> bool:
@@ -151,11 +181,9 @@ class NAIGalleryAdapter(ExternalGalleryAdapter):
         return result
 
     def created_at(self, filename: str, mtime_ns: int) -> float:
-        match = re.fullmatch(r"nai_(\d{16,20})\.[^.]+", filename)
-        if match:
-            timestamp = int(match[1]) / 1_000_000_000
-            if 0 < timestamp < 253402300800:
-                return timestamp
+        timestamp = nai_filename_timestamp(filename)
+        if timestamp is not None:
+            return timestamp
         return super().created_at(filename, mtime_ns)
 
 
@@ -193,25 +221,35 @@ def _read_file(path: Path, expected: dict, limit: int) -> bytes:
 def _enumerate_source(
     adapter: ExternalGalleryAdapter, root: Path
 ) -> tuple[list, set, dict, list]:
+    _reject_symlink_components(root)
     root_stat = root.lstat()
     if not stat.S_ISDIR(root_stat.st_mode):
         raise NotADirectoryError("图库路径不是文件夹")
     entries, seen, errors = [], set(), []
-    with os.scandir(root) as directory:
-        for entry in directory:
-            if not adapter.accepts(entry.name):
-                continue
-            # Retain an existing index on unreadable/replaced files. Only a full,
-            # successful scan can decide that an original has disappeared.
-            seen.add(entry.name)
-            try:
-                value = entry.stat(follow_symlinks=False)
-                if not stat.S_ISREG(value.st_mode):
-                    raise ValueError("不是普通图片文件")
-                sidecars = _sidecar_stats(adapter, root / entry.name)
-                entries.append((entry.name, file_fingerprint(value), sidecars))
-            except (OSError, ValueError) as exc:
-                errors.append(f"{entry.name}：{exc}")
+    pending = [root]
+    while pending:
+        current = pending.pop()
+        # Never silently accept a partial subtree: an enumeration failure aborts
+        # the pass and therefore cannot reconcile a missing subtree as deleted.
+        _reject_symlink_components(current)
+        with os.scandir(current) as directory:
+            for entry in directory:
+                path = current / entry.name
+                relative = path.relative_to(root).as_posix()
+                if adapter.recursive and entry.is_dir(follow_symlinks=False):
+                    pending.append(path)
+                    continue
+                if not adapter.accepts(entry.name):
+                    continue
+                seen.add(relative)
+                try:
+                    value = entry.stat(follow_symlinks=False)
+                    if not stat.S_ISREG(value.st_mode):
+                        raise ValueError("不是普通图片文件")
+                    sidecars = _sidecar_stats(adapter, path)
+                    entries.append((relative, file_fingerprint(value), sidecars))
+                except (OSError, ValueError) as exc:
+                    errors.append(f"{relative}：{exc}")
     entries.sort(key=lambda item: (item[1]["mtime_ns"], item[0]))
     return entries, seen, file_fingerprint(root_stat), errors
 
@@ -219,6 +257,7 @@ def _enumerate_source(
 def _load_entry(adapter: ExternalGalleryAdapter, root: Path, entry: tuple) -> tuple:
     filename, fingerprint, sidecars = entry
     path = root / filename
+    _reject_symlink_components(path.parent)
     data = _read_file(path, fingerprint, MAX_IMAGE_BYTES)
     parameters, errors = {}, []
     for sidecar in adapter.sidecar_paths(path):
@@ -244,7 +283,25 @@ def _load_entry(adapter: ExternalGalleryAdapter, root: Path, entry: tuple) -> tu
             errors.append(f"{sidecar.name}：{detail}")
     if _sidecar_stats(adapter, path) != sidecars:
         raise _FileChangedError(f"{filename} 的参数文件发生变化，将在下次扫描重试")
-    return data, parameters, errors
+    times = external_image_times(
+        filename=filename,
+        data=data,
+        path=path,
+        fingerprint=fingerprint,
+        nai=isinstance(adapter, NAIGalleryAdapter),
+    )
+    return data, parameters, errors, times
+
+
+def _reject_symlink_components(path: Path) -> None:
+    """Reject static parent symlinks as well as a symlink at the source root."""
+    for component in (*reversed(path.parents), path):
+        try:
+            mode = component.lstat().st_mode
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(mode):
+            raise NotADirectoryError(f"图库路径不允许符号链接：{component}")
 
 
 async def _settle_mutation(awaitable: Any) -> Any:
@@ -274,19 +331,120 @@ class ExternalGalleryManager:
         self.store = store
         self.data_dir = Path(data_dir).resolve()
         source_adapters = adapters if adapters is not None else [NAIGalleryAdapter()]
-        self.adapters = {item.id: item for item in source_adapters}
-        if len(self.adapters) != len(source_adapters):
+        self._adapter_types = {item.id: item for item in source_adapters}
+        if len(self._adapter_types) != len(source_adapters):
             raise ValueError("外部图库来源 ID 重复")
+        self.adapters: dict[str, ExternalGalleryAdapter] = {}
+        self._settings: dict[str, dict] = {}
         self.preview_max_edge = preview_max_edge
         self.preview_quality = preview_quality
         self.scan_interval = max(0.01, float(scan_interval))
-        self._enabled = {source_id: False for source_id in self.adapters}
-        self._epochs = {source_id: 0 for source_id in self.adapters}
+        self._enabled: dict[str, bool] = {}
+        self._epochs: dict[str, int] = {}
         self._live: dict[str, dict[str, Any]] = {}
         self._tasks: dict[str, asyncio.Task] = {}
         self._periodic_task: asyncio.Task | None = None
         self._started = False
         self._configuration_lock = asyncio.Lock()
+
+    def source_types(self) -> list[dict[str, str]]:
+        return [
+            {
+                "id": source_id,
+                "name": adapter.name,
+                "path": str(adapter.resolve_root(self.data_dir)),
+            }
+            for source_id, adapter in self._adapter_types.items()
+        ] + [{"id": "directory", "name": "自定义目录", "path": ""}]
+
+    def _source_configuration(self, external_sources: dict | None) -> tuple[dict, dict]:
+        if external_sources is None:
+            external_sources = {}
+        if not isinstance(external_sources, dict):
+            raise ValueError("外部图库设置必须是对象")  # noqa: TRY004 - invalid user configuration
+        settings, adapters = {}, {}
+        for source_id, value in external_sources.items():
+            entry = value if isinstance(value, dict) else {"enabled": value}
+            kind = entry.get(
+                "type", source_id if source_id in self._adapter_types else ""
+            )
+            default = self._adapter_types.get(kind)
+            name = str(entry.get("name") or (default.name if default else "自定义图库"))
+            recursive = bool(entry.get("recursive", False))
+            if kind == "directory":
+                path = entry.get("path", "")
+                if (
+                    not isinstance(path, str)
+                    or not path
+                    or "\x00" in path
+                    or not Path(path).is_absolute()
+                ):
+                    raise ValueError(f"{name}：请填写容器内的绝对目录路径")
+                path = os.path.abspath(path)
+                adapter = DirectoryGalleryAdapter(source_id, name, path, recursive)
+            elif kind == "nai":
+                adapter = NAIGalleryAdapter(source_id, name, recursive)
+                path = ""
+            elif default is not None:
+                # Test/custom adapter injection remains a supported extension.
+                adapter, path = default, ""
+            else:
+                raise ValueError(f"{name}：未知的外部图库类型")
+            permissions = entry.get("permissions", {})
+            if not isinstance(permissions, dict):
+                raise ValueError(f"{name}：外部图库操作权限必须是对象")  # noqa: TRY004 - invalid user configuration
+            settings[source_id] = {
+                "type": kind,
+                "name": name,
+                "path": path,
+                "recursive": recursive,
+                "enabled": bool(entry.get("enabled", False)),
+                "permissions": {
+                    action: bool(
+                        permissions.get(
+                            action, kind != "directory" if action == "delete" else True
+                        )
+                    )
+                    for action in ("favorite", "delete", "download", "reference")
+                },
+            }
+            adapters[source_id] = adapter
+        return settings, adapters
+
+    def validate_configuration(self, external_sources: dict | None) -> None:
+        settings, adapters = self._source_configuration(external_sources)
+        roots = []
+        for source_id, adapter in adapters.items():
+            root = Path(os.path.abspath(adapter.resolve_root(self.data_dir)))
+            if root == Path(root.anchor):
+                raise ValueError(f"{adapter.name}：不能扫描文件系统根目录")
+            if settings[source_id]["type"] == "directory":
+                try:
+                    _reject_symlink_components(root)
+                except NotADirectoryError as exc:
+                    raise ValueError(str(exc)) from exc
+                if root.exists() and not root.is_dir():
+                    raise ValueError(f"{adapter.name}：图库路径不是文件夹")
+            actual = root.resolve()
+            if (
+                actual == self.data_dir
+                or self.data_dir in actual.parents
+                or (adapter.recursive and actual in self.data_dir.parents)
+            ):
+                raise ValueError(
+                    f"{adapter.name}：扫描范围不能包含 Image Studio 自身的数据目录"
+                )
+            for previous_id, previous_root, previous_recursive in roots:
+                overlaps = (
+                    actual == previous_root
+                    or (previous_recursive and previous_root in actual.parents)
+                    or (adapter.recursive and actual in previous_root.parents)
+                )
+                if overlaps:
+                    raise ValueError(
+                        f"{adapter.name} 与 {settings[previous_id]['name']} 的扫描目录重复或重叠"
+                    )
+            roots.append((source_id, actual, adapter.recursive))
 
     async def configure(
         self,
@@ -296,21 +454,43 @@ class ExternalGalleryManager:
         preview_quality: int | None = None,
     ) -> None:
         async with self._configuration_lock:
+            self.validate_configuration(external_sources)
+            settings, adapters = self._source_configuration(external_sources)
             if preview_max_edge is not None:
                 self.preview_max_edge = preview_max_edge
             if preview_quality is not None:
                 self.preview_quality = preview_quality
-            settings = external_sources if isinstance(external_sources, dict) else {}
-            for source_id, adapter in self.adapters.items():
-                setting = settings.get(source_id, False)
-                enabled = (
-                    bool(setting.get("enabled", False))
-                    if isinstance(setting, dict)
-                    else bool(setting)
+            stored_ids = {
+                item["id"] for item in await self.store.external_sources_status()
+            }
+            for source_id in (set(self._settings) | stored_ids) - set(settings):
+                self._epochs[source_id] = self._epochs.get(source_id, 0) + 1
+                self._enabled[source_id] = False
+                await self._stop_source(source_id)
+                await _settle_mutation(self.store.remove_external_source(source_id))
+                self._settings.pop(source_id, None)
+                self.adapters.pop(source_id, None)
+                self._enabled.pop(source_id, None)
+                self._epochs.pop(source_id, None)
+                self._live.pop(source_id, None)
+            for source_id, adapter in adapters.items():
+                setting = settings[source_id]
+                enabled = setting["enabled"]
+                previous = self._settings.get(source_id)
+                definition_changed = previous is not None and any(
+                    previous.get(key) != setting.get(key)
+                    for key in ("type", "path", "recursive")
                 )
-                changed = enabled != self._enabled[source_id]
+                changed = (
+                    previous is None
+                    or enabled != self._enabled.get(source_id)
+                    or definition_changed
+                )
+                self._epochs.setdefault(source_id, 0)
                 if changed:
                     self._epochs[source_id] += 1
+                    await self._stop_source(source_id)
+                self.adapters[source_id] = adapter
                 self._enabled[source_id] = enabled
                 if not enabled:
                     await self._stop_source(source_id)
@@ -325,8 +505,12 @@ class ExternalGalleryManager:
                         adapter.name,
                         str(adapter.resolve_root(self.data_dir)),
                         enabled,
+                        source_type=setting["type"],
+                        recursive=setting["recursive"],
+                        permissions=setting["permissions"],
                     )
                 )
+                self._settings[source_id] = setting
                 if enabled and changed:
                     self._live.pop(source_id, None)
                     if self._started:
@@ -362,7 +546,7 @@ class ExternalGalleryManager:
     async def _periodic(self) -> None:
         while self._started:
             await asyncio.sleep(self.scan_interval)
-            for source_id, enabled in self._enabled.items():
+            for source_id, enabled in list(self._enabled.items()):
                 if enabled:
                     await self.request_scan(source_id)
 
@@ -415,6 +599,7 @@ class ExternalGalleryManager:
                 "skipped": 0,
                 **stored.get(source_id, {}),
                 **self._live.get(source_id, {}),
+                **self._settings[source_id],
             }
             item["enabled"] = self._enabled[source_id]
             if not item["enabled"]:
@@ -423,7 +608,9 @@ class ExternalGalleryManager:
         return result
 
     def _current(self, source_id: str, epoch: int) -> bool:
-        return self._enabled[source_id] and self._epochs[source_id] == epoch
+        return (
+            bool(self._enabled.get(source_id)) and self._epochs.get(source_id) == epoch
+        )
 
     async def _scan(self, source_id: str, epoch: int) -> None:
         from .image_metadata import PARSER_VERSION
@@ -468,12 +655,17 @@ class ExternalGalleryManager:
                         and previous.get("thumbnail_max_edge") == self.preview_max_edge
                         and previous.get("thumbnail_quality") == self.preview_quality
                         and int(previous.get("parser_version") or 0) >= PARSER_VERSION
+                        and int(previous.get("time_policy_version") or 0)
+                        >= TIME_POLICY_VERSION
                     ):
                         skipped += 1
                     else:
-                        data, parameters, parameter_errors = await asyncio.to_thread(
-                            _load_entry, adapter, root, entry
-                        )
+                        (
+                            data,
+                            parameters,
+                            parameter_errors,
+                            times,
+                        ) = await asyncio.to_thread(_load_entry, adapter, root, entry)
                         if not self._current(source_id, epoch):
                             return
                         for error in parameter_errors:
@@ -498,9 +690,7 @@ class ExternalGalleryManager:
                                 mtime_ns=fingerprint["mtime_ns"],
                                 parameters=parameters,
                                 generation_engine=adapter.generation_engine,
-                                created_at=adapter.created_at(
-                                    filename, fingerprint["mtime_ns"]
-                                ),
+                                **times,
                                 preview_max_edge=self.preview_max_edge,
                                 preview_quality=self.preview_quality,
                             )
@@ -543,7 +733,7 @@ class ExternalGalleryManager:
             report.update(
                 status="unavailable",
                 error="未找到 NAI 插件图库目录"
-                if source_id == "nai"
+                if isinstance(adapter, NAIGalleryAdapter)
                 else "未找到外部图库目录",
                 errors=[str(exc)[:500]],
                 last_scan_at=time.time(),

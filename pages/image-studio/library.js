@@ -1235,10 +1235,18 @@
       $("detailFavorite").setAttribute("aria-pressed", String(!!detail?.is_favorite));
       $("detailFavorite").title = detail?.is_favorite ? "取消收藏" : "收藏生成记录";
       $("detailFavorite").setAttribute("aria-label", $("detailFavorite").title);
-      $("detailFavorite").disabled = favoritePending || !detail;
-      $("detailUseReference").disabled = !image?.id || !!image.file_state && image.file_state !== "available";
-      $("detailReproduce").disabled = !detail;
-      $("detailDelete").disabled = !detail || !(detail.images || []).length;
+      const allowed = Object.fromEntries(["favorite", "delete", "download", "reference"].map(action => [action, detail?.allowed_actions?.[action] !== false && image?.allowed_actions?.[action] !== false]));
+      const normalized = image?.metadata?.normalized || {};
+      const hasParameters = !detail?.is_external || !!(detail.prompt || detail.model || normalized.prompt || normalized.model || Object.keys(normalized.parameters || {}).length || Object.keys(detail.parameters || {}).length);
+      $("detailFavorite").disabled = favoritePending || !detail || allowed.favorite === false;
+      $("detailUseReference").disabled = !image?.id || !!image.file_state && image.file_state !== "available" || allowed.reference === false;
+      $("detailReproduce").disabled = !detail || !hasParameters;
+      $("detailDelete").disabled = !detail || !(detail.images || []).length || allowed.delete === false;
+      for (const [id, action] of [["detailFavorite", "favorite"], ["detailUseReference", "reference"], ["detailDelete", "delete"]]) {
+        const button = $(id);
+        if (allowed[action] === false) { if (!button.dataset.allowedTitle) button.dataset.allowedTitle = button.title; button.title = "此外部图库未允许此操作"; }
+        else if (button.dataset.allowedTitle) { button.title = button.dataset.allowedTitle; delete button.dataset.allowedTitle; }
+      }
       $("detailImportEdit").hidden = detail?.source !== "import" || !!detail?.is_external;
       $("detailImportEdit").disabled = importEditLoading || !detail || !(detail.images || []).length;
       $("detailCopy").disabled = !detail || !!detail.lightweight && !image?._metadataLoaded;
@@ -1262,6 +1270,7 @@
 
     async function toggleFavorite() {
       const detail = state.detailData; if (!detail || favoritePending) return;
+      if (detail.allowed_actions?.favorite === false) return;
       const id = detail.id; const favorite = !detail.is_favorite;
       favoritePending = true; updateDetailActions(detail);
       try {
@@ -1309,6 +1318,7 @@
       batchFavoritePending = true; ++selectionFavoriteRevision;
       window.clearTimeout(selectionFavoriteTimer); renderSelectionFavorite();
       try {
+        await hooks.checkGalleryAction(ids, "favorite");
         const result = await apiPost("gallery/favorite", { generation_ids: ids, action: "toggle" });
         const changed = new Map((result.items || []).map((item) => [item.id, item]));
         for (const item of state.galleryItems) if (changed.has(item.id)) Object.assign(item, changed.get(item.id));
@@ -1322,10 +1332,11 @@
 
     async function deleteDetailImages() {
       const detail = state.detailData; if (!detail) return;
+      if (detail.allowed_actions?.delete === false) return;
       const images = detail.images || []; if (!images.length) return;
       const selected = new Set(images.map((image) => image.id));
       const body = images.length === 1 ? "<p>永久删除这张图片及对应生成记录？</p>" : `<p>选择要从本条生成记录中删除的图片。</p><button class="quiet-button" id="deleteImagesSelectAll" type="button">取消全选</button><div class="delete-image-grid">${images.map((image, index) => `<label class="delete-image-choice"><img data-delete-preview="${escape(image.id)}" ${image.thumbnail_data_url || image.data_url ? `src="${escape(image.thumbnail_data_url || image.data_url)}"` : ""} alt="第 ${index + 1} 张图片" /><input type="checkbox" data-delete-image="${escape(image.id)}" checked /><span>第 ${index + 1} 张</span></label>`).join("")}</div>`;
-      const consequence = `${detail.is_favorite ? "<p>此记录已收藏。</p>" : ""}${detail.is_external ? `<p class="external-delete-warning">包含外部资源（${escape(detail.external_source?.name || "外部图库")}）。将永久删除来源插件中的原图及关联参数文件，无法恢复。</p>` : ""}<p>删除全部成图会同时移除本条记录及其参考图关联。</p>`;
+      const consequence = `${detail.is_favorite ? "<p>此记录已收藏。</p>" : ""}${detail.is_external ? `<p class="external-delete-warning">包含外部资源（${escape(detail.external_source?.name || "外部图库")}）。将永久删除来源目录中的原图及已确认关联的参数文件，无法恢复。</p>` : ""}<p>删除全部成图会同时移除本条记录及其参考图关联。</p>`;
       let active = true, observer;
       await openModal("删除图片", body + consequence, [{ label: "取消", action: () => false }, { label: `删除 ${images.length} 张`, danger: true, id: "deleteImagesAccept", action: async () => {
         if (!selected.size) throw new Error("请至少选择一张图片。");
@@ -1562,7 +1573,7 @@
       window.addEventListener("beforeunload", () => imports.forEach((item) => URL.revokeObjectURL(item.url)));
     }
 
-    return { bind, modeLabel, engineLabel, galleryPageSize, renderGalleryCard, galleryRendered, selectionChanged, syncFloatingBars, detailMetadataMarkup, detailWarningsMarkup, layoutDetailParameters, clearDetailParameterLayout, updateDetailActions, copyText, resolveParameters, schemaPolicyButton, editParameterPolicy, setCommandLabel, modalOpen: () => !!modalClose };
+    return { bind, modeLabel, engineLabel, galleryPageSize, renderGalleryCard, galleryRendered, selectionChanged, syncFloatingBars, detailMetadataMarkup, detailWarningsMarkup, layoutDetailParameters, clearDetailParameterLayout, updateDetailActions, copyText, resolveParameters, schemaPolicyButton, editParameterPolicy, setCommandLabel, openModal, modalOpen: () => !!modalClose };
   };
   window.ImageStudioMetadata = { extractMetadata, decodeComment };
 })();
