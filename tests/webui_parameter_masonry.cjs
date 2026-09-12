@@ -9,6 +9,17 @@ if (!base) throw new Error("Set STUDIO_TEST_URL to an isolated tests.webui_harne
 const engine = process.env.STUDIO_BROWSER || "chromium";
 const output = fs.mkdtempSync(path.join(os.tmpdir(), "image-studio-parameter-masonry-"));
 const prompt = Array.from({ length: 18 }, (_, index) => `Landscape ${index + 1}: mountain lake, daylight and clear water.`).join("\n");
+function fixtureRequest(detail) {
+  detail.source = "webui";
+  detail.original_prompt = prompt;
+  detail.parameters = { ...detail.parameters, negative_prompt: "blur", parameters: { steps: 24, sampler: "euler", scale: 6, long_note: prompt.slice(0, 500), seed: 42, enabled: false, guidance: 0.3 } };
+}
+function fixtureMetadata() {
+  return { format: "comfyui", raw: {}, normalized: {
+    prompt, steps: 24, sampler: "euler", seed: 42,
+    stages: [{ node_id: "1", type: "KSampler", prompt, steps: 24, seed: 42, sampler: "euler", scale: 6, note: "stage note" }],
+  } };
+}
 
 async function settle(frame) {
   await frame.evaluate(async () => {
@@ -53,16 +64,15 @@ async function verifyGrid(grid, count) {
     await page.route("**/gallery/detail/**", async route => {
       const response = await route.fetch();
       const detail = await response.json();
-      detail.source = "webui";
-      detail.original_prompt = prompt;
-      detail.parameters = { ...detail.parameters, negative_prompt: "blur", parameters: { steps: 24, sampler: "euler", scale: 6, long_note: prompt.slice(0, 500), seed: 42, enabled: false, guidance: 0.3 } };
-      detail.images = detail.images.map(image => ({ ...image, metadata: {
-        format: "comfyui", raw: {}, normalized: {
-          prompt, steps: 24, sampler: "euler", seed: 42,
-          stages: [{ node_id: "1", type: "KSampler", prompt, steps: 24, seed: 42, sampler: "euler", scale: 6, note: "stage note" }],
-        },
-      } }));
+      fixtureRequest(detail);
+      detail.images = detail.images.map(image => ({ ...image, metadata: fixtureMetadata() }));
       await route.fulfill({ response, json: detail });
+    });
+    // Details now hydrate selected image parameters separately from the manifest.
+    await page.route("**/gallery/image-info/**", async route => {
+      const response = await route.fetch(); const payload = await response.json();
+      fixtureRequest(payload.detail_fields); payload.image.metadata = fixtureMetadata();
+      await route.fulfill({ response, json: payload });
     });
     await page.goto(base);
     const frame = page.frames().find(item => item.url().includes("/ui/"));

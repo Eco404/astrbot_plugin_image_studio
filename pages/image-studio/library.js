@@ -74,6 +74,7 @@
     let detailParameterGrids = [];
     let detailParameterObserver = null;
     let detailParameterFrame = 0;
+    let settingsPanelFrame = 0;
     let favoritePending = false;
     let batchFavoritePending = false;
     let selectionFavoriteKey = "";
@@ -1109,28 +1110,55 @@
       detailParameterGrids = [];
     }
 
+    function positionBalancedGrid(grid, columnsProperty) {
+      if (!grid?.isConnected || !grid.getClientRects().length || !grid.clientWidth) return;
+      const columns = Number(getComputedStyle(grid).getPropertyValue(columnsProperty)) === 1 ? 1 : 2;
+      const rows = Array.from(grid.children);
+      if (columns === 1) rows.forEach(row => { row.style.gridColumn = "1"; });
+      // Measure at the final column width, independently of opening transforms.
+      const sizes = rows.map(row => {
+        const style = getComputedStyle(row);
+        return Math.max(1, Math.ceil((parseFloat(style.height) || row.offsetHeight) + (parseFloat(style.marginBottom) || 0)));
+      });
+      const heights = [0, 0]; let column = 0;
+      rows.forEach((row, index) => {
+        const gridColumn = String(column + 1);
+        const gridRow = `${heights[column] + 1} / span ${sizes[index]}`;
+        if (row.style.gridColumn !== gridColumn) row.style.gridColumn = gridColumn;
+        if (row.style.gridRow !== gridRow) row.style.gridRow = gridRow;
+        heights[column] += sizes[index];
+        if (columns === 2 && heights[column] > heights[1 - column]) column = 1 - column;
+      });
+    }
+
     function positionDetailParameters() {
       detailParameterFrame = 0;
-      for (const grid of detailParameterGrids) {
-        if (!grid.isConnected || !grid.getClientRects().length || !grid.clientWidth) continue;
-        const columns = Number(getComputedStyle(grid).getPropertyValue("--parameter-columns")) === 1 ? 1 : 2;
-        const rows = Array.from(grid.children);
-        if (columns === 1) rows.forEach(row => { row.style.gridColumn = "1"; });
-        // Measure at the final column width, independently of the drawer's opening transform.
-        const sizes = rows.map(row => {
-          const style = getComputedStyle(row);
-          return Math.max(1, Math.ceil((parseFloat(style.height) || row.offsetHeight) + (parseFloat(style.marginBottom) || 0)));
-        });
-        const heights = [0, 0]; let column = 0;
-        rows.forEach((row, index) => {
-          const gridColumn = String(column + 1);
-          const gridRow = `${heights[column] + 1} / span ${sizes[index]}`;
-          if (row.style.gridColumn !== gridColumn) row.style.gridColumn = gridColumn;
-          if (row.style.gridRow !== gridRow) row.style.gridRow = gridRow;
-          heights[column] += sizes[index];
-          if (columns === 2 && heights[column] > heights[1 - column]) column = 1 - column;
-        });
-      }
+      for (const grid of detailParameterGrids) positionBalancedGrid(grid, "--parameter-columns");
+    }
+
+    function layoutSettingsPanels() {
+      cancelAnimationFrame(settingsPanelFrame); settingsPanelFrame = 0;
+      positionBalancedGrid($("settingsView").querySelector(".settings-layout"), "--settings-columns");
+    }
+
+    function scheduleSettingsPanelLayout() {
+      if (!settingsPanelFrame) settingsPanelFrame = requestAnimationFrame(layoutSettingsPanels);
+    }
+
+    function bindSettingsPanelLayout() {
+      const grid = $("settingsView").querySelector(".settings-layout");
+      grid.classList.add("is-masonry");
+      const observer = window.ResizeObserver ? new ResizeObserver(scheduleSettingsPanelLayout) : null;
+      const observeCards = () => {
+        observer?.disconnect(); observer?.observe(grid);
+        for (const card of grid.children) observer?.observe(card, { box: "border-box" });
+        scheduleSettingsPanelLayout();
+      };
+      observeCards();
+      // Rebind only when whole cards change; their content is covered by size observation.
+      new MutationObserver(observeCards).observe(grid, { childList: true });
+      window.addEventListener("resize", scheduleSettingsPanelLayout, { passive: true });
+      grid.addEventListener("toggle", scheduleSettingsPanelLayout, true);
     }
 
     function scheduleDetailParameterLayout() {
@@ -1449,6 +1477,8 @@
     function openGalleryPagePicker() {
       if (totalGalleryPages() <= 1) return;
       window.ImageStudioSelect?.close();
+      const bar = document.querySelector(".gallery-floatingbar").getBoundingClientRect();
+      $("galleryPagePicker").style.bottom = `${window.innerHeight - bar.top + 8}px`;
       $("galleryPagePicker").hidden = false; $("galleryPageLabel").setAttribute("aria-expanded", "true");
       const input = $("galleryPageInput"), strip = $("galleryPageCards");
       input.max = String(totalGalleryPages()); input.value = String(state.galleryPage + 1);
@@ -1560,6 +1590,7 @@
     }
 
     function bind() {
+      bindSettingsPanelLayout();
       renderIcons();
       bindGalleryPagePicker();
       $("galleryGrid").addEventListener("keydown", (event) => { const card = event.target.closest("[data-gallery-id]"); if (event.target !== card) return; if (["Enter", " "].includes(event.key)) { event.preventDefault(); detailTrigger = card; void hooks.openDetail(card.dataset.galleryId); } });
@@ -1656,7 +1687,7 @@
       window.addEventListener("beforeunload", () => imports.forEach((item) => URL.revokeObjectURL(item.url)));
     }
 
-    return { bind, modeLabel, engineLabel, galleryPageSize, closeGalleryPagePicker, renderGalleryCard, galleryRendered, selectionChanged, syncFloatingBars, detailMetadataMarkup, detailWarningsMarkup, layoutDetailParameters, clearDetailParameterLayout, updateDetailActions, copyText, resolveParameters, schemaPolicyButton, editParameterPolicy, setCommandLabel, openModal, modalOpen: () => !!modalClose };
+    return { bind, modeLabel, engineLabel, galleryPageSize, closeGalleryPagePicker, renderGalleryCard, galleryRendered, selectionChanged, syncFloatingBars, detailMetadataMarkup, detailWarningsMarkup, layoutDetailParameters, layoutSettingsPanels, clearDetailParameterLayout, updateDetailActions, copyText, resolveParameters, schemaPolicyButton, editParameterPolicy, setCommandLabel, openModal, modalOpen: () => !!modalClose };
   };
   window.ImageStudioMetadata = { extractMetadata, decodeComment };
 })();

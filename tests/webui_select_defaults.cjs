@@ -52,14 +52,15 @@ async function test(browserType, name, viewport) {
       const after = bar.getBoundingClientRect(); const listBox = list.getBoundingClientRect();
       const hit = document.elementFromPoint(before.left + 1, before.top + before.height / 2);
       const css = getComputedStyle(menu);
-      return { before: before.y, after: after.y, listTop: listBox.top, barBottom: after.bottom, scroll: list.scrollTop, canScroll: list.scrollHeight > list.clientHeight, behind: !!hit?.closest(".studio-select-option"), overflow: css.overflowY, glass: css.backgroundColor, expectedGlass: getComputedStyle(document.getElementById("glassProbe")).backgroundColor, blur: css.backdropFilter || css.webkitBackdropFilter, left: box.left, top: box.top, right: box.right, bottom: box.bottom, width: innerWidth, height: innerHeight };
+      const alpha = color => { const canvas = document.createElement("canvas"); canvas.width = canvas.height = 1; const context = canvas.getContext("2d"); context.fillStyle = color; context.fillRect(0, 0, 1, 1); return context.getImageData(0, 0, 1, 1).data[3] / 255; };
+      return { before: before.y, after: after.y, listTop: listBox.top, barBottom: after.bottom, scroll: list.scrollTop, canScroll: list.scrollHeight > list.clientHeight, behind: !!hit?.closest(".studio-select-option"), overflow: css.overflowY, glass: css.backgroundColor, alpha: alpha(css.backgroundColor), themeAlpha: alpha(getComputedStyle(document.getElementById("glassProbe")).backgroundColor), blur: css.backdropFilter || css.webkitBackdropFilter, left: box.left, top: box.top, right: box.right, bottom: box.bottom, width: innerWidth, height: innerHeight };
     });
     assert.equal(geometry.before, geometry.after);
     assert.ok(geometry.listTop >= geometry.barBottom - 1, JSON.stringify(geometry));
     assert.ok(geometry.scroll > 0 && geometry.canScroll, JSON.stringify(geometry));
     assert.equal(geometry.behind, false);
     assert.equal(geometry.overflow, "hidden");
-    assert.equal(geometry.glass, geometry.expectedGlass);
+    assert.ok(Math.abs(geometry.alpha - (geometry.themeAlpha + (1 - geometry.themeAlpha) * .25)) < .01, "gallery filter adds a small tint over the theme glass");
     assert.match(geometry.blur, /blur\(22px\)/);
     assert.ok(geometry.left >= 7 && geometry.top >= 7 && geometry.right <= geometry.width - 7 && geometry.bottom <= geometry.height - 7, JSON.stringify(geometry));
     const wheel = await page.locator(".studio-select-menu").evaluate((menu) => {
@@ -100,6 +101,7 @@ async function test(browserType, name, viewport) {
     assert.deepEqual(await saved(page, "galleryProvider"), { mode: "all" }, "saving another dropdown must preserve its sibling defaults");
     await trigger(page, "galleryMode").press("Escape");
     await trigger(page, "unrelated").click();
+    assert.equal(await page.locator(".studio-select-menu").evaluate(menu => getComputedStyle(menu).backgroundColor), await page.locator("#glassProbe").evaluate(probe => getComputedStyle(probe).backgroundColor), "other selects keep their theme opacity");
     assert.equal(await action(page, "default").count(), 0, "save-default belongs only to the gallery filters");
     await trigger(page, "unrelated").press("Escape");
     await trigger(page, "single").click();

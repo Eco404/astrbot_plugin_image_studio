@@ -7,10 +7,10 @@
   <script src="./appearance.js?v=1.1.0-dev.2-gallery3"></script>
   <link rel="stylesheet" href="./vendor/photoswipe/photoswipe.css?v=5.4.4" />
   <link rel="stylesheet" href="./app.css?v=1.1.0-dev.2-gallery3" />
-  <link rel="stylesheet" href="./library.css?v=1.1.0-dev.2-gallery3" />
+  <link rel="stylesheet" href="./library.css?v=1.1.0-dev.2-masonry4" />
   <link rel="stylesheet" href="./sortable.css?v=1.1.0-dev.2-gallery3" />
   <link rel="stylesheet" href="./detail-swipe.css?v=1.1.0-dev.2-gallery3" />
-  <link rel="stylesheet" href="./select.css?v=1.1.0-dev.2-gallery3" />
+  <link rel="stylesheet" href="./select.css?v=1.1.0-dev.2-masonry4" />
   <link rel="stylesheet" href="./appearance.css?v=1.1.0-dev.2-gallery3" />
   <link rel="stylesheet" href="./controls.css?v=1.1.0-dev.2-gallery3" />
 </head>
@@ -91,8 +91,8 @@
         <div class="selection-bar gallery-selection-bar glass is-hidden" id="selectionBar"><span id="selectionCount">已选 0 项</span><button class="quiet-button" id="cancelSelectionButton" type="button">取消</button><button class="quiet-button" id="selectAllButton" type="button">全选当前页</button><button class="quiet-button" id="favoriteSelectionButton" type="button" disabled>收藏</button><button class="quiet-button" id="exportButton" type="button">导出</button><button class="danger-button" id="deleteButton" type="button">删除</button></div>
         <div class="gallery-grid" id="galleryGrid"></div>
         <div class="empty-state is-hidden" id="galleryEmpty">画廊中还没有保留的生成记录。</div>
+        <div class="gallery-page-picker floatingbar" id="galleryPagePicker" role="region" aria-label="选择画廊页码" hidden><div class="gallery-page-cards" id="galleryPageCards" role="group" aria-label="页码"><div id="galleryPageTrack"></div></div><form class="gallery-page-jump" id="galleryPageJump"><label for="galleryPageInput">跳至</label><input id="galleryPageInput" type="number" min="1" step="1" inputmode="numeric" aria-label="目标页码" /><button class="quiet-button" type="submit">前往</button></form></div>
         <div class="gallery-floatingbar floatingbar">
-        <div class="gallery-page-picker" id="galleryPagePicker" role="region" aria-label="选择画廊页码" hidden><div class="gallery-page-cards" id="galleryPageCards" role="group" aria-label="页码"><div id="galleryPageTrack"></div></div><form class="gallery-page-jump" id="galleryPageJump"><label for="galleryPageInput">跳至</label><input id="galleryPageInput" type="number" min="1" step="1" inputmode="numeric" aria-label="目标页码" /><button class="quiet-button" type="submit">前往</button></form></div>
         <div class="gallery-pagination is-hidden" id="galleryPagination" aria-label="画廊分页"><button class="quiet-button" id="galleryPrev" type="button">上一页</button><button class="gallery-page-label" id="galleryPageLabel" type="button" aria-live="polite" aria-expanded="false" aria-controls="galleryPagePicker" title="选择页码">第 1 / 1 页</button><button class="quiet-button" id="galleryNext" type="button">下一页</button></div>
         </div>
       </section>
@@ -254,12 +254,12 @@
   <script src="./vendor/js-sha256/sha256.min.js?v=0.11.1"></script>
   <script src="./hash.js?v=1.1.0-dev.2-gallery3" onerror="window.__reportImageStudioPageError(true)"></script>
   <script src="./gallery-preferences.js?v=1.1.0-dev.2-gallery3" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./select.js?v=1.1.0-dev.2-gallery3" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./select.js?v=1.1.0-dev.2-masonry4" onerror="window.__reportImageStudioPageError(true)"></script>
   <script src="./sortable.js?v=1.1.0-dev.2-gallery3" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./library.js?v=1.1.0-dev.2-gallery3" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./library.js?v=1.1.0-dev.2-masonry4" onerror="window.__reportImageStudioPageError(true)"></script>
   <script src="./detail-swipe.js?v=1.1.0-dev.2-gallery3" onerror="window.__reportImageStudioPageError(true)"></script>
   <script src="./backdrop.js?v=1.1.0-dev.2-gallery3" onerror="window.__reportImageStudioPageError(true)"></script>
   <script src="./external-sources.js?v=1.1.0-dev.2-gallery3" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./app.js?v=1.1.0-dev.2-gallery3" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./app.js?v=1.1.0-dev.2-masonry4" onerror="window.__reportImageStudioPageError(true)"></script>
 </body>
 </html>

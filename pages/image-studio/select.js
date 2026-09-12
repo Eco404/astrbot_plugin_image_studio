@@ -277,6 +277,7 @@
     const scrollTop = control.listbox?.scrollTop || 0;
     menu.replaceChildren();
     menu.classList.toggle("is-multiple", !!control.multiple);
+    menu.classList.toggle("is-gallery-filter", GALLERY_SELECT_IDS.has(control.select?.id));
     menu.id = `${control.identifier}-${control.multiple ? "popup" : "menu"}`;
     menu.setAttribute("role", control.multiple ? "group" : "listbox");
     const listbox = document.createElement("div"); listbox.className = "studio-select-options";
