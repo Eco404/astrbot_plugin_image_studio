@@ -17,6 +17,7 @@ from astrbot_plugin_image_studio.models import (
     ReferenceImage,
 )
 from astrbot_plugin_image_studio.storage import GenerationStore
+from astrbot_plugin_image_studio.tests.schema_upgrade_fixtures import create_v1
 from astrbot_plugin_image_studio.tests.test_import_groups import image
 
 
@@ -111,8 +112,9 @@ def test_new_release_creates_complete_schema_once_without_development_metadata(
         assert (
             schema.ensure_release_schema(conn, backup_dir=tmp_path / "backups") is None
         )
-        assert schema.RELEASE_VERSION == 1
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert schema.RELEASE_VERSION == 2
+        assert schema.DATABASE_VERSION == "2"
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
         assert (
             conn.execute(
                 "SELECT name FROM sqlite_master WHERE name='schema_meta'"
@@ -156,9 +158,11 @@ def test_changed_partial_index_predicate_is_rejected_without_mutations(
     tmp_path, promotion
 ):
     with closing(sqlite3.connect(tmp_path / "history.sqlite3")) as conn:
-        schema.ensure_release_schema(conn, backup_dir=tmp_path / "backups")
         if promotion:
+            create_v1(conn)
             mark_development(conn)
+        else:
+            schema.ensure_release_schema(conn, backup_dir=tmp_path / "backups")
         conn.execute("DROP INDEX idx_generations_import_key")
         conn.execute(
             "CREATE UNIQUE INDEX idx_generations_import_key "
@@ -174,7 +178,7 @@ def test_changed_partial_index_predicate_is_rejected_without_mutations(
 
 def test_development_if_not_exists_partial_index_matches_release(tmp_path):
     with closing(sqlite3.connect(":memory:")) as conn:
-        schema.ensure_release_schema(conn, backup_dir=tmp_path / "backups")
+        create_v1(conn)
         mark_development(conn)
         conn.execute("DROP INDEX idx_generations_import_key")
         conn.execute(
@@ -183,11 +187,13 @@ def test_development_if_not_exists_partial_index_matches_release(tmp_path):
         )
         conn.commit()
         assert schema.ensure_release_schema(conn, backup_dir=tmp_path / "backups")
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
 
 
-def test_final_development_promotion_preserves_all_business_rows_files_and_restore_backup(
+@pytest.mark.parametrize("promotion", [False, True])
+def test_v1_upgrade_preserves_all_business_rows_files_and_restore_backup(
     tmp_path,
+    promotion,
 ):
     async def run():
         store = await populated_store(tmp_path)
@@ -197,24 +203,28 @@ def test_final_development_promotion_preserves_all_business_rows_files_and_resto
             if path.is_file()
         }
         with store._connect() as conn:
-            for table in ("external_records", "external_sources", "schema_meta"):
+            for table in ("external_records", "external_sources"):
                 conn.execute(f"DROP TABLE {table}")
-            mark_development(conn)
+            if promotion:
+                mark_development(conn)
+            else:
+                conn.execute("PRAGMA user_version = 1")
         with store._connect() as conn:
             before = business_rows(conn)
             old_snapshot = snapshot(conn)
         promoted = GenerationStore(tmp_path)
         await promoted.initialize()
         with promoted._connect() as conn:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
-            assert tuple(conn.execute("SELECT * FROM schema_meta").fetchone()) == (
-                1,
-                2,
-                2,
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+            assert (
+                conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name='schema_meta'"
+                ).fetchone()
+                is None
             )
             assert business_rows(conn) == before
             assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
-        backups = list((tmp_path / "backups").glob("history-pre-v1-*.sqlite3"))
+        backups = list((tmp_path / "backups").glob("history-pre-v2-*.sqlite3"))
         assert len(backups) == 1
         with closing(sqlite3.connect(backups[0])) as backup:
             assert snapshot(backup) == old_snapshot
@@ -247,7 +257,7 @@ def test_older_or_unknown_development_revision_is_rejected_without_mutations(
     tmp_path, version
 ):
     with closing(sqlite3.connect(tmp_path / "history.sqlite3")) as conn:
-        schema.ensure_release_schema(conn, backup_dir=tmp_path / "backups")
+        create_v1(conn)
         mark_development(conn, revision=version)
         conn.commit()
         before = snapshot(conn)
@@ -276,9 +286,9 @@ def test_unsupported_or_malformed_database_is_rejected_before_backup_or_changes(
     tmp_path, case
 ):
     with closing(sqlite3.connect(tmp_path / "history.sqlite3")) as conn:
-        schema.ensure_release_schema(conn, backup_dir=tmp_path / "backups")
+        create_v1(conn)
         if case == "future":
-            conn.execute("PRAGMA user_version = 2")
+            conn.execute("PRAGMA user_version = 3")
         elif case == "unversioned":
             conn.execute("PRAGMA user_version = 0")
         else:
@@ -316,7 +326,7 @@ def test_failed_transaction_rolls_back_schema_and_version_stamp(
 ):
     with closing(sqlite3.connect(tmp_path / "history.sqlite3")) as conn:
         if promotion:
-            schema.ensure_release_schema(conn, backup_dir=tmp_path / "backups")
+            create_v1(conn)
             mark_development(conn)
             conn.commit()
         before = snapshot(conn)
@@ -339,7 +349,7 @@ def test_failed_transaction_rolls_back_schema_and_version_stamp(
 
 def test_backup_failure_prevents_promotion(tmp_path, monkeypatch):
     with closing(sqlite3.connect(tmp_path / "history.sqlite3")) as conn:
-        schema.ensure_release_schema(conn, backup_dir=tmp_path / "backups")
+        create_v1(conn)
         mark_development(conn)
         conn.commit()
         before = snapshot(conn)
@@ -357,7 +367,7 @@ def test_promotion_rechecks_version_after_backup_before_schema_changes(
     tmp_path, monkeypatch
 ):
     with closing(sqlite3.connect(tmp_path / "history.sqlite3")) as conn:
-        schema.ensure_release_schema(conn, backup_dir=tmp_path / "backups")
+        create_v1(conn)
         mark_development(conn)
         conn.commit()
         original_backup = schema._backup_database
@@ -393,7 +403,7 @@ def test_dimension_repairs_are_independent_and_retry_on_later_maintenance(tmp_pa
                     "SELECT width,height FROM image_assets WHERE id=?", (asset["id"],)
                 ).fetchone()
             ) == (0, 0)
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
         original.parent.mkdir(parents=True, exist_ok=True)
         held.rename(original)
         await store.run_maintenance(
@@ -407,6 +417,6 @@ def test_dimension_repairs_are_independent_and_retry_on_later_maintenance(tmp_pa
                     "SELECT width,height FROM image_assets WHERE id=?", (asset["id"],)
                 ).fetchone()
             ) == (24, 32)
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
 
     asyncio.run(run())

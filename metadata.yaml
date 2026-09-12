@@ -1,7 +1,7 @@
 name: astrbot_plugin_image_studio
 display_name: Image Studio
-desc: 多服务商 AI 生图工作台，支持聊天指令、Agent 生图改图、图片导入与画廊管理。
-version: 1.1.0-dev.2
+desc: 多服务商 AI 生图与图库工作台，支持OpenAI接口、Gemini接口、NAI请求、自定义接口。\n支持对话生图改图、并发批量生成、图片参数导入。\n支持扫描nai_image插件的图片以及任意自定义目录，并在画廊中统一浏览和管理。
+version: 1.1.0
 author: econeco
 repo: https://github.com/Eco404/astrbot_plugin_image_studio
 category: AI 增强

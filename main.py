@@ -97,8 +97,10 @@ IMAGE_WORKFLOW_CONTINUATION_PROMPT = (
 @register(
     PLUGIN_NAME,
     "econeco",
-    "多 Provider 生图、画廊与 Agent 可读图片工具。",
-    "1.1.0-dev.2",
+    r"多服务商 AI 生图与图库工作台，支持OpenAI接口、Gemini接口、NAI请求、自定义接口。\n"
+    r"支持对话生图改图、并发批量生成、图片参数导入。\n"
+    "支持扫描nai_image插件的图片以及任意自定义目录，并在画廊中统一浏览和管理。",
+    "1.1.0",
 )
 class ImageStudioPlugin(Star):
     """Own Image Studio configuration, generation, gallery, and tool APIs."""

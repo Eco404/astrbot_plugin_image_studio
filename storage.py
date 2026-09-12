@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import HistorySettings
-from .database_schema import DATABASE_VERSION, ensure_development_schema
+from .database_schema import DATABASE_VERSION, ensure_release_schema
 from .models import (
     GeneratedImage,
     GenerationRequest,
@@ -257,7 +257,7 @@ class GenerationStore:
         ):
             directory.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
-            ensure_development_schema(conn, backup_dir=self.data_dir / "backups")
+            ensure_release_schema(conn, backup_dir=self.data_dir / "backups")
         self._repair_derived_fields_sync()
         self._backfill_metadata_sync()
         self._delete_expired_leases_sync(time.time())
