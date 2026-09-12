@@ -487,7 +487,7 @@ class ImageGenerationService:
         resolved = resolve_parameters(
             copied["content"], self.settings, for_reproduction=True
         )
-        imported = detail.get("source") == "import"
+        imported = detail.get("source") in {"import", "external"}
         staged = (
             await self.store.stage_generation_references(generation_id)
             if not imported

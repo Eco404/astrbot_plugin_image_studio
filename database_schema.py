@@ -11,7 +11,9 @@ from pathlib import Path
 from typing import Any
 
 RELEASE_VERSION = 1
-DATABASE_VERSION = "1"
+DATABASE_VERSION = "2-dev.1"
+DEVELOPMENT_TARGET = 2
+DEVELOPMENT_REVISION = 1
 
 SCHEMA_STATEMENTS = (
     """CREATE TABLE generations (
@@ -126,6 +128,37 @@ _TABLES = (
     "image_metadata",
     "import_batches",
 )
+
+# Keep the published v1 definition above immutable. At release time this single
+# additive migration becomes v1 -> v2; intermediate dev revisions are not releases.
+DEVELOPMENT_STATEMENTS = (
+    """CREATE TABLE external_sources (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        root_path TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 0,
+        status_json TEXT NOT NULL DEFAULT '{}'
+    )""",
+    """CREATE TABLE external_records (
+        generation_id TEXT PRIMARY KEY REFERENCES generations(id) ON DELETE CASCADE,
+        source_id TEXT NOT NULL REFERENCES external_sources(id),
+        relative_path TEXT NOT NULL,
+        asset_id TEXT NOT NULL REFERENCES image_assets(id),
+        fingerprint TEXT NOT NULL,
+        sidecar_fingerprint TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL,
+        mtime_ns INTEGER NOT NULL,
+        available INTEGER NOT NULL DEFAULT 1,
+        UNIQUE(source_id, relative_path)
+    )""",
+    "CREATE INDEX idx_external_records_asset ON external_records(asset_id)",
+    """CREATE TABLE schema_meta (
+        id INTEGER PRIMARY KEY CHECK(id = 1),
+        target_version INTEGER NOT NULL,
+        dev_revision INTEGER NOT NULL
+    )""",
+)
+_DEVELOPMENT_TABLES = ("external_sources", "external_records", "schema_meta")
 
 
 def _identifier(name: str) -> str:
@@ -268,6 +301,88 @@ def ensure_release_schema(conn: sqlite3.Connection, *, backup_dir: Path) -> Path
         else:
             conn.execute("DROP TABLE schema_meta")
         _stamp_release(conn)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return backup
+
+
+@lru_cache(maxsize=1)
+def _development_shapes() -> dict[str, tuple[Any, ...]]:
+    with closing(sqlite3.connect(":memory:")) as conn:
+        for statement in (*SCHEMA_STATEMENTS, *DEVELOPMENT_STATEMENTS):
+            conn.execute(statement)
+        return {table: _table_shape(conn, table) for table in _DEVELOPMENT_TABLES}
+
+
+def _development_kind(conn: sqlite3.Connection) -> str:
+    version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+    if version not in {0, RELEASE_VERSION}:
+        raise RuntimeError(f"不支持的图库数据库正式版本：{version}；请使用对应插件版本")
+    tables = {
+        str(row[0])
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    if version == RELEASE_VERSION and "schema_meta" in tables:
+        for table, expected in _development_shapes().items():
+            if _table_shape(conn, table) != expected:
+                raise RuntimeError(f"图库数据库开发结构不符：{table}；未执行升级")
+        rows = conn.execute(
+            "SELECT id, target_version, dev_revision FROM schema_meta"
+        ).fetchall()
+        if len(rows) != 1 or tuple(rows[0]) != (
+            1,
+            DEVELOPMENT_TARGET,
+            DEVELOPMENT_REVISION,
+        ):
+            raise RuntimeError("不支持的图库数据库开发修订；请使用对应开发版本")
+        _validate_release_layout(conn)
+        return "development"
+    if set(_DEVELOPMENT_TABLES[:2]) & tables:
+        raise RuntimeError("图库数据库存在未登记的外部图库结构；未执行升级")
+    return _database_kind(conn)
+
+
+def _stamp_development(conn: sqlite3.Connection) -> None:
+    conn.execute(f"PRAGMA user_version = {RELEASE_VERSION}")
+    conn.execute(
+        "INSERT INTO schema_meta(id, target_version, dev_revision) VALUES (1, ?, ?)",
+        (DEVELOPMENT_TARGET, DEVELOPMENT_REVISION),
+    )
+
+
+def ensure_development_schema(
+    conn: sqlite3.Connection, *, backup_dir: Path
+) -> Path | None:
+    """Create/upgrade to the supported dev layout with a single backup transaction."""
+    if conn.in_transaction:
+        raise RuntimeError("图库数据库升级必须在独立事务中执行")
+    kind = _development_kind(conn)
+    if kind == "development":
+        return None
+    backup = _backup_database(conn, backup_dir) if kind != "empty" else None
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        if _development_kind(conn) != kind:
+            raise RuntimeError("图库数据库在备份后发生变化，请重新启动插件重试")
+        if kind == "empty":
+            for statement in SCHEMA_STATEMENTS:
+                conn.execute(statement)
+            try:
+                conn.execute(
+                    "CREATE VIRTUAL TABLE generation_search USING fts5("
+                    "generation_id UNINDEXED, original_prompt, final_prompt, provider_name, model)"
+                )
+            except sqlite3.OperationalError as exc:
+                if "no such module: fts5" not in str(exc).lower():
+                    raise
+        elif kind == "promotion":
+            conn.execute("DROP TABLE schema_meta")
+        for statement in DEVELOPMENT_STATEMENTS:
+            conn.execute(statement)
+        _stamp_development(conn)
+        _development_kind(conn)
         conn.commit()
     except Exception:
         conn.rollback()

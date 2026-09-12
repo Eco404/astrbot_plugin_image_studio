@@ -8,6 +8,7 @@ import copy
 import hashlib
 import io
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -20,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import HistorySettings
-from .database_schema import DATABASE_VERSION, ensure_release_schema
+from .database_schema import DATABASE_VERSION, ensure_development_schema
 from .models import (
     GeneratedImage,
     GenerationRequest,
@@ -44,6 +45,7 @@ _COMFY_PROJECTION_CACHE_BYTES = 16 * 1024 * 1024
 _COMFY_PROJECTION_CACHE: OrderedDict[tuple[Any, ...], bytes] = OrderedDict()
 _COMFY_PROJECTION_CACHE_LOCK = threading.Lock()
 _GALLERY_RETENTION_CACHE_SECONDS = 3.0
+_LOGGER = logging.getLogger(__name__)
 _THUMBNAIL_REVISION_SQL = (
     "COALESCE(t.max_edge, 0) || ':' || COALESCE(t.quality, 0) || ':' || "
     "COALESCE(t.size_bytes, 0)"
@@ -74,6 +76,25 @@ class ImportDuplicateError(ValueError):
 
 class ImportEditConflictError(ValueError):
     """The imported record changed after an editor read its snapshot."""
+
+
+class ExternalDeleteError(ValueError):
+    """An explicit external deletion failed, possibly after removing some files."""
+
+    def __init__(self, generation_id: str, message: str, *, deleted_files=None):
+        super().__init__(message)
+        self.generation_id = generation_id
+        self.deleted_files = deleted_files or []
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "generation_id": self.generation_id,
+            "code": "external_delete_failed",
+            "message": str(self),
+            "partial": bool(self.deleted_files),
+            "generation_deleted": bool(self.deleted_files),
+            "deleted_files": self.deleted_files,
+        }
 
 
 class GenerationStore:
@@ -158,7 +179,7 @@ class GenerationStore:
         ):
             directory.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
-            ensure_release_schema(conn, backup_dir=self.data_dir / "backups")
+            ensure_development_schema(conn, backup_dir=self.data_dir / "backups")
         self._repair_derived_fields_sync()
         self._backfill_metadata_sync()
         self._delete_expired_leases_sync(time.time())
@@ -218,6 +239,545 @@ class GenerationStore:
             report = dict(self._last_maintenance_report)
             report["stats"] = await asyncio.to_thread(self._storage_stats_sync)
         return report
+
+    async def configure_external_source(
+        self, source_id: str, name: str, root_path: str | Path, enabled: bool
+    ) -> dict[str, Any]:
+        await self._external_mutation(
+            self._configure_external_source_sync, source_id, name, root_path, enabled
+        )
+        return next(
+            item
+            for item in await self.external_sources_status()
+            if item["id"] == source_id
+        )
+
+    async def _external_mutation(self, function, *args):
+        # A cancelled scanner must not release the store lock while its worker still commits.
+        async with self._lock:
+            task = asyncio.create_task(asyncio.to_thread(function, *args))
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                try:
+                    await task
+                except Exception:
+                    _LOGGER.exception(
+                        "External gallery mutation failed while cancellation was pending"
+                    )
+                raise
+
+    def _configure_external_source_sync(self, source_id, name, root_path, enabled):
+        root = Path(root_path).absolute()
+        if not source_id or root == Path(root.anchor):
+            raise ValueError("外部图库来源或目录无效")
+        with self._connect() as conn:
+            previous = conn.execute(
+                "SELECT root_path FROM external_sources WHERE id = ?", (source_id,)
+            ).fetchone()
+            if previous and previous["root_path"] != str(root):
+                # File identity is rooted in this exact directory; changing it starts a new index.
+                ids = [
+                    row[0]
+                    for row in conn.execute(
+                        "SELECT generation_id FROM external_records WHERE source_id=?",
+                        (source_id,),
+                    )
+                ]
+                conn.execute(
+                    "DELETE FROM generations WHERE id IN (SELECT generation_id FROM external_records WHERE source_id = ?)",
+                    (source_id,),
+                )
+                self._delete_legacy_search_sync(conn, ids)
+            conn.execute(
+                "INSERT INTO external_sources (id,name,root_path,enabled) VALUES (?,?,?,?) "
+                "ON CONFLICT(id) DO UPDATE SET name=excluded.name,root_path=excluded.root_path,enabled=excluded.enabled",
+                (source_id, name, str(root), int(enabled)),
+            )
+        if not enabled:
+            self._trim_disabled_external_thumbnails_sync()
+        self._purge_unreferenced_assets_sync()
+
+    async def external_scan_snapshot(self, source_id: str) -> dict[str, Any]:
+        return await asyncio.to_thread(self._external_scan_snapshot_sync, source_id)
+
+    def _external_scan_snapshot_sync(self, source_id):
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT e.*,t.path AS thumbnail_path,t.max_edge AS thumbnail_max_edge,t.quality AS thumbnail_quality,m.parser_version "
+                "FROM external_records e LEFT JOIN image_thumbnails t ON t.asset_id=e.asset_id "
+                "LEFT JOIN image_metadata m ON m.asset_id=e.asset_id WHERE e.source_id=?",
+                (source_id,),
+            ).fetchall()
+        result = {}
+        for row in rows:
+            item = dict(row)
+            thumbnail = item.pop("thumbnail_path")
+            item["thumbnail_available"] = bool(
+                thumbnail and (self.data_dir / thumbnail).is_file()
+            )
+            result[item["relative_path"]] = item
+        return result
+
+    async def set_external_status(self, source_id: str, status: dict[str, Any]) -> None:
+        await self._external_mutation(self._set_external_status_sync, source_id, status)
+
+    def _set_external_status_sync(self, source_id, status):
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE external_sources SET status_json=? WHERE id=?",
+                (
+                    json.dumps(status, ensure_ascii=False, separators=(",", ":")),
+                    source_id,
+                ),
+            )
+
+    async def external_sources_status(self) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(self._external_sources_status_sync)
+
+    def _external_sources_status_sync(self):
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT s.*,COUNT(e.generation_id) AS indexed_count,COALESCE(SUM(e.size_bytes),0) AS size_bytes "
+                "FROM external_sources s LEFT JOIN external_records e ON e.source_id=s.id AND e.available=1 GROUP BY s.id ORDER BY s.id"
+            ).fetchall()
+            result = []
+            for row in rows:
+                item = dict(row)
+                thumbs = conn.execute(
+                    "SELECT COUNT(*),COALESCE(SUM(t.size_bytes),0) FROM image_thumbnails t WHERE t.asset_id IN "
+                    "(SELECT asset_id FROM external_records WHERE source_id=? AND available=1)",
+                    (item["id"],),
+                ).fetchone()
+                item["thumbnail_count"], item["thumbnail_bytes"] = map(int, thumbs)
+                item["enabled"] = bool(item["enabled"])
+                status = _load_json(item.pop("status_json"))
+                item = {**status, **item}
+                item.setdefault("status", "idle" if item["enabled"] else "disabled")
+                item.pop("root_path")
+                item["counts"] = {
+                    "images": item["indexed_count"],
+                    "size_bytes": item["size_bytes"],
+                    "thumbnail_size_bytes": item["thumbnail_bytes"],
+                }
+                result.append(item)
+        return result
+
+    @staticmethod
+    def _external_path(row: dict[str, Any] | sqlite3.Row, *, verify=True) -> Path:
+        root = Path(row["root_path"])
+        relative = Path(row["relative_path"])
+        if relative.is_absolute() or ".." in relative.parts or not relative.parts:
+            raise ValueError("外部图片路径超出图库目录")
+        path = root / relative
+        # Reject symlinks even when their current target happens to be inside the root.
+        if root.is_symlink() or any(
+            (root.joinpath(*relative.parts[:index])).is_symlink()
+            for index in range(1, len(relative.parts) + 1)
+        ):
+            raise ValueError("外部图片不能使用符号链接")
+        if not _is_within(path, root):
+            raise ValueError("外部图片路径超出图库目录")
+        if verify:
+            stat = path.stat()
+            if (
+                not path.is_file()
+                or stat.st_size != row["size_bytes"]
+                or stat.st_mtime_ns != row["mtime_ns"]
+            ):
+                raise ValueError("外部图片已经变化，请重新扫描后再操作")
+            if "fingerprint" in row.keys():
+                GenerationStore._verify_external_fingerprint(
+                    path, _load_json(row["fingerprint"])
+                )
+        return path
+
+    def _external_record_sync(self, generation_id: str):
+        with self._connect() as conn:
+            return conn.execute(
+                "SELECT e.*,s.root_path,s.enabled,s.name FROM external_records e JOIN external_sources s ON s.id=e.source_id WHERE e.generation_id=?",
+                (generation_id,),
+            ).fetchone()
+
+    def _external_generation_enabled_sync(self, generation_id: str) -> bool:
+        row = self._external_record_sync(generation_id)
+        return row is None or bool(row["enabled"] and row["available"])
+
+    def _external_display_sync(self, generation_id: str, source: Any) -> dict[str, Any]:
+        if source != "external":
+            return {"is_external": False, "external_source": None}
+        row = self._external_record_sync(generation_id)
+        return {
+            "is_external": True,
+            "external_source": {"id": row["source_id"], "name": row["name"]}
+            if row
+            else None,
+        }
+
+    def _resolve_image_asset_sync(self, row: dict[str, Any]) -> Path | None:
+        generation_id = str(row.get("generation_id") or "")
+        external = self._external_record_sync(generation_id) if generation_id else None
+        if external is not None and not (external["enabled"] and external["available"]):
+            return None
+        local = self.data_dir / str(row["path"])
+        if _is_within(local, self.assets_dir) and local.is_file():
+            return local
+        if external is None:
+            return None
+        try:
+            return self._external_path(external)
+        except (OSError, ValueError):
+            return None
+
+    async def upsert_external_image(
+        self,
+        source_id: str,
+        relative_path: str,
+        data: bytes,
+        *,
+        fingerprint: str,
+        sidecar_fingerprint: str,
+        size_bytes: int,
+        mtime_ns: int,
+        parameters: dict[str, Any] | None = None,
+        created_at: float | None = None,
+        preview_max_edge: int = 1024,
+        preview_quality: int = 80,
+        generation_engine: str = "unknown",
+    ) -> dict[str, str] | None:
+        return await self._external_mutation(
+            self._upsert_external_image_sync,
+            source_id,
+            relative_path,
+            data,
+            fingerprint,
+            sidecar_fingerprint,
+            size_bytes,
+            mtime_ns,
+            parameters or {},
+            created_at,
+            preview_max_edge,
+            preview_quality,
+            generation_engine,
+        )
+
+    def _upsert_external_image_sync(
+        self,
+        source_id,
+        relative_path,
+        data,
+        fingerprint,
+        sidecar_fingerprint,
+        size_bytes,
+        mtime_ns,
+        parameters,
+        created_at,
+        preview_max_edge,
+        preview_quality,
+        generation_engine,
+    ):
+        with self._connect() as conn:
+            source = conn.execute(
+                "SELECT * FROM external_sources WHERE id=?", (source_id,)
+            ).fetchone()
+            previous = conn.execute(
+                "SELECT * FROM external_records WHERE source_id=? AND relative_path=?",
+                (source_id, relative_path),
+            ).fetchone()
+        if source is None or not source["enabled"]:
+            return None
+        if size_bytes != len(data):
+            raise ValueError("外部图片读取时发生变化，请重试扫描")
+        original = self._external_path(
+            {
+                **dict(source),
+                "relative_path": relative_path,
+                "size_bytes": size_bytes,
+                "mtime_ns": mtime_ns,
+                "fingerprint": fingerprint,
+            }
+        )
+        _validate_import_content(data)
+        digest = hashlib.sha256(data).hexdigest()
+        mime = detect_mime_type(data)
+        width, height = _image_dimensions(data)
+        metadata = self._metadata_for_asset_sync(digest, data)
+        engine = _canonical_engine(generation_engine)
+        overrides = {
+            "generation_engine": engine,
+            "generated_at": created_at or mtime_ns / 1e9,
+        }
+        for source_key, target in (
+            ("tag", "prompt"),
+            ("negative", "negative_prompt"),
+            ("model", "model"),
+        ):
+            if source_key in parameters:
+                overrides[target] = str(parameters[source_key])
+        if parameters:
+            overrides["parameters"] = dict(parameters)
+        supplemental = _import_supplemental(
+            Path(relative_path).name, overrides, metadata
+        )
+        supplemental["external_parameters"] = dict(parameters)
+        asset = {
+            "id": digest,
+            "path": f"external/{digest}{_image_suffix(mime, data)}",
+            "mime_type": mime,
+            "size_bytes": size_bytes,
+            "width": width,
+            "height": height,
+            "original_path": original,
+        }
+        thumbnail = self._prepare_thumbnail_sync(
+            asset, max_edge=preview_max_edge, quality=preview_quality
+        )
+        generation_id = str(previous["generation_id"]) if previous else uuid.uuid4().hex
+        # Thumbnail work can take long enough for the source to replace its file.
+        self._verify_external_fingerprint(original, _load_json(fingerprint))
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO image_assets(id,path,mime_type,size_bytes,width,height,created_at) VALUES (?,?,?,?,?,?,?) "
+                "ON CONFLICT(id) DO UPDATE SET width=excluded.width,height=excluded.height,file_state='available'",
+                (digest, asset["path"], mime, size_bytes, width, height, time.time()),
+            )
+            self._upsert_thumbnails_sync(conn, [thumbnail])
+            self._save_metadata_sync(conn, {digest: metadata})
+            conn.execute(
+                "INSERT INTO generations(id,created_at,source,status,mode,provider_id,provider_name,provider_kind,model,original_prompt,final_prompt,parameters_json,elapsed_ms,generation_engine,generated_at,supplemental_json) "
+                "VALUES (?,?,'external','succeeded',?,'','','',?,?,?, ?,0,?,?,?) "
+                "ON CONFLICT(id) DO UPDATE SET mode=excluded.mode,model=excluded.model,original_prompt=excluded.original_prompt,final_prompt=excluded.final_prompt,parameters_json=excluded.parameters_json,generation_engine=excluded.generation_engine,generated_at=excluded.generated_at,supplemental_json=excluded.supplemental_json",
+                (
+                    generation_id,
+                    created_at or mtime_ns / 1e9,
+                    supplemental["mode"],
+                    supplemental["model"],
+                    supplemental["prompt"],
+                    str(
+                        metadata.get("normalized", {}).get("prompt")
+                        or supplemental["prompt"]
+                    ),
+                    json.dumps(parameters, ensure_ascii=False),
+                    engine,
+                    supplemental["generated_at"],
+                    json.dumps(supplemental, ensure_ascii=False),
+                ),
+            )
+            image = conn.execute(
+                "SELECT id FROM generation_images WHERE generation_id=?",
+                (generation_id,),
+            ).fetchone()
+            if previous and previous["asset_id"] != digest:
+                conn.execute(
+                    "DELETE FROM generation_images WHERE generation_id=?",
+                    (generation_id,),
+                )
+                image = None
+            image_id = str(image["id"]) if image else uuid.uuid4().hex
+            conn.execute(
+                "INSERT INTO generation_images(id,generation_id,ordinal,asset_id,supplemental_json) VALUES (?,?,0,?,?) "
+                "ON CONFLICT(id) DO UPDATE SET asset_id=excluded.asset_id,supplemental_json=excluded.supplemental_json",
+                (
+                    image_id,
+                    generation_id,
+                    digest,
+                    json.dumps(supplemental, ensure_ascii=False),
+                ),
+            )
+            conn.execute(
+                "INSERT INTO external_records(generation_id,source_id,relative_path,asset_id,fingerprint,sidecar_fingerprint,size_bytes,mtime_ns,available) VALUES (?,?,?,?,?,?,?,?,1) "
+                "ON CONFLICT(generation_id) DO UPDATE SET asset_id=excluded.asset_id,fingerprint=excluded.fingerprint,sidecar_fingerprint=excluded.sidecar_fingerprint,size_bytes=excluded.size_bytes,mtime_ns=excluded.mtime_ns,available=1",
+                (
+                    generation_id,
+                    source_id,
+                    relative_path,
+                    digest,
+                    fingerprint,
+                    sidecar_fingerprint,
+                    size_bytes,
+                    mtime_ns,
+                ),
+            )
+            self._refresh_search_sync(conn, generation_id)
+        if previous and previous["asset_id"] != digest:
+            self._purge_unreferenced_assets_sync([str(previous["asset_id"])])
+        return {
+            "generation_id": generation_id,
+            "image_id": image_id,
+            "asset_id": digest,
+        }
+
+    async def reconcile_external_source(self, source_id: str, seen_paths) -> int:
+        return await self._external_mutation(
+            self._reconcile_external_source_sync, source_id, set(seen_paths)
+        )
+
+    def _reconcile_external_source_sync(self, source_id, seen_paths):
+        with self._connect() as conn:
+            source = conn.execute(
+                "SELECT enabled FROM external_sources WHERE id=?", (source_id,)
+            ).fetchone()
+            if not source or not source["enabled"]:
+                return 0
+            missing = [
+                row
+                for row in conn.execute(
+                    "SELECT generation_id,relative_path FROM external_records WHERE source_id=?",
+                    (source_id,),
+                )
+                if row["relative_path"] not in seen_paths
+            ]
+            conn.executemany(
+                "DELETE FROM generations WHERE id=?",
+                [(row["generation_id"],) for row in missing],
+            )
+            self._delete_legacy_search_sync(
+                conn, [row["generation_id"] for row in missing]
+            )
+        self._purge_unreferenced_assets_sync()
+        return len(missing)
+
+    @staticmethod
+    def _delete_legacy_search_sync(conn, generation_ids):
+        try:
+            conn.executemany(
+                "DELETE FROM generation_search WHERE generation_id=?",
+                [(item,) for item in generation_ids],
+            )
+        except sqlite3.OperationalError:
+            pass
+
+    def _trim_disabled_external_thumbnails_sync(self):
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT t.asset_id,t.path FROM image_thumbnails t JOIN image_assets a ON a.id=t.asset_id "
+                "WHERE a.path LIKE 'external/%' AND NOT EXISTS (SELECT 1 FROM external_records e JOIN external_sources s ON s.id=e.source_id "
+                "WHERE e.asset_id=t.asset_id AND s.enabled=1 AND e.available=1)"
+            ).fetchall()
+            conn.executemany(
+                "DELETE FROM image_thumbnails WHERE asset_id=?",
+                [(row["asset_id"],) for row in rows],
+            )
+        for row in rows:
+            _unlink_if_owned(self.data_dir / row["path"], self.thumbnails_dir)
+
+    async def stage_gallery_reference(self, image_id: str) -> dict[str, str]:
+        # Resolve and read while holding the same lock as scanning and explicit deletion.
+        async with self._lock:
+            resolved = await self.gallery_image_file(image_id)
+            if resolved is None:
+                raise ValueError("图片不存在、已被删除或外部图库已关闭")
+            path, mime, filename = resolved
+            content = await asyncio.to_thread(path.read_bytes)
+            return await self.stage_reference(
+                filename=filename, content=content, mime_type=mime
+            )
+
+    async def external_delete_preview(
+        self, generation_ids: list[str]
+    ) -> dict[str, Any]:
+        ids = _validate_generation_selection(generation_ids)
+        return await asyncio.to_thread(self._external_delete_preview_sync, ids)
+
+    def _external_delete_preview_sync(self, ids):
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT s.name FROM external_records e JOIN external_sources s ON s.id=e.source_id "
+                f"WHERE e.generation_id IN ({','.join('?' for _ in ids)})",
+                ids,
+            ).fetchall()
+        return {
+            "external_count": len(rows),
+            "external_sources": sorted({row["name"] for row in rows}),
+        }
+
+    def _delete_external_original_sync(
+        self, generation_id: str
+    ) -> ExternalDeleteError | None:
+        row = self._external_record_sync(generation_id)
+        if row is None:
+            return None
+        if not row["enabled"]:
+            raise ExternalDeleteError(generation_id, "外部图库已关闭，请重新启用后删除")
+        try:
+            path = self._external_path(row)
+            fingerprint = _load_json(row["fingerprint"])
+            self._verify_external_fingerprint(path, fingerprint)
+            if hashlib.sha256(path.read_bytes()).hexdigest() != row["asset_id"]:
+                raise ValueError("外部图片内容已经变化，请重新扫描后再删除")
+        except FileNotFoundError:
+            # The source's retention cleaner won the race; remove only our index.
+            return None
+        except (OSError, ValueError) as exc:
+            raise ExternalDeleteError(generation_id, str(exc)) from exc
+        sidecars = _load_json(row["sidecar_fingerprint"])
+        candidates: list[Path] = []
+        try:
+            for filename, fingerprint in sidecars.items():
+                if filename not in {
+                    path.with_suffix(".yaml").name,
+                    path.with_suffix(".json").name,
+                }:
+                    continue
+                candidate = path.with_name(filename)
+                if candidate.is_symlink():
+                    raise ValueError("外部参数文件不能使用符号链接")
+                try:
+                    self._verify_external_fingerprint(candidate, fingerprint)
+                except FileNotFoundError:
+                    continue
+                candidates.append(candidate)
+        except (OSError, ValueError) as exc:
+            raise ExternalDeleteError(
+                generation_id, f"外部参数文件已经变化，未删除原图：{exc}"
+            ) from exc
+        deleted: list[str] = []
+        try:
+            self._external_path(row)
+            path.unlink()
+            deleted.append(path.name)
+            for candidate in candidates:
+                # Do not unlink a sidecar replaced since the first validation.
+                try:
+                    if candidate.is_symlink():
+                        raise ValueError("外部参数文件不能使用符号链接")
+                    self._verify_external_fingerprint(
+                        candidate, sidecars[candidate.name]
+                    )
+                    candidate.unlink()
+                    deleted.append(candidate.name)
+                except FileNotFoundError:
+                    continue
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError) as exc:
+            if not deleted:
+                raise ExternalDeleteError(
+                    generation_id, f"外部图片删除失败：{exc}"
+                ) from exc
+            return ExternalDeleteError(
+                generation_id,
+                f"原图已删除，但部分外部参数文件未删除：{exc}",
+                deleted_files=deleted,
+            )
+        return None
+
+    @staticmethod
+    def _verify_external_fingerprint(path: Path, fingerprint: Any) -> None:
+        if not isinstance(fingerprint, dict):
+            raise ValueError("外部文件身份无效，请重新扫描")
+        stat = path.stat()
+        actual = {
+            "size_bytes": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+            "ctime_ns": stat.st_ctime_ns,
+            "device": stat.st_dev,
+            "inode": stat.st_ino,
+        }
+        if any(
+            actual[key] != value for key, value in fingerprint.items() if key in actual
+        ):
+            raise ValueError("文件已经被替换或修改，请重新扫描")
 
     def _metadata_for_asset_sync(
         self, asset_id: str, data: bytes, *, strict: bool = False
@@ -488,7 +1048,7 @@ class GenerationStore:
             asset_rows = [
                 dict(row)
                 for row in conn.execute(
-                    "SELECT id, path, mime_type, size_bytes FROM image_assets"
+                    "SELECT id, path, mime_type, size_bytes FROM image_assets WHERE path NOT LIKE 'external/%'"
                 ).fetchall()
             ]
         for asset in asset_rows:
@@ -1028,7 +1588,7 @@ class GenerationStore:
                 conn.executemany(
                     "INSERT INTO image_assets (id, path, mime_type, size_bytes, width, height, created_at) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET "
-                    "width=excluded.width, height=excluded.height, file_state='available'",
+                    "path=excluded.path, width=excluded.width, height=excluded.height, file_state='available'",
                     [
                         (
                             asset["id"],
@@ -1888,7 +2448,10 @@ class GenerationStore:
         existing = {
             str(row[0])
             for row in conn.execute(
-                f"SELECT DISTINCT asset_id FROM generation_images WHERE asset_id IN ({placeholders})",
+                "SELECT DISTINCT i.asset_id FROM generation_images i JOIN generations g ON g.id=i.generation_id "
+                f"WHERE i.asset_id IN ({placeholders}) AND (g.source!='external' OR EXISTS ("
+                "SELECT 1 FROM external_records e JOIN external_sources s ON s.id=e.source_id "
+                "WHERE e.generation_id=g.id AND e.available=1 AND s.enabled=1))",
                 list(seen),
             ).fetchall()
         }
@@ -2085,7 +2648,7 @@ class GenerationStore:
                 now = time.time()
                 conn.executemany(
                     "INSERT INTO image_assets (id, path, mime_type, size_bytes, width, height, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET file_state='available'",
+                    "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET path=excluded.path, file_state='available'",
                     [
                         (
                             asset["id"],
@@ -2253,7 +2816,13 @@ class GenerationStore:
 
     @staticmethod
     def _gallery_filters(filters: dict[str, Any]) -> tuple[str, list[Any]]:
-        where: list[str] = []
+        where: list[str] = [
+            "(g.source != 'external' OR EXISTS (SELECT 1 FROM external_records e "
+            "JOIN external_sources s ON s.id=e.source_id WHERE e.generation_id=g.id "
+            "AND s.enabled=1 AND e.available=1 AND NOT EXISTS (SELECT 1 FROM generation_images local_image "
+            "JOIN generations local_generation ON local_generation.id=local_image.generation_id "
+            "WHERE local_image.asset_id=e.asset_id AND local_generation.source != 'external')))"
+        ]
         args: list[Any] = []
         query = str(filters.get("query") or "").strip()[:240]
         for key, plural, limit in (
@@ -2374,7 +2943,7 @@ class GenerationStore:
             "filters": {
                 "providers": provider_options,
                 "modes": ["text2img", "img2img", "unknown"],
-                "sources": ["webui", "command", "llm_tool", "import"],
+                "sources": ["webui", "command", "llm_tool", "import", "external"],
                 "generation_engines": engines,
             },
         }
@@ -2394,6 +2963,8 @@ class GenerationStore:
 
     def _generation_manifest_sync(self, generation_id: str) -> dict[str, Any] | None:
         if not _SAFE_ID_RE.fullmatch(generation_id):
+            return None
+        if not self._external_generation_enabled_sync(generation_id):
             return None
         with self._connect() as conn:
             conn.execute("BEGIN")
@@ -2451,8 +3022,12 @@ class GenerationStore:
         ]
         return result
 
-    @staticmethod
-    def _generation_header(result: dict[str, Any]) -> dict[str, Any]:
+    def _generation_header(self, result: dict[str, Any]) -> dict[str, Any]:
+        result.update(
+            self._external_display_sync(
+                str(result.get("id") or ""), result.get("source")
+            )
+        )
         if "parameters_json" in result:
             result["parameters"] = _load_json(result.pop("parameters_json"))
         if "supplemental_json" in result:
@@ -2512,6 +3087,8 @@ class GenerationStore:
                 (image_id,),
             ).fetchone()
             if row is None:
+                return None
+            if not self._external_generation_enabled_sync(row["generation_id"]):
                 return None
             record = conn.execute(
                 "SELECT id, created_at, source, status, mode, provider_id, provider_name, "
@@ -2698,7 +3275,7 @@ class GenerationStore:
     def _gallery_image_file_sync(self, image_id: str) -> tuple[Path, str, str] | None:
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT a.path, a.mime_type, g.created_at, g.provider_id, "
+                "SELECT a.path, a.mime_type, i.generation_id, g.created_at, g.provider_id, "
                 "COALESCE(json_extract(i.supplemental_json, '$.model'), g.model) AS model, "
                 "COALESCE(json_extract(i.supplemental_json, '$.mode'), g.mode) AS mode, "
                 "(SELECT COUNT(*) FROM generation_images n WHERE n.generation_id = i.generation_id) AS image_count, "
@@ -2711,8 +3288,8 @@ class GenerationStore:
         if row is None:
             return None
         item = dict(row)
-        path = self.data_dir / str(item["path"])
-        if not path.is_file() or not _is_within(path, self.assets_dir):
+        path = self._resolve_image_asset_sync(item)
+        if path is None:
             return None
         return (
             path,
@@ -2745,7 +3322,9 @@ class GenerationStore:
         if row is None:
             return None
         item = dict(row)
-        original = self.data_dir / str(item["path"])
+        if not self._external_generation_enabled_sync(item["generation_id"]):
+            return None
+        original = self._resolve_image_asset_sync(item)
         thumbnail = self.data_dir / str(item["thumbnail_path"])
         use_original = detail == "original"
         path = original if use_original else thumbnail
@@ -2755,8 +3334,10 @@ class GenerationStore:
         size_bytes = int(
             item["size_bytes"] if use_original else item["thumbnail_size_bytes"]
         )
-        if not path.is_file() or not _is_within(
-            path, self.assets_dir if use_original else self.thumbnails_dir
+        if (
+            path is None
+            or not path.is_file()
+            or (not use_original and not _is_within(path, self.thumbnails_dir))
         ):
             return None
         return {
@@ -2818,6 +3399,8 @@ class GenerationStore:
         self, generation_id: str, include_assets: bool = True
     ) -> dict[str, Any] | None:
         if not _SAFE_ID_RE.fullmatch(generation_id):
+            return None
+        if not self._external_generation_enabled_sync(generation_id):
             return None
         with self._connect() as conn:
             row = conn.execute(
@@ -2893,7 +3476,7 @@ class GenerationStore:
             protected = float(row["cleanup_protected_until"])
             if favorite:
                 protected = 0.0
-            elif row["is_favorite"] and row["source"] != "import":
+            elif row["is_favorite"] and row["source"] not in {"import", "external"}:
                 protected = time.time() + 24 * 3600
             conn.execute(
                 "UPDATE generations SET is_favorite = ?, cleanup_protected_until = ? WHERE id = ?",
@@ -2955,7 +3538,7 @@ class GenerationStore:
                     continue
                 protected = (
                     protected_until
-                    if not favorite and row["source"] != "import"
+                    if not favorite and row["source"] not in {"import", "external"}
                     else 0.0
                 )
                 conn.execute(
@@ -3003,6 +3586,7 @@ class GenerationStore:
                 raise ValueError(
                     "以下图片不存在或不属于本次生成：" + ", ".join(invalid)
                 )
+            external_error = self._delete_external_original_sync(generation_id)
             asset_ids = [owned[item] for item in image_ids]
             conn.executemany(
                 "DELETE FROM generation_images WHERE id = ? AND generation_id = ?",
@@ -3028,6 +3612,8 @@ class GenerationStore:
             else:
                 self._refresh_search_sync(conn, generation_id)
         self._purge_unreferenced_assets_sync(asset_ids)
+        if external_error is not None:
+            raise external_error
         return {
             "deleted": image_ids,
             "remaining": remaining,
@@ -3049,6 +3635,7 @@ class GenerationStore:
             ).fetchone()[0]
             if not count:
                 return False
+            external_error = self._delete_external_original_sync(generation_id)
             asset_rows = conn.execute(
                 "SELECT asset_id FROM generation_images WHERE generation_id = ? "
                 "UNION SELECT asset_id FROM generation_references "
@@ -3066,6 +3653,8 @@ class GenerationStore:
         self._purge_unreferenced_assets_sync(
             [str(row["asset_id"]) for row in asset_rows if row["asset_id"]]
         )
+        if external_error is not None:
+            raise external_error
         return True
 
     async def delete_reference(self, reference_id: str) -> bool:
@@ -3117,8 +3706,10 @@ class GenerationStore:
                     continue
                 images = detail["images"]
                 for image_index, image in enumerate(images, start=1):
-                    path = self.data_dir / image["path"]
-                    if path.is_file() and _is_within(path, self.assets_dir):
+                    path = self._resolve_image_asset_sync(
+                        {**image, "generation_id": generation_id}
+                    )
+                    if path is not None:
                         image_filename = export_image_filename(
                             {
                                 **detail,
@@ -3207,6 +3798,7 @@ class GenerationStore:
             )
         }
         return {
+            **self._external_display_sync(row["id"], row["source"]),
             "id": row["id"],
             "created_at": row["created_at"],
             "source": row["source"],
@@ -3236,9 +3828,9 @@ class GenerationStore:
     def _asset_item(
         self, row: dict[str, Any], *, preview_full: bool, include_preview: bool = True
     ) -> dict[str, Any]:
-        path = self.data_dir / str(row["path"])
+        path = self._resolve_image_asset_sync(row) if preview_full else None
         thumbnail = self.data_dir / str(row.get("thumbnail_path") or "")
-        preview = _path_data_url(path, row["mime_type"]) if preview_full else ""
+        preview = _path_data_url(path, row["mime_type"]) if path is not None else ""
         supplemental = _canonical_supplemental(
             _load_json(row.get("supplemental_json") or "{}")
         )
@@ -3353,7 +3945,7 @@ class GenerationStore:
         with self._connect() as conn:
             protected_until = conn.execute(
                 "SELECT MIN(cleanup_protected_until) FROM generations "
-                "WHERE source != 'import' AND is_favorite = 0 AND cleanup_protected_until > ?",
+                "WHERE source NOT IN ('import','external') AND is_favorite = 0 AND cleanup_protected_until > ?",
                 (now,),
             ).fetchone()[0]
         expires_at = now + _GALLERY_RETENTION_CACHE_SECONDS
@@ -3370,12 +3962,12 @@ class GenerationStore:
         with self._connect() as conn:
             count = int(
                 conn.execute(
-                    "SELECT COUNT(*) FROM generations WHERE source != 'import' AND is_favorite = 0"
+                    "SELECT COUNT(*) FROM generations WHERE source NOT IN ('import','external') AND is_favorite = 0"
                 ).fetchone()[0]
             )
             protected = int(
                 conn.execute(
-                    "SELECT COUNT(*) FROM generations WHERE source != 'import' "
+                    "SELECT COUNT(*) FROM generations WHERE source NOT IN ('import','external') "
                     "AND is_favorite = 0 AND cleanup_protected_until > ?",
                     (now,),
                 ).fetchone()[0]
@@ -3383,7 +3975,7 @@ class GenerationStore:
             candidates = [
                 str(row[0])
                 for row in conn.execute(
-                    "SELECT id FROM generations WHERE source != 'import' AND is_favorite = 0 "
+                    "SELECT id FROM generations WHERE source NOT IN ('import','external') AND is_favorite = 0 "
                     "AND cleanup_protected_until <= ? ORDER BY created_at ASC, id ASC LIMIT 10",
                     (now,),
                 ).fetchall()
@@ -3391,7 +3983,7 @@ class GenerationStore:
             exempt = conn.execute(
                 "SELECT SUM(CASE WHEN source = 'import' THEN 1 ELSE 0 END), "
                 "SUM(CASE WHEN is_favorite = 1 THEN 1 ELSE 0 END), "
-                "SUM(CASE WHEN source = 'import' OR is_favorite = 1 THEN 1 ELSE 0 END) FROM generations"
+                "SUM(CASE WHEN source = 'import' OR is_favorite = 1 THEN 1 ELSE 0 END) FROM generations WHERE source != 'external'"
             ).fetchone()
         usage = self._history_asset_usage_sync()
         size_bytes = usage["counted_size_bytes"]
@@ -3467,7 +4059,7 @@ class GenerationStore:
             or int(current["quality"]) != quality
         ):
             _create_thumbnail(
-                self.data_dir / asset["path"],
+                asset.get("original_path") or self.data_dir / asset["path"],
                 target,
                 max_edge=max_edge,
                 quality=quality,
@@ -3519,7 +4111,7 @@ class GenerationStore:
                 "SELECT asset_id, generation_id FROM generation_references WHERE asset_id IS NOT NULL"
                 "), ownership AS ("
                 "SELECT l.asset_id, MAX(CASE WHEN g.source = 'import' OR g.is_favorite = 1 THEN 1 ELSE 0 END) AS exempt "
-                "FROM links l JOIN generations g ON g.id = l.generation_id GROUP BY l.asset_id"
+                "FROM links l JOIN generations g ON g.id = l.generation_id WHERE g.source != 'external' GROUP BY l.asset_id"
                 ") SELECT "
                 "COALESCE(SUM(CASE WHEN o.exempt = 0 THEN a.size_bytes + COALESCE(t.size_bytes, 0) ELSE 0 END), 0), "
                 "COALESCE(SUM(CASE WHEN o.exempt = 1 THEN a.size_bytes + COALESCE(t.size_bytes, 0) ELSE 0 END), 0) "
@@ -3537,12 +4129,12 @@ class GenerationStore:
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT "
-                "(SELECT COUNT(*) FROM generations), "
-                "(SELECT COUNT(*) FROM image_assets), "
+                "(SELECT COUNT(*) FROM generations WHERE source != 'external'), "
+                "(SELECT COUNT(*) FROM image_assets WHERE path NOT LIKE 'external/%'), "
                 "(SELECT COUNT(*) FROM image_thumbnails), "
                 "(SELECT COUNT(*) FROM agent_asset_leases "
                 " WHERE expires_at > ? AND hard_expires_at > ?), "
-                "COALESCE((SELECT SUM(size_bytes) FROM image_assets), 0) + "
+                "COALESCE((SELECT SUM(size_bytes) FROM image_assets WHERE path NOT LIKE 'external/%'), 0) + "
                 "COALESCE((SELECT SUM(size_bytes) FROM image_thumbnails), 0)",
                 (now, now),
             ).fetchone()
@@ -3553,6 +4145,9 @@ class GenerationStore:
             "active_leases": int(row[3]),
             "size_bytes": int(row[4]),
             "database_version": DATABASE_VERSION,
+            "external_sources": [
+                item for item in self._external_sources_status_sync() if item["enabled"]
+            ],
         }
 
     def _remove_broken_asset_sync(self, asset_id: str) -> int:
@@ -3591,6 +4186,26 @@ class GenerationStore:
             restriction = f"AND a.id IN ({','.join('?' for _ in candidates)})"
             args = candidates
         with self._connect() as conn:
+            # An external association must not keep an unreferenced owned copy alive.
+            demoted = conn.execute(
+                "SELECT a.id,a.path,a.mime_type FROM image_assets a WHERE a.path NOT LIKE 'external/%' "
+                "AND EXISTS (SELECT 1 FROM external_records e WHERE e.asset_id=a.id) "
+                "AND NOT EXISTS (SELECT 1 FROM generation_images i JOIN generations g ON g.id=i.generation_id WHERE i.asset_id=a.id AND g.source!='external') "
+                "AND NOT EXISTS (SELECT 1 FROM generation_references r WHERE r.asset_id=a.id) "
+                "AND NOT EXISTS (SELECT 1 FROM agent_asset_leases l WHERE l.asset_id=a.id AND l.expires_at>? AND l.hard_expires_at>?) "
+                f"{restriction}",
+                [time.time(), time.time(), *args],
+            ).fetchall()
+            conn.executemany(
+                "UPDATE image_assets SET path=? WHERE id=?",
+                [
+                    (
+                        f"external/{row['id']}{_IMAGE_SUFFIXES.get(row['mime_type'], '.img')}",
+                        row["id"],
+                    )
+                    for row in demoted
+                ],
+            )
             rows = conn.execute(
                 "SELECT a.id, a.path, t.path AS thumbnail_path FROM image_assets a "
                 "LEFT JOIN image_thumbnails t ON t.asset_id = a.id "
@@ -3605,6 +4220,8 @@ class GenerationStore:
                 "DELETE FROM image_assets WHERE id = ?",
                 [(str(row["id"]),) for row in rows],
             )
+        for row in demoted:
+            _unlink_if_owned(self.data_dir / str(row["path"]), self.assets_dir)
         for row in rows:
             _unlink_if_owned(self.data_dir / str(row["path"]), self.assets_dir)
             if row["thumbnail_path"]:
@@ -3612,6 +4229,7 @@ class GenerationStore:
                     self.data_dir / str(row["thumbnail_path"]), self.thumbnails_dir
                 )
         _remove_empty_directories(self.assets_dir)
+        self._trim_disabled_external_thumbnails_sync()
 
     def _cleanup_orphaned_asset_files_sync(
         self, *, older_than: float | None = None

@@ -185,7 +185,7 @@
   function escape(value) { const div = document.createElement("div"); div.textContent = text(value); return div.innerHTML.replaceAll('"', "&quot;").replaceAll("'", "&#39;"); }
   function formatDate(value) { return new Date(Number(value) * 1000).toLocaleString(); }
   function formatBytes(value) { const bytes = Number(value || 0); return bytes > 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.max(0, Math.round(bytes / 1024))} KB`; }
-  function sourceLabel(value) { return ({ webui: "WebUI", command: "指令", llm_tool: "LLM 工具", import: "导入" })[value] || value || "未知"; }
+  function sourceLabel(value) { return ({ webui: "WebUI", command: "指令", llm_tool: "LLM 工具", import: "导入", external: "外部图库" })[value] || value || "未知"; }
   function invocationSourceLabel(source) { if (!source || !Object.values(source).some((value) => value)) return "未记录"; return { 场景: source.context_type === "group" ? "群聊" : source.context_type === "private" ? "私聊" : source.context_type, 平台: source.platform_name, 平台实例: source.platform_id, 群ID: source.group_id, 群名称: source.group_name, 用户ID: source.user_id, 用户昵称: source.user_name }; }
   function setError(target, message) { target.textContent = message || ""; }
   function errorMessage(error, fallback) {
@@ -262,6 +262,7 @@
     library.syncFloatingBars();
     if (view === "gallery") void loadGallery();
     if (view === "settings") { void loadSettings(); void loadStorageHealth(); }
+    externalSources.viewChanged();
     window.ImageStudioSelect?.refresh();
   }
 
@@ -1240,7 +1241,7 @@
     els.drawerBody.querySelector('[data-detail-metadata-retry]')?.addEventListener("click", () => { const image = detail.images[state.detailImageIndex]; delete image._metadataError; void loadDetailAssets(detail.id, detail, fallbackThumbnail); });
     els.drawerBody.querySelector("[data-reproduce]")?.addEventListener("click", () => void reproduce(detail.id));
     els.drawerBody.querySelector("[data-copy-request]")?.addEventListener("click", () => void copyRequestParameters(detail));
-    els.drawerBody.querySelector("[data-output-reference]")?.addEventListener("click", () => void useDataUrlAsReference(currentImageUrl, "gallery-output-reference.png"));
+    els.drawerBody.querySelector("[data-output-reference]")?.addEventListener("click", () => void useGalleryImageAsReference(currentImage));
     els.drawerBody.scrollTop = scrollTop;
     if (detail.lightweight && !mobileViewerSession?.active) void loadDetailAssets(detail.id, detail, fallbackThumbnail);
     return paintDetailImage(imageFrame, currentImage, imageIndex).then((painted) => {
@@ -1343,7 +1344,7 @@
         referenceButton.type = "button";
         referenceButton.dataset.outputReference = "1";
         referenceButton.textContent = "将当前成图用作新参考图";
-        referenceButton.addEventListener("click", () => void useDataUrlAsReference(currentImageUrl, "gallery-output-reference.png"));
+        referenceButton.addEventListener("click", () => void useGalleryImageAsReference(currentImage));
         placeholder.replaceWith(referenceButton);
       }
     } catch (error) {
@@ -1985,6 +1986,7 @@
     els.storageHealthLeases.textContent = String(Number(stats.active_leases || 0)); els.storageHealthGenerations.textContent = String(Number(stats.generations || 0)); els.storageHealthSize.textContent = formatBytes(stats.size_bytes || 0);
     els.storageHealthErrors.textContent = errors.length ? errors.join("；") : "暂无异常。";
     if (report?.retention) storageRetention = report.retention;
+    if (Array.isArray(report?.external_sources)) externalSources.ingest(report.external_sources);
     renderStorageQuotas();
   }
 
@@ -2034,6 +2036,7 @@
         if (!payload.webui.providers.some((item) => item.id === state.selectedSettingsProviderId)) state.selectedSettingsProviderId = payload.webui.providers[0]?.id || "";
         state.selectedSettingsModelId = "";
         renderSettingsProviders();
+        externalSources.settingsLoaded();
         window.ImageStudioSelect?.refresh($("settingsView"));
         settingsBaseline = settingsFingerprint(settingsDraft()); updateSettingsDirty();
         const warnings = Array.isArray(payload.validation_errors) ? payload.validation_errors.filter(Boolean) : [];
@@ -2364,7 +2367,7 @@
     settingsSaving = true; setError(els.settingsError, "正在保存设置…"); els.saveSettingsButton.disabled = true; library.setCommandLabel("saveSettingsButton", "保存中…");
     const draft = settingsDraft(); const submitted = settingsFingerprint(draft); const webui = draft.studio;
     try {
-      await apiPost("settings/save", { settings_revision: webui.revision ?? webui.ui?.settings_revision, ...draft });
+      const saved = await apiPost("settings/save", { settings_revision: webui.revision ?? webui.ui?.settings_revision, ...draft });
       const server = await apiGet("settings/get");
       normalizeSettingsModelDefaults(server);
       await bootstrap();
@@ -2372,10 +2375,14 @@
         await loadSettings(true, server);
       } else {
         state.settings.webui.revision = server.webui.revision;
+        state.settings.webui.external_sources = server.webui.external_sources;
+        externalSources.settingsLoaded(true);
         settingsBaseline = settingsFingerprint({ base: server.base, studio: server.webui });
       }
-      setError(els.settingsError, ""); showNotice("设置已保存并生效。", "success");
+      const warnings = Array.isArray(saved?.warnings) ? saved.warnings.filter(Boolean) : [];
+      setError(els.settingsError, warnings.join("；")); showNotice(warnings.length ? `设置已保存。${warnings.join("；")}` : "设置已保存并生效。", warnings.length ? "info" : "success");
       await loadStorageHealth();
+      await externalSources.refresh();
     } catch (error) {
       const message = errorMessage(error, "设置保存失败"); setError(els.settingsError, message); showNotice(message, "error");
     } finally { settingsSaving = false; els.saveSettingsButton.disabled = false; library.setCommandLabel("saveSettingsButton", "保存全部设置"); updateSettingsDirty(); }
@@ -2388,6 +2395,7 @@
     webui.llm_policy = { ...(webui.llm_policy || {}), image_return_mode: els.agentImageReturnMode.value };
     webui.asset_policy = { ...(webui.asset_policy || {}), preview_max_edge: Number(els.agentPreviewMaxEdge.value), preview_quality: Number(els.agentPreviewQuality.value), lease_hours: Number(els.agentAssetRetentionHours.value) };
     webui.generation_defaults = { page: { text2img_model_ref: els.settingPageDefaultTextModel.value, img2img_model_ref: els.settingPageDefaultImageModel.value }, tool: { text2img_model_ref: els.settingToolDefaultTextModel.value, img2img_model_ref: els.settingToolDefaultImageModel.value } };
+    externalSources.settingsDraft(webui);
     return { base: { enable_llm_tool: els.settingTool.checked }, studio: webui };
   }
 
@@ -2410,8 +2418,49 @@
 
   function dataUrlToFile(dataUrl, name) { const [head, encoded] = dataUrl.split(",", 2); const type = (head.match(/data:([^;]+)/) || [])[1] || "image/png"; const bytes = Uint8Array.from(atob(encoded), (char) => char.charCodeAt(0)); return new File([bytes], name, { type }); }
   async function exportSelected() { try { const result = await apiPost("gallery/export", { ids: Array.from(state.selectedIds) }); const client = await bridge(); await client.download(result.download_endpoint, {}, result.filename); showNotice("导出文件已开始下载。", "success"); } catch (error) { showNotice(errorMessage(error, "画廊导出失败"), "error"); } }
-  async function deleteSelected() { if (!await confirmAction(`永久删除 ${state.selectedIds.size} 条生成记录及其结果图？`)) return; try { await apiPost("gallery/delete", { ids: Array.from(state.selectedIds) }); clearGallerySelection(); await loadGallery(); showNotice("所选生成记录已删除。", "success"); } catch (error) { showNotice(errorMessage(error, "生成记录删除失败"), "error"); } }
-  async function useDataUrlAsReference(dataUrl, name) { try { const client = await bridge(); const uploaded = await client.upload("studio/reference/upload", dataUrlToFile(dataUrl, name)); state.references = [uploaded]; state.mode = "img2img"; document.querySelectorAll(".segment").forEach((button) => button.classList.toggle("is-active", button.dataset.mode === "img2img")); renderModelChoices(); renderReferences(); closeDetail(); switchView("generate"); setError(els.generationError, "已将当前成图作为新的图生图参考图。它不会被当作历史原始参考图。"); } catch (error) { setError(els.generationError, errorMessage(error, "添加参考图失败")); } }
+  async function deleteSelected() {
+    const ids = Array.from(state.selectedIds); if (!ids.length || $("deleteButton").disabled) return;
+    $("deleteButton").disabled = true;
+    try {
+      // Selections survive paging, so visible cards cannot establish whether
+      // the whole operation includes external originals.
+      const preview = await apiPost("gallery/delete/preview", { ids });
+      const external = Number(preview.external_count || 0) > 0;
+      const names = (preview.external_sources || []).map(source => typeof source === "string" ? source : source.name || source.id).filter(Boolean).join("、");
+      const warning = external ? `其中包含 ${preview.external_count} 条外部记录${names ? `（${names}）` : ""}，会永久删除来源插件中的原图及关联参数文件，无法恢复。` : "";
+      if (!await confirmAction(`永久删除 ${ids.length} 条生成记录及其结果图？${warning}`)) return;
+      const result = await apiPost("gallery/delete", { ids, confirm_external: external });
+      const errors = result.errors || [];
+      const confirmedDeleted = new Set(Array.isArray(result.deleted) ? result.deleted : []);
+      const failed = new Set([...(result.failed || []), ...errors.map(error => error.id)].filter(id => id && !confirmedDeleted.has(id)));
+      const deleted = Array.isArray(result.deleted) ? result.deleted : ids.filter(id => !failed.has(id));
+      for (const id of deleted) state.selectedIds.delete(id);
+      for (const id of failed) state.selectedIds.add(id);
+      updateSelection(); await loadGallery();
+      showNotice(errors.length ? `已删除 ${deleted.length} 条记录；${errors.map(error => error.message || "删除失败").join("；")}${failed.size ? "。未删除的记录仍保持勾选。" : ""}` : "所选生成记录已删除。", errors.length ? "error" : "success");
+    } catch (error) { showNotice(errorMessage(error, "生成记录删除失败"), "error"); }
+    finally { $("deleteButton").disabled = false; }
+  }
+
+  function applyUploadedReference(uploaded) {
+    state.references = [uploaded]; state.mode = "img2img";
+    document.querySelectorAll(".segment").forEach(button => button.classList.toggle("is-active", button.dataset.mode === "img2img"));
+    renderModelChoices(); renderReferences(); closeDetail(); switchView("generate");
+    setError(els.generationError, "已将当前成图作为新的图生图参考图。它不会被当作历史原始参考图。");
+  }
+
+  async function useDataUrlAsReference(dataUrl, name) {
+    try { const client = await bridge(); applyUploadedReference(await client.upload("studio/reference/upload", dataUrlToFile(dataUrl, name))); }
+    catch (error) { showNotice(errorMessage(error, "添加参考图失败"), "error"); }
+  }
+
+  async function useGalleryImageAsReference(image) {
+    if (!image?.id) return;
+    $("detailUseReference").disabled = true;
+    try { applyUploadedReference(await apiPost("studio/reference/from-gallery", { image_id: image.id })); }
+    catch (error) { showNotice(errorMessage(error, "添加参考图失败"), "error"); }
+    finally { library.updateDetailActions(state.detailData); }
+  }
   function confirmAction(message) { return new Promise((resolve) => { const dialog = $("confirmDialog"); const cancel = $("confirmCancel"); const accept = $("confirmAccept"); $("confirmMessage").textContent = message; dialog.classList.remove("is-hidden"); els.scrim.classList.remove("is-hidden"); syncPageScrollLock(); accept.focus(); const onKeydown = (event) => { if (event.key === "Escape") finish(false); }; const finish = (value) => { dialog.classList.add("is-hidden"); if (!els.detailDrawer.classList.contains("is-open")) els.scrim.classList.add("is-hidden"); syncPageScrollLock(); cancel.removeEventListener("click", onCancel); accept.removeEventListener("click", onAccept); document.removeEventListener("keydown", onKeydown); activeConfirmation = null; resolve(value); }; const onCancel = () => finish(false); const onAccept = () => finish(true); activeConfirmation = finish; cancel.addEventListener("click", onCancel); accept.addEventListener("click", onAccept); document.addEventListener("keydown", onKeydown); }); }
 
   function bindEvents() {
@@ -2444,7 +2493,8 @@
     document.addEventListener("keydown", (event) => { if (mobileImageViewer || library.modalOpen()) return; if (event.key === "Escape") { if (!els.parameterDialog.classList.contains("is-hidden")) closeToolParameterDialog(); else if (!els.imagePreview.classList.contains("is-hidden")) closeImagePreview(); else if (els.detailDrawer.classList.contains("is-open") && !activeConfirmation) closeDetail(); return; } if (event.target.closest('input,textarea,select,[role="combobox"],[contenteditable=true]')) return; if (!els.imagePreview.classList.contains("is-hidden")) { if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); void navigateImagePreview(event.key === "ArrowLeft" ? -1 : 1); } return; } if (!els.detailDrawer.classList.contains("is-open") || activeConfirmation) return; if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); void navigateDetail(event.key === "ArrowLeft" ? -1 : 1); } });
   }
 
-  const library = window.ImageStudioLibrary({ state, escape, apiGet, apiPost, bridge, showNotice, errorMessage, formatDate, formatBytes, sourceLabel, syncPageScrollLock, switchView, requestParameters, loadGallery, clearGallerySelection, openDetail, closeDetail, reproduce, applyDraft, useDataUrlAsReference, ensureDetailMetadata, ensureDetailPreview, getImageMedia, cacheImageMedia, loadImageMedia });
+  const externalSources = window.ImageStudioExternalSources({ state, apiGet, apiPost, escape, formatBytes, formatDate, showNotice, errorMessage, updateSettingsDirty, invalidateBrowseCache });
+  const library = window.ImageStudioLibrary({ state, escape, apiGet, apiPost, bridge, showNotice, errorMessage, formatDate, formatBytes, sourceLabel, syncPageScrollLock, switchView, requestParameters, loadGallery, clearGallerySelection, openDetail, closeDetail, reproduce, applyDraft, useDataUrlAsReference, useGalleryImageAsReference, ensureDetailMetadata, ensureDetailPreview, getImageMedia, cacheImageMedia, loadImageMedia });
 
   async function start() {
     bindEvents();

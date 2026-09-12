@@ -116,6 +116,7 @@ def default_webui_settings() -> dict[str, Any]:
         "schema_version": 2,
         "revision": 0,
         "providers": [],
+        "external_sources": {"nai": {"enabled": False}},
         "history": {
             "enabled": True,
             "max_records": 200,
@@ -205,6 +206,21 @@ def normalize_webui_settings(value: Any) -> tuple[dict[str, Any], list[str]]:
         history.get("record_invocation_identity"), False
     )
     merged["history"] = history
+
+    external = merged.get("external_sources")
+    if not isinstance(external, dict):
+        external = {}
+    normalized_external = {}
+    for source_id, value in external.items():
+        if not isinstance(source_id, str) or not re.fullmatch(
+            r"[a-z][a-z0-9_]{0,47}", source_id
+        ):
+            errors.append("外部图库来源 ID 无效")
+            continue
+        enabled = value.get("enabled", False) if isinstance(value, dict) else value
+        normalized_external[source_id] = {"enabled": _as_bool(enabled, False)}
+    normalized_external.setdefault("nai", {"enabled": False})
+    merged["external_sources"] = normalized_external
 
     raw_defaults = (
         merged.get("generation_defaults")

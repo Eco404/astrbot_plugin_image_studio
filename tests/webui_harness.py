@@ -365,12 +365,27 @@ async def create_app(data_dir: Path, seed: bool = True) -> FastAPI:
         plugin.config, plugin._studio_settings
     )
     plugin._settings_lock = asyncio.Lock()
+    from astrbot_plugin_image_studio.external_gallery import ExternalGalleryManager
+
+    plugin._external_gallery = ExternalGalleryManager(plugin.store, data_dir)
+    await plugin._configure_external_gallery()
     plugin._imports, plugin._exports, plugin._import_groups = {}, {}, {}
     plugin._session, plugin._maintenance_task = None, None
     plugin._service = ImageGenerationService(
         settings=plugin._settings, executor=FakeExecutor(), store=plugin.store
     )
-    app = FastAPI()
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def lifespan(_app):
+        await plugin._external_gallery.start()
+        try:
+            yield
+        finally:
+            await plugin._external_gallery.close()
+            await plugin.store.close()
+
+    app = FastAPI(lifespan=lifespan)
     app.state.plugin = plugin
     app.state.data_dir = data_dir
     app.state.seed_ids = []

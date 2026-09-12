@@ -111,7 +111,7 @@ def test_new_release_creates_complete_schema_once_without_development_metadata(
         assert (
             schema.ensure_release_schema(conn, backup_dir=tmp_path / "backups") is None
         )
-        assert schema.RELEASE_VERSION == 1 and schema.DATABASE_VERSION == "1"
+        assert schema.RELEASE_VERSION == 1
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
         assert (
             conn.execute(
@@ -197,6 +197,8 @@ def test_final_development_promotion_preserves_all_business_rows_files_and_resto
             if path.is_file()
         }
         with store._connect() as conn:
+            for table in ("external_records", "external_sources", "schema_meta"):
+                conn.execute(f"DROP TABLE {table}")
             mark_development(conn)
         with store._connect() as conn:
             before = business_rows(conn)
@@ -205,11 +207,10 @@ def test_final_development_promotion_preserves_all_business_rows_files_and_resto
         await promoted.initialize()
         with promoted._connect() as conn:
             assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
-            assert (
-                conn.execute(
-                    "SELECT name FROM sqlite_master WHERE name='schema_meta'"
-                ).fetchone()
-                is None
+            assert tuple(conn.execute("SELECT * FROM schema_meta").fetchone()) == (
+                1,
+                2,
+                1,
             )
             assert business_rows(conn) == before
             assert conn.execute("PRAGMA foreign_key_check").fetchall() == []

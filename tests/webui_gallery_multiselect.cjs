@@ -56,9 +56,9 @@ async function verify(browser, name, width) {
 
     await frame.locator("#galleryNext").click();
     await frame.locator("#galleryPageLabel").filter({ hasText: "第 2" }).waitFor();
-    let payload = await toggle("gallerySource", "webui", ["command", "llm_tool", "import"]);
+    let payload = await toggle("gallerySource", "webui", ["command", "llm_tool", "import", "external"]);
     assert.equal(payload.total, initial.items.filter(item => item.source !== "webui").length);
-    await toggle("gallerySource", "import", ["command", "llm_tool"]);
+    await toggle("gallerySource", "import", ["command", "llm_tool", "external"]);
     await page.screenshot({ path: path.join(output, `${name}-sources.png`) });
     await close("gallerySource");
 
@@ -72,13 +72,13 @@ async function verify(browser, name, width) {
     const refresh = page.waitForResponse(response => response.url().includes("/gallery/list"));
     await frame.locator("#galleryRefresh").click(); await refresh;
     assert.deepEqual(await selected("galleryProvider"), ["natural"]);
-    assert.deepEqual(await selected("gallerySource"), ["command", "llm_tool"]);
+    assert.deepEqual(await selected("gallerySource"), ["command", "llm_tool", "external"]);
 
     const sequenceResponse = page.waitForResponse(response => response.url().includes("/gallery/image-sequence"));
     await frame.locator(".gallery-card .gallery-info").first().click();
     const sequence = await sequenceResponse;
     const sequenceParams = new URL(sequence.url()).searchParams;
-    assert.equal(sequenceParams.get("sources"), '["command","llm_tool"]');
+    assert.equal(sequenceParams.get("sources"), '["command","llm_tool","external"]');
     assert.equal(sequenceParams.get("provider_ids"), '["natural"]');
     const sequenceItems = (await sequence.json()).items;
     assert.deepEqual([...new Set(sequenceItems.map(item => item.generation_id))], expected.map(item => item.id));

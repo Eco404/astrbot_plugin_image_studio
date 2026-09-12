@@ -53,7 +53,8 @@ def export_parameters(
         image = images[0]
     if image is None:
         raise ValueError("所选图片不属于当前生成记录或已被删除")
-    if detail.get("source") == "import" and image.get("supplemental"):
+    metadata_record = detail.get("source") in {"import", "external"}
+    if metadata_record and image.get("supplemental"):
         supplemental = image["supplemental"]
         detail = {**detail, "supplemental": supplemental}
         for key in ("model", "mode", "generation_engine", "generated_at"):
@@ -68,7 +69,7 @@ def export_parameters(
     raw = metadata.get("raw") or {}
     normalized = metadata.get("normalized") or {}
     request = request_snapshot(detail)
-    if detail.get("source") == "import":
+    if metadata_record:
         supplemental = detail.get("supplemental") or {}
         overrides = supplemental.get("overrides") or {}
         display = {**normalized, **(supplemental.get("display_parameters") or {})}
@@ -87,15 +88,21 @@ def export_parameters(
             "version": 1,
             "generation_engine": detail.get("generation_engine", "unknown"),
             "data": request,
-            "metadata": metadata if detail.get("source") == "import" else {},
+            "metadata": metadata if metadata_record else {},
             "supplemental": detail.get("supplemental", {}),
-            "has_request_snapshot": detail.get("source") != "import",
+            "has_request_snapshot": not metadata_record,
         }
     elif format_name == "nai":
+        external_parameters = (detail.get("supplemental") or {}).get(
+            "external_parameters"
+        )
         if (
-            detail.get("source") != "import"
-            and detail.get("provider_kind") == "nai_direct"
+            detail.get("source") == "external"
+            and external_parameters
+            and detail.get("generation_engine") == "novelai"
         ):
+            content = copy.deepcopy(external_parameters)
+        elif not metadata_record and detail.get("provider_kind") == "nai_direct":
             content = {
                 **request["parameters"],
                 "tag": request["prompt"],

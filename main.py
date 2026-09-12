@@ -43,12 +43,14 @@ from .config import (
     runtime_settings,
     save_studio_settings,
 )
+from .external_gallery import ExternalGalleryManager
 from .models import ImageProvider, InvocationSource, ReferenceImage
 from .image_metadata import parse_metadata_fields
 from .parameter_exchange import export_parameters, resolve_parameters
 from .providers import ProviderError, ProviderExecutor
 from .service import ImageGenerationService
 from .storage import (
+    ExternalDeleteError,
     GenerationStore,
     ImportDuplicateError,
     ImportEditConflictError,
@@ -89,7 +91,7 @@ IMAGE_WORKFLOW_CONTINUATION_PROMPT = (
     PLUGIN_NAME,
     "econeco",
     "多 Provider 生图、画廊与 Agent 可读图片工具。",
-    "1.1.0-dev.1",
+    "1.1.0-dev.2",
 )
 class ImageStudioPlugin(Star):
     """Own Image Studio configuration, generation, gallery, and tool APIs."""
@@ -111,11 +113,13 @@ class ImageStudioPlugin(Star):
         self._studio_settings, studio_errors = load_studio_settings(Path(self.data_dir))
         self._settings, runtime_errors = runtime_settings(config, self._studio_settings)
         self._settings_errors = [*studio_errors, *runtime_errors]
+        self._external_gallery = ExternalGalleryManager(self.store, Path(self.data_dir))
 
     async def initialize(self) -> None:
         """Initialize storage, HTTP resources, and Page API routes."""
 
         await self.store.initialize()
+        await self._configure_external_gallery()
         await self.store.run_maintenance(
             self._settings.history,
             preview_max_edge=self._settings.asset_preview_max_edge,
@@ -134,6 +138,7 @@ class ImageStudioPlugin(Star):
             store=self.store,
         )
         self._register_web_apis()
+        await self._external_gallery.start()
         if self._settings_errors:
             logger.warning(
                 "%s 配置存在问题: %s", LOG_TAG, "; ".join(self._settings_errors)
@@ -148,6 +153,7 @@ class ImageStudioPlugin(Star):
     async def terminate(self) -> None:
         """Close plugin-owned HTTP resources during reload or shutdown."""
 
+        await self._external_gallery.close()
         if self._maintenance_task is not None:
             self._maintenance_task.cancel()
             try:
@@ -162,6 +168,13 @@ class ImageStudioPlugin(Star):
         self._imports.clear()
         self._import_groups.clear()
         await self.store.close()
+
+    async def _configure_external_gallery(self) -> None:
+        await self._external_gallery.configure(
+            self._studio_settings.get("external_sources", {}),
+            preview_max_edge=self._settings.asset_preview_max_edge,
+            preview_quality=self._settings.asset_preview_quality,
+        )
 
     async def _maintenance_loop(self) -> None:
         while True:
@@ -290,6 +303,24 @@ class ImageStudioPlugin(Star):
                 "Image Studio: upload reference",
             ),
             (
+                "studio/reference/from-gallery",
+                self._api_gallery_as_reference,
+                ["POST"],
+                "Image Studio: retain a gallery original as reference",
+            ),
+            (
+                "external/status",
+                self._api_external_status,
+                ["GET"],
+                "Image Studio: external gallery scan status",
+            ),
+            (
+                "external/scan",
+                self._api_external_scan,
+                ["POST"],
+                "Image Studio: rescan external gallery",
+            ),
+            (
                 "settings/get",
                 self._api_get_settings,
                 ["GET"],
@@ -384,6 +415,12 @@ class ImageStudioPlugin(Star):
                 self._api_gallery_delete,
                 ["POST"],
                 "Image Studio: delete gallery records",
+            ),
+            (
+                "gallery/delete/preview",
+                self._api_gallery_delete_preview,
+                ["POST"],
+                "Image Studio: inspect external originals before deletion",
             ),
             (
                 "gallery/reference/delete",
@@ -488,6 +525,7 @@ class ImageStudioPlugin(Star):
         if not isinstance(body, dict):
             return error_response("请求体必须是 JSON 对象", status_code=400)
         expected_revision = _as_int(body.get("settings_revision"), -1)
+        warnings: list[str] = []
         async with self._settings_lock:
             current_studio, _ = normalize_webui_settings(self._studio_settings)
             current_revision = _as_int(current_studio.get("revision"), 0)
@@ -534,12 +572,49 @@ class ImageStudioPlugin(Star):
                 self.config, self._studio_settings
             )
             self._service_or_raise().update_settings(self._settings)
-        return json_response({"settings_revision": self._settings.revision})
+            try:
+                await self._configure_external_gallery()
+            except Exception as exc:
+                logger.exception("%s 设置已保存，但外部图库配置应用失败", LOG_TAG)
+                warnings.append(
+                    f"设置已保存，但外部图库配置未能应用：{type(exc).__name__}。请检查存储状态后重新保存。"
+                )
+        return json_response(
+            {"settings_revision": self._settings.revision, "warnings": warnings}
+        )
 
     async def _api_storage_health(self) -> Any:
         report = await self.store.maintenance_report()
         report["retention"] = await self.store.retention_status(self._settings.history)
+        report["external_sources"] = await self._external_gallery.status()
         return json_response(report)
+
+    async def _api_external_status(self) -> Any:
+        return json_response({"sources": await self._external_gallery.status()})
+
+    async def _api_external_scan(self) -> Any:
+        body = await web_request.json(default={})
+        if not isinstance(body, dict):
+            return error_response("请求体必须是 JSON 对象", status_code=400)
+        try:
+            result = await self._external_gallery.request_scan(
+                str(body.get("source_id") or "nai")
+            )
+        except ValueError as exc:
+            return error_response(str(exc), status_code=400)
+        return json_response(result)
+
+    async def _api_gallery_as_reference(self) -> Any:
+        body = await web_request.json(default={})
+        if not isinstance(body, dict):
+            return error_response("请求体必须是 JSON 对象", status_code=400)
+        try:
+            result = await self.store.stage_gallery_reference(
+                str(body.get("image_id") or "")
+            )
+        except (ValueError, OSError) as exc:
+            return error_response(str(exc), status_code=400)
+        return json_response(result)
 
     async def _api_import_inspect(self) -> Any:
         body = await web_request.json(default={})
@@ -1067,10 +1142,30 @@ class ImageStudioPlugin(Star):
         if not 1 <= len(body["image_ids"]) <= 100:
             return error_response("请选择 1 至 100 张图片", status_code=400)
         try:
+            preview = await self.store.external_delete_preview(
+                [str(body.get("generation_id") or "")]
+            )
+            if preview["external_count"] and body.get("confirm_external") is not True:
+                return error_response(
+                    "本次删除包含外部资源，将删除来源插件中的原图，请确认后重试",
+                    status_code=409,
+                )
             result = await self.store.delete_images(
                 str(body.get("generation_id") or ""), body["image_ids"]
             )
             return json_response(result)
+        except ExternalDeleteError as exc:
+            details = exc.as_dict()
+            if details.get("generation_deleted"):
+                return json_response(
+                    {
+                        "deleted": body["image_ids"],
+                        "remaining": 0,
+                        "generation_deleted": True,
+                        "errors": [details],
+                    }
+                )
+            return error_response(str(exc), status_code=409)
         except ValueError as exc:
             return error_response(str(exc), status_code=400)
 
@@ -1361,16 +1456,54 @@ class ImageStudioPlugin(Star):
     async def _api_gallery_delete(self) -> Any:
         body = await web_request.json(default={})
         ids = body.get("ids") if isinstance(body, dict) else []
-        if not isinstance(ids, list) or not ids:
-            return error_response("请选择要删除的生成记录", status_code=400)
+        if not isinstance(ids, list) or not 1 <= len(ids) <= 200:
+            return error_response("请选择 1 至 200 条生成记录", status_code=400)
+        try:
+            preview = await self.store.external_delete_preview(ids)
+        except ValueError as exc:
+            return error_response(str(exc), status_code=400)
+        if preview["external_count"] and body.get("confirm_external") is not True:
+            return error_response(
+                "本次删除包含外部资源，将删除来源插件中的原图，请确认后重试",
+                status_code=409,
+            )
         deleted: list[str] = []
         failed: list[str] = []
-        for generation_id in ids[:200]:
-            if await self.store.delete_generation(str(generation_id or "")):
-                deleted.append(str(generation_id))
-            else:
+        errors: list[dict[str, Any]] = []
+        for generation_id in dict.fromkeys(ids):
+            try:
+                if await self.store.delete_generation(str(generation_id or "")):
+                    deleted.append(str(generation_id))
+                else:
+                    failed.append(str(generation_id))
+                    errors.append(
+                        {"id": str(generation_id), "message": "记录不存在或已删除"}
+                    )
+            except ExternalDeleteError as exc:
+                if exc.as_dict().get("generation_deleted"):
+                    deleted.append(str(generation_id))
+                else:
+                    failed.append(str(generation_id))
+                errors.append(
+                    {**exc.as_dict(), "id": str(generation_id), "message": str(exc)}
+                )
+            except (ValueError, OSError) as exc:
                 failed.append(str(generation_id))
-        return json_response({"deleted": deleted, "failed": failed})
+                errors.append({"id": str(generation_id), "message": str(exc)})
+        return json_response({"deleted": deleted, "failed": failed, "errors": errors})
+
+    async def _api_gallery_delete_preview(self) -> Any:
+        body = await web_request.json(default={})
+        if not isinstance(body, dict):
+            return error_response("请求体必须是 JSON 对象", status_code=400)
+        if not isinstance(body.get("ids"), list) or not 1 <= len(body["ids"]) <= 200:
+            return error_response("请选择 1 至 200 条生成记录", status_code=400)
+        try:
+            return json_response(
+                await self.store.external_delete_preview(body.get("ids"))
+            )
+        except ValueError as exc:
+            return error_response(str(exc), status_code=400)
 
     async def _api_reference_delete(self) -> Any:
         body = await web_request.json(default={})

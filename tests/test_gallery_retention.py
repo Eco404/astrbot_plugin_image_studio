@@ -276,12 +276,9 @@ def test_database_release_version_is_explicit_and_future_versions_are_rejected(
         ] == DATABASE_VERSION
         with sqlite3.connect(store.db_path) as conn:
             assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
-            assert (
-                conn.execute(
-                    "SELECT name FROM sqlite_master WHERE name = 'schema_meta'"
-                ).fetchone()
-                is None
-            )
+            assert conn.execute(
+                "SELECT target_version,dev_revision FROM schema_meta"
+            ).fetchone() == (2, 1)
             conn.execute("PRAGMA user_version = 2")
         with pytest.raises(RuntimeError, match="正式版本"):
             await GenerationStore(tmp_path).initialize()
@@ -506,7 +503,7 @@ def test_schema_transaction_rolls_back_before_version_stamp(tmp_path, monkeypatc
     def fail_stamp(conn):
         raise RuntimeError("simulated migration failure")
 
-    monkeypatch.setattr(schema_module, "_stamp_release", fail_stamp)
+    monkeypatch.setattr(schema_module, "_stamp_development", fail_stamp)
     store = GenerationStore(tmp_path)
     with pytest.raises(RuntimeError, match="migration failure"):
         asyncio.run(store.initialize())

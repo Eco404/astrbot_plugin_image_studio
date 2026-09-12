@@ -159,7 +159,7 @@ async function run(engine, width) {
     assert.ok(initialPreviews.every((id) => allowedInitial.has(id)), "initial previews must belong to adjacent images or nearby filmstrip thumbnails");
     assertIds(idsFor(requests, "original"), [ids[0]], "normal detail open may request only the selected original");
     assertIds(idsFor(requests, "image-info"), [ids[0]], "filmstrip and neighbor prefetch must not request full metadata");
-    assert.equal(await inner.locator("#detailUseReference").isDisabled(), true, "reference action must wait for the current original");
+    assert.equal(await inner.locator("#detailUseReference").isDisabled(), false, "reference action stages the original server-side without waiting for the browser download");
     const raw = inner.locator(".raw-metadata");
     await raw.waitFor({ state: "attached" });
     assert.equal(await raw.getAttribute("open"), null);

@@ -1194,13 +1194,14 @@
       const normalized = metadata.normalized || {};
       const request = hooks.requestParameters(detail);
       const supplemental = image?.supplemental && Object.keys(image.supplemental).length ? image.supplemental : detail.supplemental || {};
+      const imageParameters = ["import", "external"].includes(detail.source);
       const imported = { ...(supplemental.display_parameters || {}), ...(supplemental.overrides || {}), ...(supplemental.overrides?.parameters || {}), prompt: supplemental.prompt ?? detail.original_prompt, model: supplemental.model ?? detail.model, mode: supplemental.mode ?? detail.mode };
       delete imported.parameters;
-      const requestRows = detail.source === "import" ? imported : { prompt: request.prompt, negative_prompt: request.negative_prompt, model: request.model, mode: modeLabel(request.mode), size: request.size, count: request.count, ...(request.parameters || {}) };
+      const requestRows = imageParameters ? imported : { prompt: request.prompt, negative_prompt: request.negative_prompt, model: request.model, mode: modeLabel(request.mode), size: request.size, count: request.count, ...(request.parameters || {}) };
       const displayNormalized = { ...normalized }; delete displayNormalized.parameters;
       const metadataRows = { ...displayNormalized, ...(normalized.parameters || {}) };
       const summaryStatus = metadata.format === "comfyui" ? promptStatusMarkup(normalized.prompt_status, "正向：") + promptStatusMarkup(normalized.negative_prompt_status, "反向：") : "";
-      if (metadata.format === "comfyui") for (const key of ["condition_nodes", "stages", "outputs", "prompt_candidates"]) { delete metadataRows[key]; if (detail.source === "import") delete requestRows[key]; }
+      if (metadata.format === "comfyui") for (const key of ["condition_nodes", "stages", "outputs", "prompt_candidates"]) { delete metadataRows[key]; if (imageParameters) delete requestRows[key]; }
       const raw = metadata.raw || {};
       const rawMarkup = Object.keys(raw).length ? deferredDetailSection("detail-block raw-metadata", "图片原始元数据", () => Object.entries(raw).map(([name, value]) => deferredDetailSection("metadata-raw-field", escape(name), () => parameterRows({ [name]: value }))).join("")) : "";
       const generated = Object.keys(metadataRows).length ? deferredDetailSection("detail-block generated-parameters", `图片生成参数 · ${escape(engineLabel(metadata.format))}`, () => `${summaryStatus}<div class="detail-parameter-grid">${parameterRows(metadataRows)}</div>`) : "";
@@ -1208,7 +1209,7 @@
         const template = document.createElement("template"); template.innerHTML = comfyDetailsMarkup(metadata, true);
         template.content.firstElementChild.querySelector("summary").remove(); return template.content.firstElementChild.innerHTML;
       }) : "";
-      return `<div class="detail-block"><h3>${detail.source === "import" ? "导入信息" : "原始请求"}</h3><div class="detail-parameter-grid">${parameterRows(requestRows)}</div></div>${generated}${workflow}${rawMarkup}`;
+      return `<div class="detail-block"><h3>${detail.source === "external" ? "外部图片参数" : detail.source === "import" ? "导入信息" : "原始请求"}</h3><div class="detail-parameter-grid">${parameterRows(requestRows)}</div></div>${generated}${workflow}${rawMarkup}`;
     }
 
     function detailWarningsMarkup(detail, image) {
@@ -1235,10 +1236,10 @@
       $("detailFavorite").title = detail?.is_favorite ? "取消收藏" : "收藏生成记录";
       $("detailFavorite").setAttribute("aria-label", $("detailFavorite").title);
       $("detailFavorite").disabled = favoritePending || !detail;
-      $("detailUseReference").disabled = !image?.data_url || !(image._originalLoaded || !detail?.lightweight && state.detailAssetsLoaded);
+      $("detailUseReference").disabled = !image?.id || !!image.file_state && image.file_state !== "available";
       $("detailReproduce").disabled = !detail;
       $("detailDelete").disabled = !detail || !(detail.images || []).length;
-      $("detailImportEdit").hidden = detail?.source !== "import";
+      $("detailImportEdit").hidden = detail?.source !== "import" || !!detail?.is_external;
       $("detailImportEdit").disabled = importEditLoading || !detail || !(detail.images || []).length;
       $("detailCopy").disabled = !detail || !!detail.lightweight && !image?._metadataLoaded;
       window.ImageStudioSelect?.refresh($("detailCopyFormat"));
@@ -1268,7 +1269,7 @@
         const actual = result.is_favorite ?? result.favorite ?? favorite;
         if (state.detailId === id && state.detailData) state.detailData.is_favorite = actual;
         const card = state.galleryItems.find((item) => item.id === id); if (card) card.is_favorite = actual;
-        showNotice(actual ? "已收藏，本条生成记录的全部图片均受保留保护。" : detail.source === "import" ? "已取消收藏，导入记录仍然保留，不参与自动清理。" : "已取消收藏，24 小时后可参与自动清理。", "success");
+        showNotice(detail.is_external ? actual ? "已收藏。" : "已取消收藏。" : actual ? "已收藏，本条生成记录的全部图片均受保留保护。" : detail.source === "import" ? "已取消收藏，导入记录仍然保留，不参与自动清理。" : "已取消收藏，24 小时后可参与自动清理。", "success");
         await hooks.loadGallery();
       } catch (error) { showNotice(errorMessage(error, "收藏状态更新失败"), "error"); }
       finally { favoritePending = false; updateDetailActions(state.detailData); }
@@ -1324,7 +1325,7 @@
       const images = detail.images || []; if (!images.length) return;
       const selected = new Set(images.map((image) => image.id));
       const body = images.length === 1 ? "<p>永久删除这张图片及对应生成记录？</p>" : `<p>选择要从本条生成记录中删除的图片。</p><button class="quiet-button" id="deleteImagesSelectAll" type="button">取消全选</button><div class="delete-image-grid">${images.map((image, index) => `<label class="delete-image-choice"><img data-delete-preview="${escape(image.id)}" ${image.thumbnail_data_url || image.data_url ? `src="${escape(image.thumbnail_data_url || image.data_url)}"` : ""} alt="第 ${index + 1} 张图片" /><input type="checkbox" data-delete-image="${escape(image.id)}" checked /><span>第 ${index + 1} 张</span></label>`).join("")}</div>`;
-      const consequence = `${detail.is_favorite ? "<p>此记录已收藏。</p>" : ""}<p>删除全部成图会同时移除本条记录及其参考图关联。</p>`;
+      const consequence = `${detail.is_favorite ? "<p>此记录已收藏。</p>" : ""}${detail.is_external ? `<p class="external-delete-warning">包含外部资源（${escape(detail.external_source?.name || "外部图库")}）。将永久删除来源插件中的原图及关联参数文件，无法恢复。</p>` : ""}<p>删除全部成图会同时移除本条记录及其参考图关联。</p>`;
       let active = true, observer;
       await openModal("删除图片", body + consequence, [{ label: "取消", action: () => false }, { label: `删除 ${images.length} 张`, danger: true, id: "deleteImagesAccept", action: async () => {
         if (!selected.size) throw new Error("请至少选择一张图片。");
@@ -1335,11 +1336,12 @@
           const successor = images.slice(state.detailImageIndex + 1).find((image) => !selected.has(image.id));
           nextIndex = successor ? remainingImages.findIndex((image) => image.id === successor.id) : Math.max(0, remainingImages.length - 1);
         }
-        const result = await apiPost("gallery/images/delete", { generation_id: detail.id, image_ids: Array.from(selected) });
+        const result = await apiPost("gallery/images/delete", { generation_id: detail.id, image_ids: Array.from(selected), confirm_external: !!detail.is_external });
         await hooks.loadGallery();
         if (result.generation_deleted || Number(result.remaining) === 0) hooks.closeDetail();
         else await hooks.openDetail(detail.id, nextIndex);
-        showNotice(`已删除 ${Array.isArray(result.deleted) ? result.deleted.length : result.deleted ?? selected.size} 张图片。`, "success"); return true;
+        const errors = result.errors || [];
+        showNotice(`已删除 ${Array.isArray(result.deleted) ? result.deleted.length : result.deleted ?? selected.size} 张图片。${errors.map(error => error.message || "部分文件未删除").join("；")}`, errors.length ? "error" : "success"); return true;
       } }], { onOpen: () => {
         const loadPreview = async (element) => {
           const image = images.find(image => image.id === element.dataset.deletePreview);
@@ -1410,7 +1412,7 @@
       return `<article class="gallery-card ${item.is_favorite ? "is-favorite" : ""} ${warning ? "has-cleanup-warning" : ""} ${selected ? "is-selected" : ""}" data-gallery-id="${escape(item.id)}" tabindex="0" role="button" aria-label="查看 ${escape(item.model || item.provider_name || "图片")}">
         <div class="gallery-image-wrap">${item.thumbnail_data_url ? `<img src="${escape(item.thumbnail_data_url)}" alt="${escape(item.prompt_preview)}" loading="${index < Math.max(1, galleryColumns) * 2 ? "eager" : "lazy"}" decoding="async" />` : `<div class="gallery-missing-image">${icon("Image")}<span>图片不可用</span></div>`}
           <label class="gallery-selection" title="选择生成记录"><input type="checkbox" data-select-id="${escape(item.id)}" aria-label="选择生成记录" ${selected ? "checked" : ""} /><span>${icon("Check")}</span></label>
-          <span class="gallery-source-label">${escape(engineLabel(item.generation_engine))}</span>${Number(item.image_count) > 1 ? `<span class="gallery-image-count" title="${Number(item.image_count)} 张图片">${icon("Image")}<span>${Number(item.image_count)}</span></span>` : ""}${item.is_favorite ? `<span class="gallery-favorite" title="已收藏" aria-label="已收藏">${icon("Star")}</span>` : ""}
+          <span class="gallery-source-label${item.is_external ? " is-external" : ""}"${item.is_external ? ` title="来自 ${escape(item.external_source?.name || "NAI 插件图库")}" aria-label="${escape(engineLabel(item.generation_engine))}，来自 ${escape(item.external_source?.name || "NAI 插件图库")}"` : ""}>${escape(engineLabel(item.generation_engine))}</span>${Number(item.image_count) > 1 ? `<span class="gallery-image-count" title="${Number(item.image_count)} 张图片">${icon("Image")}<span>${Number(item.image_count)}</span></span>` : ""}${item.is_favorite ? `<span class="gallery-favorite" title="已收藏" aria-label="已收藏">${icon("Star")}</span>` : ""}
         </div><div class="gallery-info"><strong>${escape(item.model || item.provider_name || engineLabel(item.generation_engine))}</strong><p>${escape(item.prompt_preview || "无提示词")}</p><div class="gallery-meta"><span>${modeLabel(item.mode)}</span><span>${formatDate(item.created_at)}</span></div>${warning ? '<span class="cleanup-warning-label">清理候选</span>' : ""}${item.file_state && item.file_state !== "available" ? '<span class="cleanup-warning-label">文件需检查</span>' : ""}</div></article>`;
     }
 
@@ -1519,7 +1521,7 @@
       $("detailCopy").addEventListener("click", () => void copyDetailFormat());
       $("detailWorkflowDownload").addEventListener("click", () => void copyDetailFormat(true));
       $("detailReproduce").addEventListener("click", () => void hooks.reproduce(state.detailId));
-      $("detailUseReference").addEventListener("click", () => { const image = state.detailData?.images?.[state.detailImageIndex]; if (image?.data_url) void hooks.useDataUrlAsReference(image.data_url, "gallery-output-reference.png"); });
+      $("detailUseReference").addEventListener("click", () => { const image = state.detailData?.images?.[state.detailImageIndex]; if (image?.id) void hooks.useGalleryImageAsReference(image); });
       $("detailDelete").addEventListener("click", () => void deleteDetailImages());
       $("drawerBody").addEventListener("click", (event) => { const button = event.target.closest("[data-copy-field]"); if (button) void copyText(detailCopies[Number(button.dataset.copyField)]); });
       $("drawerBody").addEventListener("toggle", (event) => {
