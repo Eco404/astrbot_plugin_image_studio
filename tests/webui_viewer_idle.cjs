@@ -115,6 +115,10 @@ async function verifyPreparedDetails(page, frame, inner, items) {
   const previewRoute = async (route) => {
     const response = await route.fetch(); const body = await response.json(); const data = body.data || body;
     data.images[current.imageIndex].thumbnail_data_url = coldPreview;
+    // The viewer already decoded this image's original. A cold-thumbnail probe
+    // needs a new immutable identity; otherwise restoring the cached original
+    // correctly skips preview decoding entirely.
+    data.images[current.imageIndex].sha256 = `cold-preview-${data.images[current.imageIndex].sha256}`;
     await route.fulfill({ response, json: body });
   };
   await page.route(`**/gallery/detail/${current.generation}?*`, previewRoute);
@@ -211,11 +215,12 @@ async function verifyPreparedDetails(page, frame, inner, items) {
     assert.deepEqual(await decoded(inner, items[6].id), [], "a stale non-current original should not be decoded after a quick switch"); await stale.remove();
     assert.equal((await snapshot(inner)).id, items[7].id);
     const background = await inner.evaluate(() => {
-      const holder = document.querySelector(".image-studio-viewer-background"); const image = holder?.querySelector(".image-studio-viewer-backdrop:not(.image-studio-viewer-backdrop-previous)");
-      return { same: holder === window.__idleBackground, filter: holder && getComputedStyle(holder).filter, imageFilter: image && getComputedStyle(image).filter, src: image?.src, preview: window.__idleViewer.currSlide.data.previewSrc };
+      const holder = document.querySelector(".image-studio-viewer-background"); const image = holder?.querySelector("canvas.image-studio-viewer-backdrop");
+      return { same: holder === window.__idleBackground, filter: holder && getComputedStyle(holder).filter, imageFilter: image && getComputedStyle(image).filter, src: image?.dataset.previewSource, preview: window.__idleViewer.currSlide.data.previewSrc, width: image?.width, height: image?.height };
     });
-    await inner.waitForFunction(() => document.querySelector(".image-studio-viewer-backdrop:not(.image-studio-viewer-backdrop-previous)")?.src === window.__idleViewer.currSlide.data.previewSrc);
-    assert.equal(background.same, true); assert.match(background.filter, /blur\(/); assert.equal(background.imageFilter, "none");
+    await inner.waitForFunction(() => document.querySelector("canvas.image-studio-viewer-backdrop")?.dataset.previewSource === window.__idleViewer.currSlide.data.previewSrc);
+    assert.equal(background.same, true); assert.equal(background.filter, "none"); assert.equal(background.imageFilter, "none");
+    assert.ok(background.width > 1 && background.height > 1 && Math.max(background.width, background.height) <= 320);
     assert.deepEqual(blockedDetailRequests, [], "the obscured detail modal must not load records/assets during viewer navigation");
     assert.deepEqual(await inner.evaluate(() => window.__idleDrawerChanges), [], "the obscured detail modal must not be rerendered during viewer navigation");
     await page.screenshot({ path: path.join(output, `${engine}-idle-final.png`) });
@@ -237,12 +242,24 @@ async function verifyPreparedDetails(page, frame, inner, items) {
     await frame.locator(`.detail-filmstrip[data-generation-id="${items[1].generation}"] [data-detail-dot="${items[1].imageIndex}"][aria-current="true"]`).waitFor();
     await frame.locator("#detailUseReference:not(:disabled)").waitFor();
     await frame.locator("[data-detail-image]").click(); await inner.waitForFunction(() => window.__idleViewer?.opener.isOpen); await ready(inner, 1, true);
-    const closing = blockOriginal(page, items[6].id); await closing.install();
-    await inner.evaluate(() => window.__idleViewer.goTo(6)); await ready(inner, 6); await waitRequest(page, closing);
+    let repeatedOriginals = 0;
+    const observeCachedOriginal = request => {
+      const url = new URL(request.url());
+      if (url.pathname.endsWith(`/${items[6].id}`) && url.searchParams.get("detail") === "original") repeatedOriginals++;
+    };
+    page.on("request", observeCachedOriginal);
+    await inner.evaluate(() => window.__idleViewer.goTo(6)); await ready(inner, 6, true); await page.waitForTimeout(160);
+    page.off("request", observeCachedOriginal);
+    assert.equal(repeatedOriginals, 0, "a downloaded stale original must be reusable by a later viewer without another request");
+    // Image 6's earlier stale response is reusable in the shared media cache.
+    // Use an original that has never been requested for the pending-close case.
+    const closingIndex = 3;
+    const closing = blockOriginal(page, items[closingIndex].id); await closing.install();
+    await inner.evaluate(index => window.__idleViewer.goTo(index), closingIndex); await ready(inner, closingIndex); await waitRequest(page, closing);
     await inner.evaluate(() => { window.__idleClosingViewer = window.__idleViewer; window.__idleViewer.close(); }); await frame.locator(".pswp--open").waitFor({ state: "detached" });
     closing.release(); await page.waitForTimeout(180); await closing.remove();
     assert.equal(await frame.locator(".pswp--open").count(), 0, "a late original response must not revive the closed viewer");
-    assert.equal(await inner.evaluate(() => window.__idleClosingViewer.options.dataSource[6].originalSrc || ""), "", "a late original response must not upgrade a closed session");
+    assert.equal(await inner.evaluate(index => window.__idleClosingViewer.options.dataSource[index].originalSrc || "", closingIndex), "", "a late original response must not upgrade a closed session");
     assert.deepEqual(errors, []); await page.close();
     console.log(`${engine}: pointer/drag/settle/zoom idle gating, stale-original suppression, deferred details, thumbnail-only fixed backdrop, Chinese recovery and close synchronization passed`);
     console.log(`Viewer idle screenshots: ${output}`);

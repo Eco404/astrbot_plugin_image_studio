@@ -46,7 +46,7 @@ html { scroll-padding-top: 112px; scroll-padding-bottom: calc(100px + env(safe-a
 .gallery-page-label:hover, .gallery-page-label[aria-expanded="true"] { background: var(--surface-hover); }
 .gallery-page-label:focus-visible, .gallery-page-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .gallery-page-picker { bottom: 82px; gap: 12px; min-width: 0; padding: 10px; border: 1px solid var(--line); color: var(--text); }
-.gallery-page-picker:not([hidden]), .studio-modal-root:not(.is-hidden) .studio-modal, .studio-modal-root:not(.is-hidden) .studio-modal-scrim { animation: studio-view-enter var(--motion-base) ease backwards; }
+.gallery-page-picker:not([hidden]) { animation: studio-view-enter var(--motion-base) ease backwards; }
 .studio-icon-button, .external-source-entry, .external-source-status, .gallery-page-label, .gallery-page-card { transition: color var(--motion-fast) ease, background-color var(--motion-fast) ease, border-color var(--motion-fast) ease, box-shadow var(--motion-fast) ease; }
 .gallery-page-cards { flex: 1 1 auto; min-width: 0; overflow-x: auto; overflow-y: hidden; overscroll-behavior: contain; touch-action: pan-x; padding-block: 3px; scrollbar-width: thin; }
 #galleryPageTrack { position: relative; height: 44px; min-width: 100%; }
@@ -234,8 +234,8 @@ html { scroll-padding-top: 112px; scroll-padding-bottom: calc(100px + env(safe-a
 .generated-parameters > summary { cursor: pointer; font-size: 13px; font-weight: 700; overflow-wrap: anywhere; }
 .generated-parameters[open] > summary { margin-bottom: 9px; }
 .studio-modal-root { position: fixed; z-index: 12; inset: 0; display: grid; place-items: center; padding: 16px; overscroll-behavior: none; }
-.studio-modal-scrim { position: absolute; inset: 0; background: rgba(0, 0, 0, .25); backdrop-filter: blur(3px); touch-action: none; }
-.studio-modal { position: relative; display: flex; flex-direction: column; width: min(620px, 100%); max-height: calc(100dvh - 32px); overflow: hidden; background: var(--topbar-glass); }
+.studio-modal-scrim { position: absolute; inset: 0; background: rgba(0, 0, 0, .22); backdrop-filter: blur(3px); touch-action: none; }
+.studio-modal { position: relative; display: flex; flex-direction: column; width: min(620px, 100%); max-height: calc(100dvh - 32px); overflow: hidden; background: var(--glass); color: var(--text); }
 .studio-modal > header { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 14px 18px; border-bottom: 1px solid var(--line); }
 .studio-modal h2 { margin: 0; font-size: 16px; }
 .studio-modal-body { min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 18px; }
@@ -245,9 +245,7 @@ html { scroll-padding-top: 112px; scroll-padding-bottom: calc(100px + env(safe-a
 .studio-modal-error { font-size: 12px; padding: 0 18px; overflow-wrap: anywhere; }
 .studio-modal-error:not(:empty) { padding-bottom: 12px; }
 .studio-modal.is-merge-picker { width: min(860px, 100%); }
-.studio-modal.is-import-editor { width: min(1240px, 100%); color: var(--text); }
-.studio-modal.is-external-editor { background: var(--glass); color: var(--text); backdrop-filter: blur(24px) saturate(115%); -webkit-backdrop-filter: blur(24px) saturate(115%); }
-.studio-modal.is-external-editor > footer { background: var(--detail-footer-tint); backdrop-filter: none; -webkit-backdrop-filter: none; }
+.studio-modal.is-import-editor { width: min(1240px, 100%); }
 .import-edit-batch-summary { margin-bottom: 16px; font-size: 12px; color: var(--muted); }
 .import-edit-batch-summary > summary { cursor: pointer; min-height: 40px; align-content: center; }
 .is-import-editor .studio-modal-body { scroll-padding-block: 16px; }
@@ -370,11 +368,10 @@ html { scroll-padding-top: 112px; scroll-padding-bottom: calc(100px + env(safe-a
 .detail-references > .field-hint { grid-column: 1 / -1; }
 @media (prefers-reduced-motion: reduce) { .studio-modal, .import-card, .studio-icon-button { animation: none !important; transition: none !important; } }
 
-.image-studio-pswp .pswp__bg { overflow: hidden; background: var(--page); }
-/* A stationary filter surface keeps slide changes out of Safari's blur-layer lifecycle. */
-.image-studio-viewer-background { position: absolute; z-index: 0; inset: -32px; width: calc(100% + 64px); height: calc(100% + 64px); filter: blur(24px) saturate(.82); transform: translate3d(0, 0, 0) scale(1.05); backface-visibility: hidden; pointer-events: none; }
-.image-studio-viewer-backdrop { position: absolute; inset: 0; display: block; width: 100%; height: 100%; object-fit: cover; filter: none; opacity: .64; transform: none; pointer-events: none; }
-.image-studio-viewer-backdrop:not([src]) { visibility: hidden; }
+.image-studio-pswp .pswp__bg { overflow: hidden; background: var(--pswp-bg); transform: none; will-change: auto; }
+/* Fullscreen blur is pre-rendered; only the fixed opaque canvas changes pixels. */
+.image-studio-viewer-background { position: absolute; z-index: 0; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.image-studio-viewer-backdrop { position: absolute; inset: 0; display: block; width: 100%; height: 100%; object-fit: cover; pointer-events: none; }
 .image-studio-image-status { position: absolute; z-index: 30; top: max(18px, env(safe-area-inset-top)); left: 50%; display: flex; align-items: center; gap: 10px; width: max-content; max-width: calc(100% - 24px); padding: 7px 8px 7px 12px; border-radius: 8px; transform: translateX(-50%); background: var(--topbar-glass); color: var(--text); box-shadow: var(--shadow); font-size: 12px; line-height: 1.4; backdrop-filter: blur(16px); }
 .image-studio-image-status > span { min-width: 0; overflow-wrap: anywhere; }
 .image-studio-image-retry { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; min-width: 44px; padding: 0 10px; border: 0; border-radius: 8px; background: var(--surface); color: var(--text); font-size: 12px; white-space: nowrap; }

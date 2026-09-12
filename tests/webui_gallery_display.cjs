@@ -109,7 +109,9 @@ async function verify(browser, name, width) {
     assert.ok(material.alpha > .38 && material.alpha < .42, JSON.stringify(material)); assert.ok(material.blur.includes("blur")); assert.equal(material.footer, "none");
     await frame.locator("#studioModalClose").click();
     const sortSaved = page.waitForResponse(response => response.url().includes("/gallery/preferences") && response.request().method() === "POST");
-    await frame.locator("#gallerySort").selectOption("latest_content"); await sortSaved;
+    await frame.locator("#gallerySort").selectOption("latest_content");
+    await frame.locator("#saveSettingsButton").click(); await sortSaved;
+    await frame.locator("#settingsDirtyStatus").filter({ hasText: "已保存" }).waitFor();
     await frame.waitForFunction(() => window.ImageStudioGalleryPreferences.getSort() === "latest_content");
     await frame.locator('[data-view="gallery"]').click(); await settle(frame);
     const latest = await refresh(); assert.equal(requests.at(-1).searchParams.get("sort"), "latest_content");

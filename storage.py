@@ -16,6 +16,7 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
+from collections.abc import Callable
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
@@ -112,6 +113,10 @@ class ExternalDeleteError(ValueError):
         }
 
 
+class _ExternalFileChangedError(ValueError):
+    """A verified file identity changed, rather than a path or permission error."""
+
+
 class GenerationStore:
     """Store plugin-owned gallery files and queryable generation metadata."""
 
@@ -126,6 +131,7 @@ class GenerationStore:
         self.delivery_dir = self.data_dir / "delivery_staging"
         self.db_path = self.data_dir / "history.sqlite3"
         self._lock = asyncio.Lock()
+        self._external_issue_handler: Callable[[str, str], None] | None = None
         self._revision_lock = threading.Lock()
         self._revision_connection: sqlite3.Connection | None = None
         self._revision_identity: tuple[int, int] | None = None
@@ -151,6 +157,63 @@ class GenerationStore:
     async def close(self) -> None:
         """Release the read-only database observer used by gallery caches."""
         await asyncio.to_thread(self._close_revision_connection_sync)
+
+    def set_external_issue_handler(
+        self, handler: Callable[[str, str], None] | None
+    ) -> None:
+        """Attach the manager's thread-safe recovery scheduler while it is running."""
+        self._external_issue_handler = handler
+
+    def _notify_external_issue_sync(self, row, reason: str) -> None:
+        handler = self._external_issue_handler
+        if handler is not None and row is not None and row["enabled"]:
+            handler(str(row["source_id"]), reason)
+
+    def _report_external_failure_sync(
+        self, generation_id: str, error: Exception
+    ) -> None:
+        if isinstance(error, FileNotFoundError):
+            reason = "missing"
+        elif isinstance(error, _ExternalFileChangedError):
+            reason = "changed"
+        else:
+            return
+        if self._external_issue_handler is not None:
+            self._notify_external_issue_sync(
+                self._external_record_sync(generation_id), reason
+            )
+
+    def _gallery_data_url_sync(
+        self, path: Path, mime_type: str, generation_id: str, *, thumbnail=False
+    ) -> str:
+        try:
+            if path.is_file():
+                return image_data_url(path.read_bytes(), mime_type)
+            path.stat()
+        except FileNotFoundError:
+            if self._external_issue_handler is not None:
+                self._notify_external_issue_sync(
+                    self._external_record_sync(generation_id),
+                    "thumbnail_missing" if thumbnail else "missing",
+                )
+        except OSError:
+            # Permission and I/O failures are not evidence that a file moved.
+            pass
+        return ""
+
+    def _gallery_thumbnail_sync(self, row: dict[str, Any], generation_id: str) -> str:
+        if not row.get("thumbnail_path"):
+            if self._external_issue_handler is not None:
+                self._notify_external_issue_sync(
+                    self._external_record_sync(generation_id), "thumbnail_missing"
+                )
+            return ""
+        return self._gallery_data_url_sync(
+            self.data_dir / str(row["thumbnail_path"]),
+            str(row.get("thumbnail_mime_type") or "image/webp"),
+            generation_id,
+            thumbnail=True,
+        )
 
     def _close_revision_connection_sync(self) -> None:
         with self._revision_lock:
@@ -478,7 +541,7 @@ class GenerationStore:
                 or stat.st_size != row["size_bytes"]
                 or stat.st_mtime_ns != row["mtime_ns"]
             ):
-                raise ValueError("外部图片已经变化，请重新扫描后再操作")
+                raise _ExternalFileChangedError("外部图片已经变化，请重新扫描后再操作")
             if "fingerprint" in row.keys():
                 GenerationStore._verify_external_fingerprint(
                     path, _load_json(row["fingerprint"])
@@ -506,7 +569,11 @@ class GenerationStore:
         row = self._external_record_sync(generation_id)
         return {
             "is_external": True,
-            "external_source": {"id": row["source_id"], "name": row["name"]}
+            "external_source": {
+                "id": row["source_id"],
+                "name": row["name"],
+                "type": row["type"],
+            }
             if row
             else None,
             "allowed_actions": self._external_allowed_actions(row),
@@ -544,6 +611,11 @@ class GenerationStore:
             return None
         try:
             return self._external_path(external)
+        except (FileNotFoundError, _ExternalFileChangedError) as exc:
+            self._notify_external_issue_sync(
+                external, "missing" if isinstance(exc, FileNotFoundError) else "changed"
+            )
+            return None
         except (OSError, ValueError):
             return None
 
@@ -824,10 +896,26 @@ class GenerationStore:
             if resolved is None:
                 raise ValueError("图片不存在、已被删除或外部图库已关闭")
             path, mime, filename = resolved
-            content = await asyncio.to_thread(path.read_bytes)
+            content = await asyncio.to_thread(
+                self._read_gallery_file_sync, image_id, path
+            )
             return await self.stage_reference(
                 filename=filename, content=content, mime_type=mime
             )
+
+    def _read_gallery_file_sync(self, image_id: str, path: Path) -> bytes:
+        try:
+            return path.read_bytes()
+        except FileNotFoundError as exc:
+            # An external cleaner can remove the file after path resolution.
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT generation_id FROM generation_images WHERE id=?",
+                    (image_id,),
+                ).fetchone()
+            if row is not None:
+                self._report_external_failure_sync(str(row["generation_id"]), exc)
+            raise
 
     async def external_delete_preview(
         self, generation_ids: list[str]
@@ -906,11 +994,15 @@ class GenerationStore:
             fingerprint = _load_json(row["fingerprint"])
             self._verify_external_fingerprint(path, fingerprint)
             if hashlib.sha256(path.read_bytes()).hexdigest() != row["asset_id"]:
-                raise ValueError("外部图片内容已经变化，请重新扫描后再删除")
-        except FileNotFoundError:
+                raise _ExternalFileChangedError(
+                    "外部图片内容已经变化，请重新扫描后再删除"
+                )
+        except FileNotFoundError as exc:
             # The source's retention cleaner won the race; remove only our index.
+            self._report_external_failure_sync(generation_id, exc)
             return None
         except (OSError, ValueError) as exc:
+            self._report_external_failure_sync(generation_id, exc)
             raise ExternalDeleteError(generation_id, str(exc)) from exc
         sidecars = (
             _load_json(row["sidecar_fingerprint"]) if row["type"] == "nai" else {}
@@ -928,10 +1020,12 @@ class GenerationStore:
                     raise ValueError("外部参数文件不能使用符号链接")
                 try:
                     self._verify_external_fingerprint(candidate, fingerprint)
-                except FileNotFoundError:
+                except FileNotFoundError as exc:
+                    self._report_external_failure_sync(generation_id, exc)
                     continue
                 candidates.append(candidate)
         except (OSError, ValueError) as exc:
+            self._report_external_failure_sync(generation_id, exc)
             raise ExternalDeleteError(
                 generation_id, f"外部参数文件已经变化，未删除原图：{exc}"
             ) from exc
@@ -950,11 +1044,13 @@ class GenerationStore:
                     )
                     candidate.unlink()
                     deleted.append(candidate.name)
-                except FileNotFoundError:
+                except FileNotFoundError as exc:
+                    self._report_external_failure_sync(generation_id, exc)
                     continue
-        except FileNotFoundError:
-            pass
+        except FileNotFoundError as exc:
+            self._report_external_failure_sync(generation_id, exc)
         except (OSError, ValueError) as exc:
+            self._report_external_failure_sync(generation_id, exc)
             if not deleted:
                 raise ExternalDeleteError(
                     generation_id, f"外部图片删除失败：{exc}"
@@ -981,7 +1077,7 @@ class GenerationStore:
         if any(
             actual[key] != value for key, value in fingerprint.items() if key in actual
         ):
-            raise ValueError("文件已经被替换或修改，请重新扫描")
+            raise _ExternalFileChangedError("文件已经被替换或修改，请重新扫描")
 
     def _metadata_for_asset_sync(
         self, asset_id: str, data: bytes, *, strict: bool = False
@@ -3560,10 +3656,12 @@ class GenerationStore:
         if row is None:
             return None
         item = dict(row)
+        if not self._external_generation_enabled_sync(str(item["generation_id"])):
+            return None
+        self._assert_external_action_sync([str(item["generation_id"])], action)
         path = self._resolve_image_asset_sync(item)
         if path is None:
             return None
-        self._assert_external_action_sync([str(item["generation_id"])], action)
         return (
             path,
             str(item["mime_type"]),
@@ -3589,7 +3687,7 @@ class GenerationStore:
                 f"a.id AS sha256, {_THUMBNAIL_REVISION_SQL} AS thumbnail_revision, "
                 "t.mime_type AS thumbnail_mime_type, t.size_bytes AS thumbnail_size_bytes "
                 "FROM generation_images i JOIN image_assets a ON a.id = i.asset_id "
-                "JOIN image_thumbnails t ON t.asset_id = a.id WHERE i.id = ?",
+                "LEFT JOIN image_thumbnails t ON t.asset_id = a.id WHERE i.id = ?",
                 (image_id,),
             ).fetchone()
         if row is None:
@@ -3598,19 +3696,26 @@ class GenerationStore:
         if not self._external_generation_enabled_sync(item["generation_id"]):
             return None
         original = self._resolve_image_asset_sync(item)
-        thumbnail = self.data_dir / str(item["thumbnail_path"])
+        thumbnail = self.data_dir / str(item["thumbnail_path"] or "")
         use_original = detail == "original"
         path = original if use_original else thumbnail
         mime_type = str(
-            item["mime_type"] if use_original else item["thumbnail_mime_type"]
+            item["mime_type"]
+            if use_original
+            else item["thumbnail_mime_type"] or "image/webp"
         )
         size_bytes = int(
-            item["size_bytes"] if use_original else item["thumbnail_size_bytes"]
+            item["size_bytes"] if use_original else item["thumbnail_size_bytes"] or 0
         )
-        if (
-            path is None
-            or not path.is_file()
-            or (not use_original and not _is_within(path, self.thumbnails_dir))
+        if path is None:
+            return None
+        data_url = (
+            self._gallery_data_url_sync(path, mime_type, str(item["generation_id"]))
+            if use_original
+            else self._gallery_thumbnail_sync(item, str(item["generation_id"]))
+        )
+        if not data_url or (
+            not use_original and not _is_within(path, self.thumbnails_dir)
         ):
             return None
         return {
@@ -3626,7 +3731,7 @@ class GenerationStore:
             "size_bytes": size_bytes,
             "width": max(1, int(item.get("width") or 1)),
             "height": max(1, int(item.get("height") or 1)),
-            "data_url": _path_data_url(path, mime_type),
+            "data_url": data_url,
         }
 
     async def stage_generation_references(
@@ -4033,7 +4138,11 @@ class GenerationStore:
                             used_stems=used_stems,
                         )
                         stem = Path(image_filename).stem
-                        archive.write(path, arcname=image_filename)
+                        try:
+                            archive.write(path, arcname=image_filename)
+                        except FileNotFoundError as exc:
+                            self._report_external_failure_sync(generation_id, exc)
+                            raise
                         metadata = {
                             key: value
                             for key, value in detail.items()
@@ -4090,7 +4199,6 @@ class GenerationStore:
                 continue
 
     def _gallery_item(self, row: dict[str, Any]) -> dict[str, Any]:
-        thumbnail = self.data_dir / str(row.get("thumbnail_path") or "")
         invocation_source = {
             key: str(row.get(key) or "")
             for key in (
@@ -4127,17 +4235,19 @@ class GenerationStore:
             "mime_type": row["mime_type"],
             "size_bytes": row["size_bytes"],
             "invocation_source": invocation_source,
-            "thumbnail_data_url": _path_data_url(
-                thumbnail, str(row.get("thumbnail_mime_type") or "image/webp")
-            ),
+            "thumbnail_data_url": self._gallery_thumbnail_sync(row, str(row["id"])),
         }
 
     def _asset_item(
         self, row: dict[str, Any], *, preview_full: bool, include_preview: bool = True
     ) -> dict[str, Any]:
         path = self._resolve_image_asset_sync(row) if preview_full else None
-        thumbnail = self.data_dir / str(row.get("thumbnail_path") or "")
-        preview = _path_data_url(path, row["mime_type"]) if path is not None else ""
+        generation_id = str(row.get("generation_id") or "")
+        preview = (
+            self._gallery_data_url_sync(path, row["mime_type"], generation_id)
+            if path is not None
+            else ""
+        )
         supplemental = _canonical_supplemental(
             _load_json(row.get("supplemental_json") or "{}")
         )
@@ -4167,9 +4277,7 @@ class GenerationStore:
             # Keep summaries lightweight while allowing the carousel to render
             # every result before original assets arrive.
             "thumbnail_data_url": (
-                _path_data_url(
-                    thumbnail, str(row.get("thumbnail_mime_type") or "image/webp")
-                )
+                self._gallery_thumbnail_sync(row, generation_id)
                 if not preview_full and include_preview
                 else ""
             ),

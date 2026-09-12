@@ -86,7 +86,9 @@ def test_external_gallery_index_reads_originals_and_owns_only_thumbnails(tmp_pat
         assert gallery["total"] == 1
         item = gallery["items"][0]
         assert item["source"] == "external" and item["generation_engine"] == "novelai"
-        assert item["external_source"] == {"id": "nai", "name": "NAI 插件图库"}
+        assert item["external_source"] == {
+            "id": "nai", "name": "NAI 插件图库", "type": "nai"
+        }
         assert item["thumbnail_data_url"].startswith("data:image/webp")
         assert (await store.list_generations({"query": "red cat"}))["total"] == 1
         detail = await store.generation_detail(result["generation_id"])
@@ -618,6 +620,9 @@ def test_external_plain_images_and_unresolved_comfy_outputs_are_indexable(tmp_pa
             )
             detail = await store.generation_detail(result["generation_id"])
             assert detail["generation_engine"] == engine
+            assert detail["external_source"]["type"] == "directory"
+            manifest = await store.generation_detail(result["generation_id"], light=True)
+            assert manifest["external_source"]["type"] == "directory"
             assert detail["generated_at"] is None
             assert detail["images"][0]["data_url"]
             if engine == "unknown":

@@ -10,7 +10,12 @@
   let activeConfirmation = null;
   let settingsLoadPromise = null;
   let settingsBaseline = "";
+  let savedSettingsPayload = null;
+  let settingsReadPending = false;
+  let settingsReadPromise = null;
+  let settingsBootstrapPending = false;
   let settingsSaving = false;
+  let settingsNavigationPending = false;
   let storageRetention = null;
   let referencesUploading = false;
   let eventsBound = false;
@@ -21,6 +26,7 @@
   const galleryFilterFields = [["galleryProvider", "provider_ids"], ["galleryMode", "modes"], ["gallerySource", "sources"], ["galleryEngine", "generation_engines"]];
   const galleryFilterSelections = new Map();
   let gallerySort = "created";
+  let gallerySortDraft = "created";
   let detailRequestRevision = 0;
   let detailFilmstripScrollFrame = 0;
   let detailBackdropSource = "";
@@ -244,17 +250,51 @@
   }
 
   function syncPageScrollLock() {
+    const motion = window.ImageStudioDialogMotion;
+    const foreground = element => !element.classList.contains("is-hidden") && !element.classList.contains("is-closing");
+    const needsScrim = els.detailDrawer.classList.contains("is-open") || foreground(els.parameterDialog) || foreground($('confirmDialog'));
+    if (needsScrim) motion.show(els.scrim);
+    else if (foreground(els.scrim)) motion.hide(els.scrim, syncPageScrollLock);
     const locked = els.detailDrawer.classList.contains("is-open")
       || !els.imagePreview.classList.contains("is-hidden")
       || !!mobileImageViewer
       || !els.parameterDialog.classList.contains("is-hidden")
       || !$('studioModalRoot').classList.contains("is-hidden")
-      || !$('confirmDialog').classList.contains("is-hidden");
+      || !$('confirmDialog').classList.contains("is-hidden")
+      || !els.scrim.classList.contains("is-hidden");
     document.documentElement.classList.toggle("modal-open", locked);
-    document.body.classList.toggle("modal-open", locked);
   }
 
   function switchView(view) {
+    if (view !== "settings" && state.view === "settings" && (settingsSaving || settingsDirty())) {
+      void leaveSettings(view);
+      return;
+    }
+    showView(view);
+  }
+
+  async function leaveSettings(view) {
+    if (settingsNavigationPending) return;
+    if (settingsSaving) { showNotice("正在保存设置，请稍候再切换页面。", "info"); return; }
+    settingsNavigationPending = true;
+    try {
+      const discard = await library.openModal("有未保存的设置", "<p>离开设置页面会放弃本次尚未保存的调整，包括主题与显示设置。</p>", [
+        { label: "放弃设置", danger: true, id: "discardSettingsButton", action: () => true },
+        { label: "留在设置页面", primary: true, id: "staySettingsButton", action: () => false },
+      ], { focus: "staySettingsButton" });
+      if (!discard) return;
+      // Restore every editor from the last successful save, without requiring
+      // another network request or losing drafts when choosing to stay.
+      if (savedSettingsPayload && !await loadSettings(true, structuredClone(savedSettingsPayload))) return;
+      window.ImageStudioAppearance.discard();
+      gallerySortDraft = gallerySort;
+      if ($("gallerySort")) { $("gallerySort").value = gallerySortDraft; window.ImageStudioSelect?.refresh($("gallerySort")); }
+      updateSettingsDirty();
+      showView(view);
+    } finally { settingsNavigationPending = false; }
+  }
+
+  function showView(view) {
     window.ImageStudioSelect?.close();
     state.view = view;
     document.querySelectorAll(".nav-item").forEach((button) => button.classList.toggle("is-active", button.dataset.view === view));
@@ -1374,7 +1414,7 @@
     library.updateDetailActions(null);
     const card = state.galleryItems.find((item) => String(item.id) === String(id));
     state.detailFallbackThumbnail = card?.thumbnail_data_url || "";
-    els.detailDrawer.classList.add("is-open"); els.detailDrawer.setAttribute("aria-hidden", "false"); els.scrim.classList.remove("is-hidden"); syncPageScrollLock(); if (options.focus !== false) els.detailDrawer.focus();
+    els.detailDrawer.classList.add("is-open"); els.detailDrawer.setAttribute("aria-hidden", "false"); syncPageScrollLock(); if (options.focus !== false) els.detailDrawer.focus({ preventScroll: true });
     els.detailDate.textContent = "";
     if (options.resetScroll !== false) els.drawerBody.scrollTop = 0; els.drawerBody.innerHTML = '<div class="detail-loading">正在读取生成详情…</div>';
     try {
@@ -1428,7 +1468,7 @@
     } finally { if (currentDetailSession(session)) state.detailNavigating = false; }
   }
 
-  function closeDetail() { library.clearDetailParameterLayout(); stopDetailNavigation(); window.ImageStudioBackdrop.dispose(els.drawerBody.querySelector(".detail-image-backdrop:not(.detail-backdrop-previous)")); detailImagePaintRevision++; mobileDetailSyncRevision++; decodedDisplayImages.clear(); detailBackdropSource = ""; detailRequestRevision += 1; if (mobileImageViewer) { suppressMobileDetailSync = true; mobileImageViewer.close(); } state.detailId = ""; state.detailData = null; state.detailFallbackThumbnail = ""; state.detailAssetsLoaded = false; state.detailNavigating = false; state.detailImageIndex = 0; state.detailRequestedImageIndex = 0; closeImagePreview(); els.detailDrawer.classList.remove("is-open"); els.detailDrawer.setAttribute("aria-hidden", "true"); if (!activeConfirmation) els.scrim.classList.add("is-hidden"); syncPageScrollLock(); }
+  function closeDetail() { library.clearDetailParameterLayout(); stopDetailNavigation(); window.ImageStudioBackdrop.dispose(els.drawerBody.querySelector(".detail-image-backdrop:not(.detail-backdrop-previous)")); detailImagePaintRevision++; mobileDetailSyncRevision++; decodedDisplayImages.clear(); detailBackdropSource = ""; detailRequestRevision += 1; if (mobileImageViewer) { suppressMobileDetailSync = true; mobileImageViewer.close(); } state.detailId = ""; state.detailData = null; state.detailFallbackThumbnail = ""; state.detailAssetsLoaded = false; state.detailNavigating = false; state.detailImageIndex = 0; state.detailRequestedImageIndex = 0; closeImagePreview(); els.detailDrawer.classList.remove("is-open"); els.detailDrawer.setAttribute("aria-hidden", "true"); syncPageScrollLock(); }
 
   function isMobileDetailPreview(context) {
     return context?.type === "detail" && window.matchMedia("(max-width: 540px)").matches && typeof window.PhotoSwipe === "function";
@@ -1453,7 +1493,7 @@
 
   function mobileViewerBusy(session) {
     const viewer = session.viewer;
-    return document.hidden || session.pointerIds.size > 0 || session.touchCount > 0 || viewer.opener.isOpening
+    return document.hidden || session.inputSuspended || session.pointerIds.size > 0 || session.touchCount > 0 || viewer.opener.isOpening
       || viewer.gestures.isDragging || viewer.gestures.isZooming || viewer.mainScroll.isShifted()
       || viewer.animations.activeAnimations.some((animation) => animation.props.isMainScroll || animation.props.isPan);
   }
@@ -1487,16 +1527,84 @@
   }
 
   function trackMobilePointer(session, event, down) {
+    if (!isCurrentMobileSession(session) || session.resettingGesture) return;
     const original = event.originalEvent;
+    // Browser cancellation is not a released drag. Cancel before PhotoSwipe
+    // finishes its pointerUp dispatch and attempts inertia or vertical close.
+    if (!down && /cancel$/.test(original?.type || "")) { resetMobileGesture(session); return; }
+    // A fresh primary touch proves the previous touch sequence has ended,
+    // even when iOS's image callout omitted its terminal/contextmenu events.
+    const freshTouch = down && (original?.pointerType === "touch" && original.isPrimary === true
+      || original?.type === "touchstart" && original.touches?.length === 1);
+    if (freshTouch && (session.pointerIds.size || session.touchCount)) resetMobileGesture(session);
+    if (down) session.inputSuspended = false;
     if (original?.pointerId !== undefined) down ? session.pointerIds.add(original.pointerId) : session.pointerIds.delete(original.pointerId);
     else session.touchCount = original?.touches?.length ?? (down ? 1 : 0);
     if (down) {
       session.entryAnimation?.cancel();
       window.clearTimeout(session.workTimer); session.workTimer = 0;
-      window.ImageStudioBackdrop.pause(session.backdrop);
+      window.ImageStudioViewerBackdrop.pause(session.backdrop);
     } else {
       updateMobileViewerFeedback(session); scheduleMobileWork(session);
     }
+  }
+
+  function resetMobileGesture(session, suspend = false) {
+    if (!isCurrentMobileSession(session) || session.resettingGesture) return;
+    const viewer = session.viewer, gestures = viewer.gestures;
+    const index = viewer.currIndex;
+    session.resettingGesture = true;
+    session.inputSuspended = suspend;
+    window.clearTimeout(session.workTimer); session.workTimer = 0;
+    session.entryAnimation?.cancel();
+    window.ImageStudioViewerBackdrop.pause(session.backdrop);
+    try {
+      // Compatibility adapter for the bundled PhotoSwipe 5.4.4 gesture engine.
+      // Its cancel event removes internal contacts, but normally also releases
+      // a drag with inertia. Suppress that release: a system menu must not
+      // accidentally flip a page, close the viewer or turn into a tap.
+      gestures.isDragging = false; gestures.isZooming = false;
+      gestures.dragAxis = null;
+      gestures.velocity.x = gestures.velocity.y = 0;
+      for (const pointerId of session.pointerIds) {
+        gestures.onPointerUp({ type: "pointercancel", pointerId, target: viewer.scrollWrap });
+      }
+      if (session.touchCount) gestures.onPointerUp({ type: "touchcancel", touches: [], target: viewer.scrollWrap });
+      gestures.isMultitouch = false;
+      viewer.animations.stopAll();
+      if (viewer.mainScroll.isShifted()) viewer.goTo(index);
+      const slide = viewer.currSlide;
+      if (slide) {
+        const zoom = Math.max(slide.zoomLevels.min, Math.min(slide.zoomLevels.max, slide.currZoomLevel));
+        if (zoom !== slide.currZoomLevel) slide.zoomTo(zoom, undefined, 0);
+        slide.panTo(slide.pan.x, slide.pan.y);
+      }
+      viewer.applyBgOpacity(1);
+    } finally {
+      session.pointerIds.clear(); session.touchCount = 0;
+      session.resettingGesture = false;
+    }
+    if (!suspend) { updateMobileViewerFeedback(session); scheduleMobileWork(session); }
+  }
+
+  function bindMobileGestureInterruption(session) {
+    const viewer = session.viewer;
+    const interrupt = () => resetMobileGesture(session, true);
+    const resume = () => {
+      if (!isCurrentMobileSession(session)) return;
+      session.inputSuspended = false;
+      updateMobileViewerFeedback(session); scheduleMobileWork(session);
+    };
+    // Leave the native menu enabled. These listeners are owned by PhotoSwipe
+    // and removed with its normal close/destroy lifecycle.
+    viewer.events.add(viewer.scrollWrap, "contextmenu", interrupt);
+    viewer.events.add(window, "blur pagehide", interrupt);
+    viewer.events.add(window, "focus pageshow", resume);
+    viewer.events.add(document, "visibilitychange", () => { if (document.hidden) interrupt(); else resume(); });
+    viewer.events.add(window, "pointercancel touchcancel", event => {
+      const handledInside = event.target instanceof Node && viewer.scrollWrap.contains(event.target);
+      if (!handledInside && (session.pointerIds.has(event.pointerId) || session.touchCount)) resetMobileGesture(session);
+    });
   }
 
   function updateMobileImageSource(index, payload, detail, session = mobileViewerSession) {
@@ -1583,11 +1691,25 @@
     void queueMobileWork(session, "feedback", () => applyMobileViewerFeedback(session));
   }
 
+  function restoreMobileViewerBackground(session) {
+    if (!isCurrentMobileSession(session)) return;
+    const viewer = session.viewer;
+    if (viewer.gestures.isZooming || (viewer.gestures.isDragging && viewer.gestures.dragAxis === "y")) return;
+    // A new horizontal gesture can interrupt vertical-dismissal rebound before
+    // it restores the background. PhotoSwipe's rebound only writes opacity
+    // while it is below 1, so this also prevents its later frames dimming it
+    // again without interrupting either the slide or the pan animation.
+    if (viewer.bgOpacity < 1) viewer.applyBgOpacity(1);
+  }
+
   function applyMobileViewerFeedback(session) {
     if (!isCurrentMobileSession(session)) return;
+    // Feedback runs after the gesture and its rebound settle, including taps
+    // and cancelled vertical drags that never change the current image.
+    restoreMobileViewerBackground(session);
     const item = session.items[session.viewer.currIndex];
     const src = item?.previewSrc || "";
-    if (session.backdrop) void window.ImageStudioBackdrop.transition(session.backdrop, src, { opacity: .64, previousClass: "image-studio-viewer-backdrop-previous" });
+    if (session.backdrop) void window.ImageStudioViewerBackdrop.transition(session.backdrop, src);
     const message = item?.originalSrc ? "" : item?.originalError || item?.previewError || "";
     if (session.status) {
       session.status.hidden = !message;
@@ -1683,15 +1805,46 @@
     mobileImageViewer?.element?.classList.toggle("image-studio-controls-visible");
   }
 
+  async function prepareMobileViewerBackdrop(item) {
+    const displayed = els.drawerBody.querySelector(".detail-image-backdrop:not(.detail-backdrop-previous)");
+    // Keep a loaded thumbnail fallback while the candidate is decoded off screen.
+    // Opening must never wait indefinitely for a broken preview or image decoder.
+    const fallback = displayed?.complete && displayed.naturalWidth > 1 ? displayed.cloneNode(false) : null;
+    const withinDeadline = async (work) => {
+      let timer;
+      try { return await Promise.race([work, new Promise(resolve => { timer = window.setTimeout(() => resolve(null), 800); })]); }
+      finally { window.clearTimeout(timer); }
+    };
+    let background = document.createElement("img");
+    background.className = "image-studio-viewer-backdrop";
+    try {
+      const source = item.previewSrc || await withinDeadline(loadImageMedia(item, "preview"));
+      if (source) {
+        item.previewSrc = source;
+        background.src = source;
+        const decoded = await withinDeadline(background.decode().then(() => true));
+        if (!decoded || !background.naturalWidth) background = null;
+      } else background = null;
+    } catch { background = null; }
+    if (!background && fallback?.complete && fallback.naturalWidth > 1) background = fallback;
+    if (!background) return null;
+    background.className = "image-studio-viewer-backdrop";
+    background.alt = ""; background.setAttribute("aria-hidden", "true");
+    return background;
+  }
+
   async function openMobileImageViewer(dataUrl, context) {
     if (mobileImageViewer || mobileViewerOpening) return true;
     mobileViewerOpening = true;
     const openingRevision = ++mobileViewerOpenRevision;
     const requestedDetailRevision = detailRequestRevision;
     const requestedImageId = state.detailData?.images?.[context.imageIndex]?.id;
+    const currentOpening = () => openingRevision === mobileViewerOpenRevision
+      && requestedDetailRevision === detailRequestRevision && String(state.detailId) === String(context.generationId)
+      && (!requestedImageId || String(state.detailData?.images?.[state.detailImageIndex]?.id) === String(requestedImageId));
     try {
       const sequence = await ensureDetailSequence(detailNavigationSession);
-      if (openingRevision !== mobileViewerOpenRevision || requestedDetailRevision !== detailRequestRevision || String(state.detailId) !== String(context.generationId)) return true;
+      if (!currentOpening()) return true;
       const initialIndex = sequence.findIndex((item) => String(item.generation_id) === String(context.generationId) && (requestedImageId ? String(item.image_id) === String(requestedImageId) : Number(item.image_index) === Number(context.imageIndex)));
       if (initialIndex < 0 || !sequence.length) return false;
       mobileDetailSyncRevision++;
@@ -1705,7 +1858,16 @@
         const original = known.detail === "original" ? known.src : getImageMedia(item, "original");
         return { ...item, src: original || known.src, msrc: preview || original || known.src, width: Math.max(1, Number(item.width || 1)), height: Math.max(1, Number(item.height || 1)), previewSrc: preview, originalSrc: original, loadedDetail: original ? "original" : known.detail, alt: "生成结果" };
       });
-      const session = { active: true, sequence, items: mobileImageDataSource, loads: mobileImageLoads, retryTimers: new Set(), viewer: null, backdrop: null, status: null, retrying: false, workQueue: new Map(), workTimer: 0, pointerIds: new Set(), touchCount: 0, originalIndices: new Set(mobileImageDataSource.flatMap((item, index) => item.originalSrc ? [index] : [])), preparingDetail: false, detailSyncIndex: -1, detailSyncPromise: null, entryAnimation: null };
+      const initialItem = mobileImageDataSource[initialIndex];
+      const initialBackdropImage = await prepareMobileViewerBackdrop(initialItem);
+      if (!currentOpening()) return true;
+      const initialBackdrop = window.ImageStudioViewerBackdrop.create(initialBackdropImage);
+      if (!initialBackdrop) { showNotice("图片预览暂时无法加载，请稍后重试。", "error"); return true; }
+      if (initialItem.previewSrc) {
+        initialItem.src = initialItem.originalSrc || initialItem.previewSrc; initialItem.msrc = initialItem.previewSrc;
+        initialItem.loadedDetail = initialItem.originalSrc ? "original" : "preview";
+      }
+      const session = { active: true, sequence, items: mobileImageDataSource, loads: mobileImageLoads, retryTimers: new Set(), viewer: null, backdrop: null, status: null, retrying: false, workQueue: new Map(), workTimer: 0, pointerIds: new Set(), touchCount: 0, inputSuspended: false, resettingGesture: false, originalIndices: new Set(mobileImageDataSource.flatMap((item, index) => item.originalSrc ? [index] : [])), preparingDetail: false, detailSyncIndex: -1, detailSyncPromise: null, entryAnimation: null };
       session.sequenceRevision = detailNavigationSession?.sequenceRevision || galleryDataRevision;
       // PhotoSwipe blocks input during its opening animation; the visual fade is independent.
       const pswp = new window.PhotoSwipe({ dataSource: mobileImageDataSource, index: initialIndex, loop: false, closeOnVerticalDrag: true, pinchToClose: false, tapAction: toggleMobileImageControls, imageClickAction: toggleMobileImageControls, bgClickAction: toggleMobileImageControls, doubleTapAction: "zoom", initialZoomLevel: "fit", secondaryZoomLevel: 2.5, maxZoomLevel: 4, preload: [1, 1], arrowPrev: false, arrowNext: false, close: false, zoom: false, counter: false, bgOpacity: 1, showHideAnimationType: "fade", showAnimationDuration: 0, hideAnimationDuration: 220, zoomAnimationDuration: 220, errorMsg: "图片暂时无法加载，请重试。", mainClass: "image-studio-pswp" });
@@ -1721,26 +1883,34 @@
       });
       pswp.on("change", () => {
         if (!isCurrentMobileSession(session)) return;
+        restoreMobileViewerBackground(session);
         const download = pswp.element?.querySelector(".pswp__button--image-studio-download");
         if (download) download.hidden = session.items[pswp.currIndex]?.allowed_actions?.download === false;
         if (session.preparingDetail) { mobileDetailSyncRevision++; detailRequestRevision++; detailImagePaintRevision++; }
         session.preparingDetail = false; session.detailSyncIndex = -1; session.detailSyncPromise = null;
         warmMobileImages(pswp.currIndex, session);
       });
+      pswp.on("moveMainScroll", (event) => {
+        if (event.dragging && pswp.gestures.dragAxis === "x") restoreMobileViewerBackground(session);
+      });
+      pswp.on("resize", () => { if (isCurrentMobileSession(session)) window.ImageStudioViewerBackdrop.resize(session.backdrop); });
       pswp.on("pointerDown", (event) => trackMobilePointer(session, event, true));
       pswp.on("pointerUp", (event) => trackMobilePointer(session, event, false));
       pswp.on("verticalDrag", () => { void prepareMobileDetail(session); });
       pswp.on("close", () => {
         cancelMobileWork(session);
-        window.ImageStudioBackdrop.pause(session.backdrop);
+        window.ImageStudioViewerBackdrop.pause(session.backdrop);
         void prepareMobileDetail(session);
       });
       pswp.on("afterInit", () => {
+        bindMobileGestureInterruption(session);
         const download = pswp.element?.querySelector(".pswp__button--image-studio-download");
         if (download) download.hidden = session.items[pswp.currIndex]?.allowed_actions?.download === false;
         const backgroundLayer = document.createElement("div"); backgroundLayer.className = "image-studio-viewer-background"; backgroundLayer.setAttribute("aria-hidden", "true");
-        const background = document.createElement("img"); background.className = "image-studio-viewer-backdrop"; background.alt = ""; background.setAttribute("aria-hidden", "true");
-        backgroundLayer.appendChild(background); pswp.bg?.appendChild(backgroundLayer); session.backdrop = background;
+        backgroundLayer.appendChild(initialBackdrop); pswp.bg?.appendChild(backgroundLayer); session.backdrop = initialBackdrop;
+        // The opaque canvas is already painted before the first visible frame.
+        session.themeObserver = new MutationObserver(() => updateMobileViewerFeedback(session));
+        session.themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
         const status = document.createElement("div"); status.className = "image-studio-image-status"; status.hidden = true; status.setAttribute("role", "status");
         const message = document.createElement("span"); const retry = document.createElement("button"); retry.className = "image-studio-image-retry"; retry.type = "button"; retry.textContent = "重试";
         retry.addEventListener("click", (event) => { event.stopPropagation(); void retryMobileImage(session); });
@@ -1758,7 +1928,8 @@
         const shouldSyncDetail = !suppressMobileDetailSync;
         session.active = false;
         cancelMobileWork(session);
-        window.ImageStudioBackdrop.dispose(session.backdrop);
+        session.themeObserver?.disconnect();
+        window.ImageStudioViewerBackdrop.dispose(session.backdrop);
         session.retryTimers.forEach((timer) => window.clearTimeout(timer)); session.retryTimers.clear(); session.loads.clear();
         if (mobileViewerSession !== session) return;
         suppressMobileDetailSync = false;
@@ -1918,11 +2089,20 @@
     state.imagePreviewDownloadFilename = downloadFilename || "";
     state.imagePreviewContext = context ? { ...context, imageIndex: state.imagePreviewIndex } : null;
     renderImagePreview();
-    els.imagePreview.classList.remove("is-hidden");
+    window.ImageStudioDialogMotion.show(els.imagePreview);
     syncPageScrollLock();
   }
 
-  function closeImagePreview() { syncDetailFromImagePreview(); els.imagePreview.classList.add("is-hidden"); els.previewImage.removeAttribute("src"); els.downloadImageButton.href = "#"; els.downloadImageButton.download = ""; state.imagePreviewItems = []; state.imagePreviewIndex = 0; state.imagePreviewDownloadFilename = ""; state.imagePreviewContext = null; state.imagePreviewNavigating = false; state.imagePreviewSwipeAt = 0; syncPageScrollLock(); }
+  function closeImagePreview() {
+    if (els.imagePreview.classList.contains("is-hidden") || els.imagePreview.classList.contains("is-closing")) return;
+    syncDetailFromImagePreview();
+    state.imagePreviewItems = []; state.imagePreviewIndex = 0; state.imagePreviewDownloadFilename = ""; state.imagePreviewContext = null; state.imagePreviewNavigating = false; state.imagePreviewSwipeAt = 0;
+    window.ImageStudioDialogMotion.hide(els.imagePreview, () => {
+      els.previewImage.removeAttribute("src"); els.downloadImageButton.href = "#"; els.downloadImageButton.download = "";
+      syncPageScrollLock();
+    });
+    syncPageScrollLock();
+  }
 
   async function copyRequestParameters(detail) {
     const content = JSON.stringify(requestParameters(detail), null, 2);
@@ -2034,7 +2214,13 @@
   }
 
   async function loadSettings(force = false, suppliedPayload = null) {
-    if (state.settings && !force) return true;
+    if (state.settings && !force) {
+      if (settingsReadPending) {
+        try { await rereadConfirmedSettings(); }
+        catch (error) { showNotice(`设置已保存，但重新读取失败：${errorMessage(error, "请稍后重试")}`, "info"); }
+      }
+      return true;
+    }
     if (settingsLoadPromise) return settingsLoadPromise;
     els.addProviderButton.disabled = true; els.addModelButton.disabled = true; els.saveSettingsButton.disabled = true;
     setError(els.settingsError, "正在读取设置…");
@@ -2043,6 +2229,7 @@
         const payload = suppliedPayload || await apiGet("settings/get");
         if (!payload?.base || !payload?.webui || !Array.isArray(payload.webui.providers)) throw new Error("设置接口返回的数据格式无效");
         normalizeSettingsModelDefaults(payload);
+        savedSettingsPayload = structuredClone(payload);
         state.settings = payload;
         els.settingTool.checked = !!payload.base.enable_llm_tool;
         const llmPolicy = payload.webui.llm_policy || {}; const assetPolicy = payload.webui.asset_policy || {}; els.agentImageReturnMode.value = ["asset", "preview", "original"].includes(llmPolicy.image_return_mode) ? llmPolicy.image_return_mode : "preview"; els.agentPreviewMaxEdge.value = Number(assetPolicy.preview_max_edge || 768); els.agentPreviewQuality.value = Number(assetPolicy.preview_quality || 80); els.agentAssetRetentionHours.value = Number(assetPolicy.lease_hours || 24); syncAgentImageSettings();
@@ -2247,7 +2434,10 @@
     const key = input.dataset.modelField;
     if (key === "parameters") { try { model.parameters = input.value.trim() ? JSON.parse(input.value) : {}; input.setCustomValidity(""); } catch { input.setCustomValidity("参数 schema 必须是合法 JSON"); } return; }
     if (key.startsWith("tool_")) { const toolKey = key.slice(5); model.tool[toolKey] = input.type === "checkbox" ? input.checked : input.value; if (toolKey === "enabled") refreshSettingsDefaultModels(); return; }
-    if (key === "id" && input.value === "__manual__") { const manual = window.prompt("输入模型 ID", model.id); if (!manual?.trim()) { input.value = model.id; return; } input.value = manual.trim(); }
+    if (key === "id" && input.value === "__manual__") {
+      if (commit) void editManualModelId(input, model);
+      return;
+    }
     model[key] = input.type === "checkbox" ? input.checked : input.type === "number" ? Number(input.value) : input.value;
     if (key === "native_batch_size") {
       model.native_batch_size_source = currentSettingsProvider().kind === "nai_direct" ? "fixed" : "manual";
@@ -2266,6 +2456,25 @@
       if (activeRow) { activeRow.dataset.settingsModel = input.value; if (!model.name) activeRow.querySelector("strong").textContent = input.value; }
     }
     refreshSettingsDefaultModels();
+  }
+
+  async function editManualModelId(input, model) {
+    input.value = model.id;
+    window.ImageStudioSelect?.refresh(input);
+    const value = await library.openModal("输入模型 ID", `<label class="field">模型 ID<input id="manualModelId" value="${escape(model.id)}" autocomplete="off" /></label>`, [
+      { label: "取消", action: () => false },
+      { label: "确认", primary: true, action: () => {
+        const id = $("manualModelId").value.trim();
+        if (!id || id === "__manual__") throw new Error("请填写有效的模型 ID。");
+        return id;
+      } },
+    ], { focus: "manualModelId" });
+    if (!value || currentSettingsModel() !== model || !input.isConnected) return;
+    if (!Array.from(input.options).some(option => option.value === value)) input.add(new Option(value, value));
+    input.value = value;
+    updateModelField(input, true);
+    window.ImageStudioSelect?.refresh(input);
+    updateSettingsDirty();
   }
   function defaultToolParameterDescription(name, descriptor) {
     const base = String(descriptor.description || descriptor.label || name);
@@ -2319,10 +2528,15 @@
     }
     const choiceDescriptions = policy.choice_descriptions;
     els.toolParameterChoices.value = choiceDescriptions && typeof choiceDescriptions === "object" && !Array.isArray(choiceDescriptions) && Object.keys(choiceDescriptions).length ? JSON.stringify(choiceDescriptions, null, 2) : "";
-    els.parameterDialog.classList.remove("is-hidden"); els.scrim.classList.remove("is-hidden"); syncPageScrollLock();
+    window.ImageStudioDialogMotion.show(els.parameterDialog); syncPageScrollLock();
     window.ImageStudioSelect?.refresh(els.parameterDialog);
   }
-  function closeToolParameterDialog() { state.editingToolParameter = ""; state.editingToolDefaultChoices = []; els.parameterDialog.classList.add("is-hidden"); if (!els.detailDrawer.classList.contains("is-open")) els.scrim.classList.add("is-hidden"); syncPageScrollLock(); }
+  function closeToolParameterDialog() {
+    state.editingToolParameter = ""; state.editingToolDefaultChoices = [];
+    window.ImageStudioSelect?.close();
+    window.ImageStudioDialogMotion.hide(els.parameterDialog, syncPageScrollLock);
+    syncPageScrollLock();
+  }
   function applyToolParameterDialog() {
     const model = currentSettingsModel(); const name = state.editingToolParameter; if (!model || !name) return;
     let choiceDescriptions = {}; try { choiceDescriptions = els.toolParameterChoices.value.trim() ? JSON.parse(els.toolParameterChoices.value) : {}; } catch { showNotice("选项说明必须是合法 JSON。", "error"); return; }
@@ -2376,31 +2590,84 @@
   }
   async function saveSettings() {
     if (settingsSaving) return;
-    if (!state.settings && !await loadSettings()) return;
-    const invalid = $("settingsView").querySelector("input:invalid, textarea:invalid, select:invalid");
-    if (invalid) { invalid.reportValidity(); setError(els.settingsError, "请先修正无效的设置项。"); return; }
+    if (!await loadSettings()) return;
+    await window.ImageStudioAppearance.ready;
+    if (settingsSaving) return;
+    const invalid = $("settingsView").querySelector('input:invalid, textarea:invalid, select:invalid, [aria-invalid="true"]');
+    if (invalid) { invalid.reportValidity?.(); setError(els.settingsError, "请先修正无效的设置项。"); return; }
     settingsSaving = true; setError(els.settingsError, "正在保存设置…"); els.saveSettingsButton.disabled = true; library.setCommandLabel("saveSettingsButton", "保存中…");
     const draft = settingsDraft(); const submitted = settingsFingerprint(draft); const webui = draft.studio;
+    const appearance = window.ImageStudioAppearance;
+    const appearanceSnapshot = appearance.get(), saveAppearance = appearance.isDirty();
+    const sortSnapshot = gallerySortDraft, saveSort = sortSnapshot !== gallerySort;
+    let savedAny = false;
     try {
-      const saved = await apiPost("settings/save", { settings_revision: webui.revision ?? webui.ui?.settings_revision, ...draft });
-      const server = await apiGet("settings/get");
-      normalizeSettingsModelDefaults(server);
-      await bootstrap();
-      if (settingsFingerprint(settingsDraft()) === submitted) {
-        await loadSettings(true, server);
-      } else {
-        state.settings.webui.revision = server.webui.revision;
-        state.settings.webui.external_sources = server.webui.external_sources;
-        externalSources.settingsLoaded(true, draft.studio.external_sources);
-        settingsBaseline = settingsFingerprint({ base: server.base, studio: server.webui });
+      let warnings = [];
+      if (submitted !== settingsBaseline) {
+        const saved = await apiPost("settings/save", { settings_revision: webui.revision ?? webui.ui?.settings_revision, ...draft });
+        savedAny = true;
+        warnings = Array.isArray(saved?.warnings) ? saved.warnings.filter(Boolean) : [];
+        const confirmed = { base: structuredClone(draft.base), webui: structuredClone(draft.studio), validation_errors: [] };
+        const revision = Number(saved?.settings_revision ?? Number(webui.revision ?? webui.ui?.settings_revision ?? 0) + 1);
+        confirmed.webui.revision = revision;
+        confirmed.webui.ui = { ...(confirmed.webui.ui || {}), settings_revision: revision };
+        // The write is already committed. Keep its acknowledged snapshot even
+        // if either follow-up request fails, without replacing newer edits.
+        adoptConfirmedSettings(confirmed, draft.studio.external_sources);
+        settingsReadPending = true;
+        settingsBootstrapPending = true;
+        try { await rereadConfirmedSettings(); }
+        catch (error) { warnings.push(`设置已保存，但重新读取失败：${errorMessage(error, "请稍后重试")}`); }
       }
-      const warnings = Array.isArray(saved?.warnings) ? saved.warnings.filter(Boolean) : [];
+      if (settingsBootstrapPending) {
+        try { await bootstrap(); settingsBootstrapPending = false; }
+        catch (error) { warnings.push(`设置已保存，但生图面板刷新失败：${errorMessage(error, "请稍后重试")}`); }
+      }
+      if (saveAppearance) { await appearance.save(appearanceSnapshot); savedAny = true; }
+      if (saveSort) {
+        await window.ImageStudioGalleryPreferences.setSort(sortSnapshot);
+        savedAny = true; gallerySort = sortSnapshot;
+        invalidateBrowseCache(); state.galleryPage = 0;
+      }
       setError(els.settingsError, warnings.join("；")); showNotice(warnings.length ? `设置已保存。${warnings.join("；")}` : "设置已保存并生效。", warnings.length ? "info" : "success");
       await loadStorageHealth();
       await externalSources.refresh();
     } catch (error) {
-      const message = errorMessage(error, "设置保存失败"); setError(els.settingsError, message); showNotice(message, "error");
+      const message = `${savedAny ? "部分设置已保存，其余更改仍未保存：" : ""}${errorMessage(error, "设置保存失败")}`; setError(els.settingsError, message); showNotice(message, "error");
     } finally { settingsSaving = false; els.saveSettingsButton.disabled = false; library.setCommandLabel("saveSettingsButton", "保存全部设置"); updateSettingsDirty(); }
+  }
+
+  function adoptConfirmedSettings(payload, submittedSources) {
+    const confirmed = structuredClone(payload);
+    normalizeSettingsModelDefaults(confirmed);
+    savedSettingsPayload = confirmed;
+    settingsBaseline = settingsFingerprint({ base: confirmed.base, studio: confirmed.webui });
+    if (state.settings) {
+      state.settings.webui.revision = confirmed.webui.revision;
+      state.settings.webui.ui = { ...(state.settings.webui.ui || {}), settings_revision: confirmed.webui.revision };
+      state.settings.webui.external_sources = structuredClone(confirmed.webui.external_sources || {});
+      externalSources.settingsLoaded(true, submittedSources || confirmed.webui.external_sources || {});
+    }
+    updateSettingsDirty();
+  }
+
+  function rereadConfirmedSettings() {
+    if (settingsReadPromise) return settingsReadPromise;
+    const previous = structuredClone(savedSettingsPayload);
+    const baseline = settingsBaseline;
+    settingsReadPromise = (async () => {
+      const server = await apiGet("settings/get");
+      if (!server?.base || !server?.webui || !Array.isArray(server.webui.providers)) throw new Error("设置接口返回的数据格式无效");
+      if (savedSettingsPayload?.webui.revision !== previous?.webui.revision) return;
+      const revision = Number(server.webui.revision ?? server.webui.ui?.settings_revision);
+      if (!Number.isFinite(revision) || revision < Number(previous.webui.revision)) throw new Error("尚未读取到最新的已保存设置");
+      normalizeSettingsModelDefaults(server);
+      if (settingsFingerprint(settingsDraft()) === baseline) {
+        if (!await loadSettings(true, server)) throw new Error("无法更新已保存的设置");
+      } else adoptConfirmedSettings(server, previous.webui.external_sources);
+      settingsReadPending = false;
+    })().finally(() => { settingsReadPromise = null; });
+    return settingsReadPromise;
   }
 
   function settingsDraft() {
@@ -2425,8 +2692,14 @@
     return JSON.stringify(normalize(copy));
   }
 
+  function settingsDirty() {
+    return !!window.ImageStudioAppearance?.isDirty() || gallerySortDraft !== gallerySort
+      || !!$("settingsView").querySelector('input:invalid, textarea:invalid, select:invalid, [aria-invalid="true"]')
+      || (!!state.settings && !!settingsBaseline && settingsFingerprint(settingsDraft()) !== settingsBaseline);
+  }
+
   function updateSettingsDirty() {
-    const dirty = !!state.settings && !!settingsBaseline && (settingsFingerprint(settingsDraft()) !== settingsBaseline || !!$("settingsView").querySelector("input:invalid, textarea:invalid, select:invalid"));
+    const dirty = settingsDirty();
     els.saveSettingsButton.classList.toggle("is-dirty", dirty); $("settingsDirtyStatus").textContent = dirty ? "有未保存的更改" : state.settings ? "已保存" : "";
     $("settingsDirtyStatus").classList.toggle("is-saved", !dirty && !!state.settings);
     renderStorageQuotas();
@@ -2485,7 +2758,33 @@
     catch (error) { showNotice(errorMessage(error, "添加参考图失败"), "error"); }
     finally { library.updateDetailActions(state.detailData); }
   }
-  function confirmAction(message) { return new Promise((resolve) => { const dialog = $("confirmDialog"); const cancel = $("confirmCancel"); const accept = $("confirmAccept"); $("confirmMessage").textContent = message; dialog.classList.remove("is-hidden"); els.scrim.classList.remove("is-hidden"); syncPageScrollLock(); accept.focus(); const onKeydown = (event) => { if (event.key === "Escape") finish(false); }; const finish = (value) => { dialog.classList.add("is-hidden"); if (!els.detailDrawer.classList.contains("is-open")) els.scrim.classList.add("is-hidden"); syncPageScrollLock(); cancel.removeEventListener("click", onCancel); accept.removeEventListener("click", onAccept); document.removeEventListener("keydown", onKeydown); activeConfirmation = null; resolve(value); }; const onCancel = () => finish(false); const onAccept = () => finish(true); activeConfirmation = finish; cancel.addEventListener("click", onCancel); accept.addEventListener("click", onAccept); document.addEventListener("keydown", onKeydown); }); }
+  function confirmAction(message) {
+    activeConfirmation?.(false, true);
+    const previousFocus = document.activeElement;
+    return new Promise(resolve => {
+      const dialog = $("confirmDialog"), cancel = $("confirmCancel"), accept = $("confirmAccept");
+      let closing = false;
+      const finish = (value, immediate = false) => {
+        if (activeConfirmation !== finish || (closing && !immediate)) return;
+        closing = true;
+        cancel.removeEventListener("click", onCancel); accept.removeEventListener("click", onAccept); document.removeEventListener("keydown", onKeydown);
+        const complete = () => {
+          if (activeConfirmation !== finish) return;
+          activeConfirmation = null;
+          if (!immediate) { syncPageScrollLock(); if (previousFocus?.isConnected) previousFocus.focus?.({ preventScroll: true }); }
+          resolve(value);
+        };
+        if (immediate) { window.ImageStudioDialogMotion.hideImmediately(dialog); complete(); }
+        else { window.ImageStudioDialogMotion.hide(dialog, complete); syncPageScrollLock(); }
+      };
+      const onCancel = () => finish(false), onAccept = () => finish(true);
+      const onKeydown = event => { if (event.key === "Escape" && !library.modalOpen()) finish(false); };
+      $("confirmMessage").textContent = message;
+      activeConfirmation = finish;
+      window.ImageStudioDialogMotion.show(dialog); syncPageScrollLock(); accept.focus({ preventScroll: true });
+      cancel.addEventListener("click", onCancel); accept.addEventListener("click", onAccept); document.addEventListener("keydown", onKeydown);
+    });
+  }
 
   function bindEvents() {
     if (eventsBound) return;
@@ -2513,17 +2812,20 @@
     const bindGallerySort = () => {
       const select = $("gallerySort");
       if (!select || select.dataset.bound) return;
-      select.dataset.bound = "true"; select.value = gallerySort;
+      select.dataset.bound = "true"; select.value = gallerySortDraft;
       select.addEventListener("change", () => {
-        gallerySort = select.value === "latest_content" ? "latest_content" : "created";
-        void window.ImageStudioGalleryPreferences.setSort(gallerySort).catch(() => showNotice("排序已应用，但浏览器未能保存该设置。", "error"));
-        invalidateBrowseCache(); state.galleryPage = 0;
-        if (state.view === "gallery") void loadGallery(0);
+        gallerySortDraft = select.value === "latest_content" ? "latest_content" : "created";
+        updateSettingsDirty();
       });
       window.ImageStudioSelect?.refresh(select);
     };
     bindGallerySort();
     window.addEventListener("image-studio-display-settings-ready", bindGallerySort);
+    window.addEventListener("image-studio-appearance-change", updateSettingsDirty);
+    window.addEventListener("beforeunload", event => {
+      if (state.view !== "settings" || !settingsDirty()) return;
+      event.preventDefault(); event.returnValue = "";
+    });
     library.bind();
     const refreshQuota = () => refreshProviderQuota();
     providerQuotaTimer = window.setInterval(refreshQuota, PROVIDER_QUOTA_TTL);
@@ -2558,6 +2860,7 @@
     try {
       await window.ImageStudioGalleryPreferences.ready(await bridge());
       gallerySort = window.ImageStudioGalleryPreferences.getSort();
+      gallerySortDraft = gallerySort;
     } catch { showNotice("未能读取此浏览器的画廊偏好，暂用默认显示。", "error"); }
     bindEvents();
     try { await bootstrap(); }

@@ -74,9 +74,9 @@ async function swipe(page, inner, direction) {
       await select(frame, inner, "galleryProvider", "natural"); await natural;
       await frame.locator(".gallery-card .gallery-info").first().click(); await openViewer(frame, inner); await waitLoaded(inner, 0);
       assert.equal(await frame.locator(".image-studio-controls-visible").count(), 0, "download button should start hidden");
-      await inner.waitForFunction(() => document.querySelector(".image-studio-viewer-backdrop:not(.image-studio-viewer-backdrop-previous)")?.naturalWidth > 1);
-      const backdrop = await inner.locator(".image-studio-viewer-backdrop:not(.image-studio-viewer-backdrop-previous)").evaluate((image) => ({ width: image.naturalWidth, fit: getComputedStyle(image).objectFit, filter: getComputedStyle(image).filter, holderFilter: getComputedStyle(image.parentElement).filter, holderClass: image.parentElement.className }));
-      assert.ok(backdrop.width > 1); assert.equal(backdrop.fit, "cover"); assert.equal(backdrop.filter, "none"); assert.match(backdrop.holderFilter, /blur\(24px\)/); assert.equal(backdrop.holderClass, "image-studio-viewer-background");
+      await inner.waitForFunction(() => document.querySelector("canvas.image-studio-viewer-backdrop")?.width > 1);
+      const backdrop = await inner.locator("canvas.image-studio-viewer-backdrop").evaluate((image) => ({ width: image.width, height: image.height, source: image.dataset.previewSource, preview: window.__testViewer.currSlide.data.previewSrc, filter: getComputedStyle(image).filter, holderOpacity: getComputedStyle(image.parentElement).opacity, holderFilter: getComputedStyle(image.parentElement).filter, holderClass: image.parentElement.className }));
+      assert.ok(backdrop.width > 1 && backdrop.height > 1 && Math.max(backdrop.width, backdrop.height) <= 320); assert.equal(backdrop.source, backdrop.preview); assert.equal(backdrop.filter, "none"); assert.equal(backdrop.holderFilter, "none"); assert.equal(backdrop.holderOpacity, "1"); assert.equal(backdrop.holderClass, "image-studio-viewer-background");
       assert.equal(await inner.locator(".pswp__bg").evaluate((element) => Number(getComputedStyle(element).opacity)), 1, "viewer background must obscure the underlying dialog");
       await screenshot(page, inner, `${test.width}-${test.theme}-initial-background`);
 
@@ -156,8 +156,10 @@ async function swipe(page, inner, direction) {
       await oldRequest;
       await inner.evaluate(() => window.__testViewer.close()); await frame.locator(".pswp--open").waitFor({ state: "detached" }); await frame.locator("#closeDrawer").click();
       await inner.evaluate(() => window.scrollTo(0, 0));
-      const filtered = page.waitForResponse((response) => response.url().includes("/gallery/list") && new URL(response.url()).searchParams.get("sources") === '["command"]');
-      await select(frame, inner, "gallerySource", "command"); await filtered;
+      // The blocked second natural record is a command image; choose a disjoint
+      // source so the new viewer's first original does not wait on that same gate.
+      const filtered = page.waitForResponse((response) => response.url().includes("/gallery/list") && new URL(response.url()).searchParams.get("sources") === '["llm_tool"]');
+      await select(frame, inner, "gallerySource", "llm_tool"); await filtered;
       await frame.locator(".gallery-card .gallery-info").first().click(); await openViewer(frame, inner); await waitLoaded(inner, 0);
       await inner.waitForFunction(() => !!window.__testViewer.options.dataSource[1].previewSrc);
       const fresh = await inner.evaluate(() => ({ id: window.__testViewer.options.dataSource[1].image_id, src: window.__testViewer.options.dataSource[1].src }));

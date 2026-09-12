@@ -81,8 +81,13 @@ async function verify(browser, name) {
     await settle(frame);
     await geometry(frame, 2);
     await page.emulateMedia({ reducedMotion: "no-preference" });
-    await frame.locator("#addExternalSource").click();
-    assert.equal(await frame.locator("#studioModal").evaluate(modal => getComputedStyle(modal).animationName), "studio-view-enter");
+    const entrance = await frame.locator("#addExternalSource").evaluate(button => {
+      button.click();
+      const animation = document.getElementById("studioModal").getAnimations()[0];
+      return { duration: animation.effect.getTiming().duration, easing: animation.effect.getTiming().easing, frames: animation.effect.getKeyframes() };
+    });
+    assert.equal(entrance.duration, 180); assert.equal(entrance.easing, "ease");
+    assert.equal(entrance.frames[0].opacity, "0"); assert.ok(entrance.frames[0].transform.includes(".985"));
     await frame.locator("#studioModalClose").click();
     await frame.locator("#addExternalSource").click();
     await settle(frame);

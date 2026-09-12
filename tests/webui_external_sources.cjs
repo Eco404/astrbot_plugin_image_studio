@@ -139,12 +139,14 @@ async function verify(browser, name, width) {
     await frame.locator("#studioModalTitle").filter({ hasText: "移除图库" }).waitFor();
     assert.match(await frame.locator("#studioModalBody").innerText(), /来源中的原文件.*保留/);
     await frame.locator("#studioModalFooter button").filter({ hasText: "确认移除" }).click();
+    await custom.waitFor({ state: "detached" });
     assert.equal(await custom.count(), 0);
     await page.waitForTimeout(1700);
     assert.equal(await custom.count(), 0, "status polling must not resurrect removed drafts");
     assert.equal(await frame.locator("#saveSettingsButton").evaluate(button => button.classList.contains("is-dirty")), true);
 
     await frame.locator('[data-view="gallery"]').click();
+    await frame.locator("#discardSettingsButton").click();
     await frame.locator(".gallery-source-label.is-external").waitFor();
     const polls = calls.filter(call => call.path.endsWith("/external/status")).length;
     await page.waitForTimeout(1800);

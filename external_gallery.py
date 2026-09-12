@@ -344,6 +344,7 @@ class ExternalGalleryManager:
         self._live: dict[str, dict[str, Any]] = {}
         self._tasks: dict[str, asyncio.Task] = {}
         self._periodic_task: asyncio.Task | None = None
+        self._event_loop: asyncio.AbstractEventLoop | None = None
         self._started = False
         self._configuration_lock = asyncio.Lock()
 
@@ -489,6 +490,9 @@ class ExternalGalleryManager:
                 self._epochs.setdefault(source_id, 0)
                 if changed:
                     self._epochs[source_id] += 1
+                    # Worker notifications can arrive while cancellation waits.
+                    # Do not start a new-epoch scan against the old adapter/root.
+                    self._enabled[source_id] = False
                     await self._stop_source(source_id)
                 self.adapters[source_id] = adapter
                 self._enabled[source_id] = enabled
@@ -520,6 +524,9 @@ class ExternalGalleryManager:
         if self._started:
             return
         self._started = True
+        self._event_loop = asyncio.get_running_loop()
+        if setter := getattr(self.store, "set_external_issue_handler", None):
+            setter(self._notify_source_issue)
         for source_id, enabled in self._enabled.items():
             if enabled:
                 await self.request_scan(source_id)
@@ -529,6 +536,9 @@ class ExternalGalleryManager:
 
     async def close(self) -> None:
         self._started = False
+        if setter := getattr(self.store, "set_external_issue_handler", None):
+            setter(None)
+        self._event_loop = None
         if self._periodic_task:
             self._periodic_task.cancel()
             await asyncio.gather(self._periodic_task, return_exceptions=True)
@@ -555,6 +565,38 @@ class ExternalGalleryManager:
             raise ValueError("未知的外部图库来源")
         if not self._enabled[source_id]:
             raise ValueError("请先启用该外部图库扫描")
+        self._schedule_scan(source_id)
+        return {
+            "id": source_id,
+            "name": self.adapters[source_id].name,
+            "enabled": True,
+            **self._live.get(source_id, {}),
+        }
+
+    def _notify_source_issue(self, source_id: str, reason: str) -> None:
+        """Storage readers run in worker threads; schedule recovery on our loop."""
+        loop = self._event_loop
+        if not self._started or loop is None:
+            return
+        if reason not in {"missing", "changed", "thumbnail_missing"}:
+            return
+        try:
+            loop.call_soon_threadsafe(self._recover_source, source_id)
+        except RuntimeError:
+            # Shutdown may close the event loop while an existing reader finishes.
+            pass
+
+    def _recover_source(self, source_id: str) -> None:
+        if (
+            self._started
+            and self._enabled.get(source_id)
+            and source_id in self.adapters
+        ):
+            self._schedule_scan(source_id)
+
+    def _schedule_scan(self, source_id: str) -> None:
+        # Manual, periodic and failure-triggered requests share one task per
+        # source. An active scan is reused; never queue an additional scan.
         task = self._tasks.get(source_id)
         if task is None or task.done():
             self._live[source_id] = {
@@ -569,12 +611,6 @@ class ExternalGalleryManager:
                 self._scan(source_id, self._epochs[source_id]),
                 name=f"image-studio-scan-{source_id}",
             )
-        return {
-            "id": source_id,
-            "name": self.adapters[source_id].name,
-            "enabled": True,
-            **self._live.get(source_id, {}),
-        }
 
     async def status(self) -> list[dict[str, Any]]:
         stored = {

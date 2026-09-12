@@ -67,7 +67,6 @@
     let importBatchJob = null;
     let importBatchResult = null;
     let modalClose = null;
-    let modalPending = false;
     let modalDismissOutside = true;
     let detailCopies = [];
     let detailDeferred = [];
@@ -85,7 +84,7 @@
     let resizeTimer = null;
     let detailTrigger = null;
     let galleryColumns = 0;
-    let detailIdentity = "";
+    let detailActionsReady = false;
     let selectionScrollFrame = 0;
     let importEditor = null;
     let importEditLoading = false;
@@ -181,25 +180,39 @@
     }
 
     function openModal(title, body, actions, options = {}) {
-      if (modalClose) modalClose(false);
+      if (modalClose) modalClose(false, true);
       const previousFocus = document.activeElement;
+      const root = $("studioModalRoot"), modal = $("studioModal");
       $("studioModalTitle").textContent = title;
       $("studioModalBody").innerHTML = body;
       $("studioModalError").textContent = "";
       $("studioModalFooter").innerHTML = "";
+      modal.removeAttribute("aria-busy");
+      $("studioModalBody").scrollTop = 0;
       $("studioModal").classList.toggle("is-merge-picker", !!options.mergePicker);
       $("studioModal").classList.toggle("is-import-editor", !!options.importEditor);
       $("studioModal").classList.toggle("is-external-editor", !!options.externalEditor);
       modalDismissOutside = options.dismissOutside !== false;
-      $("studioModalRoot").classList.remove("is-hidden");
+      window.ImageStudioDialogMotion.show(root);
       hooks.syncPageScrollLock();
       return new Promise((resolve) => {
-        const close = (result) => {
-          if (modalPending) return;
+        let pending = false, closing = false;
+        const close = (result, immediate = false) => {
+          if (modalClose !== close || (!immediate && (pending || closing))) return;
           window.ImageStudioSelect?.close();
-          options.onClose?.();
-          modalClose = null; $("studioModalRoot").classList.add("is-hidden");
-          hooks.syncPageScrollLock(); previousFocus?.focus?.({ preventScroll: true }); resolve(result);
+          if (!closing) options.onClose?.();
+          closing = true;
+          const finish = () => {
+            if (modalClose !== close) return;
+            modalClose = null;
+            if (!immediate) {
+              hooks.syncPageScrollLock();
+              if (previousFocus?.isConnected) previousFocus.focus?.({ preventScroll: true });
+            }
+            resolve(result);
+          };
+          if (immediate) { window.ImageStudioDialogMotion.hideImmediately(root); finish(); }
+          else window.ImageStudioDialogMotion.hide(root, finish);
         };
         modalClose = close;
         for (const definition of actions) {
@@ -208,19 +221,22 @@
           button.textContent = definition.label;
           if (definition.id) button.id = definition.id;
           button.addEventListener("click", async () => {
-            if (modalPending) return;
-            modalPending = true; $("studioModal").setAttribute("aria-busy", "true");
+            if (modalClose !== close || pending || closing) return;
+            pending = true; modal.setAttribute("aria-busy", "true");
             $("studioModalFooter").querySelectorAll("button").forEach((item) => { item.disabled = true; });
-            try { const result = await definition.action(); modalPending = false; if (result !== undefined) close(result); }
-            catch (error) { $("studioModalError").textContent = errorMessage(error, "操作失败"); }
-            finally { modalPending = false; $("studioModal").removeAttribute("aria-busy"); $("studioModalFooter").querySelectorAll("button").forEach((item) => { item.disabled = false; }); }
+            try { const result = await definition.action(); pending = false; if (result !== undefined) close(result); }
+            catch (error) { if (modalClose === close) $("studioModalError").textContent = errorMessage(error, "操作失败"); }
+            finally {
+              pending = false;
+              if (modalClose === close) { modal.removeAttribute("aria-busy"); $("studioModalFooter").querySelectorAll("button").forEach((item) => { item.disabled = false; }); }
+            }
           });
           $("studioModalFooter").appendChild(button);
         }
         renderIcons($("studioModal"));
         options.onOpen?.();
         window.ImageStudioSelect?.refresh($("studioModal"));
-        (options.focus ? $(options.focus) : $("studioModalFooter").querySelector("button"))?.focus();
+        (options.focus ? $(options.focus) : $("studioModalFooter").querySelector("button"))?.focus({ preventScroll: true });
       });
     }
 
@@ -1225,6 +1241,7 @@
       const request = hooks.requestParameters(detail);
       const supplemental = image?.supplemental && Object.keys(image.supplemental).length ? image.supplemental : detail.supplemental || {};
       const imageParameters = ["import", "external"].includes(detail.source);
+      const directoryExternal = detail.source === "external" && detail.external_source?.type === "directory";
       const imported = { ...(supplemental.display_parameters || {}), ...(supplemental.overrides || {}), ...(supplemental.overrides?.parameters || {}), prompt: supplemental.prompt ?? detail.original_prompt, model: supplemental.model ?? detail.model, mode: supplemental.mode ?? detail.mode };
       delete imported.parameters;
       const requestRows = imageParameters ? imported : { prompt: request.prompt, negative_prompt: request.negative_prompt, model: request.model, mode: modeLabel(request.mode), size: request.size, count: request.count, ...(request.parameters || {}) };
@@ -1234,12 +1251,16 @@
       if (metadata.format === "comfyui") for (const key of ["condition_nodes", "stages", "outputs", "prompt_candidates"]) { delete metadataRows[key]; if (imageParameters) delete requestRows[key]; }
       const raw = metadata.raw || {};
       const rawMarkup = Object.keys(raw).length ? deferredDetailSection("detail-block raw-metadata", "图片原始元数据", () => Object.entries(raw).map(([name, value]) => deferredDetailSection("metadata-raw-field", escape(name), () => parameterRows({ [name]: value }))).join("")) : "";
-      const generated = Object.keys(metadataRows).length ? deferredDetailSection("detail-block generated-parameters", `图片生成参数 · ${escape(engineLabel(metadata.format))}`, () => `${summaryStatus}<div class="detail-parameter-grid">${parameterRows(metadataRows)}</div>`) : "";
+      const generatedTitle = `图片生成参数 · ${escape(engineLabel(metadata.format))}`;
+      const generated = Object.keys(metadataRows).length ? directoryExternal
+        ? `<div class="detail-block generated-parameters"><h3>${generatedTitle}</h3>${summaryStatus}<div class="detail-parameter-grid">${parameterRows(metadataRows)}</div></div>`
+        : deferredDetailSection("detail-block generated-parameters", generatedTitle, () => `${summaryStatus}<div class="detail-parameter-grid">${parameterRows(metadataRows)}</div>`) : "";
       const workflow = metadata.format === "comfyui" && normalized.stages?.length ? deferredDetailSection("comfy-workflow-info", `采样阶段与条件 · ${normalized.stages.length} 个阶段`, () => {
         const template = document.createElement("template"); template.innerHTML = comfyDetailsMarkup(metadata, true);
         template.content.firstElementChild.querySelector("summary").remove(); return template.content.firstElementChild.innerHTML;
       }) : "";
-      return `<div class="detail-block"><h3>${detail.source === "external" ? "外部图片参数" : detail.source === "import" ? "导入信息" : "原始请求"}</h3><div class="detail-parameter-grid">${parameterRows(requestRows)}</div></div>${generated}${workflow}${rawMarkup}`;
+      const requestMarkup = directoryExternal ? "" : `<div class="detail-block"><h3>${detail.source === "external" ? "外部图片参数" : detail.source === "import" ? "导入信息" : "原始请求"}</h3><div class="detail-parameter-grid">${parameterRows(requestRows)}</div></div>`;
+      return `${requestMarkup}${generated}${workflow}${rawMarkup}`;
     }
 
     function detailWarningsMarkup(detail, image) {
@@ -1248,18 +1269,42 @@
     }
 
     function updateDetailActions(detail) {
+      const footer = $("detailFooter");
+      // A new drawer session must never inherit the previous record's actions.
+      // While navigating an open drawer, keep its last resolved layout until
+      // the selected image's metadata can replace it in one pass.
+      if (!$("detailDrawer").classList.contains("is-open")) detailActionsReady = false;
       if (detail?._manifestPending) detail = null;
-      const identity = `${detail?.id || ""}:${state.detailImageIndex}`;
-      const changed = detailIdentity !== identity; detailIdentity = identity;
       const image = detail?.images?.[state.detailImageIndex];
-      const engine = image?.supplemental?.generation_engine || engineOf(detail || {});
-      const formats = { studio: "Image Studio 参数" };
+      const metadataReady = !!detail && (!detail.lightweight || !!image?._metadataLoaded);
+      if (!metadataReady) {
+        footer.inert = true;
+        footer.setAttribute("aria-busy", "true");
+        if (detailActionsReady) return;
+      }
+      const providerKind = String(detail?.provider_kind || "").trim().toLowerCase();
+      const providerEngine = ["nai_direct", "openai_images", "gemini", "custom_json"].includes(providerKind) ? providerKind : "";
+      const engineHint = [image?.supplemental?.generation_engine, detail?.generation_engine, providerEngine, image?.metadata?.format].map(value => String(value || "").trim().toLowerCase()).find(value => value && !["unknown", "mixed"].includes(value));
+      const engine = ["nai", "nai_direct"].includes(engineHint) ? "novelai" : engineHint;
+      // A transferable prompt does not mean this plugin can reproduce its
+      // source workflow. Keep native exports separate from workflow exports.
+      const supportsReproduction = metadataReady && ["novelai", "openai_images", "gemini", "custom_json"].includes(engine);
+      const formats = supportsReproduction ? { studio: "Image Studio 参数" } : {};
       if (["nai", "novelai"].includes(engine) || image?.metadata?.format === "novelai") { formats.nai = "NAI 请求参数"; formats.novelai = "NovelAI 图片参数"; }
       if (image?.metadata?.raw?.workflow) formats.workflow = "ComfyUI 工作流";
       if (image?.metadata?.format === "comfyui" && image?.metadata?.raw?.prompt) formats.comfy_api = "ComfyUI 执行图";
       if (engine === "a1111" || image?.metadata?.format === "a1111") formats.a1111 = "Stable Diffusion 参数";
-      const selected = changed ? "studio" : $("detailCopyFormat").value;
-      $("detailCopyFormat").innerHTML = options(formats, selected);
+      const formatNames = Object.keys(formats), hasFormats = formatNames.length > 0;
+      const formatSelect = $("detailCopyFormat"), previousFormat = formatSelect.value;
+      const selected = Object.prototype.hasOwnProperty.call(formats, previousFormat) ? previousFormat : formatNames[0] || "";
+      const sameFormats = formatSelect.options.length === formatNames.length && formatNames.every((name, index) => formatSelect.options[index].value === name && formatSelect.options[index].textContent === formats[name]);
+      // Preview/original image loads also refresh this footer. Preserve native
+      // option nodes and the open custom menu when its formats have not changed.
+      if (!sameFormats) formatSelect.innerHTML = options(formats, selected);
+      else if (formatSelect.value !== selected) formatSelect.value = selected;
+      formatSelect.disabled = !hasFormats || !metadataReady;
+      formatSelect.closest(".copy-format-control").hidden = !hasFormats;
+      $("detailCopy").hidden = !hasFormats;
       $("detailWorkflowDownload").hidden = !formats.workflow && !formats.comfy_api;
       $("detailFavorite").classList.toggle("is-favorite", !!detail?.is_favorite);
       $("detailFavorite").setAttribute("aria-pressed", String(!!detail?.is_favorite));
@@ -1270,7 +1315,8 @@
       const hasParameters = !detail?.is_external || !!(detail.prompt || detail.model || normalized.prompt || normalized.model || Object.keys(normalized.parameters || {}).length || Object.keys(detail.parameters || {}).length);
       $("detailFavorite").disabled = favoritePending || !detail || allowed.favorite === false;
       $("detailUseReference").disabled = !image?.id || !!image.file_state && image.file_state !== "available" || allowed.reference === false;
-      $("detailReproduce").disabled = !detail || !hasParameters;
+      $("detailReproduce").hidden = !supportsReproduction;
+      $("detailReproduce").disabled = !supportsReproduction || !hasParameters;
       $("detailDelete").disabled = !detail || !(detail.images || []).length || allowed.delete === false;
       for (const [id, action] of [["detailFavorite", "favorite"], ["detailUseReference", "reference"], ["detailDelete", "delete"]]) {
         const button = $(id);
@@ -1279,8 +1325,11 @@
       }
       $("detailImportEdit").hidden = detail?.source !== "import" || !!detail?.is_external;
       $("detailImportEdit").disabled = importEditLoading || !detail || !(detail.images || []).length;
-      $("detailCopy").disabled = !detail || !!detail.lightweight && !image?._metadataLoaded;
-      window.ImageStudioSelect?.refresh($("detailCopyFormat"));
+      $("detailCopy").disabled = !hasFormats || !metadataReady;
+      detailActionsReady = metadataReady;
+      footer.inert = !metadataReady;
+      footer.setAttribute("aria-busy", String(!metadataReady));
+      window.ImageStudioSelect?.refresh(formatSelect);
     }
 
     async function copyDetailFormat(download = false) {
@@ -1641,6 +1690,12 @@
         hooks.clearGallerySelection(); void hooks.loadGallery(0);
       });
       $("pasteParametersButton").addEventListener("click", () => void readClipboardParameters());
+      // Inert keeps the existing appearance while metadata loads. The capture
+      // guard also covers programmatic clicks and older embedded browsers.
+      $("detailFooter").addEventListener("click", (event) => {
+        if (!$("detailFooter").inert) return;
+        event.preventDefault(); event.stopImmediatePropagation();
+      }, true);
       $("detailFavorite").addEventListener("click", () => void toggleFavorite());
       $("detailImportEdit").addEventListener("click", () => void openImportEditor());
       $("detailCopy").addEventListener("click", () => void copyDetailFormat());
@@ -1678,7 +1733,7 @@
         if (event.key !== "Tab") return;
         const modal = modalClose ? $("studioModal") : !$("confirmDialog").classList.contains("is-hidden") ? $("confirmDialog") : !$("parameterDialog").classList.contains("is-hidden") ? $("parameterDialog") : !$("imagePreview").classList.contains("is-hidden") ? $("imagePreview") : $("detailDrawer").classList.contains("is-open") ? $("detailDrawer") : null;
         if (!modal) return;
-        const focusable = Array.from(modal.querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href], [tabindex="0"]')).filter((item) => !item.matches(".studio-select-native") && item.getClientRects().length);
+        const focusable = Array.from(modal.querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href], [tabindex="0"]')).filter((item) => !item.matches(".studio-select-native") && !item.closest("[inert]") && item.getClientRects().length);
         if (!focusable.length) { event.preventDefault(); modal.focus(); return; }
         const first = focusable[0], last = focusable[focusable.length - 1];
         if (event.shiftKey && (document.activeElement === first || !modal.contains(document.activeElement))) { event.preventDefault(); last.focus(); }

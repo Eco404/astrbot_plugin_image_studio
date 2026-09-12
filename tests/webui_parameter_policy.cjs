@@ -17,6 +17,10 @@ async function choose(frame, selector, value) {
   }, value);
 }
 
+async function toggle(input, checked) {
+  if (await input.isChecked() !== checked) await input.locator("..").click();
+}
+
 async function matrix(browser, width) {
   const context = await browser.newContext({ viewport: { width, height: width < 540 ? 844 : 1000 }, hasTouch: width < 540 });
   const page = await context.newPage();
@@ -85,14 +89,14 @@ async function matrix(browser, width) {
     for (const name of ["webui_visible", "record_in_history", "refill_from_history"]) assert.equal(await frame.locator(`#schemaPolicy-${name}`).isChecked(), true, "omitted flags default true");
     await frame.locator("#studioModalRoot .studio-modal-scrim").click({ position: { x: 2, y: 2 }, force: true });
     assert.equal(await frame.locator("#studioModalRoot").isVisible(), true, "outside click does not close parameter policy dialog");
-    await frame.locator("#schemaPolicy-refill_from_history").uncheck({ force: true });
+    await toggle(frame.locator("#schemaPolicy-refill_from_history"), false);
     await frame.locator("#studioModalFooter button").filter({ hasText: "取消" }).click();
     await frame.locator('[data-edit-schema-policy="steps"]').click();
     assert.equal(await frame.locator("#schemaPolicy-refill_from_history").isChecked(), true, "cancel discards unsaved policy");
     const visible = frame.locator("#schemaPolicy-webui_visible");
     const recorded = frame.locator("#schemaPolicy-record_in_history");
     const refill = frame.locator("#schemaPolicy-refill_from_history");
-    await visible.uncheck({ force: true });
+    await toggle(visible, false);
     assert.equal(await refill.isChecked(), false, "hiding a parameter clears refill");
     assert.equal(await refill.isDisabled(), false, "refill remains actionable for reverse dependency activation");
     assert.equal(await recorded.isChecked(), true, "hidden parameters can still be recorded");
@@ -100,37 +104,39 @@ async function matrix(browser, width) {
     assert.equal(await refill.isChecked(), true);
     assert.equal(await visible.isChecked(), true, "enabling refill enables visibility");
     assert.equal(await recorded.isChecked(), true);
-    await visible.uncheck({ force: true });
-    await recorded.uncheck({ force: true });
-    await refill.check({ force: true });
+    await toggle(visible, false);
+    await toggle(recorded, false);
+    await toggle(refill, true);
     assert.equal(await visible.isChecked(), true, "enabling refill restores both missing prerequisites");
     assert.equal(await recorded.isChecked(), true);
-    await refill.uncheck({ force: true });
+    await toggle(refill, false);
     assert.equal(await visible.isChecked(), true, "disabling refill leaves prerequisites untouched");
     assert.equal(await recorded.isChecked(), true);
-    await visible.uncheck({ force: true });
-    await recorded.uncheck({ force: true });
-    await visible.check({ force: true });
+    await toggle(visible, false);
+    await toggle(recorded, false);
+    await toggle(visible, true);
     assert.equal(await refill.isChecked(), false, "enabling a prerequisite does not enable refill");
-    await recorded.check({ force: true });
+    await toggle(recorded, true);
     assert.equal(await refill.isDisabled(), false);
     assert.equal(await refill.isChecked(), false, "restoring prerequisites does not silently enable refill");
-    await refill.check({ force: true });
-    await recorded.uncheck({ force: true });
+    await toggle(refill, true);
+    await toggle(recorded, false);
     assert.equal(await refill.isChecked(), false, "disabling recording clears refill");
     assert.equal(await refill.isDisabled(), false);
     assert.equal(await visible.isChecked(), true, "recording is independent from visibility");
-    await refill.check({ force: true });
+    await toggle(refill, true);
     assert.equal(await recorded.isChecked(), true, "enabling refill enables recording");
-    await recorded.uncheck({ force: true });
-    await recorded.check({ force: true });
+    await toggle(recorded, false);
+    await toggle(recorded, true);
     await frame.locator("#studioModalFooter button").filter({ hasText: "保存" }).click();
+    await frame.locator("#studioModalRoot").waitFor({ state: "hidden" });
     assert.equal(JSON.parse(await frame.locator("#modelParametersSchema").inputValue()).steps.refill_from_history, false, "save persists dependent switch clearing");
     await frame.locator('[data-edit-schema-policy="steps"]').click();
     assert.equal(await refill.isChecked(), false, "reopening retains the saved off state");
-    await refill.check({ force: true });
+    await toggle(refill, true);
     await page.screenshot({ path: path.join(output, `${engine}-${width}-policy-dialog.png`) });
     await frame.locator("#studioModalFooter button").filter({ hasText: "保存" }).click();
+    await frame.locator("#studioModalRoot").waitFor({ state: "hidden" });
     const edited = JSON.parse(await frame.locator("#modelParametersSchema").inputValue());
     assert.equal(edited.steps.webui_visible, true);
     assert.equal(edited.steps.record_in_history, true);
