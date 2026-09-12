@@ -15,6 +15,11 @@
   --on-accent: #fff;
   --control-accent: var(--accent);
   --on-control-accent: var(--on-accent);
+  --nav-active-background: var(--control-accent);
+  --nav-active-icon-background: color-mix(in srgb, var(--accent) 16%, transparent);
+  --nav-mobile-active-background: var(--control-accent);
+  --nav-active-foreground: var(--on-control-accent);
+  --nav-active-icon-foreground: var(--nav-active-foreground);
   --control-accent-hover: var(--control-accent);
   --on-control-accent-hover: var(--on-control-accent);
 }
@@ -29,6 +34,10 @@
   --warning: #d0a361;
   --warning-soft: rgba(190, 139, 66, .17);
   --on-accent: #16211c;
+  --nav-active-background: hsl(var(--accent-h) 22% 30%);
+  --nav-active-icon-background: hsl(var(--accent-h) 22% 37%);
+  --nav-mobile-active-background: var(--nav-active-icon-background);
+  --nav-active-foreground: hsl(var(--accent-h) 30% 90%);
 }
 @supports (background: color-mix(in srgb, white 50%, transparent)) and ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
   :root, :root[data-theme="dark"] {
@@ -36,15 +45,31 @@
     --detail-footer-tint: color-mix(in srgb, var(--appearance-glass-solid) var(--detail-footer-tint-opacity, 18.75%), transparent);
   }
 }
-.topbar, .floatingbar, .selection-bar.gallery-selection-bar,
-.image-preview__actions, .studio-modal > footer {
+.topbar, .floatingbar, .selection-bar.gallery-selection-bar {
   background: var(--glass);
   backdrop-filter: blur(22px) saturate(115%);
   -webkit-backdrop-filter: blur(22px) saturate(115%);
 }
-.detail-drawer { -webkit-backdrop-filter: blur(24px) saturate(115%); }
-/* Share the drawer's backdrop; the tint adds only a small effective opacity difference. */
-.detail-footer { background: var(--detail-footer-tint); backdrop-filter: none; -webkit-backdrop-filter: none; }
+.detail-drawer, .studio-modal, .confirm-dialog, .parameter-dialog,
+.image-preview__panel, .appearance-reset-confirmation {
+  background: var(--glass);
+  color: var(--text);
+  backdrop-filter: blur(24px) saturate(115%);
+  -webkit-backdrop-filter: blur(24px) saturate(115%);
+}
+.scrim, .studio-modal-scrim, .image-preview__backdrop {
+  background: rgba(0, 0, 0, .22);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+}
+/* Reuse the enclosing glass layer; nested surfaces add only a small tint. */
+.detail-footer, .studio-modal > footer, .image-preview__actions,
+.confirm-dialog__actions, .parameter-dialog__actions,
+.studio-modal.is-import-editor .import-card {
+  background: var(--detail-footer-tint);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
 html[data-appearance-pending="true"] body { visibility: hidden; }
 .quiet-glass-background { background-color: var(--page); background-image: linear-gradient(136deg, hsl(var(--accent-h) 20% 92%), hsl(216 24% 93%) 38%, hsl(26 22% 94%) 70%, hsl(188 20% 90%)); }
 :root[data-theme="dark"] .quiet-glass-background { background-color: var(--page); background-image: linear-gradient(136deg, hsl(var(--accent-h) 9% 14%), hsl(32 8% 11%) 42%, hsl(216 11% 15%) 72%, hsl(188 9% 12%)); }
@@ -52,6 +77,13 @@ html[data-appearance-pending="true"] body { visibility: hidden; }
 .primary-button { background: var(--control-accent); color: var(--on-control-accent); }
 .primary-button:hover:not(:disabled) { background: var(--control-accent-hover); color: var(--on-control-accent-hover); }
 .primary-button:disabled { background: var(--control-accent); color: var(--on-control-accent); }
+.nav-item.is-active { background: var(--nav-active-background); color: var(--nav-active-foreground); }
+.nav-item.is-active .nav-icon { background: var(--nav-active-icon-background); color: var(--nav-active-icon-foreground); }
+@media (max-width: 900px) {
+  .nav-list { flex: 1; justify-content: space-around; }
+  .nav-item.is-active { background: transparent; }
+  .nav-item.is-active .nav-icon { background: var(--nav-mobile-active-background); color: var(--nav-active-foreground); }
+}
 .gallery-selection input:checked + span { background: var(--control-accent); color: var(--on-control-accent); }
 .gallery-card input[type="checkbox"], .delete-image-choice input,
 input[type="checkbox"], input[type="radio"] { accent-color: var(--control-accent); }
@@ -116,7 +148,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--control-accent
 .appearance-status { margin: 8px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
 .appearance-status:empty { display: none; }
 .appearance-status.is-error { color: var(--danger); }
-.appearance-reset-confirmation { position: absolute; z-index: 5; right: 16px; top: 52px; width: min(260px, calc(100% - 32px)); padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--topbar-glass); box-shadow: var(--shadow); font-size: 12px; }
+.appearance-reset-confirmation { position: absolute; z-index: 5; right: 16px; top: 52px; width: min(260px, calc(100% - 32px)); padding: 12px; border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); font-size: 12px; }
 .appearance-reset-confirmation[hidden] { display: none; }
 .appearance-reset-confirmation > div { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
 @media (prefers-reduced-motion: no-preference) {

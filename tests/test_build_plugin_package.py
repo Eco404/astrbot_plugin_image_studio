@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import ast
 import importlib.util
+import re
 import subprocess
 import sys
 import zipfile
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 import yaml
@@ -55,12 +58,33 @@ def test_real_package_contains_all_runtime_assets_and_is_reproducible(tmp_path):
         assert expected.issubset(archive.namelist())
         assert archive.read(f"{name}/main.py") == (ROOT / "main.py").read_bytes()
         metadata = yaml.safe_load(archive.read(f"{name}/metadata.yaml"))
+        registration = next(
+            decorator
+            for node in ast.parse(archive.read(f"{name}/main.py")).body
+            if isinstance(node, ast.ClassDef)
+            for decorator in node.decorator_list
+            if isinstance(decorator, ast.Call)
+            and isinstance(decorator.func, ast.Name)
+            and decorator.func.id == "register"
+        )
+        assert ast.literal_eval(registration.args[2]) == metadata["desc"]
         assert metadata["author"] == "econeco"
         assert (
             metadata["repo"] == "https://github.com/Eco404/astrbot_plugin_image_studio"
         )
         changelog = archive.read(f"{name}/CHANGELOG.md").decode("utf-8")
         assert f"## {version} - " in changelog
+        page = archive.read(f"{name}/pages/image-studio/index.html").decode("utf-8")
+        assets = re.findall(r'\b(?:src|href)="(\./[^"]+)"', page)
+        assert assets
+        for asset in assets:
+            if asset.startswith("./vendor/"):
+                continue
+            cached = parse_qs(urlsplit(asset).query).get("v", [])
+            assert len(cached) == 1 and (
+                cached[0] == version
+                or ("-" in version and cached[0].startswith(f"{version}-"))
+            ), f"First-party asset version differs from package: {asset}"
         readme = archive.read(f"{name}/README.md").decode("utf-8")
         assert "](docs/images/generate.png)" in readme
         for relative in ("docs/images/generate.png", "logo.png"):

@@ -73,9 +73,24 @@ async function checkHeader(page, frame, inner, view, test) {
   const navBackground = await inner.locator(`.nav-item[data-view="${view}"]`).evaluate((button) => {
     const canvas = document.createElement("canvas"); canvas.width = 1; canvas.height = 1; const context = canvas.getContext("2d");
     const alpha = (element) => { context.clearRect(0, 0, 1, 1); context.fillStyle = getComputedStyle(element).backgroundColor; context.fillRect(0, 0, 1, 1); return context.getImageData(0, 0, 1, 1).data[3]; };
-    return { outer: alpha(button), inner: alpha(button.querySelector(".nav-icon")) };
+    const inner = button.querySelector(".nav-icon");
+    const probe = document.createElement("span");
+    probe.style.background = innerWidth <= 900 ? "var(--nav-mobile-active-background)" : "var(--nav-active-background)";
+    probe.style.color = innerWidth <= 900 ? "var(--nav-active-foreground)" : "var(--nav-active-icon-foreground)";
+    button.append(probe);
+    const themed = getComputedStyle(innerWidth <= 900 ? inner : button).backgroundColor === getComputedStyle(probe).backgroundColor;
+    const rgb = color => { context.clearRect(0, 0, 1, 1); context.fillStyle = color; context.fillRect(0, 0, 1, 1); return Array.from(context.getImageData(0, 0, 1, 1).data); };
+    const stroke = rgb(getComputedStyle(inner).color), expectedStroke = rgb(getComputedStyle(probe).color);
+    const themedStroke = stroke.every((channel, index) => Math.abs(channel - expectedStroke[index]) <= 1);
+    probe.remove();
+    return { outer: alpha(button), inner: alpha(inner), themed, themedStroke, stroke, expectedStroke };
   });
-  assert.ok(navBackground.inner > 0, `${test.name}/${view}: selected icon must retain its inner background`);
+  assert.equal(await inner.locator(".brand-mark").count(), 0, "navigation no longer includes the logo icon");
+  assert.equal(await inner.locator(".brand strong").textContent(), "Image Studio");
+  assert.equal(await inner.locator(".brand span").textContent(), "生图工作台");
+  assert.ok(navBackground.inner > 0, `${test.name}/${view}: selected icon retains its rounded inner background`);
+  assert.ok(navBackground.themed, `${test.name}/${view}: navigation uses the appropriate theme surface`);
+  assert.ok(navBackground.themedStroke, `${test.name}/${view}: icon strokes use the theme's readable navigation color ${JSON.stringify(navBackground)}`);
   assert.ok(test.width <= 900 ? navBackground.outer === 0 : navBackground.outer > 0, `${test.name}/${view}: unexpected navigation background ${JSON.stringify(navBackground)}`);
   if (test.width <= 540 && view === "generate") await checkRoundIcon(frame, "#pasteParametersButton", `${test.name}-paste`);
   if (test.width <= 540 && view === "gallery") await checkRoundIcon(frame, "#galleryRefresh", `${test.name}-refresh`);
@@ -174,7 +189,7 @@ async function checkSelectionHeader(page, frame, inner, test) {
         await page.goto(base);
         const frame = page.frameLocator("#studio"); await frame.locator("#runtimeStatus").filter({ hasText: "已加载" }).waitFor({ state: "attached" });
         const inner = page.frames().find((item) => item.url().includes("/ui/"));
-        await inner.evaluate(async (mode) => { await window.ImageStudioAppearance?.ready; window.ImageStudioAppearance.set({ preference: mode }); }, theme);
+        await inner.evaluate(async (mode) => { await window.ImageStudioAppearance?.ready; window.ImageStudioAppearance.set({ preference: mode }); await window.ImageStudioAppearance.save(); }, theme);
         await frame.locator("#pageHeaderAnchor").waitFor({ state: "attached" });
         for (const view of ["generate", "gallery", "import", "settings"]) {
           if (view === "import") { await openView(frame, inner, view); await stageImport(inner); }

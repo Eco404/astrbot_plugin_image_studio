@@ -7,9 +7,14 @@ import hashlib
 import math
 import re
 import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
+
+import aiohttp
 
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 from astrbot.core.utils.media_utils import MediaResolver, file_uri_to_path, is_file_uri
@@ -22,10 +27,36 @@ from .models import (
     ImageModel,
     ImageProvider,
     InvocationSource,
+    MODEL_SCHEDULING_KEYS,
     ReferenceImage,
 )
-from .providers import ProviderExecutor
+from .providers import ProviderBatchError, ProviderError, ProviderExecutor
 from .storage import GenerationStore, detect_mime_type
+
+
+class _ProviderLimiter:
+    """Keep in-flight requests counted when provider settings change."""
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.active = 0
+        self.changed = asyncio.Event()
+
+    def resize(self, limit: int) -> None:
+        self.limit = limit
+        self.changed.set()
+
+    @asynccontextmanager
+    async def slot(self) -> AsyncIterator[None]:
+        while self.active >= self.limit:
+            self.changed.clear()
+            await self.changed.wait()
+        self.active += 1
+        try:
+            yield
+        finally:
+            self.active -= 1
+            self.changed.set()
 
 
 class ImageGenerationService:
@@ -41,23 +72,25 @@ class ImageGenerationService:
         self.settings = settings
         self.executor = executor
         self.store = store
-        self._semaphores = self._build_semaphores(settings)
+        self._limiters: dict[str, _ProviderLimiter] = {}
+        self._model_limiters: dict[tuple[str, str], _ProviderLimiter] = {}
+        self.update_settings(settings)
 
     def update_settings(self, settings: RuntimeSettings) -> None:
         """Swap future-request settings after an atomic configuration save."""
 
         self.settings = settings
-        self._semaphores = self._build_semaphores(settings)
-
-    @staticmethod
-    def _build_semaphores(
-        settings: RuntimeSettings,
-    ) -> dict[str, asyncio.Semaphore]:
-        return {
-            provider.id: asyncio.Semaphore(provider.max_concurrent_generations)
-            for provider in settings.providers
-            if provider.id
-        }
+        for provider in settings.providers:
+            limiter = self._limiters.setdefault(
+                provider.id, _ProviderLimiter(provider.max_concurrent_generations)
+            )
+            limiter.resize(provider.max_concurrent_generations)
+            for model in provider.models:
+                model_limiter = self._model_limiters.setdefault(
+                    (provider.id, model.id),
+                    _ProviderLimiter(model.max_concurrent_requests),
+                )
+                model_limiter.resize(model.max_concurrent_requests)
 
     async def generate(
         self,
@@ -142,7 +175,7 @@ class ImageGenerationService:
             if reference_limit <= 0:
                 if source == "llm_tool":
                     raise ValueError("当前模型未向 LLM 工具开放可用的参考图数量")
-                raise ValueError("当前模型的参考图能力上限为 0，不能用于图生图")
+                raise ValueError("当前模型未开放图生图参考图输入")
             if not references:
                 raise ValueError(
                     "未读取到可用参考图；请使用当前消息或引用消息中的图片，"
@@ -157,23 +190,32 @@ class ImageGenerationService:
             if negative_prompt is None:
                 negative_prompt = selected_model.negative_prompt_default
         else:
-            normalized_count = max(
-                1,
-                min(
-                    4,
-                    _as_int(
-                        count
-                        if count not in (None, "", 0)
-                        else _control_parameter_value(
-                            parameters, selected_model, "count", source=source
-                        ),
-                        1,
-                    ),
-                ),
+            batch_parameters = _parameters(parameters)
+            if source == "llm_tool":
+                batch_parameters = {
+                    key: value
+                    for key, value in batch_parameters.items()
+                    if key in selected_model.llm_exposed_parameter_names
+                }
+            count_name = _control_parameter_name(selected_model, "count")
+            supplied_count = (
+                count
+                if count not in (None, "", 0)
+                and (
+                    source != "llm_tool"
+                    or count_name in selected_model.llm_exposed_parameter_names
+                )
+                else _control_parameter_value(
+                    batch_parameters, selected_model, "count", source=source
+                )
             )
-        model_parameters = _parameters_for_model(
+            normalized_count, advanced_parameters = _command_count(
+                supplied_count, batch_parameters, selected_model
+            )
+        parameter_values = _resolved_model_values(
             advanced_parameters, selected_model, source=source
         )
+        model_parameters = _wire_parameters(parameter_values, selected_model)
         if source == "command":
             model_parameters = {
                 key: value
@@ -203,9 +245,30 @@ class ImageGenerationService:
             source=source if source in {"webui", "command", "llm_tool"} else "webui",
             selection_source=selection_source,
             invocation_source=invocation_source or InvocationSource(),
+            native_batch_size=selected_model.native_batch_size,
+            max_concurrent_requests=selected_model.max_concurrent_requests,
+            local_parameters={
+                name: value
+                for name, value in parameter_values.items()
+                if selected_model.parameters.get(name, {}).get("ui_only")
+            },
         )
         started = time.perf_counter()
-        images = await self.run_provider_request(provider, request)
+        warning = ""
+        batch_failures: tuple[tuple[int, str], ...] = ()
+        try:
+            images = await self.run_provider_request(provider, request)
+        except ProviderBatchError as exc:
+            if not exc.images:
+                raise
+            images = exc.images
+            batch_failures = exc.failures
+            warning = str(exc)
+        if len(images) != request.count and not batch_failures:
+            warning = (
+                f"本次目标 {request.count} 张，上游实际返回 {len(images)} 张；"
+                "已保留全部返回图片，未自动追加请求。"
+            )
         elapsed_ms = round((time.perf_counter() - started) * 1000)
         generation_id = await self.store.record_success(
             provider=provider,
@@ -215,6 +278,7 @@ class ImageGenerationService:
             history=settings.history,
             preview_max_edge=settings.asset_preview_max_edge,
             preview_quality=settings.asset_preview_quality,
+            batch_failures=batch_failures,
         )
         await self.store.discard_staged_references(request.references)
         return GenerationResult(
@@ -223,6 +287,7 @@ class ImageGenerationService:
             images=images,
             elapsed_ms=elapsed_ms,
             generation_id=generation_id,
+            warning=warning,
         )
 
     async def run_provider_request(
@@ -230,11 +295,78 @@ class ImageGenerationService:
     ) -> tuple[GeneratedImage, ...]:
         """Execute any generation-like request under its provider concurrency limit."""
 
-        semaphore = self._semaphores.setdefault(
-            provider.id, asyncio.Semaphore(provider.max_concurrent_generations)
+        limiter = self._limiters.setdefault(
+            provider.id, _ProviderLimiter(provider.max_concurrent_generations)
         )
-        async with semaphore:
-            return await self.executor.generate(provider, request)
+        model = provider.get_model(request.model)
+        model_limiter = self._model_limiters.setdefault(
+            (provider.id, model.id), _ProviderLimiter(model.max_concurrent_requests)
+        )
+        return await self._run_batch(provider, model, request, limiter, model_limiter)
+
+    async def _run_batch(
+        self,
+        provider: ImageProvider,
+        model: ImageModel,
+        request: GenerationRequest,
+        limiter: _ProviderLimiter,
+        model_limiter: _ProviderLimiter,
+    ) -> tuple[GeneratedImage, ...]:
+        count = _batch_integer(request.count, "count")
+        native_size = _batch_integer(model.native_batch_size, "native_batch_size")
+        request_sizes = tuple(
+            min(native_size, count - offset) for offset in range(0, count, native_size)
+        )
+        parameters = {
+            key: value
+            for key, value in request.parameters.items()
+            if key not in MODEL_SCHEDULING_KEYS and key not in {"count", "n"}
+        }
+        pending = iter(enumerate(request_sizes))
+        results: list[tuple[GeneratedImage, ...]] = [()] * len(request_sizes)
+        failures: dict[int, str] = {}
+
+        async def worker() -> None:
+            for index, size in pending:
+                chunk = replace(request, count=size, parameters=dict(parameters))
+                try:
+                    async with model_limiter.slot():
+                        async with limiter.slot():
+                            images = await self.executor.generate(provider, chunk)
+                    if not images:
+                        raise ProviderError("上游未返回可用图片")
+                    results[index] = tuple(images)
+                except (ProviderError, aiohttp.ClientError, TimeoutError) as exc:
+                    failures[index + 1] = (
+                        str(exc)[:500]
+                        if isinstance(exc, ProviderError)
+                        else "请求超时"
+                        if isinstance(exc, TimeoutError)
+                        else "无法连接服务商"
+                    )
+
+        # Shared model slots are acquired before provider slots so queued work
+        # for a busy model cannot occupy its provider's entire allowance.
+        tasks = [
+            asyncio.create_task(worker())
+            for _ in range(min(len(request_sizes), model.max_concurrent_requests))
+        ]
+        try:
+            await asyncio.gather(*tasks)
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        images = tuple(image for result in results for image in result)
+        if failures:
+            raise ProviderBatchError(
+                count,
+                images,
+                tuple(sorted(failures.items())),
+                request_sizes=request_sizes,
+            )
+        return images
 
     async def staged_references(self, reference_ids: Any) -> tuple[ReferenceImage, ...]:
         """Resolve an API request's opaque reference IDs."""
@@ -346,73 +478,61 @@ class ImageGenerationService:
     ) -> dict[str, Any]:
         """Return a reproducible draft and stage retained references when available."""
 
-        detail = await self.store.generation_detail(generation_id, include_assets=False)
+        from .parameter_exchange import export_parameters, resolve_parameters
+
+        detail = await self.store.generation_image_context(generation_id, image_id)
         if detail is None:
             raise ValueError("历史生成记录不存在")
-        if detail.get("source") == "import":
-            from .parameter_exchange import export_parameters, resolve_parameters
-
-            copied = export_parameters(detail, image_id)
-            resolved = resolve_parameters(copied["content"], self.settings)
-            return {
-                **resolved["draft"],
-                "candidates": resolved["candidates"],
-                "requires_model_selection": resolved["requires_model_selection"],
-                "warnings": resolved["warnings"],
-                "unmapped": resolved["unmapped"],
-                "notice": "导入参数已准备，请核对模型和无法映射的字段。",
-            }
-        parameters = (
-            detail.get("parameters")
-            if isinstance(detail.get("parameters"), dict)
-            else {}
+        if (
+            detail.get("source") == "external"
+            and not detail.get("original_prompt")
+            and not detail.get("model")
+            and not detail.get("parameters")
+            and all(
+                image.get("metadata", {}).get("format", "unknown") == "unknown"
+                for image in detail.get("images", [])
+            )
+        ):
+            raise ValueError("这张外部图片没有可恢复的生成参数，可直接用作参考图")
+        copied = export_parameters(detail, image_id)
+        resolved = resolve_parameters(
+            copied["content"], self.settings, for_reproduction=True
         )
-        staged = await self.store.stage_generation_references(generation_id)
-        provider = self.settings.provider(str(detail.get("provider_id") or ""))
-        compatible = self.settings.models_for_mode(
-            str(detail.get("mode") or "text2img")
+        imported = detail.get("source") in {"import", "external"}
+        staged = (
+            await self.store.stage_generation_references(generation_id)
+            if not imported
+            else []
         )
-        model_ref = (
-            f"{detail.get('provider_id')}:{detail.get('model')}"
-            if provider and detail.get("model")
-            else ""
-        )
+        warnings = list(resolved["warnings"])
+        if staged:
+            warnings = [
+                text
+                for text in warnings
+                if text != "参数文本不包含原始参考图，请补充参考图后生成。"
+            ]
         draft = {
-            "mode": detail.get("mode"),
-            "provider_id": detail.get("provider_id") if provider else "",
-            "model_ref": model_ref if provider else "",
-            "model": detail.get("model"),
-            "prompt": detail.get("original_prompt"),
-            "negative_prompt": parameters.get("negative_prompt", ""),
-            "size": parameters.get("size", ""),
-            "count": parameters.get("count", 1),
-            "parameters": parameters.get("parameters", {}),
+            **resolved["draft"],
             "references": staged,
-            "provider_available": provider is not None,
+            "provider_available": not resolved["requires_model_selection"],
             "reference_available": bool(staged),
-            "candidates": [
-                {
-                    **model.public_dict(),
-                    "provider_id": provider_item.id,
-                    "provider_name": provider_item.name,
-                    "provider_kind": provider_item.kind,
-                    "model_ref": f"{provider_item.id}:{model.id}",
-                }
-                for provider_item, model in compatible
-            ],
+            "candidates": resolved["candidates"],
+            "requires_model_selection": resolved["requires_model_selection"],
+            "warnings": warnings,
+            "unmapped": resolved["unmapped"],
         }
         if detail.get("mode") == "img2img" and not staged:
             draft["notice"] = (
                 "历史参考图未保留，已填入全部可恢复参数。请上传新参考图，或在生图页明确选择当前成图作为参考图。"
             )
-        elif provider is None or not any(
-            item.id == detail.get("model") for item in provider.models
-        ):
+        elif resolved["requires_model_selection"]:
             draft["notice"] = (
                 "历史 Provider 已不可用。请选择下方支持相同模式的 Provider 后再生成。"
             )
         else:
-            draft["notice"] = "已填入历史生成参数。"
+            draft["notice"] = "已按当前模型设置恢复生成参数。"
+        if warnings:
+            draft["notice"] += " " + "；".join(warnings)
         return draft
 
     def _select_model(
@@ -572,6 +692,22 @@ def _command_count(
     }
 
 
+def _batch_integer(value: Any, name: str) -> int:
+    try:
+        numeric = float(value)
+        if (
+            isinstance(value, bool)
+            or not math.isfinite(numeric)
+            or not numeric.is_integer()
+        ):
+            raise ValueError
+        if numeric < 1:
+            raise ValueError
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"批次参数 {name} 必须为正整数") from exc
+    return int(numeric)
+
+
 def _size(value: str, provider_kind: str = "") -> str:
     raw = str(value or "").strip()
     if provider_kind == "nai_direct" and raw in {
@@ -617,9 +753,17 @@ def _parameters_for_model(
 ) -> dict[str, Any]:
     """Map friendly schema names to provider request keys at the trust boundary."""
 
+    return _wire_parameters(_resolved_model_values(value, model, source=source), model)
+
+
+def _resolved_model_values(
+    value: Any, model: ImageModel, *, source: str = "webui"
+) -> dict[str, Any]:
     raw = _parameters(value)
     values: dict[str, Any] = {}
-    for name, descriptor in model.parameters.items():
+    active_parameters = model.active_parameters
+    inactive = set(model.parameters) - set(active_parameters)
+    for name, descriptor in active_parameters.items():
         if "default" not in descriptor:
             continue
         values[name] = descriptor["default"]
@@ -627,64 +771,61 @@ def _parameters_for_model(
     if source == "llm_tool" and isinstance(tool_parameters, dict):
         for name, descriptor in tool_parameters.items():
             if (
-                name in model.parameters
+                name in active_parameters
                 and isinstance(descriptor, dict)
                 and "default_override" in descriptor
             ):
                 values[name] = descriptor["default_override"]
             elif (
-                name in model.parameters
+                name in active_parameters
                 and isinstance(descriptor, dict)
                 and "default" in descriptor
             ):
                 values[name] = descriptor["default"]
     _expand_parameter_presets(values, model)
     allowed = model.llm_exposed_parameter_names
-    mapped: dict[str, Any] = {}
-    for key, item in values.items():
-        descriptor = model.parameters.get(key)
-        if not isinstance(descriptor, dict) or descriptor.get("ui_only"):
-            continue
-        if key in {"size", "count", "n"}:
-            continue
-        mapped[str(descriptor.get("request_key") or key)[:96]] = item
+    supplied: dict[str, Any] = {}
     for key, item in raw.items():
-        descriptor = model.parameters.get(key)
+        if key in inactive or key in MODEL_SCHEDULING_KEYS:
+            continue
         if source == "llm_tool" and key not in allowed:
             continue
-        if isinstance(descriptor, dict) and descriptor.get("ui_only"):
-            target = str(descriptor.get("target") or "")
-            choice = next(
+        name = (
+            key
+            if key in active_parameters
+            else next(
                 (
-                    choice
-                    for choice in descriptor.get("choices", [])
-                    if isinstance(choice, dict)
-                    and str(choice.get("value")) == str(item)
+                    name
+                    for name, descriptor in active_parameters.items()
+                    if descriptor.get("request_key") == key
                 ),
-                None,
+                key,
             )
-            if (
-                target
-                and isinstance(choice, dict)
-                and isinstance(choice.get("fill"), str)
-            ):
-                target_descriptor = model.parameters.get(target, {})
-                mapped[str(target_descriptor.get("request_key") or target)[:96]] = (
-                    choice["fill"]
-                )
-            continue
-        request_key = (
-            str(descriptor.get("request_key") or key)
-            if isinstance(descriptor, dict)
-            else key
         )
-        _validate_parameter_value(key, item, descriptor)
-        if request_key not in {"size", "count", "n"}:
-            mapped[request_key[:96]] = item
+        _validate_parameter_value(name, item, active_parameters.get(name))
+        supplied[name] = item
+    # Expand an explicitly chosen preset only when its target was not supplied.
+    # This also protects explicit empty artist strings, regardless of key order.
+    _expand_parameter_presets(supplied, model, protected=set(supplied))
+    values.update(supplied)
+    return values
+
+
+def _wire_parameters(values: dict[str, Any], model: ImageModel) -> dict[str, Any]:
+    mapped: dict[str, Any] = {}
+    for name, item in values.items():
+        descriptor = model.parameters.get(name, {})
+        if descriptor.get("ui_only"):
+            continue
+        key = str(descriptor.get("request_key") or name)
+        if key not in {"size", "count", "n"} and key not in MODEL_SCHEDULING_KEYS:
+            mapped[key[:96]] = item
     return mapped
 
 
-def _expand_parameter_presets(values: dict[str, Any], model: ImageModel) -> None:
+def _expand_parameter_presets(
+    values: dict[str, Any], model: ImageModel, *, protected: set[str] | None = None
+) -> None:
     for name, descriptor in model.parameters.items():
         if str(descriptor.get("type") or "").lower() != "preset":
             continue
@@ -698,13 +839,33 @@ def _expand_parameter_presets(values: dict[str, Any], model: ImageModel) -> None
             ),
             None,
         )
-        if target and isinstance(choice, dict) and isinstance(choice.get("fill"), str):
+        if (
+            target
+            and target not in (protected or ())
+            and isinstance(choice, dict)
+            and isinstance(choice.get("fill"), str)
+        ):
             values[target] = choice["fill"]
+
+
+def _control_parameter_name(model: ImageModel, name: str) -> str:
+    if name in model.parameters:
+        return name
+    aliases = {"count", "n"} if name == "count" else {name}
+    return next(
+        (
+            key
+            for key, descriptor in model.parameters.items()
+            if key in aliases or descriptor.get("request_key") in aliases
+        ),
+        name,
+    )
 
 
 def _control_parameter_value(
     value: Any, model: ImageModel, name: str, *, source: str
 ) -> Any:
+    name = _control_parameter_name(model, name)
     raw = _parameters(value)
     if name in raw and (
         source != "llm_tool" or name in model.llm_exposed_parameter_names
@@ -718,6 +879,8 @@ def _control_parameter_value(
         policy = tool_parameters.get(name)
         if isinstance(policy, dict) and "default_override" in policy:
             return policy["default_override"]
+        if isinstance(policy, dict) and "default" in policy:
+            return policy["default"]
     return descriptor.get("default", "")
 
 
@@ -734,6 +897,11 @@ def _validate_parameter_value(
         }
         if str(value) not in values:
             raise ValueError(f"参数 {name} 的值不在可选范围内")
+    if value is None and (
+        descriptor.get("nullable") is True
+        or ("default" in descriptor and descriptor["default"] is None)
+    ):
+        return
     parameter_type = str(descriptor.get("type") or "").lower()
     if parameter_type in {"number", "int", "integer", "float"}:
         try:

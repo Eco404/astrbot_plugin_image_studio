@@ -7,10 +7,10 @@
   const swatches = [[168, "青绿"], [130, "叶绿"], [195, "湖蓝"], [216, "雾蓝"], [345, "蔷薇"], [35, "麦金"]];
   const scheme = matchMedia("(prefers-color-scheme: dark)");
   let settings = { ...defaults };
+  let savedBaseline = { ...defaults };
   let local = false;
   let initialized = false;
-  let revision = 0;
-  let persistTimer = 0;
+  let storageRevision = 0;
   let saveChain = Promise.resolve();
   let statusText = "";
   let statusError = false;
@@ -19,6 +19,7 @@
   let sampleRevision = 0;
   let sampledColor = "";
   let resolveReady;
+  let navigationColorContext;
   const ready = new Promise((resolve) => { resolveReady = resolve; });
 
   function normalize(value) {
@@ -74,6 +75,58 @@
     return dark ? 100 : 0;
   }
 
+  function navigationForeground(hue, saturation, start, backgrounds, dark) {
+    const targets = backgrounds.map(luminance);
+    let bestColor = null, bestContrast = 0;
+    // Prefer the theme's direction against the selected item's actual fill.
+    // Light mode retains unrestricted custom fills and may need the fallback.
+    for (const direction of dark ? [1, -1] : [-1, 1]) {
+      for (let step = 0; step <= 100; step++) {
+        const lightness = Math.max(0, Math.min(100, start + step * direction));
+        const rgb = hslRgb(hue, saturation, lightness), value = luminance(rgb);
+        const contrast = Math.min(...targets.map((target) => (Math.max(value, target) + .05) / (Math.min(value, target) + .05)));
+        // Leave room for browser rounding while compositing the icon surface.
+        if (contrast >= 4.65) return colorHex(rgb);
+        if (contrast > bestContrast) { bestContrast = contrast; bestColor = colorHex(rgb); }
+        if ((direction < 0 && lightness === 0) || (direction > 0 && lightness === 100)) break;
+      }
+    }
+    // Middle-luminance fills may peak just below the usual rounding margin.
+    // Keep a shared color whenever its best result is still safely readable.
+    return targets.length === 1 || bestContrast >= 4.55 ? bestColor : null;
+  }
+
+  function navigationIconBackground(fill, hue, saturation, lightness) {
+    if (navigationColorContext === undefined) {
+      const canvas = document.createElement?.("canvas");
+      if (canvas) canvas.width = canvas.height = 1;
+      navigationColorContext = canvas?.getContext("2d", { willReadFrequently: true }) || null;
+    }
+    if (navigationColorContext) {
+      // Sample the actual 8-bit composition, including browser rounding. A
+      // numeric average can choose the wrong stroke near middle luminance.
+      navigationColorContext.fillStyle = colorHex(fill);
+      navigationColorContext.fillRect(0, 0, 1, 1);
+      navigationColorContext.fillStyle = `hsl(${hue} ${saturation}% ${lightness}% / .16)`;
+      navigationColorContext.fillRect(0, 0, 1, 1);
+      return [...navigationColorContext.getImageData(0, 0, 1, 1).data].slice(0, 3);
+    }
+    const tint = hslRgb(hue, saturation, lightness);
+    return fill.map((value, index) => value * .84 + tint[index] * .16);
+  }
+
+  function navigationTone(hue, saturation, target) {
+    // Equal HSL lightness makes yellow much brighter than blue. Limit the
+    // rendered luminance so each accent keeps the same quiet dark hierarchy.
+    let low = 0, high = 100;
+    for (let step = 0; step < 12; step++) {
+      const middle = (low + high) / 2;
+      if (luminance(hslRgb(hue, saturation, middle)) < target) low = middle;
+      else high = middle;
+    }
+    return hslRgb(hue, saturation, (low + high) / 2);
+  }
+
   function apply() {
     const resolved = settings.preference === "system" ? (scheme.matches ? "dark" : "light") : settings.preference;
     if (root.dataset.theme !== resolved) root.dataset.theme = resolved;
@@ -102,6 +155,18 @@
     const foreground = [[22, 33, 28], [255, 255, 255], [0, 0, 0]].find((rgb) => contrast(rgb) >= 4.5) || [0, 0, 0];
     root.style.setProperty("--control-accent", colorHex(fill));
     root.style.setProperty("--on-control-accent", colorHex(foreground));
+    // Dark navigation uses three related tones rather than a bright raw fill
+    // that forces black labels. Other controls retain the exact chosen color.
+    const navFill = dark ? navigationTone(h, Math.min(s, 48), .075 + settings.accentLightness * .0003) : fill;
+    const iconFill = dark ? navigationTone(h, Math.min(s, 48), .12 + settings.accentLightness * .0003) : navigationIconBackground(fill, h, s, accent);
+    root.style.setProperty("--nav-active-background", colorHex(navFill));
+    root.style.setProperty("--nav-active-icon-background", dark ? colorHex(iconFill) : "color-mix(in srgb, var(--accent) 16%, transparent)");
+    root.style.setProperty("--nav-mobile-active-background", colorHex(dark ? iconFill : fill));
+    const navSaturation = Math.min(100, s + (dark ? 6 : 8));
+    const navStart = dark ? Math.max(86, strong) : strong;
+    const commonNavigation = navigationForeground(h, navSaturation, navStart, [navFill, iconFill], dark);
+    root.style.setProperty("--nav-active-foreground", commonNavigation || navigationForeground(h, navSaturation, navStart, [navFill], dark));
+    root.style.setProperty("--nav-active-icon-foreground", commonNavigation || navigationForeground(h, navSaturation, navStart, [iconFill], dark));
     syncControls();
   }
 
@@ -137,39 +202,65 @@
     status.classList.toggle("is-error", statusError);
   }
 
-  function persist() {
-    clearTimeout(persistTimer);
-    const snapshot = { ...settings };
-    const savedRevision = revision;
-    setStatus("");
-    if (local) {
-      try {
-        localStorage.setItem(storageKey, JSON.stringify(snapshot));
-        return;
-      } catch { local = false; }
-    }
-    saveChain = saveChain.catch(() => {}).then(async () => {
-      const bridge = window.AstrBotPluginPage;
-      if (!bridge?.apiPost) throw new Error("页面通信不可用");
-      await bridge.apiPost("appearance", snapshot);
-      // A successful response alone cannot prove that browser cookie storage is enabled.
-      const saved = normalize(await bridge.apiGet("appearance"));
-      if (JSON.stringify(saved) !== JSON.stringify(snapshot)) throw new Error("浏览器未保留主题设置");
-    }).catch(() => {
-      if (savedRevision === revision) setStatus("主题已应用，但未保存；请允许浏览器存储后重试。", true);
-    });
+  function isDirty() { return JSON.stringify(settings) !== JSON.stringify(savedBaseline); }
+  function notifyChange() { window.dispatchEvent(new Event("image-studio-appearance-change")); }
+
+  function acceptSaved(value) {
+    const preserveDraft = isDirty();
+    savedBaseline = normalize(value);
+    if (!preserveDraft) settings = { ...savedBaseline };
+    apply();
+    notifyChange();
   }
 
-  function update(patch, immediate = true) {
-    revision += 1;
+  function save(value = settings) {
+    const snapshot = normalize(value);
+    // An initialization request started before this save cannot supersede it.
+    storageRevision += 1;
+    setStatus("");
+    saveChain = saveChain.catch(() => {}).then(async () => {
+      let persisted = false;
+      if (local) {
+        try {
+          localStorage.setItem(storageKey, JSON.stringify(snapshot));
+          persisted = true;
+        } catch { local = false; }
+      }
+      if (!persisted) {
+        const bridge = window.AstrBotPluginPage;
+        if (!bridge?.apiPost || !bridge?.apiGet) throw new Error("页面通信不可用");
+        await bridge.apiPost("appearance", snapshot);
+        // A successful response alone cannot prove browser cookie storage works.
+        const saved = normalize(await bridge.apiGet("appearance"));
+        if (JSON.stringify(saved) !== JSON.stringify(snapshot)) throw new Error("浏览器未保留主题设置");
+      }
+      // Keep any newer preview edits made while this snapshot was being saved.
+      savedBaseline = { ...snapshot };
+      setStatus("");
+      notifyChange();
+      return { ...snapshot };
+    }).catch((error) => {
+      setStatus("主题已应用，但未保存；请允许浏览器存储后重试。", true);
+      throw error;
+    });
+    return saveChain;
+  }
+
+  function update(patch) {
     settings = normalize({ ...settings, ...patch });
     if (panel && ["accentHue", "accentSaturation", "accentLightness"].some((key) => Object.hasOwn(patch, key))) panel.querySelector("#appearanceHex").setAttribute("aria-invalid", "false");
+    setStatus("");
     apply();
-    if (immediate) persist();
-    else {
-      clearTimeout(persistTimer);
-      persistTimer = setTimeout(persist, 240);
-    }
+    notifyChange();
+  }
+
+  function discard() {
+    update(savedBaseline);
+    if (!panel) return;
+    closeSampler(false);
+    panel.querySelector(".appearance-reset-confirmation").hidden = true;
+    panel.querySelector(".appearance-reset").setAttribute("aria-expanded", "false");
+    panel.querySelector("#appearanceHex").value = currentColor();
   }
 
   function icon(name) {
@@ -275,7 +366,7 @@
     panel = document.getElementById("appearanceSettings");
     if (!panel) return;
     panel.setAttribute("aria-labelledby", "appearanceTitle");
-    panel.innerHTML = `<div class="section-heading appearance-heading"><h2 id="appearanceTitle">主题</h2><button type="button" class="quiet-button appearance-reset" aria-expanded="false" aria-controls="appearanceResetConfirmation">${icon("RefreshCw")}恢复默认</button></div>
+    panel.innerHTML = `<div class="section-heading appearance-heading"><h2 id="appearanceTitle">主题与显示</h2><button type="button" class="quiet-button appearance-reset" aria-expanded="false" aria-controls="appearanceResetConfirmation">${icon("RefreshCw")}恢复默认</button></div>
       <fieldset class="appearance-fieldset"><legend>显示模式</legend><div class="appearance-modes">${modes.map(([value, title]) => `<label><input type="radio" name="appearanceMode" value="${value}"><span>${title}</span></label>`).join("")}</div></fieldset>
       <fieldset class="appearance-fieldset"><legend>强调色</legend><div class="appearance-swatches">${swatches.map(([hue, title]) => `<label title="${title}" style="--swatch-h:${hue}"><input type="radio" name="appearanceAccent" value="${hue}" aria-label="${title}"><span>${icon("Check")}</span></label>`).join("")}</div></fieldset>
       <div class="appearance-custom-color"><input type="color" id="appearanceColor" aria-label="自选强调色" title="自选颜色"><input type="text" id="appearanceHex" aria-label="强调色 HEX 色值" maxlength="7" spellcheck="false" autocapitalize="off" autocomplete="off"><button type="button" id="appearanceEyedropper" class="studio-icon-button" aria-label="吸取颜色" title="吸取颜色">${icon("Pipette")}</button></div>
@@ -288,12 +379,13 @@
       <label class="appearance-range"><span>强调色饱和度<output data-appearance-value="accentSaturation"></output></span><input type="range" min="0" max="100" step="1" data-appearance-field="accentSaturation" aria-label="强调色饱和度"></label>
       <label class="appearance-range"><span>玻璃不透明度<output data-appearance-value="glassOpacity"></output></span><input type="range" min="20" max="100" step="1" data-appearance-field="glassOpacity" aria-label="玻璃不透明度"></label>
       <div id="appearanceResetConfirmation" class="appearance-reset-confirmation" role="group" aria-label="恢复默认主题" hidden><span>恢复默认主题？</span><div><button type="button" class="quiet-button" data-appearance-reset="cancel">取消</button><button type="button" class="quiet-button" data-appearance-reset="confirm">恢复</button></div></div>
-      <p class="appearance-status" role="status" aria-live="polite"></p>`;
+      <p class="appearance-status" role="status" aria-live="polite"></p>
+      <div class="field appearance-gallery-sort"><label for="gallerySort">画廊排序方式</label><select id="gallerySort"><option value="created">按创建时间</option><option value="latest_content">按最新内容</option></select><p class="field-hint">按最新内容时，以图组中最新的图片时间排序。</p></div>`;
+    window.dispatchEvent(new CustomEvent("image-studio-display-settings-ready"));
     panel.querySelectorAll('[name="appearanceMode"]').forEach((input) => input.addEventListener("change", () => update({ preference: input.value })));
     panel.querySelectorAll('[name="appearanceAccent"]').forEach((input) => input.addEventListener("change", () => update({ accentHue: Number(input.value), accentLightness: 50 })));
     const colorInput = panel.querySelector("#appearanceColor"), hexInput = panel.querySelector("#appearanceHex");
-    colorInput.addEventListener("input", () => update(readColor(colorInput.value), false));
-    colorInput.addEventListener("change", persist);
+    colorInput.addEventListener("input", () => update(readColor(colorInput.value)));
     const commitHex = () => {
       const color = readColor(hexInput.value);
       hexInput.setAttribute("aria-invalid", String(!color));
@@ -329,8 +421,7 @@
     });
     panel.querySelector("#appearanceSampler").addEventListener("keydown", (event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeSampler(); } });
     panel.querySelectorAll("[data-appearance-field]").forEach((input) => {
-      input.addEventListener("input", () => update({ [input.dataset.appearanceField]: Number(input.value) / (input.dataset.appearanceField === "glassOpacity" ? 100 : 1) }, false));
-      input.addEventListener("change", persist);
+      input.addEventListener("input", () => update({ [input.dataset.appearanceField]: Number(input.value) / (input.dataset.appearanceField === "glassOpacity" ? 100 : 1) }));
     });
     const reset = panel.querySelector(".appearance-reset");
     const confirmation = panel.querySelector(".appearance-reset-confirmation");
@@ -357,20 +448,19 @@
     bridge?.onContext?.(apply);
     bridge?.onThemeChange?.(apply);
     if (local) { finish(); return; }
-    const startingRevision = revision;
+    const startingRevision = storageRevision;
     const timeout = setTimeout(() => {
-      setStatus("未能读取已保存的主题，暂用当前主题。", true);
+      if (storageRevision === startingRevision) setStatus("未能读取已保存的主题，暂用当前主题。", true);
       finish();
     }, 4000);
     try {
       if (!bridge?.apiGet) throw new Error("页面通信不可用");
       await bridge.ready();
       const saved = await bridge.apiGet("appearance");
-      if (revision === startingRevision && !initialized) {
-        settings = normalize(saved);
-        apply();
-      }
-    } catch { setStatus("未能读取已保存的主题，暂用当前主题。", true); }
+      if (storageRevision === startingRevision) acceptSaved(saved);
+    } catch {
+      if (storageRevision === startingRevision) setStatus("未能读取已保存的主题，暂用当前主题。", true);
+    }
     finally { clearTimeout(timeout); finish(); }
   }
 
@@ -382,6 +472,7 @@
     const normalized = normalize(parsed);
     localStorage.setItem(storageKey, JSON.stringify(normalized));
     settings = normalized;
+    savedBaseline = { ...normalized };
     local = true;
   } catch {
     root.dataset.appearancePending = "true";
@@ -396,11 +487,12 @@
   scheme.addEventListener("change", () => { if (settings.preference === "system") apply(); });
   window.addEventListener("storage", (event) => {
     if (!local || event.key !== storageKey) return;
-    try { settings = normalize(event.newValue ? JSON.parse(event.newValue) : null); } catch { settings = { ...defaults }; }
-    revision += 1;
-    apply();
+    let value;
+    try { value = event.newValue ? JSON.parse(event.newValue) : null; } catch { value = defaults; }
+    storageRevision += 1;
+    acceptSaved(value);
   });
-  window.ImageStudioAppearance = Object.freeze({ ready, get: () => ({ ...settings }), set: update, defaults, normalize, saved: () => saveChain });
+  window.ImageStudioAppearance = Object.freeze({ ready, get: () => ({ ...settings }), set: update, isDirty, discard, save, defaults, normalize, saved: () => saveChain });
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", initialize, { once: true });
   else void initialize();
 })();

@@ -227,8 +227,8 @@ async function verify(page, frame, inner, groupId, summary, assets, name, engine
   const originals = assets.images.map((image) => image.data_url);
   assert.ok(previews.every((source, index) => source && source !== originals[index]));
   let releaseAssets; const assetsGate = new Promise((resolve) => { releaseAssets = resolve; });
-  const pattern = `**/gallery/assets/${groupId}`;
-  const delay = async (route) => { await assetsGate; await route.continue(); };
+  const pattern = "**/gallery/image/*";
+  const delay = async (route) => { if (new URL(route.request().url()).searchParams.get("detail") === "original") await assetsGate; await route.continue(); };
   await page.route(pattern, delay);
   try {
     await frame.locator(`[data-gallery-id="${groupId}"] .gallery-info`).click();

@@ -333,26 +333,29 @@ def test_prebaseline_receipt_layout_is_rejected_without_changing_gallery(tmp_pat
         store = GenerationStore(tmp_path)
         await store.initialize()
         result = await store.import_image(image(), "image.png", {"prompt": "kept"})
-        before = await store.generation_detail(
-            result["generation_id"], include_assets=False
-        )
         with store._connect() as conn:
+            for table in ("external_records", "external_sources"):
+                conn.execute(f"DROP TABLE {table}")
             conn.execute("DROP TABLE import_batches")
             conn.execute(
-                "CREATE TABLE schema_meta (id INTEGER PRIMARY KEY, target_version INTEGER NOT NULL, dev_revision INTEGER NOT NULL)"
+                "CREATE TABLE schema_meta (id INTEGER PRIMARY KEY CHECK(id = 1), target_version INTEGER NOT NULL, dev_revision INTEGER NOT NULL)"
             )
             conn.execute("INSERT INTO schema_meta VALUES (1, 1, 2)")
             conn.execute("PRAGMA user_version = 0")
+        with store._connect() as conn:
+            before = list(conn.iterdump())
         reopened = GenerationStore(tmp_path)
         with pytest.raises(RuntimeError, match="末版开发版"):
             await reopened.initialize()
-        assert (
-            await reopened.generation_detail(
-                result["generation_id"], include_assets=False
-            )
-            == before
-        )
         with reopened._connect() as conn:
+            assert list(conn.iterdump()) == before
+            assert (
+                conn.execute(
+                    "SELECT original_prompt FROM generations WHERE id=?",
+                    (result["generation_id"],),
+                ).fetchone()[0]
+                == "kept"
+            )
             assert (
                 conn.execute("SELECT dev_revision FROM schema_meta").fetchone()[0] == 2
             )

@@ -25,14 +25,14 @@ async function settle(frame) {
   });
 }
 
-async function checkMenu(frame) {
+async function checkMenu(frame, expectedSelected = 1) {
   await settle(frame);
   const layout = await frame.locator(".studio-select-menu").evaluate(menu => {
     const box = menu.getBoundingClientRect();
     return { left: box.left, top: box.top, right: box.right, bottom: box.bottom, width: innerWidth, height: innerHeight, selected: menu.querySelectorAll('[aria-selected="true"]').length };
   });
   assert.ok(layout.left >= 7 && layout.top >= 7 && layout.right <= layout.width - 7 && layout.bottom <= layout.height - 7, JSON.stringify(layout));
-  assert.equal(layout.selected, 1);
+  assert.equal(layout.selected, expectedSelected);
 }
 
 (async () => {
@@ -74,14 +74,14 @@ async function checkMenu(frame) {
       const engineValues = await frame.locator("#galleryEngine").evaluate(select => Array.from(select.options).map(option => option.value));
       assert.ok(engineValues.includes("novelai") && !engineValues.includes("nai"));
       await frame.locator('.studio-select-trigger[data-select-id="galleryEngine"]').click();
-      await checkMenu(frame);
+      await checkMenu(frame, engineValues.length);
       await page.screenshot({ path: path.join(output, `${test.width}-${test.theme}-gallery-menu.png`) });
       await frame.locator('.studio-select-trigger[data-select-id="galleryEngine"]').press("Escape");
       assert.equal(await frame.locator(".studio-select-menu").count(), 0);
 
       await frame.locator(".gallery-card .gallery-info").first().click();
       await frame.locator(".detail-parameter-grid").first().waitFor();
-      const columns = await frame.locator(".detail-parameter-grid").first().evaluate(element => getComputedStyle(element).columnCount);
+      const columns = await frame.locator(".detail-parameter-grid").first().evaluate(element => getComputedStyle(element).getPropertyValue("--parameter-columns").trim());
       assert.equal(columns, test.width <= 540 ? "1" : "2");
       await frame.locator("#drawerBody").evaluate(element => { element.scrollTop = 280; });
       await settle(frame);
@@ -90,7 +90,11 @@ async function checkMenu(frame) {
       await checkMenu(frame);
       if (test.width <= 540) {
         const trigger = await frame.locator('.studio-select-trigger[data-select-id="detailCopyFormat"]').boundingBox();
-        assert.equal(trigger.width, 44); assert.equal(trigger.height, 44);
+        // Earlier cases import a new record, which may be the first gallery
+        // card now. Its edit action adds one control to the responsive footer.
+        const actionSlots = await frame.locator("#detailImportEdit").isVisible() ? 8 : 7;
+        const expectedSize = Math.min(44, (test.width - 32) / actionSlots);
+        assert.ok(Math.abs(trigger.width - expectedSize) < 1); assert.ok(Math.abs(trigger.height - expectedSize) < 1);
       }
       await page.screenshot({ path: path.join(output, `${test.width}-${test.theme}-detail-menu.png`) });
       await frame.locator('.studio-select-trigger[data-select-id="detailCopyFormat"]').press("Escape");
@@ -120,7 +124,8 @@ async function checkMenu(frame) {
       assert.equal(await frame.locator("#newModelChoice").getAttribute("list"), null);
 
       const sample = path.join(root, "data/image/149037466_p0.webp");
-      if (fs.existsSync(sample)) {
+      const checkWebpImport = process.env.STUDIO_SKIP_LOCAL_SAMPLE !== "1" && fs.existsSync(sample);
+      if (checkWebpImport) {
         await frame.locator('[data-view="import"]').click();
         const buffer = execFileSync(process.env.STUDIO_PYTHON || "/home/coder/apps/miniconda3/envs/astrbot/bin/python", ["-c", "import sys,io; from PIL import Image,PngImagePlugin; image=Image.open(sys.argv[1]); metadata=PngImagePlugin.PngInfo(); [metadata.add_text(k,v) for k,v in image.info.items() if isinstance(v,str)]; metadata.add_text('BrowserFixture',sys.argv[2]); output=io.BytesIO(); image.save(output,format='PNG',pnginfo=metadata,exif=image.info.get('exif',b'')); sys.stdout.buffer.write(output.getvalue())", sample, `${path.basename(output)}-${test.width}-${test.theme}`], { maxBuffer: 32 * 1024 * 1024 });
         await frame.locator("#importFiles").setInputFiles({ name: `converted-${test.width}.png`, mimeType: "image/png", buffer });
@@ -135,7 +140,7 @@ async function checkMenu(frame) {
       const geometry = await frame.evaluate(() => ({ width: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth }));
       assert.ok(geometry.scroll <= geometry.width + 1, JSON.stringify(geometry));
       assert.deepEqual(errors, []);
-      console.log(`${test.width}-${test.theme}: stable gallery, masonry, themed controls, modal focus and WebP import passed`);
+      console.log(`${test.width}-${test.theme}: stable gallery, masonry, themed controls and modal focus passed; WebP import ${checkWebpImport ? "passed" : "skipped"}`);
       await page.close();
     }
     console.log(`Screenshots: ${output}`);

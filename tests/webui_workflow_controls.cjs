@@ -39,6 +39,18 @@ function responseFor(page, pathPart, predicate = () => true) {
 }
 
 async function selectValue(frame, inner, id, value) {
+  if (await inner.locator(`#${id}`).evaluate(select => select.multiple)) {
+    await frame.locator(`.studio-select-trigger[data-select-id="${id}"]`).click();
+    if (value === "") await frame.locator('.studio-select-menu [data-select-action="all"]').click();
+    else {
+      await frame.locator('.studio-select-menu [data-select-action="clear"]').click();
+      const index = await inner.locator(`#${id}`).evaluate((select, desired) => Array.from(select.options).findIndex(option => option.value === desired), value);
+      assert.ok(index >= 0, `${id} lacks value ${value}`);
+      await frame.locator(`.studio-select-menu [data-option-index="${index}"]`).click();
+    }
+    await frame.locator(`.studio-select-trigger[data-select-id="${id}"]`).press("Escape");
+    return;
+  }
   const index = await inner.locator(`#${id}`).evaluate((select, selected) => Array.from(select.options).findIndex((option) => option.value === selected), value);
   assert.ok(index >= 0, `${id} lacks value ${value}`);
   await frame.locator(`.studio-select-trigger[data-select-id="${id}"]`).click();
@@ -69,7 +81,7 @@ async function testSelectionActions(page, frame, inner, name) {
   await frame.locator(`.gallery-card[data-gallery-id="${secondId}"] .gallery-selection`).click();
   await frame.locator("#selectionCount").filter({ hasText: "2" }).waitFor();
 
-  const filterResponse = responseFor(page, "/gallery/list", (response) => new URL(response.url()).searchParams.get("source") === "command");
+  const filterResponse = responseFor(page, "/gallery/list", (response) => new URL(response.url()).searchParams.get("sources") === '["command"]');
   await selectValue(frame, inner, "gallerySource", "command");
   await filterResponse;
   assert.match(await frame.locator("#selectionCount").textContent(), /2/, "filtering discarded cross-page selection");
@@ -101,14 +113,14 @@ async function testSelectionActions(page, frame, inner, name) {
   await searchResponse;
   const clearResponse = responseFor(page, "/gallery/list", (response) => {
     const params = new URL(response.url()).searchParams;
-    return !params.get("query") && params.get("source") === "command" && Number(params.get("offset")) === 0;
+    return !params.get("query") && params.get("sources") === '["command"]' && Number(params.get("offset")) === 0;
   });
   await frame.locator("#galleryClearSearch").click(); await clearResponse;
   assert.equal(await frame.locator("#gallerySearch").inputValue(), "");
   assert.equal(await frame.locator("#gallerySource").inputValue(), "command");
   assert.match(await frame.locator("#selectionCount").textContent(), /2/, "clearing search discarded selected records");
   await frame.locator("#cancelSelectionButton").click();
-  const allResponse = responseFor(page, "/gallery/list", (response) => !new URL(response.url()).searchParams.get("source"));
+  const allResponse = responseFor(page, "/gallery/list", (response) => !new URL(response.url()).searchParams.get("sources"));
   await selectValue(frame, inner, "gallerySource", ""); await allResponse;
 }
 

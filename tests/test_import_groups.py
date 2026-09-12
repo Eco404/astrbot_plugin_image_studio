@@ -455,9 +455,11 @@ def test_older_development_layout_is_rejected_without_rewriting_imports(tmp_path
         )
         await store.set_favorite(imported["generation_id"], True)
         with store._connect() as conn:
+            for table in ("external_records", "external_sources"):
+                conn.execute(f"DROP TABLE {table}")
             conn.execute("ALTER TABLE generation_images DROP COLUMN supplemental_json")
             conn.execute(
-                "CREATE TABLE schema_meta (id INTEGER PRIMARY KEY, target_version INTEGER NOT NULL, dev_revision INTEGER NOT NULL)"
+                "CREATE TABLE schema_meta (id INTEGER PRIMARY KEY CHECK(id = 1), target_version INTEGER NOT NULL, dev_revision INTEGER NOT NULL)"
             )
             conn.execute("INSERT INTO schema_meta VALUES (1, 1, 1)")
             conn.execute("PRAGMA user_version = 0")
@@ -577,7 +579,7 @@ def test_nai_source_aliases_share_filters_and_preserve_raw_import_information(tm
                     "SELECT asset_id, metadata_json FROM image_metadata ORDER BY asset_id"
                 )
             ] == original_metadata
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
 
     asyncio.run(run())
 

@@ -116,6 +116,7 @@ def default_webui_settings() -> dict[str, Any]:
         "schema_version": 2,
         "revision": 0,
         "providers": [],
+        "external_sources": {},
         "history": {
             "enabled": True,
             "max_records": 200,
@@ -205,6 +206,56 @@ def normalize_webui_settings(value: Any) -> tuple[dict[str, Any], list[str]]:
         history.get("record_invocation_identity"), False
     )
     merged["history"] = history
+
+    external = merged.get("external_sources")
+    if not isinstance(external, dict):
+        errors.append("外部图库设置必须是对象")
+        external = {}
+    if len(external) > 32:
+        errors.append("最多配置 32 个外部图库")
+    normalized_external = {}
+    for source_id, value in external.items():
+        if not isinstance(source_id, str) or not re.fullmatch(
+            r"[a-z][a-z0-9_]{0,47}", source_id
+        ):
+            errors.append("外部图库来源 ID 无效")
+            continue
+        entry = value if isinstance(value, dict) else {"enabled": value}
+        kind = entry.get("type", "nai" if source_id == "nai" else "")
+        if not isinstance(kind, str) or kind not in {"nai", "directory"}:
+            errors.append(f"外部图库 {source_id} 的类型不受支持")
+            continue
+        name = entry.get("name", "NAI 插件图库" if kind == "nai" else "自定义图库")
+        if not isinstance(name, str) or not name.strip() or len(name.strip()) > 80:
+            errors.append(f"外部图库 {source_id} 的名称应为 1 至 80 个字符")
+            continue
+        path = entry.get("path", "") if kind == "directory" else ""
+        if not isinstance(path, str) or len(path) > 4096 or "\x00" in path:
+            errors.append(f"外部图库 {name} 的目录无效")
+            continue
+        if kind == "directory" and (
+            not path.strip() or not Path(path.strip()).is_absolute()
+        ):
+            errors.append(f"外部图库 {name} 必须填写容器内的绝对目录路径")
+        permissions = entry.get("permissions", {})
+        if not isinstance(permissions, dict):
+            errors.append(f"外部图库 {name} 的操作权限必须是对象")
+            permissions = {}
+        normalized_external[source_id] = {
+            "type": kind,
+            "name": name.strip(),
+            "path": path.strip(),
+            "enabled": _as_bool(entry.get("enabled"), False),
+            "recursive": _as_bool(entry.get("recursive"), False),
+            "permissions": {
+                action: _as_bool(
+                    permissions.get(action),
+                    kind == "nai" if action == "delete" else True,
+                )
+                for action in ("favorite", "delete", "download", "reference")
+            },
+        }
+    merged["external_sources"] = normalized_external
 
     raw_defaults = (
         merged.get("generation_defaults")

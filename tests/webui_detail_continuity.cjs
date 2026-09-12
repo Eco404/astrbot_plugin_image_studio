@@ -102,8 +102,9 @@ async function run(browserName, width) {
   let releaseAssets;
   const assetsGate = new Promise((resolve) => { releaseAssets = resolve; });
   const assetRequests = [];
-  await page.route("**/gallery/assets/*", async (route) => {
-    assetRequests.push(route.request().url().split("/").pop()); await assetsGate;
+  page.on("request", (request) => { if (request.url().includes("/gallery/assets/")) assetRequests.push(request.url()); });
+  await page.route("**/gallery/image/*", async (route) => {
+    if (new URL(route.request().url()).searchParams.get("detail") === "original") await assetsGate;
     try { await route.continue(); } catch (error) { if (!/handled|closed|disposed/i.test(error.message)) throw error; }
   });
   try {
@@ -126,14 +127,14 @@ async function run(browserName, width) {
         await inner.locator('.detail-swipe-pane[data-swipe-offset="1"] img').waitFor();
         assert.equal(await inner.locator(".detail-image-frame").getAttribute("data-generation-id"), group, "drag preview must not commit metadata");
         assert.equal(await inner.locator(".detail-filmstrip-thumb").count(), 3);
-        assert.ok(assetRequests.every((id) => id === group), "adjacent records must not preload whole original groups");
+        assert.deepEqual(assetRequests, [], "adjacent records must not preload whole original groups");
         await page.screenshot({ path: path.join(output, `${browserName}-${width}-cross-drag.png`) });
       });
     } else await inner.locator('[data-detail-nav="1"]').click();
     await selected(inner, neighbor.generation_id, 0); await persistent(inner);
     assert.equal(await inner.locator(".detail-filmstrip").count(), 0);
     const adjacentSummary = await api(page, "get", `gallery/detail/${neighbor.generation_id}?assets=0`);
-    assert.ok((await inner.locator("#drawerBody").textContent()).includes(adjacentSummary.original_prompt), "new image must display its own record parameters");
+    await inner.locator(".detail-parameter-row").filter({ hasText: adjacentSummary.original_prompt }).first().waitFor();
     if (width <= 540) await swipe(inner, -1); else await inner.locator("#detailDrawer").press("ArrowLeft");
     await selected(inner, group, 2); await persistent(inner);
     assert.equal(await inner.locator(".detail-filmstrip-thumb").count(), 3);
@@ -152,12 +153,12 @@ async function run(browserName, width) {
     await inner.locator("#closeDrawer").click();
 
     const failurePath = `**/gallery/detail/${nextPageItem.generation_id}?*`;
-    await page.route(failurePath, (route) => route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "测试：目标图片暂时无法读取" }) }));
+    await page.route(failurePath, (route) => route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "测试：目标图片暂时无法读取" }) }));
     await inner.locator(`[data-gallery-id="${lastId}"] .gallery-info`).click(); await selected(inner, lastId, 0); await watchFrame(inner);
     if (width <= 540) await swipe(inner, 1); else await inner.locator("#detailDrawer").press("ArrowRight");
-    await inner.locator("#appNotice.is-error").waitFor();
-    assert.match(await inner.locator("#appNoticeMessage").textContent(), /图片切换失败|目标图片暂时无法读取/);
-    await selected(inner, lastId, 0); await persistent(inner);
+    await inner.locator("[data-detail-manifest-retry]").waitFor();
+    assert.match(await inner.locator(".detail-manifest-loading").textContent(), /目标图片暂时无法读取/);
+    await selected(inner, nextPageItem.generation_id, nextPageItem.image_index); await persistent(inner);
     await inner.locator("#closeDrawer").click(); await page.unroute(failurePath);
 
     let releaseTarget; let targetStarted;
@@ -167,7 +168,8 @@ async function run(browserName, width) {
     try {
       await inner.locator(`[data-gallery-id="${lastId}"] .gallery-info`).click(); await selected(inner, lastId, 0);
       await inner.locator("#detailDrawer").press("ArrowRight"); await started;
-      assert.equal(await inner.locator(".detail-image-frame").getAttribute("data-generation-id"), lastId, "pending navigation must retain the origin");
+      await selected(inner, nextPageItem.generation_id, nextPageItem.image_index);
+      assert.equal(await inner.locator(".detail-manifest-loading").count(), 1, "pending manifest must not block the cached target preview");
       await inner.locator("#closeDrawer").click();
       await inner.locator(`[data-gallery-id="${group}"] .gallery-info`).click(); await selected(inner, group, 0);
       releaseTarget(); await page.waitForTimeout(450); await selected(inner, group, 0);
@@ -196,7 +198,7 @@ async function run(browserName, width) {
     assert.equal(await inner.locator(".detail-image-frame").getAttribute("data-generation-id"), group, "deleting an earlier image must not skip the next image into another group");
     await page.screenshot({ path: path.join(output, `${browserName}-${width}-settled.png`) });
     assert.deepEqual(errors, [], "browser console exceptions");
-    console.log(`${browserName} ${width}: continuous group/page/reverse transitions, persistent image layers, filtered cursors, speculative thumbnail-only loading, failure rollback, stale request cancellation and external-delete cursor stability passed`);
+    console.log(`${browserName} ${width}: continuous group/page/reverse transitions, persistent image layers, filtered cursors, speculative thumbnail-only loading, visible-preview manifest failure, stale request cancellation and external-delete cursor stability passed`);
   } finally {
     releaseAssets();
     if (created.length) await api(page, "post", "gallery/delete", { ids: created });

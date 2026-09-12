@@ -206,8 +206,11 @@ def test_page_and_tool_defaults_use_each_models_parameter_defaults(tmp_path) -> 
         )
 
         assert [(item.model, item.size, item.count) for item in captured] == [
-            ("page-model", "1024x1536", 2),
-            ("tool-model", "1536x1024", 3),
+            ("page-model", "1024x1536", 1),
+            ("page-model", "1024x1536", 1),
+            ("tool-model", "1536x1024", 1),
+            ("tool-model", "1536x1024", 1),
+            ("tool-model", "1536x1024", 1),
         ]
 
     asyncio.run(run())
@@ -1161,7 +1164,7 @@ def test_capabilities_only_lists_llm_enabled_models() -> None:
     assert "tool_images" in payload["asset_policy"]["temporary_preview_path"]
 
 
-def test_capabilities_excludes_zero_limit_model_from_img2img() -> None:
+def test_capabilities_uses_img2img_support_not_zero_reference_limit() -> None:
     provider = ImageProvider.from_mapping(
         {
             "id": "provider",
@@ -1178,6 +1181,12 @@ def test_capabilities_excludes_zero_limit_model_from_img2img() -> None:
                     "id": "positive-limit",
                     "supports_img2img": True,
                     "max_reference_images": 2,
+                },
+                {
+                    "id": "disabled-support",
+                    "supports_img2img": False,
+                    "max_reference_images": 8,
+                    "tool": {"enabled": True, "max_reference_images": 8},
                 },
             ],
         }
@@ -1198,7 +1207,8 @@ def test_capabilities_excludes_zero_limit_model_from_img2img() -> None:
     payload = json.loads(result.content[0].text)
 
     assert [item["model_ref"] for item in payload["models"]] == [
-        "provider:positive-limit"
+        "provider:zero-limit",
+        "provider:positive-limit",
     ]
 
 

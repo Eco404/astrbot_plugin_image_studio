@@ -70,7 +70,7 @@ async function arm(inner, src) { await inner.evaluate((value) => window.__armBac
 async function release(inner, src, failure = false) { await inner.evaluate(({ src, failure }) => window.__releaseBackdrop(src, failure), { src, failure }); }
 
 async function snapshot(inner, selector) {
-  return await inner.evaluate((selector) => Array.from(document.querySelectorAll(selector)).map((image) => ({ src: image.src, opacity: Number(getComputedStyle(image).opacity), loaded: image.complete && image.naturalWidth > 1, className: image.className, connected: image.isConnected })), selector);
+  return await inner.evaluate((selector) => Array.from(document.querySelectorAll(selector)).map((image) => ({ src: image instanceof HTMLCanvasElement ? image.dataset.previewSource : image.src, opacity: Number(getComputedStyle(image).opacity), loaded: image instanceof HTMLCanvasElement ? image.width > 1 && image.height > 1 && image.getContext("2d").getImageData(0, 0, 1, 1).data[3] === 255 : image.complete && image.naturalWidth > 1, className: image.className, connected: image.isConnected })), selector);
 }
 
 async function retained(inner, selector, previous, label) {
@@ -79,10 +79,24 @@ async function retained(inner, selector, previous, label) {
 }
 
 async function waitVisible(inner, selector, source) {
-  await inner.waitForFunction(({ selector, source }) => Array.from(document.querySelectorAll(selector)).some((image) => !image.className.includes("previous") && image.src === source && image.complete && image.naturalWidth > 1 && Number(getComputedStyle(image).opacity) > .6 && image.dataset.backdropState !== "fading" && image.dataset.backdropState !== "loading"), { selector, source });
+  await inner.waitForFunction(({ selector, source }) => Array.from(document.querySelectorAll(selector)).some((image) => !image.className.includes("previous") && (image instanceof HTMLCanvasElement ? image.dataset.previewSource === source && image.width > 1 && image.height > 1 : image.src === source && image.complete && image.naturalWidth > 1) && Number(getComputedStyle(image).opacity) > .6 && image.dataset.backdropState !== "fading" && image.dataset.backdropState !== "loading"), { selector, source });
 }
 
 async function intermediateFade(page, inner, selector, target, name, opacity) {
+  if (await inner.locator(selector).first().evaluate(image => image instanceof HTMLCanvasElement)) {
+    const sample = await inner.waitForFunction(({ selector, target }) => {
+      const canvas = document.querySelector(selector);
+      const progress = Number(canvas?.dataset.fadeProgress);
+      return canvas?.dataset.backdropState === "fading" && canvas.dataset.pendingSource === target && progress > 0 && progress < 1 ? { pixels: canvas.toDataURL(), opacity: Number(getComputedStyle(canvas).opacity) } : false;
+    }, { selector, target }, { polling: "raf", timeout: 3500 });
+    const during = await sample.jsonValue(); await sample.dispose();
+    assert.equal(during.opacity, 1, "the fullscreen canvas must remain opaque during its internal blend");
+    await page.screenshot({ path: path.join(output, `${name}-fading.png`) });
+    await waitVisible(inner, selector, target);
+    assert.notEqual(await inner.locator(selector).evaluate(canvas => canvas.toDataURL()), during.pixels, "the fullscreen transition must paint intermediate pixels, not only update its state label");
+    assert.equal(await inner.locator(selector).count(), 1, "fullscreen keeps one mounted background canvas");
+    return;
+  }
   await inner.waitForFunction(({ selector, target, opacity }) => Array.from(document.querySelectorAll(selector)).some((image) => image.src === target && Number(getComputedStyle(image).opacity) > .01 && Number(getComputedStyle(image).opacity) < opacity - .025), { selector, target, opacity }, { polling: "raf", timeout: 3500 });
   await page.screenshot({ path: path.join(output, `${name}-fading.png`) });
   await waitVisible(inner, selector, target);
@@ -129,7 +143,7 @@ async function exerciseSurface(page, inner, surface, test) {
   await retained(inner, selector, source3, `${surface.name}: stale decode must not replace newest image`);
   const obsoleteVisible = (await snapshot(inner, selector)).some((layer) => alternatives(2).includes(layer.src) && layer.opacity > .03);
   assert.equal(obsoleteVisible, false, `${surface.name}: stale background became visible`);
-  console.log(`${test.name}/${surface.name}: delayed decode, actual intermediate opacity, failed decode and stale result exclusion passed`);
+  console.log(`${test.name}/${surface.name}: delayed decode, visible intermediate transition, failed decode and stale result exclusion passed`);
 }
 
 async function fullscreenMissingAndClose(page, inner, frame, surface) {

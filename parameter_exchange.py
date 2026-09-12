@@ -10,6 +10,7 @@ from typing import Any
 
 from .config import RuntimeSettings
 from .image_metadata import parse_parameter_text
+from .models import MODEL_SCHEDULING_KEYS, parameter_flag
 from .storage import project_import_metadata
 
 
@@ -17,7 +18,7 @@ def request_snapshot(detail: dict[str, Any]) -> dict[str, Any]:
     """Project a saved request without credentials or invocation identity."""
 
     parameters = detail.get("parameters") or {}
-    return {
+    snapshot = {
         "mode": detail.get("mode", "unknown"),
         "provider_id": detail.get("provider_id", ""),
         "model_ref": (
@@ -27,11 +28,18 @@ def request_snapshot(detail: dict[str, Any]) -> dict[str, Any]:
         ),
         "model": detail.get("model", ""),
         "prompt": detail.get("original_prompt", ""),
-        "negative_prompt": parameters.get("negative_prompt", ""),
-        "size": parameters.get("size", ""),
-        "count": parameters.get("count", 1),
         "parameters": copy.deepcopy(parameters.get("parameters", {})),
     }
+    for name in (
+        "negative_prompt",
+        "size",
+        "count",
+        "native_batch_size",
+        "max_concurrent_requests",
+    ):
+        if name in parameters:
+            snapshot[name] = parameters[name]
+    return snapshot
 
 
 def export_parameters(
@@ -45,7 +53,8 @@ def export_parameters(
         image = images[0]
     if image is None:
         raise ValueError("所选图片不属于当前生成记录或已被删除")
-    if detail.get("source") == "import" and image.get("supplemental"):
+    metadata_record = detail.get("source") in {"import", "external"}
+    if metadata_record and image.get("supplemental"):
         supplemental = image["supplemental"]
         detail = {**detail, "supplemental": supplemental}
         for key in ("model", "mode", "generation_engine", "generated_at"):
@@ -60,7 +69,7 @@ def export_parameters(
     raw = metadata.get("raw") or {}
     normalized = metadata.get("normalized") or {}
     request = request_snapshot(detail)
-    if detail.get("source") == "import":
+    if metadata_record:
         supplemental = detail.get("supplemental") or {}
         overrides = supplemental.get("overrides") or {}
         display = {**normalized, **(supplemental.get("display_parameters") or {})}
@@ -79,22 +88,30 @@ def export_parameters(
             "version": 1,
             "generation_engine": detail.get("generation_engine", "unknown"),
             "data": request,
-            "metadata": metadata if detail.get("source") == "import" else {},
+            "metadata": metadata if metadata_record else {},
             "supplemental": detail.get("supplemental", {}),
-            "has_request_snapshot": detail.get("source") != "import",
+            "has_request_snapshot": not metadata_record,
         }
     elif format_name == "nai":
+        external_parameters = (detail.get("supplemental") or {}).get(
+            "external_parameters"
+        )
         if (
-            detail.get("source") != "import"
-            and detail.get("provider_kind") == "nai_direct"
+            detail.get("source") == "external"
+            and external_parameters
+            and detail.get("generation_engine") == "novelai"
         ):
+            content = copy.deepcopy(external_parameters)
+        elif not metadata_record and detail.get("provider_kind") == "nai_direct":
             content = {
                 **request["parameters"],
                 "tag": request["prompt"],
                 "model": request["model"],
-                "size": request["size"],
-                "negative": request["negative_prompt"],
             }
+            if "size" in request:
+                content["size"] = request["size"]
+            if "negative_prompt" in request:
+                content["negative"] = request["negative_prompt"]
         elif metadata.get("format") == "novelai":
             supplemental = detail.get("supplemental") or {}
             content = _nai_projection(
@@ -175,7 +192,11 @@ def _declared_size(values: dict[str, Any], *, nai: bool = False) -> str:
 
 
 def resolve_parameters(
-    content: str, settings: RuntimeSettings, model_ref: str = ""
+    content: str,
+    settings: RuntimeSettings,
+    model_ref: str = "",
+    *,
+    for_reproduction: bool = False,
 ) -> dict[str, Any]:
     """Resolve a copy format to a model draft, reporting every rejected value."""
 
@@ -185,6 +206,9 @@ def resolve_parameters(
     source = copy.deepcopy(parsed.get("request") or {})
     # An Image Studio export carries exact request intent; imported exports retain provenance.
     envelope = parsed.get("envelope")
+    exact_snapshot = (
+        isinstance(envelope, dict) and envelope.get("has_request_snapshot") is True
+    )
     if isinstance(envelope, dict) and envelope.get("format") == "image_studio":
         for key in ("data", "metadata", "supplemental"):
             if key in envelope and not isinstance(envelope[key], dict):
@@ -348,6 +372,8 @@ def resolve_parameters(
         "parameters": {},
         "references": [],
     }
+    if for_reproduction:
+        draft["for_reproduction"] = True
     if selected is None:
         return {
             "draft": draft,
@@ -399,6 +425,8 @@ def resolve_parameters(
         for key, desc in descriptors.items()
         if "default" in desc
     }
+    if not for_reproduction:
+        _apply_preset_values(values, descriptors)
     supplied = copy.deepcopy(source.get("parameters") or {})
     if source.get("tag") is not None:
         supplied.update(
@@ -439,9 +467,9 @@ def resolve_parameters(
         derived_size = _declared_size(normalized, nai=is_nai)
         if derived_size:
             supplied.setdefault("size", derived_size)
-    if is_nai and source_format in {"nai", "novelai"}:
+    if is_nai and source_format in {"nai", "novelai"} and not exact_snapshot:
         supplied.setdefault("artist", source.get("artist", ""))
-    elif source_format in {"nai", "novelai"}:
+    elif not is_nai and source_format in {"nai", "novelai"}:
         for original, target in {
             "scale": "cfg_scale",
             "cfg": "cfg_rescale",
@@ -452,8 +480,15 @@ def resolve_parameters(
     for key in ("size", "count"):
         if key in source:
             supplied[key] = source[key]
+    if "negative_prompt" in source:
+        supplied["negative_prompt"] = source["negative_prompt"]
+    elif not exact_snapshot and draft["negative_prompt"]:
+        supplied["negative_prompt"] = draft["negative_prompt"]
     unmapped: dict[str, Any] = {}
+    accepted: dict[str, Any] = {}
     for key, value in supplied.items():
+        if key in MODEL_SCHEDULING_KEYS:
+            continue
         name = (
             key
             if key in descriptors
@@ -467,16 +502,27 @@ def resolve_parameters(
             )
         )
         if not name:
+            if key == "negative_prompt":
+                continue
             unmapped[key] = value
             continue
         descriptor = descriptors[name]
+        if not parameter_flag(descriptor, "webui_visible") or (
+            for_reproduction and not parameter_flag(descriptor, "refill_from_history")
+        ):
+            continue
         choices = descriptor.get("choices")
         valid = not isinstance(choices, list) or any(
             str(item.get("value") if isinstance(item, dict) else item) == str(value)
             for item in choices
         )
         kind = str(descriptor.get("type") or "text")
-        if kind in {"number", "int", "integer", "float"}:
+        if value is None and (
+            descriptor.get("nullable") is True
+            or ("default" in descriptor and descriptor["default"] is None)
+        ):
+            pass
+        elif kind in {"number", "int", "integer", "float"}:
             try:
                 number = float(value)
                 valid = valid and not isinstance(value, bool) and math.isfinite(number)
@@ -508,12 +554,39 @@ def resolve_parameters(
             unmapped[key] = value
             warnings.append(f"{key} 不符合所选模型的参数范围或类型，未覆盖模型默认值。")
             continue
-        values[name] = value
-    if not selected.get("supports_negative_prompt") and draft["negative_prompt"]:
+        accepted[name] = value
+    if not for_reproduction:
+        _apply_preset_values(accepted, descriptors, protected=set(accepted))
+    values.update(accepted)
+    for name, descriptor in descriptors.items():
+        if not parameter_flag(descriptor, "webui_visible"):
+            if "default" in descriptor:
+                values[name] = copy.deepcopy(descriptor["default"])
+            else:
+                values.pop(name, None)
+    _derive_presets(values, descriptors)
+    negative_name = next(
+        (
+            name
+            for name, descriptor in descriptors.items()
+            if name == "negative_prompt"
+            or descriptor.get("request_key") == "negative_prompt"
+        ),
+        None,
+    )
+    if negative_name:
+        if negative_name in values:
+            draft["negative_prompt"] = values[negative_name]
+        else:
+            draft.pop("negative_prompt", None)
+    elif exact_snapshot and "negative_prompt" not in source:
+        draft["negative_prompt"] = selected.get("negative_prompt_default", "")
+    if not selected.get("supports_negative_prompt") and draft.get("negative_prompt"):
         unmapped["negative_prompt"] = draft["negative_prompt"]
         draft["negative_prompt"] = ""
     elif (
-        "negative_prompt" not in source
+        not negative_name
+        and "negative_prompt" not in source
         and "negative" not in source
         and "negative_prompt" not in normalized
     ):
@@ -538,10 +611,13 @@ def resolve_parameters(
     if is_nai and source_format not in {"nai", "novelai", "image_studio"}:
         warnings.append("目标为 NAI 标签模型，请核对提示词语法和参数含义。")
     draft["parameters"] = values
-    if "size" in values:
-        draft["size"] = values["size"]
-    if "count" in values:
-        draft["count"] = values["count"]
+    for name, value in values.items():
+        key = descriptors.get(name, {}).get("request_key", name)
+        if key in {"size", "count", "n"}:
+            draft["count" if key == "n" else key] = value
+    if for_reproduction:
+        draft["native_batch_size"] = selected["native_batch_size"]
+        draft["max_concurrent_requests"] = selected["max_concurrent_requests"]
     if unmapped:
         warnings.append("部分参数无法映射，原值保留在未填写参数中。")
     return {
@@ -552,3 +628,54 @@ def resolve_parameters(
         "warnings": list(dict.fromkeys(warnings)),
         "unmapped": unmapped,
     }
+
+
+def _apply_preset_values(
+    values: dict[str, Any],
+    descriptors: dict[str, Any],
+    *,
+    protected: set[str] | None = None,
+) -> None:
+    for name, descriptor in descriptors.items():
+        if descriptor.get("type") != "preset" or name not in values:
+            continue
+        target = descriptor.get("target")
+        if not target or target in (protected or ()):
+            continue
+        if not parameter_flag(descriptors.get(target, {}), "webui_visible"):
+            continue
+        choice = next(
+            (
+                item
+                for item in descriptor.get("choices", [])
+                if isinstance(item, dict) and item.get("value") == values[name]
+            ),
+            None,
+        )
+        if choice and isinstance(choice.get("fill"), str):
+            values[target] = choice["fill"]
+
+
+def _derive_presets(values: dict[str, Any], descriptors: dict[str, Any]) -> None:
+    for name, descriptor in descriptors.items():
+        if descriptor.get("type") != "preset" or not parameter_flag(
+            descriptor, "webui_visible"
+        ):
+            continue
+        target = descriptor.get("target")
+        if target not in values:
+            continue
+        choices = [
+            item for item in descriptor.get("choices", []) if isinstance(item, dict)
+        ]
+        match = next(
+            (
+                item
+                for item in choices
+                if "fill" in item and item["fill"] == values[target]
+            ),
+            None,
+        )
+        custom = next((item for item in choices if item.get("value") == "custom"), None)
+        if match or custom:
+            values[name] = (match or custom)["value"]

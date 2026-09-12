@@ -43,14 +43,24 @@ from .config import (
     runtime_settings,
     save_studio_settings,
 )
+from .external_gallery import ExternalGalleryManager
+from .gallery_preferences import (
+    GALLERY_PREFERENCES_COOKIE,
+    decode_gallery_preferences,
+    encode_gallery_preferences,
+    merge_gallery_preferences,
+)
 from .models import ImageProvider, InvocationSource, ReferenceImage
 from .image_metadata import parse_metadata_fields
 from .parameter_exchange import export_parameters, resolve_parameters
 from .providers import ProviderError, ProviderExecutor
 from .service import ImageGenerationService
 from .storage import (
+    ExternalDeleteError,
+    ExternalPermissionError,
     GenerationStore,
     ImportDuplicateError,
+    ImportEditConflictError,
     detect_mime_type,
     export_image_filename,
     image_data_url,
@@ -87,8 +97,10 @@ IMAGE_WORKFLOW_CONTINUATION_PROMPT = (
 @register(
     PLUGIN_NAME,
     "econeco",
-    "多 Provider 生图、画廊与 Agent 可读图片工具。",
-    "1.0.0",
+    r"多服务商 AI 生图与图库工作台，支持OpenAI接口、Gemini接口、NAI请求、自定义接口。\n"
+    r"支持对话生图改图、并发批量生成、图片参数导入。\n"
+    "支持扫描nai_image插件的图片以及任意自定义目录，并在画廊中统一浏览和管理。",
+    "1.1.0",
 )
 class ImageStudioPlugin(Star):
     """Own Image Studio configuration, generation, gallery, and tool APIs."""
@@ -110,11 +122,13 @@ class ImageStudioPlugin(Star):
         self._studio_settings, studio_errors = load_studio_settings(Path(self.data_dir))
         self._settings, runtime_errors = runtime_settings(config, self._studio_settings)
         self._settings_errors = [*studio_errors, *runtime_errors]
+        self._external_gallery = ExternalGalleryManager(self.store, Path(self.data_dir))
 
     async def initialize(self) -> None:
         """Initialize storage, HTTP resources, and Page API routes."""
 
         await self.store.initialize()
+        await self._configure_external_gallery()
         await self.store.run_maintenance(
             self._settings.history,
             preview_max_edge=self._settings.asset_preview_max_edge,
@@ -133,6 +147,7 @@ class ImageStudioPlugin(Star):
             store=self.store,
         )
         self._register_web_apis()
+        await self._external_gallery.start()
         if self._settings_errors:
             logger.warning(
                 "%s 配置存在问题: %s", LOG_TAG, "; ".join(self._settings_errors)
@@ -147,6 +162,7 @@ class ImageStudioPlugin(Star):
     async def terminate(self) -> None:
         """Close plugin-owned HTTP resources during reload or shutdown."""
 
+        await self._external_gallery.close()
         if self._maintenance_task is not None:
             self._maintenance_task.cancel()
             try:
@@ -160,6 +176,14 @@ class ImageStudioPlugin(Star):
         self._service = None
         self._imports.clear()
         self._import_groups.clear()
+        await self.store.close()
+
+    async def _configure_external_gallery(self) -> None:
+        await self._external_gallery.configure(
+            self._studio_settings.get("external_sources", {}),
+            preview_max_edge=self._settings.asset_preview_max_edge,
+            preview_quality=self._settings.asset_preview_quality,
+        )
 
     async def _maintenance_loop(self) -> None:
         while True:
@@ -189,6 +213,18 @@ class ImageStudioPlugin(Star):
                 self._api_set_appearance,
                 ["POST"],
                 "Image Studio: save browser appearance cookie",
+            ),
+            (
+                "gallery/preferences",
+                self._api_get_gallery_preferences,
+                ["GET"],
+                "Image Studio: browser gallery preferences",
+            ),
+            (
+                "gallery/preferences",
+                self._api_set_gallery_preferences,
+                ["POST"],
+                "Image Studio: save browser gallery preferences",
             ),
             (
                 "imports/inspect",
@@ -239,6 +275,12 @@ class ImageStudioPlugin(Star):
                 "Image Studio: resolve parameters",
             ),
             (
+                "gallery/import-edit/<generation_id>",
+                self._api_gallery_import_edit,
+                ["GET", "POST"],
+                "Image Studio: edit imported parameters and image order",
+            ),
+            (
                 "gallery/parameters/<generation_id>",
                 self._api_gallery_parameters,
                 ["GET"],
@@ -280,6 +322,24 @@ class ImageStudioPlugin(Star):
                 self._api_upload_reference,
                 ["POST"],
                 "Image Studio: upload reference",
+            ),
+            (
+                "studio/reference/from-gallery",
+                self._api_gallery_as_reference,
+                ["POST"],
+                "Image Studio: retain a gallery original as reference",
+            ),
+            (
+                "external/status",
+                self._api_external_status,
+                ["GET"],
+                "Image Studio: external gallery scan status",
+            ),
+            (
+                "external/scan",
+                self._api_external_scan,
+                ["POST"],
+                "Image Studio: rescan external gallery",
             ),
             (
                 "settings/get",
@@ -348,6 +408,18 @@ class ImageStudioPlugin(Star):
                 "Image Studio: gallery image data",
             ),
             (
+                "gallery/image-info/<image_id>",
+                self._api_gallery_image_info,
+                ["GET"],
+                "Image Studio: gallery image metadata",
+            ),
+            (
+                "gallery/reference-image/<reference_id>",
+                self._api_gallery_reference_image,
+                ["GET"],
+                "Image Studio: gallery reference preview",
+            ),
+            (
                 "gallery/download/<image_id>",
                 self._api_gallery_image_download,
                 ["GET"],
@@ -364,6 +436,12 @@ class ImageStudioPlugin(Star):
                 self._api_gallery_delete,
                 ["POST"],
                 "Image Studio: delete gallery records",
+            ),
+            (
+                "gallery/delete/preview",
+                self._api_gallery_delete_preview,
+                ["POST"],
+                "Image Studio: inspect external originals before deletion",
             ),
             (
                 "gallery/reference/delete",
@@ -410,6 +488,37 @@ class ImageStudioPlugin(Star):
         response.set_cookie(
             APPEARANCE_COOKIE,
             encode_appearance_cookie(settings),
+            max_age=365 * 24 * 60 * 60,
+            httponly=True,
+            samesite="lax",
+            path="/",
+        )
+        return response
+
+    async def _api_get_gallery_preferences(self) -> Any:
+        value = decode_gallery_preferences(
+            web_request.cookies.get(GALLERY_PREFERENCES_COOKIE)
+        )
+        response = json_response(value)
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    async def _api_set_gallery_preferences(self) -> Any:
+        try:
+            current = decode_gallery_preferences(
+                web_request.cookies.get(GALLERY_PREFERENCES_COOKIE)
+            )
+            settings = merge_gallery_preferences(
+                current, await web_request.json(default={})
+            )
+            encoded = encode_gallery_preferences(settings)
+        except (ValueError, TypeError, RecursionError) as exc:
+            return error_response(str(exc), status_code=400)
+        response = json_response(settings)
+        response.headers["Cache-Control"] = "no-store"
+        response.set_cookie(
+            GALLERY_PREFERENCES_COOKIE,
+            encoded,
             max_age=365 * 24 * 60 * 60,
             httponly=True,
             samesite="lax",
@@ -468,6 +577,7 @@ class ImageStudioPlugin(Star):
         if not isinstance(body, dict):
             return error_response("请求体必须是 JSON 对象", status_code=400)
         expected_revision = _as_int(body.get("settings_revision"), -1)
+        warnings: list[str] = []
         async with self._settings_lock:
             current_studio, _ = normalize_webui_settings(self._studio_settings)
             current_revision = _as_int(current_studio.get("revision"), 0)
@@ -487,6 +597,13 @@ class ImageStudioPlugin(Star):
             )
             if errors:
                 return error_response("；".join(errors), status_code=400)
+            try:
+                await asyncio.to_thread(
+                    self._external_gallery.validate_configuration,
+                    candidate["external_sources"],
+                )
+            except (ValueError, OSError) as exc:
+                return error_response(str(exc), status_code=400)
             candidate["revision"] = current_revision + 1
             candidate["ui"]["settings_revision"] = candidate["revision"]
             base = body.get("base") if isinstance(body.get("base"), dict) else {}
@@ -514,12 +631,56 @@ class ImageStudioPlugin(Star):
                 self.config, self._studio_settings
             )
             self._service_or_raise().update_settings(self._settings)
-        return json_response({"settings_revision": self._settings.revision})
+            try:
+                await self._configure_external_gallery()
+            except Exception as exc:
+                logger.exception("%s 设置已保存，但外部图库配置应用失败", LOG_TAG)
+                warnings.append(
+                    f"设置已保存，但外部图库配置未能应用：{type(exc).__name__}。请检查存储状态后重新保存。"
+                )
+        return json_response(
+            {"settings_revision": self._settings.revision, "warnings": warnings}
+        )
 
     async def _api_storage_health(self) -> Any:
         report = await self.store.maintenance_report()
         report["retention"] = await self.store.retention_status(self._settings.history)
+        report["external_sources"] = await self._external_gallery.status()
         return json_response(report)
+
+    async def _api_external_status(self) -> Any:
+        return json_response(
+            {
+                "types": self._external_gallery.source_types(),
+                "sources": await self._external_gallery.status(),
+            }
+        )
+
+    async def _api_external_scan(self) -> Any:
+        body = await web_request.json(default={})
+        if not isinstance(body, dict):
+            return error_response("请求体必须是 JSON 对象", status_code=400)
+        try:
+            result = await self._external_gallery.request_scan(
+                str(body.get("source_id") or "nai")
+            )
+        except ValueError as exc:
+            return error_response(str(exc), status_code=400)
+        return json_response(result)
+
+    async def _api_gallery_as_reference(self) -> Any:
+        body = await web_request.json(default={})
+        if not isinstance(body, dict):
+            return error_response("请求体必须是 JSON 对象", status_code=400)
+        try:
+            result = await self.store.stage_gallery_reference(
+                str(body.get("image_id") or "")
+            )
+        except ExternalPermissionError as exc:
+            return error_response(str(exc), status_code=403)
+        except (ValueError, OSError) as exc:
+            return error_response(str(exc), status_code=400)
+        return json_response(result)
 
     async def _api_import_inspect(self) -> Any:
         body = await web_request.json(default={})
@@ -947,19 +1108,61 @@ class ImageStudioPlugin(Star):
                 body["content"],
                 self._settings,
                 str(body.get("model_ref") or ""),
+                for_reproduction=body.get("for_reproduction") is True,
             )
             return json_response(result)
         except ValueError as exc:
             return error_response(str(exc), status_code=400)
 
-    async def _api_gallery_parameters(self, generation_id: str) -> Any:
-        detail = await self.store.generation_detail(generation_id, include_assets=False)
-        if detail is None:
-            return error_response("生成记录不存在", status_code=404)
+    async def _api_gallery_import_edit(self, generation_id: str) -> Any:
         try:
+            if web_request.method == "GET":
+                if "output_node_id" in web_request.query:
+                    return json_response(
+                        await self.store.project_import_edit_image(
+                            generation_id,
+                            str(web_request.query.get("image_id", "")),
+                            str(web_request.query.get("item_revision", "")),
+                            str(web_request.query.get("output_node_id", "")),
+                        )
+                    )
+                return json_response(
+                    await self.store.import_edit_snapshot(
+                        generation_id,
+                        light=str(web_request.query.get("light", "")).lower()
+                        in {"1", "true", "yes"},
+                        image_id=str(web_request.query.get("image_id", "")),
+                        item_revision=str(web_request.query.get("item_revision", "")),
+                        include_preview=str(
+                            web_request.query.get("include_preview", "1")
+                        ).lower()
+                        not in {"0", "false", "no"},
+                    )
+                )
+            body = await web_request.json(default={})
+            if not isinstance(body, dict) or set(body) != {"revision", "items"}:
+                raise ValueError("编辑请求必须包含 revision 和 items")
+            return json_response(
+                await self.store.edit_import(
+                    generation_id, body["revision"], body["items"]
+                )
+            )
+        except ImportEditConflictError as exc:
+            return error_response(str(exc), status_code=409)
+        except LookupError as exc:
+            return error_response(str(exc), status_code=404)
+        except (ValueError, TypeError, OverflowError, RecursionError) as exc:
+            return error_response(str(exc), status_code=400)
+
+    async def _api_gallery_parameters(self, generation_id: str) -> Any:
+        image_id = str(web_request.query.get("image_id") or "")
+        try:
+            detail = await self.store.generation_image_context(generation_id, image_id)
+            if detail is None:
+                return error_response("生成记录不存在", status_code=404)
             result = export_parameters(
                 detail,
-                str(web_request.query.get("image_id") or ""),
+                image_id,
                 str(web_request.query.get("format") or "studio"),
             )
             return json_response(result)
@@ -975,6 +1178,8 @@ class ImageStudioPlugin(Star):
                 return json_response(
                     await self.store.toggle_favorites(body["generation_ids"])
                 )
+            except ExternalPermissionError as exc:
+                return error_response(str(exc), status_code=403)
             except ValueError as exc:
                 return error_response(str(exc), status_code=400)
         if not isinstance(body, dict) or not isinstance(body.get("favorite"), bool):
@@ -984,6 +1189,8 @@ class ImageStudioPlugin(Star):
                 str(body.get("generation_id") or ""), body["favorite"]
             )
             return json_response(result)
+        except ExternalPermissionError as exc:
+            return error_response(str(exc), status_code=403)
         except ValueError as exc:
             return error_response(str(exc), status_code=400)
 
@@ -1005,10 +1212,37 @@ class ImageStudioPlugin(Star):
         if not 1 <= len(body["image_ids"]) <= 100:
             return error_response("请选择 1 至 100 张图片", status_code=400)
         try:
+            preview = await self.store.external_action_preview(
+                [str(body.get("generation_id") or "")], "delete"
+            )
+            if not preview["allowed"]:
+                return error_response(
+                    "；".join(item["message"] for item in preview["denied"]),
+                    status_code=403,
+                )
+            if preview["external_count"] and body.get("confirm_external") is not True:
+                return error_response(
+                    "本次删除包含外部资源，将删除来源插件中的原图，请确认后重试",
+                    status_code=409,
+                )
             result = await self.store.delete_images(
                 str(body.get("generation_id") or ""), body["image_ids"]
             )
             return json_response(result)
+        except ExternalDeleteError as exc:
+            details = exc.as_dict()
+            if details.get("generation_deleted"):
+                return json_response(
+                    {
+                        "deleted": body["image_ids"],
+                        "remaining": 0,
+                        "generation_deleted": True,
+                        "errors": [details],
+                    }
+                )
+            return error_response(str(exc), status_code=409)
+        except ExternalPermissionError as exc:
+            return error_response(str(exc), status_code=403)
         except ValueError as exc:
             return error_response(str(exc), status_code=400)
 
@@ -1069,7 +1303,7 @@ class ImageStudioPlugin(Star):
                 model_ref=str(body.get("model_ref") or ""),
                 model=str(body.get("model") or ""),
                 size=str(body.get("size") or ""),
-                count=body.get("count", 1),
+                count=body.get("count"),
                 parameters=body.get("parameters"),
                 references=references,
                 source="webui",
@@ -1158,16 +1392,15 @@ class ImageStudioPlugin(Star):
 
         model = provider.get_model(model_id)
         size = "竖图" if provider.kind == "nai_direct" else "1024x1024"
-        count = 1
         parameters: dict[str, Any] = {}
-        for name, descriptor in model.parameters.items():
+        for name, descriptor in model.active_parameters.items():
             if descriptor.get("ui_only") or "default" not in descriptor:
                 continue
             request_key = str(descriptor.get("request_key") or name)
             if request_key == "size":
                 size = str(descriptor["default"])
             elif request_key in {"count", "n"}:
-                count = _as_int(descriptor["default"], 1)
+                continue
             else:
                 parameters[request_key] = descriptor["default"]
         return GenerationRequest(
@@ -1177,12 +1410,15 @@ class ImageStudioPlugin(Star):
             negative_prompt=model.negative_prompt_default,
             model=model.id,
             size=size,
-            count=count,
+            count=1,
             parameters=parameters,
             source="webui",
+            native_batch_size=model.native_batch_size,
+            max_concurrent_requests=model.max_concurrent_requests,
         )
 
-    async def _api_gallery_list(self) -> Any:
+    @staticmethod
+    def _gallery_request_filters() -> dict[str, Any]:
         filters = {
             "query": web_request.query.get("query", ""),
             "provider_id": web_request.query.get("provider_id", ""),
@@ -1190,11 +1426,21 @@ class ImageStudioPlugin(Star):
             "source": web_request.query.get("source", ""),
             "generation_engine": web_request.query.get("generation_engine", ""),
             "favorite": web_request.query.get("favorite", ""),
+            "sort": web_request.query.get("sort", "created"),
             "limit": web_request.query.get("limit", 24),
             "offset": web_request.query.get("offset", 0),
         }
-        payload = await self.store.list_generations(filters)
-        retention = await self.store.retention_status(self._settings.history)
+        for key in ("provider_ids", "modes", "sources", "generation_engines"):
+            if key in web_request.query:
+                filters[key] = web_request.query.get(key)
+        return filters
+
+    async def _api_gallery_list(self) -> Any:
+        try:
+            payload = await self.store.list_generations(self._gallery_request_filters())
+        except ValueError as exc:
+            return error_response(str(exc), status_code=400)
+        retention = await self.store.gallery_retention_status(self._settings.history)
         candidates = set(retention.get("candidate_ids", []))
         for item in payload["items"]:
             item["cleanup_warning"] = item["id"] in candidates
@@ -1202,16 +1448,22 @@ class ImageStudioPlugin(Star):
         return json_response(payload)
 
     async def _api_gallery_detail(self, generation_id: str) -> Any:
+        light = str(web_request.query.get("light", "")).lower() in {"1", "true", "yes"}
+        revision = await self.store.gallery_revision() if light else ""
         include_assets = str(web_request.query.get("assets", "1")).lower() not in {
             "0",
             "false",
             "no",
         }
         detail = await self.store.generation_detail(
-            generation_id, include_assets=include_assets
+            generation_id,
+            include_assets=include_assets,
+            light=light,
         )
         if detail is None:
             return error_response("生成记录不存在", status_code=404)
+        if light:
+            detail["gallery_revision"] = revision
         return json_response(detail)
 
     async def _api_gallery_assets(self, generation_id: str) -> Any:
@@ -1223,16 +1475,16 @@ class ImageStudioPlugin(Star):
         )
 
     async def _api_gallery_image_sequence(self) -> Any:
-        filters = {
-            "query": web_request.query.get("query", ""),
-            "provider_id": web_request.query.get("provider_id", ""),
-            "mode": web_request.query.get("mode", ""),
-            "source": web_request.query.get("source", ""),
-            "generation_engine": web_request.query.get("generation_engine", ""),
-            "favorite": web_request.query.get("favorite", ""),
-        }
-        items = await self.store.gallery_image_sequence(filters)
-        return json_response({"items": items, "total": len(items)})
+        try:
+            revision = await self.store.gallery_revision()
+            items = await self.store.gallery_image_sequence(
+                self._gallery_request_filters()
+            )
+        except ValueError as exc:
+            return error_response(str(exc), status_code=400)
+        return json_response(
+            {"items": items, "total": len(items), "revision": revision}
+        )
 
     async def _api_gallery_image(self, image_id: str) -> Any:
         detail = str(web_request.query.get("detail", "preview")).strip().lower()
@@ -1246,11 +1498,30 @@ class ImageStudioPlugin(Star):
         return json_response(image)
 
     async def _api_gallery_image_download(self, image_id: str) -> Any:
-        image = await self.store.gallery_image_file(image_id)
+        try:
+            image = await self.store.gallery_image_file(image_id)
+        except ValueError as exc:
+            return error_response(str(exc), status_code=403)
         if image is None:
             return error_response("生成图片不存在", status_code=404)
         path, mime_type, filename = image
         return file_response(path, filename=filename, content_type=mime_type)
+
+    async def _api_gallery_image_info(self, image_id: str) -> Any:
+        image = await self.store.gallery_image_info(
+            image_id,
+            include_preview=str(web_request.query.get("include_preview", "1")).lower()
+            not in {"0", "false", "no"},
+        )
+        if image is None:
+            return error_response("生成图片不存在", status_code=404)
+        return json_response(image)
+
+    async def _api_gallery_reference_image(self, reference_id: str) -> Any:
+        image = await self.store.gallery_reference_image(reference_id)
+        if image is None:
+            return error_response("参考图片不存在", status_code=404)
+        return json_response(image)
 
     async def _api_gallery_reproduce(self, generation_id: str) -> Any:
         try:
@@ -1266,16 +1537,41 @@ class ImageStudioPlugin(Star):
     async def _api_gallery_delete(self) -> Any:
         body = await web_request.json(default={})
         ids = body.get("ids") if isinstance(body, dict) else []
-        if not isinstance(ids, list) or not ids:
-            return error_response("请选择要删除的生成记录", status_code=400)
-        deleted: list[str] = []
-        failed: list[str] = []
-        for generation_id in ids[:200]:
-            if await self.store.delete_generation(str(generation_id or "")):
-                deleted.append(str(generation_id))
-            else:
-                failed.append(str(generation_id))
-        return json_response({"deleted": deleted, "failed": failed})
+        if not isinstance(ids, list) or not 1 <= len(ids) <= 200:
+            return error_response("请选择 1 至 200 条生成记录", status_code=400)
+        try:
+            preview = await self.store.external_action_preview(ids, "delete")
+        except ValueError as exc:
+            return error_response(str(exc), status_code=400)
+        if not preview["allowed"]:
+            return error_response(
+                "；".join(item["message"] for item in preview["denied"]),
+                status_code=403,
+            )
+        if preview["external_count"] and body.get("confirm_external") is not True:
+            return error_response(
+                "本次删除包含外部资源，将删除来源插件中的原图，请确认后重试",
+                status_code=409,
+            )
+        try:
+            return json_response(await self.store.delete_generations(ids))
+        except ValueError as exc:
+            return error_response(str(exc), status_code=403)
+
+    async def _api_gallery_delete_preview(self) -> Any:
+        body = await web_request.json(default={})
+        if not isinstance(body, dict):
+            return error_response("请求体必须是 JSON 对象", status_code=400)
+        action = str(body.get("action") or "delete")
+        limit = 1000 if action == "favorite" else 200
+        if not isinstance(body.get("ids"), list) or not 1 <= len(body["ids"]) <= limit:
+            return error_response(f"请选择 1 至 {limit} 条生成记录", status_code=400)
+        try:
+            return json_response(
+                await self.store.external_action_preview(body.get("ids"), action)
+            )
+        except ValueError as exc:
+            return error_response(str(exc), status_code=400)
 
     async def _api_reference_delete(self) -> Any:
         body = await web_request.json(default={})
@@ -1295,6 +1591,8 @@ class ImageStudioPlugin(Star):
             path = await self.store.export_generations(
                 [str(item or "") for item in ids]
             )
+        except ExternalPermissionError as exc:
+            return error_response(str(exc), status_code=403)
         except ValueError as exc:
             return error_response(str(exc), status_code=400)
         await self.store.cleanup_exports()
@@ -1387,7 +1685,10 @@ class ImageStudioPlugin(Star):
         except (ValueError, ProviderError) as exc:
             yield event.plain_result(f"生图失败：{exc}")
             return
-        chain: list[Any] = [Plain(f"已生成 {len(result.images)} 张图片")]
+        message = f"已生成 {len(result.images)} 张图片"
+        if result.warning:
+            message += f"\n{result.warning}"
+        chain: list[Any] = [Plain(message)]
         chain.extend(Image.fromBytes(image.data) for image in result.images)
         yield event.chain_result(chain)
 
@@ -1719,38 +2020,33 @@ class ImageStudioPlugin(Star):
                 configured_parameters = tool.get("parameters")
                 exposed_parameter_names = model.llm_exposed_parameter_names
                 for name, descriptor in model.parameters.items():
-                    # negative_prompt is a reserved dynamic field whose exposure
-                    # is controlled separately from the model schema.
+                    # This dedicated field uses tool policy, not model schema.
                     if name == "negative_prompt":
                         continue
                     if name not in exposed_parameter_names:
                         continue
-                    if (
-                        isinstance(configured_parameters, dict)
-                        and configured_parameters
-                    ):
-                        policy = configured_parameters.get(name)
-                        if not isinstance(policy, dict) or not policy.get(
-                            "exposed", True
-                        ):
-                            continue
-                        visible = _llm_parameter_descriptor(descriptor, policy)
-                        if "default_override" in policy:
-                            visible["default"] = policy["default_override"]
-                        exposed_parameters[name] = visible
-                    else:
-                        exposed_parameters[name] = _llm_parameter_descriptor(
-                            descriptor, {}
-                        )
+                    policy = (
+                        configured_parameters.get(name)
+                        if isinstance(configured_parameters, dict)
+                        else None
+                    )
+                    policy = policy if isinstance(policy, dict) else {}
+                    visible = _llm_parameter_descriptor(descriptor, policy)
+                    if "default_override" in policy:
+                        visible["default"] = policy["default_override"]
+                    exposed_parameters[name] = visible
                 if model.llm_negative_prompt_enabled:
-                    exposed_parameters["negative_prompt"] = {
-                        "type": "string",
-                        "description": (
-                            "专用反向提示词，只填写不希望出现在画面中的内容；"
-                            "省略时使用模型配置中的默认反向提示词。"
-                        ),
-                        "default": model.negative_prompt_default,
-                    }
+                    exposed_parameters["negative_prompt"] = _llm_parameter_descriptor(
+                        {
+                            "type": "string",
+                            "description": (
+                                "专用反向提示词，只填写不希望出现在画面中的内容；"
+                                "省略时使用此处的默认值。"
+                            ),
+                            "default": model.llm_negative_prompt_default,
+                        },
+                        model.llm_negative_prompt_policy,
+                    )
                 prompt_profile = tool.get("prompt_profile", "natural_language")
                 prompt_instructions = tool.get("prompt_instructions", "")
                 entry = {
@@ -1910,9 +2206,7 @@ class ImageStudioPlugin(Star):
             effective_negative_prompt = (
                 supplied_negative_prompt
                 if has_negative_prompt
-                else selected_model.negative_prompt_default
-                if selected_model.negative_prompt
-                else ""
+                else selected_model.llm_negative_prompt_default
             )
             result = await self._service_or_raise().generate(
                 mode=normalized_mode,
@@ -2016,6 +2310,7 @@ class ImageStudioPlugin(Star):
                     f"generation_id={result.generation_id or '未保存'}；"
                     f"return_mode={configured_return_mode}；"
                     f"assets={json.dumps(manifest, ensure_ascii=False, separators=(',', ':'))}。"
+                    f"{result.warning}"
                     f"{visual_notice} 这是 Image Studio 工作流资产；发送工具只负责中途投递。"
                     "data/temp/tool_images 仅为临时视觉预览缓存；忽略该路径及其通用发送建议，"
                     "不得发送、复制、编辑、用作参考图或传给其他工具。"
@@ -2626,6 +2921,7 @@ def _result_payload(
         "model": result.request.model,
         "mode": result.request.mode,
         "elapsed_ms": result.elapsed_ms,
+        "warning": result.warning,
         "images": [
             {
                 "mime_type": image.mime_type,

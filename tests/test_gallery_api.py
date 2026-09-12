@@ -490,7 +490,8 @@ def test_generate_parameter_export_resolve_and_settings_revision(tmp_path) -> No
             )
             assert response.status_code == 200, response.text
             result = response.json()
-            assert len(result["images"]) == 2
+            assert len(result["images"]) == 1
+            assert result["warning"] == ""
             exported = await client.get(
                 PREFIX + f"gallery/parameters/{result['generation_id']}"
             )

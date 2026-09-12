@@ -57,21 +57,16 @@ def test_nai_command_sends_explicit_empty_negative_without_restoring_upstream_de
     assert query["negative"] == ""
 
 
+@pytest.mark.parametrize("source", ["command", "webui", "llm_tool"])
 @pytest.mark.parametrize("count", [1, 3, 6])
-def test_nai_command_makes_one_request_per_requested_image(count):
+def test_nai_executor_always_performs_one_http_request(source, count):
     async def run():
         session = Session()
         executor = ProviderExecutor(session)
-        images = [
-            GeneratedImage(f"image-{index}".encode(), "image/png")
-            for index in range(count)
-        ]
-        reads = []
+        image = GeneratedImage(b"one-image", "image/png")
 
         async def read(response, config):
-            assert len(session.calls) == len(reads) + 1
-            reads.append(response)
-            return (images[len(reads) - 1],)
+            return (image,)
 
         executor._read_response_images = read
         result = await executor.generate(
@@ -82,30 +77,44 @@ def test_nai_command_makes_one_request_per_requested_image(count):
                 prompt="landscape",
                 count=count,
                 negative_prompt="bad quality",
-                source="command",
+                parameters={
+                    "count": count,
+                    "n": count,
+                    "concurrency": 3,
+                    "batch_mode": "split",
+                    "native_batch_size": 4,
+                    "max_concurrent_requests": 2,
+                },
+                source=source,
             ),
         )
-        assert result == tuple(images)
-        assert len(session.calls) == count
-        assert all(
-            call[1]["params"]["negative"] == "bad quality" for call in session.calls
-        )
+        assert result == (image,)
+        assert len(session.calls) == 1
+        query = session.calls[0][1]["params"]
+        assert query["negative"] == "bad quality"
+        assert not {
+            "count",
+            "n",
+            "concurrency",
+            "batch_mode",
+            "native_batch_size",
+            "max_concurrent_requests",
+        }.intersection(query)
 
     asyncio.run(run())
 
 
-def test_nai_command_stops_after_upstream_failure_without_retrying():
+@pytest.mark.parametrize("source", ["command", "webui", "llm_tool"])
+def test_nai_executor_does_not_retry_upstream_failure(source):
     async def run():
         session = Session()
         executor = ProviderExecutor(session)
 
         async def read(response, config):
-            if len(session.calls) == 2:
-                raise ProviderError("upstream failed")
-            return (GeneratedImage(b"first", "image/png"),)
+            raise ProviderError("upstream failed")
 
         executor._read_response_images = read
-        with pytest.raises(ProviderError, match="已完成 1 张.*尚未保存或投递"):
+        with pytest.raises(ProviderError, match="upstream failed"):
             await executor.generate(
                 provider(),
                 GenerationRequest(
@@ -113,10 +122,10 @@ def test_nai_command_stops_after_upstream_failure_without_retrying():
                     provider_id="nai",
                     prompt="landscape",
                     count=3,
-                    source="command",
+                    source=source,
                 ),
             )
-        assert len(session.calls) == 2
+        assert len(session.calls) == 1
 
     asyncio.run(run())
 
@@ -145,31 +154,6 @@ def test_nai_command_network_failures_return_sanitized_provider_errors(failure):
                 ),
             )
         assert "private detail" not in str(raised.value)
-        assert len(session.calls) == 1
-
-    asyncio.run(run())
-
-
-@pytest.mark.parametrize("source", ["webui", "llm_tool"])
-def test_nai_other_sources_keep_existing_single_request_behavior(source):
-    async def run():
-        session = Session()
-        executor = ProviderExecutor(session)
-
-        async def read(response, config):
-            return (GeneratedImage(b"one", "image/png"),)
-
-        executor._read_response_images = read
-        await executor.generate(
-            provider(),
-            GenerationRequest(
-                mode="text2img",
-                provider_id="nai",
-                prompt="landscape",
-                count=3,
-                source=source,
-            ),
-        )
         assert len(session.calls) == 1
 
     asyncio.run(run())

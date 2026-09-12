@@ -44,7 +44,7 @@ async function settle(inner) { await inner.evaluate(async () => Promise.all(docu
 
 async function selected(inner, index) {
   await inner.waitForFunction((value) => document.querySelector("[data-detail-image]")?.dataset.detailImage === String(value) && document.querySelector(`[data-detail-dot="${value}"]`)?.getAttribute("aria-current") === "true", index);
-  assert.match(await inner.locator("#drawerBody").textContent(), new RegExp(`frame ${index}`));
+  await inner.locator(".detail-parameter-row").filter({ hasText: `frame ${index}` }).first().waitFor();
 }
 
 async function bounds(inner) {
@@ -277,9 +277,9 @@ async function verifyBackwards(page, inner, client, test) {
       const groupId = await seed(page, files.slice(0, 3), `${marker}-group`);
       const summary = await api(page, "get", `gallery/detail/${groupId}?assets=0`);
       let release; const gate = new Promise((resolve) => { release = resolve; });
-      const routePattern = `**/gallery/assets/${groupId}`;
+      const routePattern = "**/gallery/image/*";
       const delay = async (route) => {
-        await gate;
+        if (new URL(route.request().url()).searchParams.get("detail") === "original") await gate;
         try { await route.continue(); } catch (error) { if (!/handled|closed|disposed/i.test(error.message)) throw error; }
       };
       await page.route(routePattern, delay);

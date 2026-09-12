@@ -37,6 +37,16 @@ async function rawShadow(locator, expected) {
   assert.ok(styles.shadow.includes(`rgb(${expected.slice(0, 3).join(", ")})`), `selected shadow did not use raw source color: ${styles.shadow}`);
 }
 
+async function tickContrast(locator) {
+  return locator.evaluate((element) => {
+    const canvas = document.createElement("canvas"); canvas.width = canvas.height = 1;
+    const context = canvas.getContext("2d");
+    const luminance = (value) => { context.clearRect(0, 0, 1, 1); context.fillStyle = value; context.fillRect(0, 0, 1, 1); return [...context.getImageData(0, 0, 1, 1).data].slice(0, 3).map((v) => { const s = v / 255; return s <= .04045 ? s / 12.92 : ((s + .055) / 1.055) ** 2.4; }).reduce((total, v, index) => total + v * [.2126, .7152, .0722][index], 0); };
+    const style = getComputedStyle(element), fill = luminance(style.backgroundColor), foreground = luminance(style.color);
+    return (Math.max(fill, foreground) + .05) / (Math.min(fill, foreground) + .05);
+  });
+}
+
 async function gallery(frame, page, expected) {
   await frame.locator('[data-view="gallery"]').click();
   await frame.locator(".gallery-card").first().waitFor();
@@ -44,19 +54,15 @@ async function gallery(frame, page, expected) {
   await card.locator(".gallery-selection").click();
   await painted(card.locator(".gallery-selection > span"), "backgroundColor", expected, "gallery checkbox changed source color");
   await painted(card, "outlineColor", expected, "selected gallery image outline changed source color");
-  const contrast = await card.locator(".gallery-selection > span").evaluate((element) => {
-    const canvas = document.createElement("canvas"); canvas.width = canvas.height = 1;
-    const context = canvas.getContext("2d");
-    const luminance = (value) => { context.clearRect(0, 0, 1, 1); context.fillStyle = value; context.fillRect(0, 0, 1, 1); return [...context.getImageData(0, 0, 1, 1).data].slice(0, 3).map((v) => { const s = v / 255; return s <= .04045 ? s / 12.92 : ((s + .055) / 1.055) ** 2.4; }).reduce((total, v, index) => total + v * [.2126, .7152, .0722][index], 0); };
-    const style = getComputedStyle(element), fill = luminance(style.backgroundColor), foreground = luminance(style.color);
-    return (Math.max(fill, foreground) + .05) / (Math.min(fill, foreground) + .05);
-  });
+  const contrast = await tickContrast(card.locator(".gallery-selection > span"));
   assert.ok(contrast >= 4.5, `gallery tick contrast ${contrast}`);
   await frame.locator("#cancelSelectionButton").click();
   await frame.locator('.studio-select-trigger[data-select-id="gallerySource"]').click();
   const mark = frame.locator('.studio-select-option[aria-selected="true"] .studio-select-mark').first();
   await mark.waitFor();
-  await painted(mark, "color", expected, "dropdown selected mark changed source color");
+  await painted(mark, "backgroundColor", expected, "dropdown selected checkbox changed source color");
+  await painted(mark, "borderTopColor", expected, "dropdown selected checkbox border changed source color");
+  assert.ok(await tickContrast(mark) >= 4.5, "dropdown checkbox tick must remain readable");
   await page.keyboard.press("Escape");
   let attempts = 0;
   while (!await frame.locator(".gallery-card:has(.gallery-image-count)").count()) {

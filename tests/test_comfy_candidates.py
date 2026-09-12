@@ -63,7 +63,7 @@ def test_candidates_exclude_disconnected_and_preview_only_debug_texts() -> None:
     assert {item["id"] for item in candidates} == {"2:text", "3:text"}
 
 
-def test_raffle_filters_and_display_snapshots_are_never_candidates() -> None:
+def test_raffle_filters_are_excluded_but_linked_display_snapshot_is_manual() -> None:
     graph = api_graph()
     graph["8"] = {
         "class_type": "Raffle",
@@ -84,7 +84,13 @@ def test_raffle_filters_and_display_snapshots_are_never_candidates() -> None:
         "inputs": {"anything": ["9", 0], "text": "old output"},
     }
     candidates = parse(graph)["prompt_candidates"]
-    assert all(item["node_id"] not in {"8", "10"} for item in candidates)
+    assert all(item["node_id"] != "8" for item in candidates)
+    snapshots = [item for item in candidates if item["status"] == "display_snapshot"]
+    assert len(snapshots) == 1
+    assert snapshots[0]["text"] == "old output"
+    assert snapshots[0]["source_ref"] == "9:0"
+    assert snapshots[0]["freshness"] == "unverified"
+    assert not parse(graph).get("prompt")
     assert (
         next(item for item in candidates if item["id"] == "9:text_a")["text"]
         == "safe fragment"
@@ -204,11 +210,26 @@ def test_available_dynamic_samples_offer_only_connected_candidates(name: str) ->
         pytest.skip("本地参考样本不在发布仓库中")
     metadata = parse_image_metadata(sample.read_bytes())
     candidates = metadata["normalized"]["prompt_candidates"]
-    assert [(item["id"], len(item["text"])) for item in candidates] == [
-        ("170:text", 105),
+    static_candidates = [
+        item for item in candidates if item["status"] != "display_snapshot"
+    ]
+    assert [(item["id"], len(item["text"])) for item in static_candidates] == [
         ("171:text", 173),
         ("188:wildcard", 13),
     ]
     assert all(item["output_node_ids"] == ["175"] for item in candidates)
-    assert all(item["node_id"] not in {"69", "90", "101", "102"} for item in candidates)
+    assert all(item["node_id"] not in {"69", "101", "102"} for item in candidates)
     assert len(candidates[0]["stage_ids"]) == 4
+    snapshots = [item for item in candidates if item["status"] == "display_snapshot"]
+    assert len(snapshots) == 1
+    assert all(
+        item["node_id"] == "90" and item["source_ref"] == "73:0" for item in snapshots
+    )
+    assert all(
+        not item["conflicting"] and item["freshness"] == "unverified"
+        for item in snapshots
+    )
+    assert {item["observations"][0]["source"] for item in snapshots} == {
+        "workflow",
+    }
+    assert {entry["id"] for entry in snapshots[0]["covered_candidates"]} == {"170:text"}
