@@ -1936,6 +1936,72 @@
       // PhotoSwipe blocks input during its opening animation; the visual fade is independent.
       const pswp = new window.PhotoSwipe({ dataSource: mobileImageDataSource, index: initialIndex, loop: false, closeOnVerticalDrag: true, pinchToClose: false, tapAction: toggleMobileImageControls, imageClickAction: toggleMobileImageControls, bgClickAction: toggleMobileImageControls, doubleTapAction: "zoom", initialZoomLevel: "fit", secondaryZoomLevel: 2.5, maxZoomLevel: 4, preload: [1, 1], arrowPrev: false, arrowNext: false, close: false, zoom: false, counter: false, bgOpacity: 1, showHideAnimationType: "fade", showAnimationDuration: 0, hideAnimationDuration: 220, zoomAnimationDuration: 220, errorMsg: "图片暂时无法加载，请重试。", mainClass: "image-studio-pswp" });
       session.viewer = pswp;
+      const placeholders = new Map(), destroyedSlides = new WeakSet();
+      function syncPlaceholder(slide) {
+        if (!session.active || pswp.isDestroying || !slide?.holderElement || destroyedSlides.has(slide)) return;
+        let entry = placeholders.get(slide);
+        if (!entry) {
+          const placeholder = document.createElement("div");
+          placeholder.className = "image-studio-image-placeholder";
+          placeholder.setAttribute("aria-hidden", "true");
+          const icon = window.StudioIcons.createElement(window.StudioIcons.Image);
+          icon.setAttribute("viewBox", "2 2 20 20");
+          icon.setAttribute("stroke-width", "8");
+          icon.setAttribute("aria-hidden", "true"); icon.setAttribute("focusable", "false");
+          // A fixed, slightly heavier stroke stays readable at phone sizes.
+          icon.querySelectorAll("path,rect,circle,line,polyline,polygon,ellipse").forEach(shape => shape.setAttribute("vector-effect", "non-scaling-stroke"));
+          icon.classList.add("image-studio-placeholder-icon");
+          placeholder.appendChild(icon);
+          entry = { element: placeholder, displayedImages: new WeakSet(), pending: false };
+          const syncAfterPaintChange = () => {
+            if (entry.pending) return;
+            entry.pending = true;
+            queueMicrotask(() => { entry.pending = false; syncPlaceholder(slide); });
+          };
+          entry.observer = new MutationObserver(syncAfterPaintChange);
+          entry.observer.observe(slide.container, { childList: true, subtree: true, attributes: true, attributeFilter: ["src", "srcset"] });
+          // PhotoSwipe's own thumbnail IMG loads independently of its content
+          // events; either it or the main IMG can become visible first.
+          entry.onImageEvent = syncAfterPaintChange;
+          slide.container.addEventListener("load", entry.onImageEvent, true);
+          slide.container.addEventListener("error", entry.onImageEvent, true);
+          placeholders.set(slide, entry);
+          // The holder follows paging but does not zoom or pan the decoration.
+          // PhotoSwipe may replace its content/placeholder independently.
+          slide.holderElement.appendChild(placeholder);
+        }
+        const content = slide.content;
+        const images = Array.from(slide.container.querySelectorAll("img")).filter(image =>
+          !image.hidden && !image.classList.contains("pswp__hidden")
+          && !!image.getAttribute("src") && image.getAttribute("src") !== EMPTY_MOBILE_IMAGE);
+        const readyImages = images.filter(image => image.complete && image.naturalWidth > 0);
+        readyImages.forEach(image => entry.displayedImages.add(image));
+        // Keep a displayed preview unobstructed while that same mounted image
+        // upgrades to the original. A cold/replaced/error node still needs its marker.
+        const upgrading = content.state === "loading" && images.includes(content.element)
+          && entry.displayedImages.has(content.element);
+        entry.element.classList.toggle("is-ready", readyImages.length > 0 || upgrading);
+      }
+      pswp.on("firstZoomPan", ({ slide }) => syncPlaceholder(slide));
+      for (const event of ["contentLoadImage", "loadComplete", "contentAppendImage", "contentRemove", "contentActivate"]) {
+        pswp.on(event, ({ content }) => {
+          const slide = content.slide;
+          // PhotoSwipe emits these before its DOM update; inspect attachment
+          // afterwards, without waiting for HTTP, decoding or a gesture to end.
+          if (slide) queueMicrotask(() => syncPlaceholder(slide));
+        });
+      }
+      function removePlaceholder(slide) {
+        destroyedSlides.add(slide);
+        const entry = placeholders.get(slide);
+        if (!entry) return;
+        entry.observer.disconnect();
+        slide.container.removeEventListener("load", entry.onImageEvent, true);
+        slide.container.removeEventListener("error", entry.onImageEvent, true);
+        entry.element.remove(); placeholders.delete(slide);
+      }
+      pswp.on("slideDestroy", ({ slide }) => removePlaceholder(slide));
+      pswp.on("destroy", () => { for (const slide of placeholders.keys()) removePlaceholder(slide); });
       pswp.addFilter("placeholderSrc", (_source, content) => content.data.previewSrc || content.data.originalSrc || false);
       pswp.addFilter("contentErrorElement", (element) => {
         // The app owns pending/retry/failure feedback; PhotoSwipe only knows
@@ -1944,13 +2010,19 @@
       });
       pswp.on("loadError", ({ content }) => {
         const item = session.items[content.index];
-        if (!isCurrentMobileSession(session, content.index, item)) return;
+        if (!item || !isCurrentMobileSession(session, content.index, item)) return;
         if (content.data.src !== EMPTY_MOBILE_IMAGE) item.displayError = "图片暂时无法加载。";
         updateMobileViewerFeedback(session);
       });
       pswp.on("loadComplete", ({ content, isError }) => {
         const item = session.items[content.index];
-        if (!isError && isCurrentMobileSession(session, content.index, item) && content.data.src !== EMPTY_MOBILE_IMAGE) item.displayError = "";
+        if (!item || !isCurrentMobileSession(session, content.index, item)) return;
+        // PhotoSwipe can keep isAttached=true when reloading an error DIV on
+        // activation. Its append() then skips the replacement IMG entirely.
+        // Leave an in-progress native decode to its normal appendImage callback.
+        if (!isError && content.isAttached && !content.isDecoding && content.element instanceof HTMLImageElement
+          && content.slide?.heavyAppended && !content.element.parentNode) content.appendImage();
+        if (!isError && content.data.src !== EMPTY_MOBILE_IMAGE) item.displayError = "";
         updateMobileViewerFeedback(session);
       });
       pswp.on("uiRegister", () => {
