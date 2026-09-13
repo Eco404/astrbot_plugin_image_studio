@@ -41,8 +41,14 @@ async function tickContrast(locator) {
   return locator.evaluate((element) => {
     const canvas = document.createElement("canvas"); canvas.width = canvas.height = 1;
     const context = canvas.getContext("2d");
-    const luminance = (value) => { context.clearRect(0, 0, 1, 1); context.fillStyle = value; context.fillRect(0, 0, 1, 1); return [...context.getImageData(0, 0, 1, 1).data].slice(0, 3).map((v) => { const s = v / 255; return s <= .04045 ? s / 12.92 : ((s + .055) / 1.055) ** 2.4; }).reduce((total, v, index) => total + v * [.2126, .7152, .0722][index], 0); };
-    const style = getComputedStyle(element), fill = luminance(style.backgroundColor), foreground = luminance(style.color);
+    const paint = (value) => { context.fillStyle = value; context.fillRect(0, 0, 1, 1); };
+    const luminance = () => [...context.getImageData(0, 0, 1, 1).data].slice(0, 3).map((v) => { const s = v / 255; return s <= .04045 ? s / 12.92 : ((s + .055) / 1.055) ** 2.4; }).reduce((total, v, index) => total + v * [.2126, .7152, .0722][index], 0);
+    // Readability depends on the stacked surfaces, not the uncomposited RGB
+    // channels of a transparent checkbox or selection tint.
+    paint(getComputedStyle(document.documentElement).getPropertyValue("--page"));
+    const ancestors = []; for (let node = element; node; node = node.parentElement) ancestors.unshift(node);
+    for (const node of ancestors) paint(getComputedStyle(node).backgroundColor);
+    const fill = luminance(); paint(getComputedStyle(element).color); const foreground = luminance();
     return (Math.max(fill, foreground) + .05) / (Math.min(fill, foreground) + .05);
   });
 }
@@ -68,10 +74,16 @@ async function gallery(frame, page, expected) {
     await Promise.all(nav.getAnimations({ subtree: true }).map((animation) => animation.finished.catch(() => {})));
     return { surface: rgba(getComputedStyle(surface).backgroundColor), text: rgba(getComputedStyle(element.closest(".studio-select-option")).color) };
   });
-  await painted(mark, "backgroundColor", dropdownColors.surface, "dropdown selected checkbox must share the selected navigation's soft fill");
+  await painted(mark.locator("xpath=.."), "backgroundColor", dropdownColors.surface, "dropdown selected row must share the selected navigation's translucent fill");
+  assert.ok(dropdownColors.surface[3] > 128 && dropdownColors.surface[3] < 217, "selected dropdown surface must remain translucent");
+  await painted(mark, "backgroundColor", [0, 0, 0, 0], "dropdown selected checkbox must not add a second fill over its row");
+  assert.equal(dropdownColors.text[3], 255, "dropdown selection text must remain opaque");
   await painted(mark, "borderTopColor", dropdownColors.text, "dropdown checkbox outline must use the option text color");
   await painted(mark, "color", dropdownColors.text, "dropdown checkbox tick must use the option text color");
   assert.ok(await tickContrast(mark) >= 4.5, "dropdown checkbox tick must remain readable");
+  const mode = await frame.evaluate(() => document.documentElement.dataset.theme);
+  const screenshotName = `${page.context().browser().browserType().name()}-${page.viewportSize().width}-${mode}-${expected.slice(0, 3).join("-")}-dropdown.png`;
+  await frame.locator(".studio-select-menu").screenshot({ path: path.join(output, screenshotName), animations: "disabled" });
   await page.keyboard.press("Escape");
   let attempts = 0;
   while (!await frame.locator(".gallery-card:has(.gallery-image-count)").count()) {
@@ -167,7 +179,7 @@ async function mergePicker(frame, page, expected) {
             await page.screenshot({ path: path.join(output, `${engine}-${width}-${mode}-${name}.png`), animations: "disabled" });
           }
           assert.deepEqual(errors, []); assert.deepEqual(mutations, [], "selection style check must never upload or delete assets");
-          console.log(`${engine} ${width}px ${mode}: soft dropdowns, raw gallery/filmstrip/merge/delete selections, readable ticks and no mutations passed`);
+          console.log(`${engine} ${width}px ${mode}: translucent dropdown rows without repeated checkbox fill, raw gallery/filmstrip/merge/delete selections, readable ticks and no mutations passed`);
         } finally { await context.close(); }
       }
     } finally { await browser.close(); }

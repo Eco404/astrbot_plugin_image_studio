@@ -74,6 +74,30 @@
     return dark ? 100 : 0;
   }
 
+  function composite(color, background, opacity) {
+    return color.map((value, index) => value * opacity + background[index] * (1 - opacity));
+  }
+
+  function selectionSurface(hue, saturation, dark, glassOpacity) {
+    // Slightly reinforce the tint over very transparent glass to keep the
+    // brighter dark surface readable even above a pale backdrop.
+    const opacity = dark ? .75 + .07 * Math.max(0, (.4 - glassOpacity) / .2) : .72;
+    const target = hslRgb(hue, dark ? 18 : saturation, dark ? 28 : 90);
+    const glass = dark ? [35, 41, 38] : [252, 253, 253];
+    const page = dark ? [27, 32, 30] : [233, 239, 236];
+    const background = composite(glass, page, glassOpacity);
+    // Match the previous solid color over the usual card surface while still
+    // letting variations in the blurred backdrop show through the selection.
+    const tint = target.map((value, index) => Math.max(0, Math.min(255,
+      Math.round((value - background[index] * (1 - opacity)) / opacity))));
+    return {
+      fill: `rgb(${tint.join(" ")} / ${opacity})`,
+      // Check text against both ends of the possible blurred backdrop range.
+      backgrounds: [[0, 0, 0], [255, 255, 255]].map(underlay =>
+        composite(tint, composite(glass, underlay, glassOpacity), opacity)),
+    };
+  }
+
   function apply() {
     const resolved = settings.preference === "system" ? (scheme.matches ? "dark" : "light") : settings.preference;
     if (root.dataset.theme !== resolved) root.dataset.theme = resolved;
@@ -89,9 +113,13 @@
     // Correct text/focus colors independently. Raw selection accents retain the
     // chosen color; button and switch surfaces reuse the navigation palette.
     const dark = resolved === "dark", h = settings.accentHue, s = settings.accentSaturation;
-    const backgrounds = dark ? [[22, 33, 28], [48, 55, 51], hslRgb(h, 18, 21)] : [[255, 255, 255], [226, 233, 230], hslRgb(h, s, 90)];
+    const selection = selectionSurface(h, s, dark, settings.glassOpacity);
+    root.style.setProperty("--selection-fill", selection.fill);
+    const backgrounds = dark ? [[22, 33, 28], [48, 55, 51], hslRgb(h, 18, 28)] : [[255, 255, 255], [226, 233, 230], hslRgb(h, s, 90)];
+    backgrounds.push(...selection.backgrounds);
     const accent = safeLightness(h, s, dark ? Math.max(62, settings.accentLightness) : Math.min(30, settings.accentLightness), backgrounds, dark);
-    const strong = safeLightness(h, Math.min(100, s + (dark ? 6 : 8)), dark ? Math.max(72, accent) : Math.min(27, accent), backgrounds, dark);
+    const iconBackgrounds = selection.backgrounds.map(background => composite(hslRgb(h, s, accent), background, .16));
+    const strong = safeLightness(h, Math.min(100, s + (dark ? 6 : 8)), dark ? Math.max(72, accent) : Math.min(27, accent), [...backgrounds, ...iconBackgrounds], dark);
     root.style.setProperty("--accent-l", `${accent}%`);
     root.style.setProperty("--accent-strong-l", `${strong}%`);
     const fill = hslRgb(h, s, settings.accentLightness);

@@ -5,7 +5,7 @@ const { chromium, webkit } = require(process.env.STUDIO_PLAYWRIGHT || "playwrigh
 const base = process.env.STUDIO_TEST_URL;
 if (!base) throw new Error("Set STUDIO_TEST_URL to an isolated WebUI harness.");
 const output = fs.mkdtempSync(path.join(os.tmpdir(), "image-studio-settings-layout-"));
-const order = ["运行", "默认值", "历史", "图片预览与临时保留", "外部图库", "存储健康", "主题与显示"];
+const order = ["运行", "默认模型", "历史", "图片预览与临时保留", "外部图库", "存储健康", "主题与显示"];
 
 async function settle(frame) {
   await frame.evaluate(async () => {

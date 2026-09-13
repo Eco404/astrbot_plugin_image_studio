@@ -16,7 +16,7 @@ select.studio-select-native { position: absolute !important; inset: auto !import
 .studio-select-options { flex: 1 1 auto; min-height: 0; padding: 5px; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; touch-action: pan-y; scrollbar-width: thin; }
 .studio-select-option { display: grid; grid-template-columns: 20px minmax(0, 1fr); align-items: center; gap: 7px; min-height: 36px; padding: 7px 9px; border-radius: 7px; color: var(--text); cursor: pointer; }
 .studio-select-option.is-active { background: var(--surface-hover); }
-.studio-select-option[aria-selected="true"] { background: var(--accent-soft); color: var(--accent-strong); }
+.studio-select-option[aria-selected="true"] { background: var(--selection-fill, var(--accent-soft)); color: var(--accent-strong); }
 .studio-select-option[aria-selected="true"].is-active { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 26%, transparent); }
 .studio-select-option[aria-disabled="true"] { opacity: .45; cursor: not-allowed; }
 .studio-select-option-label { min-width: 0; overflow-wrap: anywhere; }
@@ -26,11 +26,11 @@ select.studio-select-native { position: absolute !important; inset: auto !import
 .studio-select-option[aria-selected="true"] .studio-select-mark { visibility: visible; }
 .studio-select-menu.is-multiple .studio-select-mark { width: 17px; height: 17px; visibility: visible; border: 1px solid var(--line); border-radius: 5px; background: var(--surface); }
 .studio-select-menu.is-multiple .studio-select-mark svg { width: 13px; height: 13px; visibility: hidden; }
-.studio-select-menu.is-multiple [aria-selected="true"] .studio-select-mark { border-color: currentColor; background: var(--accent-soft); color: inherit; }
+.studio-select-menu.is-multiple [aria-selected="true"] .studio-select-mark { border-color: currentColor; background: transparent; color: inherit; }
 .studio-select-menu.is-multiple [aria-selected="true"] .studio-select-mark svg { visibility: visible; }
 .studio-select-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 4px; padding: 7px 6px; border-bottom: 1px solid var(--line); background: transparent; }
 .studio-select-actions button { min-height: 30px; padding: 4px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--accent-strong); font: inherit; font-size: 12px; white-space: nowrap; cursor: pointer; }
-.studio-select-actions button:hover:not(:disabled) { background: var(--accent-soft); }
+.studio-select-actions button:hover:not(:disabled) { background: var(--selection-fill, var(--accent-soft)); }
 .studio-select-actions button:disabled { color: var(--muted); opacity: .55; cursor: default; }
 .studio-select-group, .studio-select-empty { padding: 8px 10px; color: var(--muted); font-size: 12px; }
 .studio-select-group { font-size: 11px; font-weight: 650; }

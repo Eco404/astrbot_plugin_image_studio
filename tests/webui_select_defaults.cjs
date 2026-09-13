@@ -11,7 +11,7 @@ const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewp
 <style>:root { --line: #73847844; --surface: #ffffff44; --surface-hover: #ffffff66; --text: #263c31; --muted: #607268; }
 * { box-sizing: border-box; } body { margin: 20px; min-height: 2000px; font: 14px system-ui; background: repeating-linear-gradient(30deg, #c8dcce 0px 60px, #dad8ee 60px 120px); }
 label { display: block; width: 240px; max-width: 100%; margin-bottom: 16px; } #glassProbe { background: var(--glass); }</style>
-<script src="/gallery-preferences.js" defer></script><script src="/select.js" defer></script></head><body>
+<script src="/appearance.js" defer></script><script src="/gallery-preferences.js" defer></script><script src="/select.js" defer></script></head><body>
 <label>服务商<select id="galleryProvider" multiple data-all-label="全部服务商">
 ${Array.from({ length: 30 }, (_, index) => `<option value="${index ? `provider-${index}` : ""}" selected>${index ? `服务商 ${index}` : "未指定"}</option>`).join("")}
 </select></label>
@@ -24,7 +24,7 @@ ${Array.from({ length: 30 }, (_, index) => `<option value="${index ? `provider-$
 async function prepare(page) {
   await page.route("http://image-studio-select.test/**", (route) => {
     const name = new URL(route.request().url()).pathname.slice(1);
-    if (["gallery-preferences.js", "select.js", "select.css", "appearance.css"].includes(name)) return route.fulfill({ contentType: name.endsWith("js") ? "application/javascript" : "text/css", body: fs.readFileSync(path.join(root, name), "utf8") });
+    if (["gallery-preferences.js", "select.js", "select.css", "appearance.css", "appearance.js"].includes(name)) return route.fulfill({ contentType: name.endsWith("js") ? "application/javascript" : "text/css", body: fs.readFileSync(path.join(root, name), "utf8") });
     return route.fulfill({ contentType: "text/html", body: html });
   });
   await page.goto("http://image-studio-select.test/");
@@ -45,10 +45,13 @@ async function matchingMaterials(page) {
       const surface = getComputedStyle(menu);
       const row = menu.querySelector('[aria-selected="true"]');
       const selected = getComputedStyle(row), mark = getComputedStyle(row.querySelector(".studio-select-mark"));
+      const canvas = document.createElement("canvas"); canvas.width = canvas.height = 1;
+      const context = canvas.getContext("2d");
+      const alpha = (color) => { context.clearRect(0, 0, 1, 1); context.fillStyle = color; context.fillRect(0, 0, 1, 1); return context.getImageData(0, 0, 1, 1).data[3] / 255; };
       return {
         surface: { background: surface.backgroundColor, color: surface.color, border: surface.borderTopColor, radius: surface.borderRadius, shadow: surface.boxShadow, blur: surface.backdropFilter || surface.webkitBackdropFilter },
-        selected: { background: selected.backgroundColor, color: selected.color, shadow: selected.boxShadow },
-        mark: { background: mark.backgroundColor, color: mark.color, border: mark.borderTopColor, width: mark.borderTopWidth, radius: mark.borderRadius },
+        selected: { background: selected.backgroundColor, color: selected.color, shadow: selected.boxShadow, alpha: alpha(selected.backgroundColor), textAlpha: alpha(selected.color), opacity: selected.opacity, blur: selected.backdropFilter || selected.webkitBackdropFilter },
+        mark: { background: mark.backgroundColor, alpha: alpha(mark.backgroundColor), color: mark.color, textAlpha: alpha(mark.color), opacity: mark.opacity, border: mark.borderTopColor, width: mark.borderTopWidth, radius: mark.borderRadius },
       };
     });
     await trigger(page, id).press("Escape");
@@ -56,22 +59,26 @@ async function matchingMaterials(page) {
   }
   for (const theme of ["light", "dark"]) for (const opacity of [0.2, 0.68, 1]) {
     await page.evaluate(({ theme, opacity }) => {
-      document.documentElement.dataset.theme = theme;
-      document.documentElement.style.setProperty("--glass", theme === "dark" ? `rgba(25, 30, 28, ${opacity})` : `rgba(255, 255, 255, ${opacity})`);
-      document.documentElement.style.setProperty("--accent-h", "345");
+      window.ImageStudioAppearance.set({ preference: theme, glassOpacity: opacity, accentHue: 345 });
     }, { theme, opacity });
     const single = await snapshot("single");
+    assert.ok(single.selected.alpha > .5 && single.selected.alpha < .85, "selected row must reveal the existing menu glass rather than paint an opaque surface");
+    assert.equal(single.selected.textAlpha, 1, "selection must not fade the option text");
+    assert.equal(single.selected.opacity, "1", "selection transparency belongs to the background, not the entire row");
+    assert.ok(!single.selected.blur || single.selected.blur === "none", "selected rows should reuse menu blur without another backdrop filter");
     for (const id of ["galleryProvider", "unrelated"]) {
       const multiple = await snapshot(id);
       assert.deepEqual(multiple.surface, single.surface, `${theme}/${opacity}/${id}: multiple and single menus must use the same glass material`);
       assert.deepEqual(multiple.selected, single.selected, `${theme}/${opacity}/${id}: selected row palette must match single selects`);
       assert.equal(multiple.mark.color, single.mark.color, "single and multiple checkmarks use the same text color");
-      assert.equal(multiple.mark.background, multiple.selected.background, "checkbox uses the selected row's soft fill");
+      assert.equal(multiple.mark.alpha, 0, "selected checkbox must not paint a second translucent color layer");
+      assert.equal(multiple.mark.textAlpha, 1, "selected checkbox tick remains opaque");
+      assert.equal(multiple.mark.opacity, "1", "selected checkbox must not fade its tick or border");
       assert.equal(multiple.mark.border, multiple.selected.color, "checkbox outline remains discernible against the soft fill");
       assert.ok(parseFloat(multiple.mark.width) > 0 && parseFloat(multiple.mark.radius) < 9, "multiple selection keeps its small checkbox outline");
     }
   }
-  await page.evaluate(() => { document.documentElement.dataset.theme = "light"; document.documentElement.style.removeProperty("--glass"); });
+  await page.evaluate(() => window.ImageStudioAppearance.set({ preference: "light", glassOpacity: .68 }));
 }
 
 async function test(browserType, name, viewport) {
@@ -167,7 +174,7 @@ async function test(browserType, name, viewport) {
     assert.match(await page.evaluate(() => window.__defaultError?.message), /无法保存/);
     await frames(page);
     assert.deepEqual(errors, []);
-    console.log(`${name}: separate scroll viewport, glass theme, keyboard and datalist, explicit defaults, reload, all/subset identity, malformed/blocked storage passed`);
+    console.log(`${name}: shared translucent single/multiple selection, opaque text, no repeated checkbox fill, glass theme, separate scrolling, keyboard/datalist and saved defaults passed`);
   } finally { await browser.close(); }
 }
 

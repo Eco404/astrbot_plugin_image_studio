@@ -56,7 +56,11 @@ async function accentContrast(frame) {
     const canvas = document.createElement("canvas"); canvas.width = 1; canvas.height = 1;
     const context = canvas.getContext("2d");
     const sample = document.createElement("span"); sample.style.setProperty("transition", "none", "important"); document.body.appendChild(sample);
-    const rgb = (token) => { sample.style.backgroundColor = `var(${token})`; context.clearRect(0, 0, 1, 1); context.fillStyle = getComputedStyle(sample).backgroundColor; context.fillRect(0, 0, 1, 1); return [...context.getImageData(0, 0, 1, 1).data].slice(0, 3); };
+    const rgb = (token, backdrop = []) => {
+      context.clearRect(0, 0, 1, 1);
+      for (const layer of [...backdrop, token]) { sample.style.backgroundColor = `var(${layer})`; context.fillStyle = getComputedStyle(sample).backgroundColor; context.fillRect(0, 0, 1, 1); }
+      return [...context.getImageData(0, 0, 1, 1).data].slice(0, 3);
+    };
     const luma = (values) => values.map((v) => { const s = v / 255; return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4; }).reduce((sum, v, index) => sum + v * [0.2126, 0.7152, 0.0722][index], 0);
     const contrast = (a, b) => (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
     const original = window.ImageStudioAppearance.get();
@@ -64,7 +68,7 @@ async function accentContrast(frame) {
     const mismatches = [];
     for (const hue of [0, 17, 57, 130, 168, 195, 216, 279, 345, 359]) for (const saturation of [0, 100]) for (const lightness of [0, 7, 50, 94, 100]) {
       window.ImageStudioAppearance.set({ accentHue: hue, accentSaturation: saturation, accentLightness: lightness }, false);
-      smallest = Math.min(smallest, contrast(luma(rgb("--accent")), luma(rgb("--on-accent"))), contrast(luma(rgb("--accent-soft")), luma(rgb("--accent-strong"))));
+      smallest = Math.min(smallest, contrast(luma(rgb("--accent")), luma(rgb("--on-accent"))), contrast(luma(rgb("--selection-fill", ["--page", "--glass"])), luma(rgb("--accent-strong"))));
       controlMinimum = Math.min(controlMinimum,
         contrast(luma(rgb("--control-accent")), luma(rgb("--on-control-accent"))),
         contrast(luma(rgb("--control-accent-hover")), luma(rgb("--on-control-accent-hover"))));
@@ -84,6 +88,39 @@ async function accentContrast(frame) {
   assert.deepEqual(values.mismatches, [], "image-selection accent tokens must preserve the selected source color");
 }
 
+async function selectionCompositing(frame) {
+  const samples = await frame.evaluate(() => {
+    const saved = window.ImageStudioAppearance.get();
+    const probe = document.createElement("span"); probe.style.setProperty("transition", "none", "important"); document.body.appendChild(probe);
+    const canvas = document.createElement("canvas"); canvas.width = canvas.height = 1;
+    const context = canvas.getContext("2d");
+    const token = (name) => { probe.style.backgroundColor = `var(${name})`; return getComputedStyle(probe).backgroundColor; };
+    const paint = (layers) => {
+      context.clearRect(0, 0, 1, 1);
+      for (const color of layers) { context.fillStyle = color; context.fillRect(0, 0, 1, 1); }
+      return [...context.getImageData(0, 0, 1, 1).data].slice(0, 3);
+    };
+    const delta = (a, b) => Math.max(...a.map((channel, index) => Math.abs(channel - b[index])));
+    const result = [];
+    for (const preference of ["light", "dark"]) for (const glassOpacity of [.2, .68, 1]) {
+      window.ImageStudioAppearance.set({ preference, glassOpacity, accentHue: 345, accentSaturation: 40, accentLightness: 50 }, false);
+      const page = token("--page"), glass = token("--glass"), tint = token("--selection-fill"), oldSurface = paint([token("--accent-soft")]);
+      // Use the actual browser-resolved CSS layers, without reproducing the
+      // implementation's tint compensation calculation.
+      const surface = paint([page, glass, tint]);
+      const lowBackdrop = paint(["#165569", glass, tint]), highBackdrop = paint(["#ad8375", glass, tint]);
+      result.push({ preference, glassOpacity, oldSurface, surface, targetDelta: delta(oldSurface, surface), backdropDelta: delta(lowBackdrop, highBackdrop) });
+    }
+    window.ImageStudioAppearance.set(saved, false); probe.remove();
+    return result;
+  });
+  for (const sample of samples) {
+    assert.ok(sample.targetDelta <= 8, `selection must remain close to the old palette on the normal page/glass backdrop: ${JSON.stringify(sample)}`);
+    if (sample.glassOpacity < 1) assert.ok(sample.backdropDelta >= 5, `changed backdrop should show through the selected surface: ${JSON.stringify(sample)}`);
+    else assert.equal(sample.backdropDelta, 0, "opaque enclosing glass must correctly conceal the page below it");
+  }
+}
+
 async function sidebarControls(browser, engine, width = 1440) {
   const context = await browser.newContext({ viewport: { width, height: width < 540 ? 844 : 1000 } });
   const { page, frame, errors } = await open(context);
@@ -95,6 +132,7 @@ async function sidebarControls(browser, engine, width = 1440) {
     });
   }
   try {
+    await selectionCompositing(frame);
     for (const [mode, sourceHex] of ["light", "dark"].flatMap((mode) => ["#dcc1cf", "#0066ff", "#000000", "#ffffff"].map((hex) => [mode, hex]))) {
       await theme(frame, mode);
       await frame.locator("#appearanceHex").fill(sourceHex);
@@ -111,28 +149,41 @@ async function sidebarControls(browser, engine, width = 1440) {
         const rendering = await frame.waitForFunction(() => {
           const canvas = document.createElement("canvas"); canvas.width = canvas.height = 1;
           const context = canvas.getContext("2d");
-          const rgb = (color) => { context.clearRect(0, 0, 1, 1); context.fillStyle = color; context.fillRect(0, 0, 1, 1); return [...context.getImageData(0, 0, 1, 1).data].slice(0, 3); };
+          const rgba = (color) => { context.clearRect(0, 0, 1, 1); context.fillStyle = color; context.fillRect(0, 0, 1, 1); return [...context.getImageData(0, 0, 1, 1).data]; };
+          const rgb = (color) => rgba(color).slice(0, 3);
+          const composed = (element) => {
+            context.clearRect(0, 0, 1, 1);
+            context.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--page"); context.fillRect(0, 0, 1, 1);
+            const ancestors = []; for (let node = element; node; node = node.parentElement) ancestors.unshift(node);
+            for (const node of ancestors) { context.fillStyle = getComputedStyle(node).backgroundColor; context.fillRect(0, 0, 1, 1); }
+            return [...context.getImageData(0, 0, 1, 1).data].slice(0, 3);
+          };
           const luma = (values) => values.map((v) => { const s = v / 255; return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4; }).reduce((sum, v, index) => sum + v * [0.2126, 0.7152, 0.0722][index], 0);
           const button = document.getElementById("addProviderButton");
           const nav = document.querySelector(".nav-item.is-active");
           const navSurface = innerWidth <= 900 ? nav.querySelector(".nav-icon") : nav;
-          const navigationFill = rgb(getComputedStyle(navSurface).backgroundColor);
-          const navigationText = rgb(getComputedStyle(nav).color);
+          const navigationFill = rgba(getComputedStyle(navSurface).backgroundColor);
+          const navigationText = rgba(getComputedStyle(nav).color);
           const selectedSwitch = document.querySelector(".toggle-control input:checked + span");
           if (!selectedSwitch) return false;
-          const fill = rgb(getComputedStyle(button).backgroundColor), foreground = rgb(getComputedStyle(button).color);
-          const switchFill = rgb(getComputedStyle(selectedSwitch).backgroundColor), switchForeground = rgb(getComputedStyle(selectedSwitch, "::after").backgroundColor);
+          const fill = rgba(getComputedStyle(button).backgroundColor), foreground = rgba(getComputedStyle(button).color);
+          const switchFill = rgba(getComputedStyle(selectedSwitch).backgroundColor), switchForeground = rgb(getComputedStyle(selectedSwitch, "::after").backgroundColor);
           const expectedThumb = document.documentElement.dataset.theme === "dark" ? rgb(getComputedStyle(document.querySelector(".provider-row span")).color) : [255, 255, 255];
           const contrast = (a, b) => (Math.max(luma(a), luma(b)) + .05) / (Math.min(luma(a), luma(b)) + .05);
-          const ratio = contrast(fill, foreground);
+          const ratio = contrast(composed(button), foreground.slice(0, 3));
           if (fill.some((value, index) => value !== navigationFill[index]) || foreground.some((value, index) => value !== navigationText[index]) || switchFill.some((value, index) => value !== navigationFill[index]) || ratio < 4.5 || switchForeground.some((value, index) => value !== expectedThumb[index])) return false;
-          return { fill, foreground, switchFill, ratio, switchForeground, navigationFill, navigationText, expectedThumb };
+          return { fill, foreground, switchFill, ratio, switchForeground, navigationFill, navigationText, expectedThumb, buttonOpacity: getComputedStyle(button).opacity, navOpacity: getComputedStyle(navSurface).opacity, navOuterAlpha: rgba(getComputedStyle(nav).backgroundColor)[3] };
         }, null, { timeout: 5000 });
         const value = await rendering.jsonValue();
         assert.deepEqual(value.fill, value.navigationFill, `${mode} ${sourceHex} ${hovered ? "hover" : "normal"} button must match the selected navigation surface`);
         assert.deepEqual(value.foreground, value.navigationText, `${mode} ${sourceHex} button text must match selected navigation text`);
         assert.deepEqual(value.switchFill, value.navigationFill, `${mode} ${sourceHex} switch must match the selected navigation surface`);
         assert.deepEqual(value.switchForeground, value.expectedThumb, `${mode} enabled switch thumb uses white in light mode and the muted palette in dark mode`);
+        assert.ok(value.fill[3] > 128 && value.fill[3] < 217, `${mode} ${sourceHex}: selection tint must be translucent`);
+        assert.equal(value.foreground[3], 255, "button and selected navigation text must remain opaque");
+        assert.equal(value.buttonOpacity, "1", "do not fade the whole button to make its background translucent");
+        assert.equal(value.navOpacity, "1", "do not fade the whole selected navigation surface");
+        if (width <= 900) assert.equal(value.navOuterAlpha, 0, "mobile navigation must retain a transparent outer row");
       }
       await button.evaluate((element) => { element.disabled = true; });
       const disabled = await button.evaluate(async (element) => {
@@ -179,7 +230,7 @@ async function sidebarControls(browser, engine, width = 1440) {
       await page.screenshot({ path: path.join(output, `${engine}-${width}-${mode}-switch-theme-restored.png`), animations: "disabled" });
     }
     assert.deepEqual(errors, []);
-    console.log(`${engine} ${width}px: pale/vivid/black/white primary buttons and switches match selected navigation, theme-aware thumbs restore across toggles/theme changes, and selected settings rows are borderless`);
+    console.log(`${engine} ${width}px: translucent navigation/buttons/switches preserve the palette and text contrast over composed glass, background changes show through, mobile outer rows stay transparent, and selected settings rows remain borderless`);
   } finally { await context.close(); }
 }
 
