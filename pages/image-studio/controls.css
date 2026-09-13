@@ -21,6 +21,8 @@
 .nav-item,
 .nav-icon { box-shadow: none; }
 
+.provider-row.is-active { border-color: transparent; color: var(--accent-strong); }
+
 .topbar > :first-child { min-width: 0; }
 .topbar-status { display: flex; flex: 0 1 46%; flex-direction: column; align-items: flex-end; gap: 4px; min-width: 0; text-align: right; }
 #providerStatusName { max-width: 100%; overflow-wrap: anywhere; }

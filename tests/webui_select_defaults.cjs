@@ -37,6 +37,43 @@ const saved = (page, id) => page.evaluate((id) => window.ImageStudioSelect.getGa
 async function chooseIndex(page, index) { await page.locator(`.studio-select-menu [data-option-index="${index}"]`).click(); }
 async function frames(page) { await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))); }
 
+async function matchingMaterials(page) {
+  async function snapshot(id) {
+    await trigger(page, id).click();
+    const result = await page.locator(".studio-select-menu").evaluate(async (menu) => {
+      await Promise.all(menu.getAnimations().map((animation) => animation.finished.catch(() => {})));
+      const surface = getComputedStyle(menu);
+      const row = menu.querySelector('[aria-selected="true"]');
+      const selected = getComputedStyle(row), mark = getComputedStyle(row.querySelector(".studio-select-mark"));
+      return {
+        surface: { background: surface.backgroundColor, color: surface.color, border: surface.borderTopColor, radius: surface.borderRadius, shadow: surface.boxShadow, blur: surface.backdropFilter || surface.webkitBackdropFilter },
+        selected: { background: selected.backgroundColor, color: selected.color, shadow: selected.boxShadow },
+        mark: { background: mark.backgroundColor, color: mark.color, border: mark.borderTopColor, width: mark.borderTopWidth, radius: mark.borderRadius },
+      };
+    });
+    await trigger(page, id).press("Escape");
+    return result;
+  }
+  for (const theme of ["light", "dark"]) for (const opacity of [0.2, 0.68, 1]) {
+    await page.evaluate(({ theme, opacity }) => {
+      document.documentElement.dataset.theme = theme;
+      document.documentElement.style.setProperty("--glass", theme === "dark" ? `rgba(25, 30, 28, ${opacity})` : `rgba(255, 255, 255, ${opacity})`);
+      document.documentElement.style.setProperty("--accent-h", "345");
+    }, { theme, opacity });
+    const single = await snapshot("single");
+    for (const id of ["galleryProvider", "unrelated"]) {
+      const multiple = await snapshot(id);
+      assert.deepEqual(multiple.surface, single.surface, `${theme}/${opacity}/${id}: multiple and single menus must use the same glass material`);
+      assert.deepEqual(multiple.selected, single.selected, `${theme}/${opacity}/${id}: selected row palette must match single selects`);
+      assert.equal(multiple.mark.color, single.mark.color, "single and multiple checkmarks use the same text color");
+      assert.equal(multiple.mark.background, multiple.selected.background, "checkbox uses the selected row's soft fill");
+      assert.equal(multiple.mark.border, multiple.selected.color, "checkbox outline remains discernible against the soft fill");
+      assert.ok(parseFloat(multiple.mark.width) > 0 && parseFloat(multiple.mark.radius) < 9, "multiple selection keeps its small checkbox outline");
+    }
+  }
+  await page.evaluate(() => { document.documentElement.dataset.theme = "light"; document.documentElement.style.removeProperty("--glass"); });
+}
+
 async function test(browserType, name, viewport) {
   const browser = await browserType.launch({ headless: true });
   const page = await browser.newPage({ viewport, hasTouch: viewport.width < 600 });
@@ -44,6 +81,7 @@ async function test(browserType, name, viewport) {
   page.on("pageerror", (error) => errors.push(error.message));
   try {
     await prepare(page);
+    await matchingMaterials(page);
     assert.equal(await saved(page, "galleryProvider"), null);
     await trigger(page, "galleryProvider").click();
     const geometry = await page.locator(".studio-select-menu").evaluate((menu) => {
@@ -60,7 +98,7 @@ async function test(browserType, name, viewport) {
     assert.ok(geometry.scroll > 0 && geometry.canScroll, JSON.stringify(geometry));
     assert.equal(geometry.behind, false);
     assert.equal(geometry.overflow, "hidden");
-    assert.ok(Math.abs(geometry.alpha - (geometry.themeAlpha + (1 - geometry.themeAlpha) * .25)) < .01, "gallery filter adds a small tint over the theme glass");
+    assert.ok(Math.abs(geometry.alpha - geometry.themeAlpha) < .01, "gallery filter must not add a second opacity layer over the shared menu glass");
     assert.match(geometry.blur, /blur\(22px\)/);
     assert.ok(geometry.left >= 7 && geometry.top >= 7 && geometry.right <= geometry.width - 7 && geometry.bottom <= geometry.height - 7, JSON.stringify(geometry));
     const wheel = await page.locator(".studio-select-menu").evaluate((menu) => {

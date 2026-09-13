@@ -81,45 +81,84 @@ async function accentContrast(frame) {
   });
   assert.ok(values.smallest >= 4.5, `accent text contrast below 4.5:1: ${values.smallest}`);
   assert.ok(values.controlMinimum >= 4.5, `control fill contrast below 4.5:1: ${values.controlMinimum}`);
-  assert.deepEqual(values.mismatches, [], "normal and hovered control fills must exactly preserve the selected source color");
+  assert.deepEqual(values.mismatches, [], "image-selection accent tokens must preserve the selected source color");
 }
 
-async function exactSourceControls(browser, engine, width = 1440) {
+async function sidebarControls(browser, engine, width = 1440) {
   const context = await browser.newContext({ viewport: { width, height: width < 540 ? 844 : 1000 } });
   const { page, frame, errors } = await open(context);
+  async function checkedThumb() {
+    await frame.waitForFunction(() => {
+      const input = document.getElementById("settingTool"), thumb = getComputedStyle(input.nextElementSibling, "::after");
+      const expected = document.documentElement.dataset.theme === "dark" ? getComputedStyle(document.querySelector(".provider-row span")).color : "rgb(255, 255, 255)";
+      return input.checked && thumb.backgroundColor === expected && new DOMMatrix(thumb.transform).m41 === 16;
+    });
+  }
   try {
-    for (const mode of ["light", "dark"]) {
+    for (const [mode, sourceHex] of ["light", "dark"].flatMap((mode) => ["#dcc1cf", "#0066ff", "#000000", "#ffffff"].map((hex) => [mode, hex]))) {
       await theme(frame, mode);
-      await frame.locator("#appearanceHex").fill("#dcc1cf");
+      await frame.locator("#appearanceHex").fill(sourceHex);
       await frame.locator("#appearanceHex").press("Enter");
       await frame.evaluate(() => window.ImageStudioAppearance.saved());
       await silentStatus(frame);
-      assert.equal((await frame.locator("#appearanceColor").inputValue()).toLowerCase(), "#dcc1cf");
-      const source = [220, 193, 207];
-      const button = frame.locator("#saveSettingsButton");
+      assert.equal((await frame.locator("#appearanceColor").inputValue()).toLowerCase(), sourceHex);
+      // The save button intentionally turns yellow for an unsaved draft. Use a
+      // normal primary action to compare the actual navigation/control surfaces.
+      const button = frame.locator("#addProviderButton");
       await page.mouse.move(0, 0);
       for (const hovered of [false, true]) {
         if (hovered) await button.hover();
-        const rendering = await frame.waitForFunction(({ source }) => {
+        const rendering = await frame.waitForFunction(() => {
           const canvas = document.createElement("canvas"); canvas.width = canvas.height = 1;
           const context = canvas.getContext("2d");
           const rgb = (color) => { context.clearRect(0, 0, 1, 1); context.fillStyle = color; context.fillRect(0, 0, 1, 1); return [...context.getImageData(0, 0, 1, 1).data].slice(0, 3); };
           const luma = (values) => values.map((v) => { const s = v / 255; return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4; }).reduce((sum, v, index) => sum + v * [0.2126, 0.7152, 0.0722][index], 0);
-          const button = document.getElementById("saveSettingsButton");
+          const button = document.getElementById("addProviderButton");
+          const nav = document.querySelector(".nav-item.is-active");
+          const navSurface = innerWidth <= 900 ? nav.querySelector(".nav-icon") : nav;
+          const navigationFill = rgb(getComputedStyle(navSurface).backgroundColor);
+          const navigationText = rgb(getComputedStyle(nav).color);
           const selectedSwitch = document.querySelector(".toggle-control input:checked + span");
           if (!selectedSwitch) return false;
           const fill = rgb(getComputedStyle(button).backgroundColor), foreground = rgb(getComputedStyle(button).color);
           const switchFill = rgb(getComputedStyle(selectedSwitch).backgroundColor), switchForeground = rgb(getComputedStyle(selectedSwitch, "::after").backgroundColor);
+          const expectedThumb = document.documentElement.dataset.theme === "dark" ? rgb(getComputedStyle(document.querySelector(".provider-row span")).color) : [255, 255, 255];
           const contrast = (a, b) => (Math.max(luma(a), luma(b)) + .05) / (Math.min(luma(a), luma(b)) + .05);
           const ratio = contrast(fill, foreground);
-          if (fill.some((value, index) => value !== source[index]) || switchFill.some((value, index) => value !== source[index]) || ratio < 4.5 || switchForeground.some((value) => value !== 255)) return false;
-          return { fill, switchFill, ratio, switchForeground };
-        }, { source }, { timeout: 5000 });
+          if (fill.some((value, index) => value !== navigationFill[index]) || foreground.some((value, index) => value !== navigationText[index]) || switchFill.some((value, index) => value !== navigationFill[index]) || ratio < 4.5 || switchForeground.some((value, index) => value !== expectedThumb[index])) return false;
+          return { fill, foreground, switchFill, ratio, switchForeground, navigationFill, navigationText, expectedThumb };
+        }, null, { timeout: 5000 });
         const value = await rendering.jsonValue();
-        assert.deepEqual(value.fill, source, `${mode} ${hovered ? "hover" : "normal"} button changed source color`);
-        assert.deepEqual(value.switchFill, source, `${mode} switch changed source color`);
-        assert.deepEqual(value.switchForeground, [255, 255, 255], `${mode} enabled switch thumb must stay white`);
+        assert.deepEqual(value.fill, value.navigationFill, `${mode} ${sourceHex} ${hovered ? "hover" : "normal"} button must match the selected navigation surface`);
+        assert.deepEqual(value.foreground, value.navigationText, `${mode} ${sourceHex} button text must match selected navigation text`);
+        assert.deepEqual(value.switchFill, value.navigationFill, `${mode} ${sourceHex} switch must match the selected navigation surface`);
+        assert.deepEqual(value.switchForeground, value.expectedThumb, `${mode} enabled switch thumb uses white in light mode and the muted palette in dark mode`);
       }
+      await button.evaluate((element) => { element.disabled = true; });
+      const disabled = await button.evaluate(async (element) => {
+        const nav = document.querySelector(".nav-item.is-active");
+        const navSurface = innerWidth <= 900 ? nav.querySelector(".nav-icon") : nav;
+        await Promise.all([...element.getAnimations(), ...nav.getAnimations({ subtree: true })].map((animation) => animation.finished.catch(() => {})));
+        return { fill: getComputedStyle(element).backgroundColor, text: getComputedStyle(element).color, navFill: getComputedStyle(navSurface).backgroundColor, navText: getComputedStyle(nav).color };
+      });
+      assert.equal(disabled.fill, disabled.navFill, `${mode}/${sourceHex}: disabled primary retains the navigation fill`);
+      assert.equal(disabled.text, disabled.navText, `${mode}/${sourceHex}: disabled primary retains the navigation text`);
+      await button.evaluate((element) => { element.disabled = false; });
+      for (const list of ["#settingsProviderList", "#settingsModelList"]) {
+        const active = frame.locator(`${list} .provider-row.is-active`);
+        await active.waitFor();
+        await active.hover();
+        await active.evaluate(async (element) => {
+          await Promise.all(element.getAnimations().map((animation) => animation.finished.catch(() => {})));
+        });
+        const border = await active.evaluate((element) => {
+          const style = getComputedStyle(element); const canvas = document.createElement("canvas"); canvas.width = canvas.height = 1;
+          const context = canvas.getContext("2d"); context.fillStyle = style.borderTopColor; context.fillRect(0, 0, 1, 1);
+          return { alpha: context.getImageData(0, 0, 1, 1).data[3], width: parseFloat(style.borderTopWidth) };
+        });
+        assert.ok(border.alpha === 0 || border.width === 0, `${mode} ${sourceHex} ${list}: selected row still has a decorative border`);
+      }
+      await page.screenshot({ path: path.join(output, `${engine}-${width}-${mode}-${sourceHex.slice(1)}-sidebar-controls.png`), animations: "disabled" });
       const toggle = frame.locator("#settingTool");
       await toggle.locator("+ span").click();
       await frame.waitForFunction(() => {
@@ -129,14 +168,18 @@ async function exactSourceControls(browser, engine, width = 1440) {
         return !input.checked && thumb.backgroundColor === muted && (thumb.transform === "none" || new DOMMatrix(thumb.transform).m41 === 0);
       });
       await toggle.locator("+ span").click();
-      await frame.waitForFunction(() => {
-        const input = document.getElementById("settingTool"), thumb = getComputedStyle(input.nextElementSibling, "::after");
-        return input.checked && thumb.backgroundColor === "rgb(255, 255, 255)" && new DOMMatrix(thumb.transform).m41 === 16;
-      });
-      await page.screenshot({ path: path.join(output, `${engine}-${width}-${mode}-exact-dcc1cf.png`), animations: "disabled" });
+      await checkedThumb();
+    }
+    // Theme changes also update an already-enabled switch, including returning
+    // from dark mode to light without first toggling the control off and on.
+    for (const mode of ["light", "dark", "light"]) {
+      await theme(frame, mode);
+      await checkedThumb();
+      await frame.locator("#settingTool").locator("+ span").scrollIntoViewIfNeeded();
+      await page.screenshot({ path: path.join(output, `${engine}-${width}-${mode}-switch-theme-restored.png`), animations: "disabled" });
     }
     assert.deepEqual(errors, []);
-    console.log(`${engine}: #dcc1cf preserved exactly by normal/hover primary buttons and checked switches in both themes`);
+    console.log(`${engine} ${width}px: pale/vivid/black/white primary buttons and switches match selected navigation, theme-aware thumbs restore across toggles/theme changes, and selected settings rows are borderless`);
   } finally { await context.close(); }
 }
 
@@ -296,7 +339,7 @@ async function silentPersistence(browser) {
       if (process.env.STUDIO_APPEARANCE_EXACT_ONLY !== "1") {
         await sandboxMatrix(browser, engine); await localAndFailure(browser); await silentPersistence(browser);
       }
-      for (const width of [1440, 390]) await exactSourceControls(browser, engine, width);
+      for (const width of [1440, 390]) await sidebarControls(browser, engine, width);
     }
     finally { await browser.close(); }
   }

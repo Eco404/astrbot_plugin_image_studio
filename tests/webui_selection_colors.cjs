@@ -60,8 +60,17 @@ async function gallery(frame, page, expected) {
   await frame.locator('.studio-select-trigger[data-select-id="gallerySource"]').click();
   const mark = frame.locator('.studio-select-option[aria-selected="true"] .studio-select-mark').first();
   await mark.waitFor();
-  await painted(mark, "backgroundColor", expected, "dropdown selected checkbox changed source color");
-  await painted(mark, "borderTopColor", expected, "dropdown selected checkbox border changed source color");
+  const dropdownColors = await mark.evaluate(async (element) => {
+    const canvas = document.createElement("canvas"); canvas.width = canvas.height = 1;
+    const context = canvas.getContext("2d");
+    const rgba = (color) => { context.clearRect(0, 0, 1, 1); context.fillStyle = color; context.fillRect(0, 0, 1, 1); return [...context.getImageData(0, 0, 1, 1).data]; };
+    const nav = document.querySelector(".nav-item.is-active"), surface = innerWidth <= 900 ? nav.querySelector(".nav-icon") : nav;
+    await Promise.all(nav.getAnimations({ subtree: true }).map((animation) => animation.finished.catch(() => {})));
+    return { surface: rgba(getComputedStyle(surface).backgroundColor), text: rgba(getComputedStyle(element.closest(".studio-select-option")).color) };
+  });
+  await painted(mark, "backgroundColor", dropdownColors.surface, "dropdown selected checkbox must share the selected navigation's soft fill");
+  await painted(mark, "borderTopColor", dropdownColors.text, "dropdown checkbox outline must use the option text color");
+  await painted(mark, "color", dropdownColors.text, "dropdown checkbox tick must use the option text color");
   assert.ok(await tickContrast(mark) >= 4.5, "dropdown checkbox tick must remain readable");
   await page.keyboard.press("Escape");
   let attempts = 0;
@@ -158,7 +167,7 @@ async function mergePicker(frame, page, expected) {
             await page.screenshot({ path: path.join(output, `${engine}-${width}-${mode}-${name}.png`), animations: "disabled" });
           }
           assert.deepEqual(errors, []); assert.deepEqual(mutations, [], "selection style check must never upload or delete assets");
-          console.log(`${engine} ${width}px ${mode}: raw gallery/dropdown/filmstrip/merge/delete selections, readable ticks and no mutations passed`);
+          console.log(`${engine} ${width}px ${mode}: soft dropdowns, raw gallery/filmstrip/merge/delete selections, readable ticks and no mutations passed`);
         } finally { await context.close(); }
       }
     } finally { await browser.close(); }

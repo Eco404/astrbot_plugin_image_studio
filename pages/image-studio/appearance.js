@@ -86,7 +86,8 @@
     const opacity = settings.glassOpacity;
     const footerTint = opacity < 1 ? (Math.min(1, opacity + .06) - opacity) / (1 - opacity) : 0;
     root.style.setProperty("--detail-footer-tint-opacity", `${footerTint * 100}%`);
-    // Correct text/focus colors independently; control fills use the chosen color verbatim.
+    // Correct text/focus colors independently. Raw selection accents retain the
+    // chosen color; button and switch surfaces reuse the navigation palette.
     const dark = resolved === "dark", h = settings.accentHue, s = settings.accentSaturation;
     const backgrounds = dark ? [[22, 33, 28], [48, 55, 51], hslRgb(h, 18, 21)] : [[255, 255, 255], [226, 233, 230], hslRgb(h, s, 90)];
     const accent = safeLightness(h, s, dark ? Math.max(62, settings.accentLightness) : Math.min(30, settings.accentLightness), backgrounds, dark);
