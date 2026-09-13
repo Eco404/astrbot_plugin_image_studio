@@ -334,7 +334,6 @@ def test_quota_usage_splits_exempt_records_and_unique_assets(tmp_path):
             create_preview=True,
             preview_max_edge=768,
             preview_quality=80,
-            retention_hours=24,
         )
         counted_asset = (await store.generation_detail(counted, include_assets=False))[
             "images"
@@ -477,7 +476,6 @@ def test_capacity_cleanup_excludes_leases_and_protected_reference_shares(tmp_pat
             create_preview=True,
             preview_max_edge=768,
             preview_quality=80,
-            retention_hours=24,
         )
         assert leased
         assert (await store.retention_status(HistorySettings(True, -1, 1, False)))[

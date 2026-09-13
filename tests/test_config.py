@@ -40,7 +40,7 @@ def test_webui_settings_normalize_provider_and_history() -> None:
     assert normalized["llm_policy"]["image_return_mode"] == "preview"
     assert normalized["asset_policy"]["preview_max_edge"] == 768
     assert normalized["asset_policy"]["preview_quality"] == 80
-    assert normalized["asset_policy"]["lease_hours"] == 24
+    assert "lease_hours" not in normalized["asset_policy"]
 
 
 def test_llm_image_asset_policy_is_bounded() -> None:
@@ -59,7 +59,7 @@ def test_llm_image_asset_policy_is_bounded() -> None:
     assert normalized["llm_policy"]["image_return_mode"] == "preview"
     assert normalized["asset_policy"]["preview_max_edge"] == 2048
     assert normalized["asset_policy"]["preview_quality"] == 40
-    assert normalized["asset_policy"]["lease_hours"] == 168
+    assert "lease_hours" not in normalized["asset_policy"]
 
 
 def test_history_zero_and_legacy_negative_record_limits_mean_unlimited() -> None:
@@ -69,6 +69,36 @@ def test_history_zero_and_legacy_negative_record_limits_mean_unlimited() -> None
         )
         assert errors == []
         assert normalized["history"]["max_records"] == 0
+
+
+def test_legacy_asset_retention_is_removed_from_saved_and_runtime_settings(
+    tmp_path,
+) -> None:
+    legacy = {
+        "asset_policy": {
+            "lease_hours": 168,
+            "preview_max_edge": 1024,
+            "preview_quality": 90,
+        },
+        "llm_policy": {"asset_retention_hours": 72},
+    }
+    config_path = tmp_path / "studio_config.json"
+    config_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    loaded, errors = load_studio_settings(tmp_path)
+    assert errors == []
+    assert loaded["asset_policy"] == {"preview_max_edge": 1024, "preview_quality": 90}
+    assert "asset_retention_hours" not in loaded["llm_policy"]
+    settings, errors = runtime_settings({}, legacy)
+    assert errors == []
+    assert settings.asset_preview_max_edge == 1024
+    assert settings.asset_preview_quality == 90
+    assert not hasattr(settings, "asset_lease_hours")
+
+    asyncio.run(save_studio_settings(tmp_path, legacy))
+    saved = json.loads(config_path.read_text(encoding="utf-8"))
+    assert saved["asset_policy"] == loaded["asset_policy"]
+    assert "asset_retention_hours" not in saved["llm_policy"]
 
 
 def test_history_can_enable_invocation_identity_snapshots() -> None:

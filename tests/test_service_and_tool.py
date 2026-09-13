@@ -502,8 +502,46 @@ def test_llm_can_view_multiple_assets_in_input_order() -> None:
     ]
 
 
+def test_new_llm_task_can_view_surviving_asset_after_retention_ends(tmp_path) -> None:
+    async def run() -> None:
+        store = GenerationStore(tmp_path)
+        await store.initialize()
+        first_event = ToolEvent()
+        assets = await store.lease_agent_images(
+            (GeneratedImage(PNG, "image/png"),),
+            scope_id=first_event.unified_msg_origin,
+            create_preview=False,
+            preview_max_edge=768,
+            preview_quality=80,
+        )
+        with store._connect() as conn:
+            conn.execute(
+                "UPDATE agent_asset_leases SET expires_at = 0, hard_expires_at = 0"
+            )
+        plugin = object.__new__(ImageStudioPlugin)
+        plugin._settings = settings()
+        plugin.store = store
+        result = await plugin.image_studio_view_asset(
+            ToolEvent(), asset_ids=[assets[0].asset_id], detail="original"
+        )
+        assert not result.isError
+        assert base64.b64decode(result.content[0].data) == PNG
+        outsider = ToolEvent()
+        outsider.unified_msg_origin = "test:private:user-2"
+        denied = await plugin.image_studio_view_asset(
+            outsider, asset_ids=[assets[0].asset_id], detail="original"
+        )
+        assert denied.isError
+        assert (
+            json.loads(denied.content[0].text)["failures"][0]["reason"]
+            == "access_denied"
+        )
+
+    asyncio.run(run())
+
+
 def test_llm_asset_batch_reports_every_failure_without_partial_images() -> None:
-    statuses = ["invalid_asset_id", "expired", "file_missing", "decode_failed"]
+    statuses = ["invalid_asset_id", "access_denied", "file_missing", "decode_failed"]
 
     class BatchStore:
         async def load_workflow_image_detailed(self, asset_id, **_kwargs):
@@ -560,6 +598,9 @@ def test_capability_query_activates_scoped_sender_and_hides_native_sender() -> N
     )
 
     assert not result.isError
+    policy = json.loads(result.content[0].text)["asset_policy"]
+    assert policy["temporary_retention_hours"] == 1
+    assert "retention_hours" not in policy
     assert "send_message_to_user" not in tool_set.names
     assert "pc_send_current_media" in tool_set.names
     assert "image_studio_send_output" in tool_set.names
@@ -686,18 +727,21 @@ def test_image_studio_sender_delivers_leased_asset_to_current_session(tmp_path) 
             create_preview=True,
             preview_max_edge=320,
             preview_quality=75,
-            retention_hours=24,
         )
         plugin = object.__new__(ImageStudioPlugin)
         plugin._settings = settings()
         plugin.store = store
+        with store._connect() as conn:
+            conn.execute(
+                "UPDATE agent_asset_leases SET expires_at = 0, hard_expires_at = 0"
+            )
         plugin.context = SimpleNamespace(
             get_config=lambda **_kwargs: {
                 "provider_settings": {"computer_use_runtime": "none"}
             }
         )
         event = ToolEvent()
-        event.set_extra(IMAGE_WORKFLOW_STATE_EXTRA_KEY, {"active": True})
+        await plugin.image_studio_get_capabilities(event)
 
         result = await plugin.image_studio_send_output(
             event,
@@ -729,9 +773,12 @@ def test_image_studio_sender_materializes_asset_to_local_workspace(
             create_preview=False,
             preview_max_edge=320,
             preview_quality=75,
-            retention_hours=24,
         )
         workspace = tmp_path / "workspace"
+        with store._connect() as conn:
+            conn.execute(
+                "UPDATE agent_asset_leases SET expires_at = 0, hard_expires_at = 0"
+            )
 
         async def fake_workspace(_event, _context):
             return workspace
@@ -1721,13 +1768,16 @@ def test_leased_asset_id_can_be_reused_as_image_reference(tmp_path) -> None:
             create_preview=True,
             preview_max_edge=768,
             preview_quality=80,
-            retention_hours=24,
         )
 
         plugin = object.__new__(ImageStudioPlugin)
         plugin._settings = settings()
         plugin._service = service
         plugin.store = store
+        with store._connect() as conn:
+            conn.execute(
+                "UPDATE agent_asset_leases SET expires_at = 0, hard_expires_at = 0"
+            )
         references = await plugin._event_references(
             ToolEvent(),
             [{"asset_id": assets[0].asset_id}],

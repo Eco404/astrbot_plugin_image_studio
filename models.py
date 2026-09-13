@@ -496,7 +496,7 @@ class GeneratedImage:
 
 @dataclass(frozen=True, slots=True)
 class WorkflowImageAsset:
-    """A leased private image asset plus an optional LLM preview."""
+    """A session-authorized image asset plus an optional LLM preview."""
 
     asset_id: str
     mime_type: str
@@ -509,7 +509,6 @@ WorkflowImageLoadStatus = Literal[
     "invalid_asset_id",
     "not_found",
     "access_denied",
-    "expired",
     "file_missing",
     "decode_failed",
 ]

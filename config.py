@@ -44,7 +44,6 @@ class RuntimeSettings:
     llm_image_return_mode: str = "preview"
     asset_preview_max_edge: int = 768
     asset_preview_quality: int = 80
-    asset_lease_hours: int = 24
 
     def default_model_ref(self, mode: str, source: str) -> str:
         """Return the mode default for a page/command or LLM-tool request."""
@@ -136,7 +135,6 @@ def default_webui_settings() -> dict[str, Any]:
         "asset_policy": {
             "preview_max_edge": 768,
             "preview_quality": 80,
-            "lease_hours": 24,
         },
         "ui": {"settings_revision": 0},
     }
@@ -225,7 +223,9 @@ def normalize_webui_settings(value: Any) -> tuple[dict[str, Any], list[str]]:
         if not isinstance(kind, str) or kind not in {"nai", "directory"}:
             errors.append(f"外部图库 {source_id} 的类型不受支持")
             continue
-        name = entry.get("name", "nai-image 插件图库" if kind == "nai" else "自定义图库")
+        name = entry.get(
+            "name", "nai-image 插件图库" if kind == "nai" else "自定义图库"
+        )
         if not isinstance(name, str) or not name.strip() or len(name.strip()) > 80:
             errors.append(f"外部图库 {source_id} 的名称应为 1 至 80 个字符")
             continue
@@ -307,9 +307,8 @@ def normalize_webui_settings(value: Any) -> tuple[dict[str, Any], list[str]]:
     asset_policy["preview_quality"] = max(
         40, min(95, _as_int(asset_policy.get("preview_quality"), 80))
     )
-    asset_policy["lease_hours"] = max(
-        1, min(168, _as_int(asset_policy.get("lease_hours"), 24))
-    )
+    # Workflow retention is an internal policy; old saved values must not survive.
+    asset_policy.pop("lease_hours", None)
     merged["asset_policy"] = asset_policy
     merged["schema_version"] = max(2, _as_int(merged.get("schema_version"), 2))
     merged["revision"] = max(
@@ -409,7 +408,6 @@ def runtime_settings(
         llm_image_return_mode=llm_policy["image_return_mode"],
         asset_preview_max_edge=asset_policy["preview_max_edge"],
         asset_preview_quality=asset_policy["preview_quality"],
-        asset_lease_hours=asset_policy["lease_hours"],
         revision=webui.get("revision", webui["ui"]["settings_revision"]),
     ), errors
 

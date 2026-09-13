@@ -56,6 +56,7 @@ from .parameter_exchange import export_parameters, resolve_parameters
 from .providers import ProviderError, ProviderExecutor
 from .service import ImageGenerationService
 from .storage import (
+    WORKFLOW_ASSET_RETENTION_SECONDS,
     ExternalDeleteError,
     ExternalPermissionError,
     GenerationStore,
@@ -1781,10 +1782,11 @@ class ImageStudioPlugin(Star):
                         detail="original",
                         preview_max_edge=self._settings.asset_preview_max_edge,
                         preview_quality=self._settings.asset_preview_quality,
-                        retention_hours=self._settings.asset_lease_hours,
                     )
                     if loaded is None:
-                        raise ValueError("参考图资产不存在、已过期或不属于当前会话")
+                        raise ValueError(
+                            "参考图资产不存在、原图无法读取或不属于当前会话"
+                        )
                     image, internal_path = loaded
                     digest = hashlib.sha256(image.data).hexdigest()
                     if digest not in seen:
@@ -2103,7 +2105,9 @@ class ImageStudioPlugin(Star):
             "asset_policy": {
                 "return_mode": self._settings.llm_image_return_mode,
                 "preview_max_edge": self._settings.asset_preview_max_edge,
-                "retention_hours": self._settings.asset_lease_hours,
+                "temporary_retention_hours": WORKFLOW_ASSET_RETENTION_SECONDS // 3600,
+                "temporary_retention_policy": "生成或成功读取后临时保护 1 小时；到期仅允许清理无其他保留关系的图片，不撤销会话访问权限",
+                "access_policy": "当前会话已授权的 asset_id，只要原图仍在即可继续使用；其他会话不能据此访问",
                 "private_asset_handle": "asset_id",
                 "view_tool": "image_studio_view_asset",
                 "delivery_tool": "image_studio_send_output",
@@ -2238,7 +2242,6 @@ class ImageStudioPlugin(Star):
                 create_preview=configured_return_mode == "preview",
                 preview_max_edge=self._settings.asset_preview_max_edge,
                 preview_quality=self._settings.asset_preview_quality,
-                retention_hours=self._settings.asset_lease_hours,
             )
         except Exception as exc:
             logger.warning(
@@ -2355,7 +2358,6 @@ class ImageStudioPlugin(Star):
                     detail=normalized_detail,
                     preview_max_edge=self._settings.asset_preview_max_edge,
                     preview_quality=self._settings.asset_preview_quality,
-                    retention_hours=self._settings.asset_lease_hours,
                 )
             except Exception as exc:
                 logger.warning(
@@ -2481,10 +2483,9 @@ class ImageStudioPlugin(Star):
             detail="original",
             preview_max_edge=self._settings.asset_preview_max_edge,
             preview_quality=self._settings.asset_preview_quality,
-            retention_hours=self._settings.asset_lease_hours,
         )
         if loaded is None:
-            raise ValueError("图片资产不存在、已过期或不属于当前会话。")
+            raise ValueError("图片资产不存在、原图无法读取或不属于当前会话。")
         return loaded
 
     async def _materialize_assets_to_workspace(
@@ -2623,7 +2624,6 @@ def _workflow_asset_failure(index: int, asset_id: str, reason: str) -> dict[str,
         "invalid_asset_id": "资产 ID 格式错误",
         "not_found": "没有对应的资产记录",
         "access_denied": "当前会话无权访问该资产",
-        "expired": "资产租约已过期",
         "file_missing": "资产记录存在，但原图文件缺失",
         "decode_failed": "原图文件存在，但无法解析为图片",
         "storage_error": "数据库或文件系统发生临时异常",

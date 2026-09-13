@@ -35,7 +35,7 @@ def test_legacy_normalization_and_new_source_defaults():
     assert not errors
     assert legacy["external_sources"]["nai"] == {
         "type": "nai",
-        "name": "NAI 插件图库",
+        "name": "nai-image 插件图库",
         "enabled": True,
         "path": "",
         "recursive": False,

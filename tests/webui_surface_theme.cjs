@@ -31,7 +31,8 @@ async function openView(frame, view) {
   await frame.evaluate(() => window.scrollTo({ top: 0, behavior: "instant" }));
   await frame.locator(`[data-view="${view}"]`).click();
   if (view === "gallery") await frame.locator(".gallery-card").first().waitFor();
-  if (view === "settings") await frame.locator("#settingsDirtyStatus").filter({ hasText: "已保存" }).waitFor();
+  // Theme previews may already be unsaved; wait for the settings form to load.
+  if (view === "settings") await frame.locator("#modelForm > .model-tabs").waitFor();
   await settle(frame);
 }
 

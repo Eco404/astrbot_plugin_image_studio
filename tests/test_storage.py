@@ -10,6 +10,7 @@ import time
 import zipfile
 from pathlib import Path
 
+import pytest
 from astrbot_plugin_image_studio.config import HistorySettings
 from astrbot_plugin_image_studio.models import (
     GeneratedImage,
@@ -67,12 +68,18 @@ def test_workflow_lease_reuses_canonical_asset_and_shared_preview(tmp_path) -> N
             create_preview=True,
             preview_max_edge=320,
             preview_quality=75,
-            retention_hours=24,
         )
 
         assert len(assets) == 1
         asset = assets[0]
         assert re.fullmatch(r"[a-f0-9]{64}", asset.asset_id)
+        with store._connect() as conn:
+            access = conn.execute("SELECT * FROM agent_asset_leases").fetchone()
+        assert (
+            access["expires_at"]
+            == access["hard_expires_at"]
+            == access["last_accessed_at"] + 3600
+        )
         assert history_original.read_bytes() == original_data
         assert asset.preview is not None
         assert len(asset.preview.data) < len(original_data)
@@ -85,7 +92,6 @@ def test_workflow_lease_reuses_canonical_asset_and_shared_preview(tmp_path) -> N
             detail="preview",
             preview_max_edge=320,
             preview_quality=75,
-            retention_hours=24,
         )
         loaded_original = await store.load_workflow_image(
             asset.asset_id,
@@ -93,7 +99,6 @@ def test_workflow_lease_reuses_canonical_asset_and_shared_preview(tmp_path) -> N
             detail="original",
             preview_max_edge=320,
             preview_quality=75,
-            retention_hours=24,
         )
         assert loaded_preview is not None and loaded_original is not None
         assert loaded_preview[0].data == asset.preview.data
@@ -108,7 +113,6 @@ def test_workflow_lease_reuses_canonical_asset_and_shared_preview(tmp_path) -> N
             detail="preview",
             preview_max_edge=320,
             preview_quality=75,
-            retention_hours=24,
         )
         assert denied is None
 
@@ -125,7 +129,6 @@ def test_workflow_asset_lookup_preserves_specific_failure_reasons(tmp_path) -> N
             create_preview=False,
             preview_max_edge=320,
             preview_quality=75,
-            retention_hours=24,
         )
         asset_id = assets[0].asset_id
         lookup = {
@@ -133,7 +136,6 @@ def test_workflow_asset_lookup_preserves_specific_failure_reasons(tmp_path) -> N
             "detail": "original",
             "preview_max_edge": 320,
             "preview_quality": 75,
-            "retention_hours": 24,
         }
 
         invalid = await store.load_workflow_image_detailed("bad-id", **lookup)
@@ -147,18 +149,11 @@ def test_workflow_asset_lookup_preserves_specific_failure_reasons(tmp_path) -> N
 
         with store._connect() as conn:
             conn.execute(
-                "UPDATE agent_asset_leases SET expires_at = 0 WHERE asset_id = ?",
+                "UPDATE agent_asset_leases SET expires_at = 0, hard_expires_at = 0 WHERE asset_id = ?",
                 (asset_id,),
             )
-        expired = await store.load_workflow_image_detailed(asset_id, **lookup)
-        assert expired.status == "expired"
-
-        with store._connect() as conn:
-            conn.execute(
-                "UPDATE agent_asset_leases SET expires_at = ?, hard_expires_at = ? "
-                "WHERE asset_id = ?",
-                (time.time() + 3600, time.time() + 7200, asset_id),
-            )
+        retained = await store.load_workflow_image_detailed(asset_id, **lookup)
+        assert retained.status == "ok"
         asset_path = next(store.assets_dir.rglob("*.png"))
         asset_path.unlink()
         file_missing = await store.load_workflow_image_detailed(asset_id, **lookup)
@@ -180,17 +175,17 @@ def test_maintenance_expires_lease_only_assets_and_ignores_legacy_directory(
         legacy = tmp_path / "agent_assets" / "originals" / "legacy.png"
         legacy.parent.mkdir(parents=True)
         legacy.write_bytes(PNG)
-        await store.lease_agent_images(
+        assets = await store.lease_agent_images(
             (GeneratedImage(PNG, "image/png"),),
             scope_id="test:private:user-1",
             create_preview=True,
             preview_max_edge=320,
             preview_quality=75,
-            retention_hours=24,
         )
         with store._connect() as conn:
             conn.execute(
-                "UPDATE agent_asset_leases SET expires_at = 0, hard_expires_at = 0"
+                "UPDATE agent_asset_leases SET expires_at = ?, hard_expires_at = ?",
+                (time.time() - 1, time.time() - 1),
             )
 
         report = await store.run_maintenance(
@@ -204,6 +199,29 @@ def test_maintenance_expires_lease_only_assets_and_ignores_legacy_directory(
         assert not list(store.assets_dir.rglob("*.png"))
         assert not list(store.thumbnails_dir.rglob("*.webp"))
         assert legacy.exists()
+        with store._connect() as conn:
+            assert (
+                conn.execute("SELECT COUNT(*) FROM agent_asset_leases").fetchone()[0]
+                == 0
+            )
+
+        # Re-creating the same content must not resurrect access for the old scope.
+        recreated = await store.lease_agent_images(
+            (GeneratedImage(PNG, "image/png"),),
+            scope_id="test:private:user-2",
+            create_preview=False,
+            preview_max_edge=320,
+            preview_quality=75,
+        )
+        assert recreated[0].asset_id == assets[0].asset_id
+        denied = await store.load_workflow_image_detailed(
+            recreated[0].asset_id,
+            scope_id="test:private:user-1",
+            detail="original",
+            preview_max_edge=320,
+            preview_quality=75,
+        )
+        assert denied.status == "access_denied"
 
     asyncio.run(run())
 
@@ -229,7 +247,6 @@ def test_active_lease_preserves_asset_after_gallery_record_is_deleted(tmp_path) 
             create_preview=True,
             preview_max_edge=320,
             preview_quality=75,
-            retention_hours=24,
         )
 
         assert await store.delete_generation(generation_id) is True
@@ -242,7 +259,6 @@ def test_active_lease_preserves_asset_after_gallery_record_is_deleted(tmp_path) 
                 detail="original",
                 preview_max_edge=320,
                 preview_quality=75,
-                retention_hours=24,
             )
             is not None
         )
@@ -260,7 +276,6 @@ def test_deep_maintenance_detects_same_size_asset_corruption(tmp_path) -> None:
             create_preview=True,
             preview_max_edge=320,
             preview_quality=75,
-            retention_hours=24,
         )
         path = next(store.assets_dir.rglob("*.png"))
         path.write_bytes(b"x" * len(PNG))
@@ -285,7 +300,9 @@ def test_deep_maintenance_detects_same_size_asset_corruption(tmp_path) -> None:
     asyncio.run(run())
 
 
-def test_asset_access_renews_soft_lease_without_extending_hard_expiry(tmp_path) -> None:
+def test_asset_access_renews_one_hour_retention_even_after_old_hard_expiry(
+    tmp_path,
+) -> None:
     async def run() -> None:
         store = GenerationStore(tmp_path)
         await store.initialize()
@@ -295,31 +312,252 @@ def test_asset_access_renews_soft_lease_without_extending_hard_expiry(tmp_path) 
             create_preview=False,
             preview_max_edge=320,
             preview_quality=75,
-            retention_hours=24,
         )
-        hard_expiry = time.time() + 60
+        old_access = time.time() - 8 * 24 * 3600
         with store._connect() as conn:
             conn.execute(
-                "UPDATE agent_asset_leases SET expires_at = ?, hard_expires_at = ?",
-                (time.time() + 1, hard_expiry),
+                "UPDATE agent_asset_leases SET last_accessed_at = ?, expires_at = ?, hard_expires_at = ?",
+                (old_access, old_access + 3600, old_access + 7 * 24 * 3600),
             )
 
+        before_read = time.time()
         loaded = await store.load_workflow_image(
             assets[0].asset_id,
             scope_id="test:private:user-1",
             detail="original",
             preview_max_edge=320,
             preview_quality=75,
-            retention_hours=24,
         )
         with store._connect() as conn:
             lease = conn.execute(
-                "SELECT expires_at, hard_expires_at FROM agent_asset_leases"
+                "SELECT last_accessed_at, expires_at, hard_expires_at FROM agent_asset_leases"
             ).fetchone()
 
         assert loaded is not None
-        assert lease["expires_at"] <= hard_expiry
-        assert lease["hard_expires_at"] == hard_expiry
+        assert before_read <= lease["last_accessed_at"] <= time.time()
+        assert lease["expires_at"] == lease["last_accessed_at"] + 3600
+        assert lease["hard_expires_at"] == lease["expires_at"]
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("owner", ["gallery", "reference"])
+def test_archived_workflow_asset_remains_accessible_after_retention_and_restart(
+    tmp_path, owner
+) -> None:
+    async def run() -> None:
+        from PIL import Image
+
+        store = GenerationStore(tmp_path)
+        await store.initialize()
+        output = io.BytesIO()
+        Image.new("RGB", (2, 2), "blue").save(output, "PNG")
+        generation_id = await store.record_success(
+            provider=provider(),
+            request=GenerationRequest(
+                mode="img2img" if owner == "reference" else "text2img",
+                provider_id="test-provider",
+                prompt="retained by archive",
+                references=(ReferenceImage("reference", "ref.png", PNG, "image/png"),)
+                if owner == "reference"
+                else (),
+            ),
+            images=(
+                GeneratedImage(
+                    output.getvalue() if owner == "reference" else PNG, "image/png"
+                ),
+            ),
+            elapsed_ms=10,
+            history=HistorySettings(True, 10, 50, True),
+        )
+        assets = await store.lease_agent_images(
+            (GeneratedImage(PNG, "image/png"),),
+            scope_id="test:private:user-1",
+            create_preview=True,
+            preview_max_edge=320,
+            preview_quality=75,
+        )
+        asset_id = assets[0].asset_id
+        with store._connect() as conn:
+            conn.execute(
+                "UPDATE agent_asset_leases SET last_accessed_at = ?, expires_at = ?, hard_expires_at = ?",
+                (time.time() - 7200, time.time() - 3600, time.time() - 3600),
+            )
+        report = await store.run_maintenance(
+            HistorySettings(True, 10, 50, True),
+            preview_max_edge=320,
+            preview_quality=75,
+        )
+        assert report["repaired"]["expired_leases"] == 1
+        assert report["stats"]["active_leases"] == 0
+        with store._connect() as conn:
+            access = conn.execute("SELECT * FROM agent_asset_leases").fetchone()
+            assert access["asset_id"] == asset_id
+            assert access["expires_at"] == access["hard_expires_at"] == 0
+            assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+
+        repeated = await store.run_maintenance(
+            HistorySettings(True, 10, 50, True),
+            preview_max_edge=320,
+            preview_quality=75,
+        )
+        assert repeated["repaired"]["expired_leases"] == 0
+        restarted = GenerationStore(tmp_path)
+        await restarted.initialize()
+        assert await restarted.generation_detail(generation_id) is not None
+        lookup = {"detail": "original", "preview_max_edge": 320, "preview_quality": 75}
+        denied = await restarted.load_workflow_image_detailed(
+            asset_id, scope_id="test:private:user-2", **lookup
+        )
+        assert denied.status == "access_denied"
+        # A new task uses the same conversation scope, not the previous task instance.
+        loaded = await restarted.load_workflow_image_detailed(
+            asset_id, scope_id="test:private:user-1", **lookup
+        )
+        assert loaded.status == "ok"
+        assert loaded.image.data == PNG
+        with restarted._connect() as conn:
+            access = conn.execute("SELECT * FROM agent_asset_leases").fetchone()
+            assert (
+                access["expires_at"]
+                == access["hard_expires_at"]
+                == access["last_accessed_at"] + 3600
+            )
+            assert access["expires_at"] > time.time()
+        assert restarted._storage_stats_sync()["active_leases"] == 1
+
+    asyncio.run(run())
+
+
+def test_initialize_shortens_legacy_retention_without_revoking_or_extending_access(
+    tmp_path,
+) -> None:
+    async def run() -> None:
+        store = GenerationStore(tmp_path)
+        await store.initialize()
+        await store.record_success(
+            provider=provider(),
+            request=GenerationRequest(
+                mode="text2img", provider_id="test-provider", prompt="legacy"
+            ),
+            images=(GeneratedImage(PNG, "image/png"),),
+            elapsed_ms=10,
+            history=HistorySettings(True, 10, 50, False),
+        )
+        now = time.time()
+        cases = {
+            "recent": (now - 1800, now + 23 * 3600, now + 6 * 24 * 3600),
+            "old": (now - 7200, now + 22 * 3600, now + 6 * 24 * 3600),
+            "shorter": (now - 1200, now + 100, now + 100),
+            "released": (now - 1200, 0, 0),
+        }
+        for scope, values in cases.items():
+            await store.lease_agent_images(
+                (GeneratedImage(PNG, "image/png"),),
+                scope_id=scope,
+                create_preview=False,
+                preview_max_edge=320,
+                preview_quality=75,
+            )
+            with store._connect() as conn:
+                conn.execute(
+                    "UPDATE agent_asset_leases SET last_accessed_at = ?, expires_at = ?, hard_expires_at = ? WHERE scope_id = ?",
+                    (*values, scope),
+                )
+
+        restarted = GenerationStore(tmp_path)
+        await restarted.initialize()
+        with restarted._connect() as conn:
+            first = {
+                row["scope_id"]: dict(row)
+                for row in conn.execute("SELECT * FROM agent_asset_leases")
+            }
+        assert set(first) == set(cases)
+        assert all(
+            first[scope]["last_accessed_at"] == values[0]
+            for scope, values in cases.items()
+        )
+        assert (
+            first["recent"]["expires_at"]
+            == first["recent"]["hard_expires_at"]
+            == cases["recent"][0] + 3600
+        )
+        assert first["old"]["expires_at"] == first["old"]["hard_expires_at"] == 0
+        assert (
+            first["shorter"]["expires_at"]
+            == first["shorter"]["hard_expires_at"]
+            == now + 100
+        )
+        assert (
+            first["released"]["expires_at"] == first["released"]["hard_expires_at"] == 0
+        )
+        await restarted.initialize()
+        with restarted._connect() as conn:
+            second = {
+                row["scope_id"]: dict(row)
+                for row in conn.execute("SELECT * FROM agent_asset_leases")
+            }
+        assert second == first
+
+    asyncio.run(run())
+
+
+def test_missing_archived_file_preserves_scope_for_repair_without_extending_retention(
+    tmp_path,
+) -> None:
+    async def run() -> None:
+        store = GenerationStore(tmp_path)
+        await store.initialize()
+        await store.record_success(
+            provider=provider(),
+            request=GenerationRequest(
+                mode="text2img", provider_id="test-provider", prompt="repair"
+            ),
+            images=(GeneratedImage(PNG, "image/png"),),
+            elapsed_ms=10,
+            history=HistorySettings(True, 10, 50, False),
+        )
+        assets = await store.lease_agent_images(
+            (GeneratedImage(PNG, "image/png"),),
+            scope_id="test:private:user-1",
+            create_preview=False,
+            preview_max_edge=320,
+            preview_quality=75,
+        )
+        asset_id = assets[0].asset_id
+        original = next(store.assets_dir.rglob("*.png"))
+        original.unlink()
+        lookup = {"detail": "original", "preview_max_edge": 320, "preview_quality": 75}
+        missing = await store.load_workflow_image_detailed(
+            asset_id, scope_id="test:private:user-1", **lookup
+        )
+        assert missing.status == "file_missing"
+        report = await store.run_maintenance(
+            HistorySettings(True, 10, 50, False),
+            preview_max_edge=320,
+            preview_quality=75,
+        )
+        assert report["repaired"]["broken_assets"] == 1
+        with store._connect() as conn:
+            access = conn.execute("SELECT * FROM agent_asset_leases").fetchone()
+            assert access["asset_id"] == asset_id
+            assert access["expires_at"] == access["hard_expires_at"] == 0
+        missing_again = await store.load_workflow_image_detailed(
+            asset_id, scope_id="test:private:user-1", **lookup
+        )
+        assert missing_again.status == "file_missing"
+        assert store._storage_stats_sync()["active_leases"] == 0
+        original.parent.mkdir(parents=True, exist_ok=True)
+        original.write_bytes(PNG)
+        denied = await store.load_workflow_image_detailed(
+            asset_id, scope_id="test:private:user-2", **lookup
+        )
+        assert denied.status == "access_denied"
+        repaired = await store.load_workflow_image_detailed(
+            asset_id, scope_id="test:private:user-1", **lookup
+        )
+        assert repaired.status == "ok"
+        assert repaired.image.data == PNG
 
     asyncio.run(run())
 

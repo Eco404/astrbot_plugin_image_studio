@@ -62,7 +62,7 @@
 .segment.is-active,
 .model-tab.is-active,
 .appearance-modes input:checked + span {
-  background: var(--glass);
+  background: var(--selection-fill);
   color: var(--accent-strong);
   font-weight: 700;
   box-shadow: var(--segment-frame-shadow);

@@ -90,7 +90,6 @@ async def populated_store(directory):
         create_preview=True,
         preview_max_edge=768,
         preview_quality=80,
-        retention_hours=24,
     )
     with store._connect() as conn:
         conn.execute(

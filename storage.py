@@ -46,6 +46,7 @@ _COMFY_PROJECTION_CACHE_BYTES = 16 * 1024 * 1024
 _COMFY_PROJECTION_CACHE: OrderedDict[tuple[Any, ...], bytes] = OrderedDict()
 _COMFY_PROJECTION_CACHE_LOCK = threading.Lock()
 _GALLERY_RETENTION_CACHE_SECONDS = 3.0
+WORKFLOW_ASSET_RETENTION_SECONDS = 3600
 _EXTERNAL_ACTIONS = ("favorite", "delete", "download", "reference")
 _EXTERNAL_ACTION_LABELS = {
     "favorite": "修改收藏",
@@ -258,9 +259,18 @@ class GenerationStore:
             directory.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             ensure_release_schema(conn, backup_dir=self.data_dir / "backups")
+            # Keep existing session grants, but cap legacy configurable retention
+            # at one hour after the last access. Never extend it on restart.
+            conn.execute(
+                "UPDATE agent_asset_leases SET "
+                "expires_at = MIN(expires_at, hard_expires_at, last_accessed_at + ?), "
+                "hard_expires_at = MIN(expires_at, hard_expires_at, last_accessed_at + ?) "
+                "WHERE expires_at != hard_expires_at OR expires_at > last_accessed_at + ?",
+                (WORKFLOW_ASSET_RETENTION_SECONDS,) * 3,
+            )
         self._repair_derived_fields_sync()
         self._backfill_metadata_sync()
-        self._delete_expired_leases_sync(time.time())
+        self._expire_asset_retention_sync(time.time())
         self._delete_expired_import_batches_sync(time.time())
         self._purge_unreferenced_assets_sync()
         self._cleanup_orphaned_asset_files_sync()
@@ -1337,7 +1347,7 @@ class GenerationStore:
         except sqlite3.Error as exc:
             errors.append(f"SQLite 检查失败：{type(exc).__name__}")
 
-        repaired["expired_leases"] = self._delete_expired_leases_sync(checked_at)
+        repaired["expired_leases"] = self._expire_asset_retention_sync(checked_at)
         repaired["expired_import_batches"] = self._delete_expired_import_batches_sync(
             checked_at
         )
@@ -1510,9 +1520,8 @@ class GenerationStore:
         create_preview: bool,
         preview_max_edge: int,
         preview_quality: int,
-        retention_hours: int,
     ) -> tuple[WorkflowImageAsset, ...]:
-        """Store generated assets once and lease them to an Agent session."""
+        """Grant session access and protect generated assets for one idle hour."""
 
         async with self._lock:
             return await asyncio.to_thread(
@@ -1522,7 +1531,6 @@ class GenerationStore:
                 create_preview,
                 preview_max_edge,
                 preview_quality,
-                retention_hours,
             )
 
     def _lease_agent_images_sync(
@@ -1532,14 +1540,11 @@ class GenerationStore:
         create_preview: bool,
         preview_max_edge: int,
         preview_quality: int,
-        retention_hours: int,
     ) -> tuple[WorkflowImageAsset, ...]:
         normalized_scope = str(scope_id or "").strip()
         if not normalized_scope:
             raise ValueError("Agent 资产缺少会话范围")
-        now = time.time()
-        retention_seconds = max(1, min(168, int(retention_hours))) * 3600
-        self._delete_expired_leases_sync(now)
+        self._expire_asset_retention_sync(time.time())
         max_edge = max(256, min(2048, int(preview_max_edge)))
         quality = max(40, min(95, int(preview_quality)))
         assets: list[WorkflowImageAsset] = []
@@ -1570,6 +1575,8 @@ class GenerationStore:
                     preview=preview,
                 )
             )
+        now = time.time()
+        retention_deadline = now + WORKFLOW_ASSET_RETENTION_SECONDS
         with self._connect() as conn:
             conn.executemany(
                 "INSERT INTO image_assets (id, path, mime_type, size_bytes, width, height, created_at) "
@@ -1591,7 +1598,9 @@ class GenerationStore:
             )
             self._upsert_thumbnails_sync(conn, prepared_thumbnails.values())
             for asset in prepared_assets.values():
-                hard_expires_at = now + 7 * 24 * 3600
+                # The legacy table stores two independent facts: the row grants
+                # access until the asset is deleted, and its deadlines protect
+                # otherwise unreferenced files. Both deadline columns now agree.
                 conn.execute(
                     "INSERT INTO agent_asset_leases "
                     "(id, asset_id, scope_id, created_at, last_accessed_at, expires_at, hard_expires_at) "
@@ -1605,8 +1614,8 @@ class GenerationStore:
                         normalized_scope,
                         now,
                         now,
-                        now + retention_seconds,
-                        hard_expires_at,
+                        retention_deadline,
+                        retention_deadline,
                     ),
                 )
         return tuple(assets)
@@ -1619,9 +1628,8 @@ class GenerationStore:
         detail: str,
         preview_max_edge: int,
         preview_quality: int,
-        retention_hours: int,
     ) -> tuple[GeneratedImage, str] | None:
-        """Load an original or lightweight preview from the temporary asset layer."""
+        """Read a session-authorized asset and renew its temporary protection."""
 
         result = await self.load_workflow_image_detailed(
             asset_id,
@@ -1629,7 +1637,6 @@ class GenerationStore:
             detail=detail,
             preview_max_edge=preview_max_edge,
             preview_quality=preview_quality,
-            retention_hours=retention_hours,
         )
         if not result.ok or result.image is None:
             return None
@@ -1643,7 +1650,6 @@ class GenerationStore:
         detail: str,
         preview_max_edge: int,
         preview_quality: int,
-        retention_hours: int,
     ) -> WorkflowImageLoadResult:
         """Load a scoped workflow asset while preserving its failure reason."""
 
@@ -1655,7 +1661,6 @@ class GenerationStore:
                 detail,
                 preview_max_edge,
                 preview_quality,
-                retention_hours,
             )
 
     def _load_workflow_image_detailed_sync(
@@ -1665,7 +1670,6 @@ class GenerationStore:
         detail: str,
         preview_max_edge: int,
         preview_quality: int,
-        retention_hours: int,
     ) -> WorkflowImageLoadResult:
         clean_id = str(asset_id or "").strip().lower()
         normalized_scope = str(scope_id or "").strip()
@@ -1673,12 +1677,9 @@ class GenerationStore:
             return WorkflowImageLoadResult(clean_id, "invalid_asset_id")
         if not normalized_scope:
             return WorkflowImageLoadResult(clean_id, "access_denied")
-        now = time.time()
-        retention_seconds = max(1, min(168, int(retention_hours))) * 3600
         with self._connect() as conn:
-            lease = conn.execute(
-                "SELECT expires_at, hard_expires_at FROM agent_asset_leases "
-                "WHERE asset_id = ? AND scope_id = ?",
+            access = conn.execute(
+                "SELECT 1 FROM agent_asset_leases WHERE asset_id = ? AND scope_id = ?",
                 (clean_id, normalized_scope),
             ).fetchone()
             row = conn.execute(
@@ -1687,10 +1688,8 @@ class GenerationStore:
             ).fetchone()
         if row is None:
             return WorkflowImageLoadResult(clean_id, "not_found")
-        if lease is None:
+        if access is None:
             return WorkflowImageLoadResult(clean_id, "access_denied")
-        if float(lease["expires_at"]) <= now or float(lease["hard_expires_at"]) <= now:
-            return WorkflowImageLoadResult(clean_id, "expired")
         original = self.data_dir / str(row["path"])
         if not original.is_file() or not _is_within(original, self.assets_dir):
             return WorkflowImageLoadResult(clean_id, "file_missing")
@@ -1724,13 +1723,15 @@ class GenerationStore:
                 data=preview_data,
                 mime_type=detect_mime_type(preview_data, "image/webp"),
             )
+        now = time.time()
         with self._connect() as conn:
             conn.execute(
-                "UPDATE agent_asset_leases SET last_accessed_at = ?, expires_at = ? "
+                "UPDATE agent_asset_leases SET last_accessed_at = ?, expires_at = ?, hard_expires_at = ? "
                 "WHERE asset_id = ? AND scope_id = ?",
                 (
                     now,
-                    min(now + retention_seconds, float(lease["hard_expires_at"])),
+                    now + WORKFLOW_ASSET_RETENTION_SECONDS,
+                    now + WORKFLOW_ASSET_RETENTION_SECONDS,
                     clean_id,
                     normalized_scope,
                 ),
@@ -1742,10 +1743,13 @@ class GenerationStore:
             internal_path=str(original.resolve(strict=False)),
         )
 
-    def _delete_expired_leases_sync(self, now: float) -> int:
+    def _expire_asset_retention_sync(self, now: float) -> int:
+        """Release expired cleanup protection without revoking session access."""
         with self._connect() as conn:
             cursor = conn.execute(
-                "DELETE FROM agent_asset_leases WHERE expires_at <= ? OR hard_expires_at <= ?",
+                "UPDATE agent_asset_leases SET expires_at = 0, hard_expires_at = 0 "
+                "WHERE (expires_at != 0 OR hard_expires_at != 0) "
+                "AND (expires_at <= ? OR hard_expires_at <= ?)",
                 (now, now),
             )
         return max(0, int(cursor.rowcount))
@@ -4586,7 +4590,9 @@ class GenerationStore:
                 (asset_id,),
             )
             conn.execute(
-                "DELETE FROM agent_asset_leases WHERE asset_id = ?", (asset_id,)
+                "UPDATE agent_asset_leases SET expires_at = 0, hard_expires_at = 0 "
+                "WHERE asset_id = ?",
+                (asset_id,),
             )
         return 1
 

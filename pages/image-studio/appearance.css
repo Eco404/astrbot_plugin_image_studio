@@ -8,6 +8,7 @@
   --selection-fill: var(--accent-soft);
   --appearance-glass-solid: #fcfdfd;
   --glass: var(--appearance-glass-solid);
+  --menu-glass: var(--appearance-glass-solid);
   --detail-footer-tint: transparent;
   --success: #397a62;
   --success-soft: rgba(63, 132, 107, .14);
@@ -34,11 +35,18 @@
 @supports (background: color-mix(in srgb, white 50%, transparent)) and ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
   :root, :root[data-theme="dark"] {
     --glass: color-mix(in srgb, var(--appearance-glass-solid) var(--glass-opacity), transparent);
+    --menu-glass: color-mix(in srgb, var(--appearance-glass-solid) calc(50% + var(--glass-opacity) / 2), transparent);
     --detail-footer-tint: color-mix(in srgb, var(--appearance-glass-solid) var(--detail-footer-tint-opacity, 18.75%), transparent);
   }
 }
 .topbar, .floatingbar, .selection-bar.gallery-selection-bar {
   background: var(--glass);
+  backdrop-filter: blur(22px) saturate(115%);
+  -webkit-backdrop-filter: blur(22px) saturate(115%);
+}
+.app-notice, .app-notice.is-error {
+  background: var(--menu-glass);
+  box-shadow: var(--shadow);
   backdrop-filter: blur(22px) saturate(115%);
   -webkit-backdrop-filter: blur(22px) saturate(115%);
 }
@@ -151,8 +159,8 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--control-accent
   html[data-appearance-ready="true"] .appearance-modes span { transition: background-color 160ms ease, color 160ms ease; }
   .appearance-swatches span { transition: transform 140ms ease; }
 }
-@media (prefers-contrast: more) { :root, :root[data-theme="dark"] { --glass: var(--appearance-glass-solid); } }
-@media (prefers-reduced-transparency: reduce) { :root, :root[data-theme="dark"] { --glass: var(--appearance-glass-solid); } }
+@media (prefers-contrast: more) { :root, :root[data-theme="dark"] { --glass: var(--appearance-glass-solid); --menu-glass: var(--appearance-glass-solid); } }
+@media (prefers-reduced-transparency: reduce) { :root, :root[data-theme="dark"] { --glass: var(--appearance-glass-solid); --menu-glass: var(--appearance-glass-solid); } }
 @media (forced-colors: active) {
   .appearance-modes input:checked + span, .appearance-swatches input:checked + span { outline: 2px solid Highlight; }
   .appearance-swatches span { forced-color-adjust: none; }

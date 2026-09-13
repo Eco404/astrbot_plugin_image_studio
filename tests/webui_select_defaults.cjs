@@ -49,7 +49,7 @@ async function matchingMaterials(page) {
       const context = canvas.getContext("2d");
       const alpha = (color) => { context.clearRect(0, 0, 1, 1); context.fillStyle = color; context.fillRect(0, 0, 1, 1); return context.getImageData(0, 0, 1, 1).data[3] / 255; };
       return {
-        surface: { background: surface.backgroundColor, color: surface.color, border: surface.borderTopColor, radius: surface.borderRadius, shadow: surface.boxShadow, blur: surface.backdropFilter || surface.webkitBackdropFilter },
+        surface: { background: surface.backgroundColor, alpha: alpha(surface.backgroundColor), color: surface.color, border: surface.borderTopColor, radius: surface.borderRadius, shadow: surface.boxShadow, blur: surface.backdropFilter || surface.webkitBackdropFilter },
         selected: { background: selected.backgroundColor, color: selected.color, shadow: selected.boxShadow, alpha: alpha(selected.backgroundColor), textAlpha: alpha(selected.color), opacity: selected.opacity, blur: selected.backdropFilter || selected.webkitBackdropFilter },
         mark: { background: mark.backgroundColor, alpha: alpha(mark.backgroundColor), color: mark.color, textAlpha: alpha(mark.color), opacity: mark.opacity, border: mark.borderTopColor, width: mark.borderTopWidth, radius: mark.borderRadius },
       };
@@ -57,11 +57,12 @@ async function matchingMaterials(page) {
     await trigger(page, id).press("Escape");
     return result;
   }
-  for (const theme of ["light", "dark"]) for (const opacity of [0.2, 0.68, 1]) {
+  for (const theme of ["light", "dark"]) for (const [opacity, menuOpacity] of [[.2, .6], [.38, .69], [.68, .84], [1, 1]]) {
     await page.evaluate(({ theme, opacity }) => {
       window.ImageStudioAppearance.set({ preference: theme, glassOpacity: opacity, accentHue: 345 });
     }, { theme, opacity });
     const single = await snapshot("single");
+    assert.ok(Math.abs(single.surface.alpha - menuOpacity) < .005, `${theme}: theme opacity ${opacity} must map to menu opacity ${menuOpacity}`);
     assert.ok(single.selected.alpha > .5 && single.selected.alpha < .85, "selected row must reveal the existing menu glass rather than paint an opaque surface");
     assert.equal(single.selected.textAlpha, 1, "selection must not fade the option text");
     assert.equal(single.selected.opacity, "1", "selection transparency belongs to the background, not the entire row");
@@ -78,6 +79,15 @@ async function matchingMaterials(page) {
       assert.ok(parseFloat(multiple.mark.width) > 0 && parseFloat(multiple.mark.radius) < 9, "multiple selection keeps its small checkbox outline");
     }
   }
+  await page.emulateMedia({ contrast: "more" });
+  for (const theme of ["light", "dark"]) {
+    await page.evaluate(theme => window.ImageStudioAppearance.set({ preference: theme, glassOpacity: .2 }), theme);
+    for (const id of ["single", "galleryProvider"]) {
+      const menu = await snapshot(id);
+      assert.equal(menu.surface.alpha, 1, `${theme}/${id}: high contrast keeps the menu opaque`);
+    }
+  }
+  await page.emulateMedia({ contrast: null });
   await page.evaluate(() => window.ImageStudioAppearance.set({ preference: "light", glassOpacity: .68 }));
 }
 
@@ -105,7 +115,8 @@ async function test(browserType, name, viewport) {
     assert.ok(geometry.scroll > 0 && geometry.canScroll, JSON.stringify(geometry));
     assert.equal(geometry.behind, false);
     assert.equal(geometry.overflow, "hidden");
-    assert.ok(Math.abs(geometry.alpha - geometry.themeAlpha) < .01, "gallery filter must not add a second opacity layer over the shared menu glass");
+    assert.ok(Math.abs(geometry.themeAlpha - .68) < .01, "ordinary glass keeps the selected theme opacity");
+    assert.ok(Math.abs(geometry.alpha - .84) < .01, "68% theme opacity maps to 84% menu opacity");
     assert.match(geometry.blur, /blur\(22px\)/);
     assert.ok(geometry.left >= 7 && geometry.top >= 7 && geometry.right <= geometry.width - 7 && geometry.bottom <= geometry.height - 7, JSON.stringify(geometry));
     const wheel = await page.locator(".studio-select-menu").evaluate((menu) => {
@@ -146,7 +157,7 @@ async function test(browserType, name, viewport) {
     assert.deepEqual(await saved(page, "galleryProvider"), { mode: "all" }, "saving another dropdown must preserve its sibling defaults");
     await trigger(page, "galleryMode").press("Escape");
     await trigger(page, "unrelated").click();
-    assert.equal(await page.locator(".studio-select-menu").evaluate(menu => getComputedStyle(menu).backgroundColor), await page.locator("#glassProbe").evaluate(probe => getComputedStyle(probe).backgroundColor), "other selects keep their theme opacity");
+    assert.equal(await page.locator(".studio-select-menu").evaluate(menu => getComputedStyle(menu).backgroundColor), geometry.glass, "other selects use the same mapped opacity as gallery filters");
     assert.equal(await action(page, "default").count(), 0, "save-default belongs only to the gallery filters");
     await trigger(page, "unrelated").press("Escape");
     await trigger(page, "single").click();

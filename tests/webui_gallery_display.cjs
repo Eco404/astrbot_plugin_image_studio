@@ -91,7 +91,7 @@ async function verify(browser, name, width) {
 
     await frame.locator('[data-view="settings"]').click();
     await frame.locator("#settingsDirtyStatus").filter({ hasText: "已保存" }).waitFor();
-    assert.deepEqual(await frame.locator(".settings-layout > .settings-panel h2").allTextContents(), ["运行", "默认模型", "历史", "图片预览与临时保留", "外部图库", "存储健康", "主题与显示"]);
+    assert.deepEqual(await frame.locator(".settings-layout > .settings-panel h2").allTextContents(), ["运行", "默认模型", "历史", "预览图", "外部图库", "存储健康", "主题与显示"]);
     assert.equal(await frame.locator("#settingsDirtyStatus").evaluate(element => { const probe = document.createElement("span"); probe.style.color = "var(--success)"; element.append(probe); const equal = getComputedStyle(element).color === getComputedStyle(probe).color; probe.remove(); return equal; }), true);
     const sourceHeader = frame.locator("#externalSourcesPanel > .section-heading");
     await sourceHeader.scrollIntoViewIfNeeded();

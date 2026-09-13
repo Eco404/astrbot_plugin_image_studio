@@ -99,7 +99,6 @@ def test_reference_and_lease_only_assets_can_be_imported_without_copying_origina
             create_preview=True,
             preview_max_edge=768,
             preview_quality=80,
-            retention_hours=24,
         )
         entries = [
             declared(store, reference_data, "reference.png"),
