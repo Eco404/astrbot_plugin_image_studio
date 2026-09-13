@@ -2,7 +2,7 @@
 
 在 AstrBot 中生成、编辑和管理图片。既能打开 WebUI 调整参数，也能在聊天中使用指令，或让 Agent 把生图作为任务中的一步，继续改图、拼接和制作其他作品。
 
-当前开发版本为 **1.2.0-dev.1**，基于正式版 1.1.0 继续开发。1.1.0 新增外部图库统一浏览和模型并发批次，支持编辑已导入图组，并改善大图组加载与手机全屏看图体验。完整变化见 [更新记录](CHANGELOG.md)。
+当前正式版本为 **1.2.0**。本版本在 1.1.0 的基础上完善了外部图库、图片导入、批量生图、主题显示和手机端浏览体验。完整变化见 [更新记录](CHANGELOG.md)。
 
 ![Image Studio 生图工作台](docs/images/generate.png)
 
@@ -35,7 +35,7 @@ https://github.com/Eco404/astrbot_plugin_image_studio
 
 也可以从 [Releases](https://github.com/Eco404/astrbot_plugin_image_studio/releases) 下载 ZIP 安装。安装后，在插件详情中打开 **Image Studio** 页面。
 
-从旧版升级前，请停止 AstrBot 并备份完整插件数据目录。1.1.0 会将 1.0.0 的图库数据库升级为正式 v2，也支持当前 `2-dev.2` 开发数据库转换；首次升级前会自动备份数据库，失败则回滚。自动备份不包含图片和配置，详细兼容范围与恢复方法见 [开发与升级说明](https://github.com/Eco404/astrbot_plugin_image_studio/blob/main/docs/DEVELOPMENT.md)。
+从旧版升级前，请停止 AstrBot 并备份完整插件数据目录。1.2.0 沿用正式 v2 数据库，1.1.0 用户无需数据库迁移；1.0.0 用户会按既有路径升级到 v2。首次升级前会自动备份数据库，失败则回滚。自动备份不包含图片和配置，详细兼容范围与恢复方法见 [开发与升级说明](https://github.com/Eco404/astrbot_plugin_image_studio/blob/main/docs/DEVELOPMENT.md)。
 
 ### 2. 配置服务商和模型
 
