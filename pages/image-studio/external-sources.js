@@ -5,12 +5,12 @@
     const $ = id => document.getElementById(id), copy = value => JSON.parse(JSON.stringify(value));
     const equal = (left, right) => JSON.stringify(left) === JSON.stringify(right);
     const sources = new Map(), scanRequests = new Set();
-    let types = [{ id: "nai", name: "NAI 插件图库" }, { id: "directory", name: "自定义目录" }];
+    let types = [{ id: "nai", name: "nai-image 插件图库" }, { id: "directory", name: "自定义目录" }];
     let drafts = {}, saved = {}, editor = null;
     let timer = 0, pending = null, disposed = false, revision = 0, refreshAgain = false;
     function normalize(value = {}, id = "") {
       const type = value.type || (id === "nai" ? "nai" : "directory");
-      return { type, name: value.name || (type === "nai" ? "NAI 插件图库" : "自定义图库"), enabled: !!value.enabled, path: value.path || "", recursive: !!value.recursive, permissions: { favorite: true, delete: type === "nai", download: true, reference: true, ...value.permissions } };
+      return { type, name: value.name || (type === "nai" ? "nai-image 插件图库" : "自定义图库"), enabled: !!value.enabled, path: value.path || "", recursive: !!value.recursive, permissions: { favorite: true, delete: type === "nai", download: true, reference: true, ...value.permissions } };
     }
     function normalizeMap(value) { return Object.fromEntries(Object.entries(value || {}).map(([id, item]) => [id, normalize(item, id)])); }
     function dirty(id) { return !equal(drafts[id], saved[id]); }
@@ -73,7 +73,7 @@
       $("externalEditorErrors").textContent = Array.from(new Set(errors)).join("\n");
       const candidate = readEditor(false);
       $("externalEditorScan").disabled = !canScan(id, drafts[id]) || !equal(candidate, drafts[id]);
-      if (candidate.type === "nai") $("externalEditorPath").value = types.find(type => type.id === "nai")?.path || sources.get(id)?.path || "自动定位 NAI 插件图库";
+      if (candidate.type === "nai") $("externalEditorPath").value = types.find(type => type.id === "nai")?.path || sources.get(id)?.path || "自动定位 nai-image 插件图库";
     }
     function ingest(items, observe = true, replace = false) {
       let changed = false;
@@ -127,8 +127,8 @@
     function updateEditorType(reset = false) {
       const builtin = $("externalEditorType").value === "nai";
       $("externalEditorPath").readOnly = builtin;
-      $("externalEditorPathHint").textContent = builtin ? "自动定位 NAI 插件保存历史图片的目录。" : "填写 AstrBot 所在容器内的目录；没有生成参数的图片也会正常加入画廊。";
-      if (reset) { $("externalEditorName").value = builtin ? "NAI 插件图库" : "自定义图库"; $("externalEditorPath").value = ""; $("externalPermission-delete").checked = builtin; }
+      $("externalEditorPathHint").textContent = builtin ? "自动定位 nai-image 插件保存历史图片的目录。" : "填写 AstrBot 所在容器内的目录；没有生成参数的图片也会正常加入画廊。";
+      if (reset) { $("externalEditorName").value = builtin ? "nai-image 插件图库" : "自定义图库"; $("externalEditorPath").value = ""; $("externalPermission-delete").checked = builtin; }
       renderEditorStatus();
     }
     async function edit(id = "", candidate = null) {
@@ -139,7 +139,7 @@
       const result = await hooks.openModal(existing ? "编辑外部图库" : "添加外部图库", body, [
         ...(existing ? [{ label: "移除图库", danger: true, id: "externalEditorRemove", action: () => ({ remove: true }) }] : []),
         { label: "取消", action: () => false }, { label: "确认", primary: true, id: "externalEditorApply", action: () => ({ value: readEditor() }) },
-      ], { externalEditor: true, focus: "externalEditorName", onOpen: () => {
+      ], { externalEditor: true, focus: existing ? "externalEditorName" : "studioModal", onOpen: () => {
         $("externalEditorType").addEventListener("change", () => updateEditorType(true));
         $("externalEditorScan").addEventListener("click", () => void scan(id));
         $("studioModalBody").querySelectorAll("input, select").forEach(input => input.addEventListener("input", renderEditorStatus));

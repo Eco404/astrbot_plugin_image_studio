@@ -225,7 +225,7 @@ def normalize_webui_settings(value: Any) -> tuple[dict[str, Any], list[str]]:
         if not isinstance(kind, str) or kind not in {"nai", "directory"}:
             errors.append(f"外部图库 {source_id} 的类型不受支持")
             continue
-        name = entry.get("name", "NAI 插件图库" if kind == "nai" else "自定义图库")
+        name = entry.get("name", "nai-image 插件图库" if kind == "nai" else "自定义图库")
         if not isinstance(name, str) or not name.strip() or len(name.strip()) > 80:
             errors.append(f"外部图库 {source_id} 的名称应为 1 至 80 个字符")
             continue

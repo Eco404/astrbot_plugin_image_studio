@@ -138,7 +138,7 @@ class NAIGalleryAdapter(ExternalGalleryAdapter):
     def __init__(
         self,
         source_id: str = "nai",
-        name: str = "NAI 插件图库",
+        name: str = "nai-image 插件图库",
         recursive: bool = False,
     ) -> None:
         super().__init__(
@@ -768,7 +768,7 @@ class ExternalGalleryManager:
         except (FileNotFoundError, NotADirectoryError) as exc:
             report.update(
                 status="unavailable",
-                error="未找到 NAI 插件图库目录"
+                error="未找到 nai-image 插件图库目录"
                 if isinstance(adapter, NAIGalleryAdapter)
                 else "未找到外部图库目录",
                 errors=[str(exc)[:500]],
