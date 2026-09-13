@@ -52,6 +52,7 @@ REQUIRED_ARCHIVE_FILES = RUNTIME_FILES + (
     "pages/image-studio/backdrop.js",
     "pages/image-studio/viewer-backdrop.js",
     "pages/image-studio/detail-swipe.js",
+    "pages/image-studio/image-placeholder.js",
     "pages/image-studio/detail-swipe.css",
     "pages/image-studio/library.css",
     "pages/image-studio/select.js",

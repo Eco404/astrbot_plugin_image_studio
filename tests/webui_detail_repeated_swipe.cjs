@@ -68,6 +68,15 @@ async function install(page, cold = false, navigationDelay = 0) {
       phase: frame.dataset.detailSwipeState || "idle",
       overlays: frame.querySelectorAll(".detail-swipe-overlay").length,
       panes: Array.from(frame.querySelectorAll(".detail-swipe-pane img")).map(image => ({ src: image.getAttribute("src"), x: image.getBoundingClientRect().x })),
+      illustrations: Array.from(frame.querySelectorAll(".detail-swipe-pane")).map(pane => {
+        const marker = pane.querySelector(".image-studio-image-placeholder"), glyph = marker?.querySelector(".image-studio-placeholder-icon");
+        const bounds = pane.getBoundingClientRect(), box = glyph?.getBoundingClientRect();
+        return {
+          offset: Number(pane.dataset.swipeOffset), count: pane.querySelectorAll(".image-studio-image-placeholder").length,
+          visible: !!marker && getComputedStyle(marker).visibility !== "hidden" && Number(getComputedStyle(marker).opacity) > 0,
+          paneX: bounds.x, x: box?.x, width: box?.width,
+        };
+      }),
     });
     const wait = delay => new Promise(resolve => setTimeout(resolve, delay));
     const frames = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
@@ -103,7 +112,10 @@ async function run(engine) {
   page.on("pageerror", error => pageErrors.push(error.message));
   try {
     await page.setContent('<style>body{margin:0}.detail-image-frame{position:relative;width:360px;height:460px;overflow:hidden}.detail-image{width:100%;height:100%;object-fit:contain}</style><div class="detail-image-frame"></div>');
+    await page.addStyleTag({ content: fs.readFileSync(path.join(root, "library.css"), "utf8") });
     await page.addStyleTag({ content: fs.readFileSync(path.join(root, "detail-swipe.css"), "utf8") });
+    await page.addScriptTag({ content: fs.readFileSync(path.join(root, "vendor/lucide/icons.js"), "utf8") });
+    await page.addScriptTag({ content: fs.readFileSync(path.join(root, "image-placeholder.js"), "utf8") });
     await page.addScriptTag({ content: fs.readFileSync(path.join(root, "detail-swipe.js"), "utf8") });
 
     for (const cold of [false, true]) {
@@ -132,6 +144,18 @@ async function run(engine) {
         const current = repeated.before.panes.find(pane => pane.x >= -1 && pane.x < 360);
         const caught = repeated.caught.panes.find(pane => pane.src === current?.src);
         assert.ok(current && caught && Math.abs(current.x - caught.x) < 3, `taking over must preserve the visible pane position: ${JSON.stringify(repeated)}`);
+      } else {
+        for (const [phase, state] of Object.entries(repeated)) {
+          assert.equal(state.illustrations.length, state.panes.length, `${phase}: every cold pane should have an independent illustration`);
+          for (const marker of state.illustrations) {
+            assert.equal(marker.count, 1, `${phase}: repeated touch must neither duplicate nor discard pane illustrations`);
+            assert.equal(marker.visible, true, `${phase}: the loading illustration should survive animation handover`);
+            assert.ok(Math.abs(marker.width - 144) < 2 && Math.abs(marker.x + marker.width / 2 - marker.paneX - 180) < 2, `${phase}: illustration should remain centered in its moving pane: ${JSON.stringify(marker)}`);
+          }
+        }
+        const current = repeated.before.illustrations.find(marker => marker.offset === 1);
+        const caught = repeated.caught.illustrations.find(marker => marker.offset === 0);
+        assert.ok(current && caught && Math.abs(current.x - caught.x) < 3, "taking over a cold transition must preserve the loading illustration's visible position");
       }
       await settled(page, 3, [1, 2, 3]);
       await page.evaluate(() => window.__repeatedSwipe.releasePreviews());

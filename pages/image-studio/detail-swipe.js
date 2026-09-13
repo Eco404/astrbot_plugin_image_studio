@@ -97,10 +97,18 @@
       image.alt = "";
       image.draggable = false;
       image.setAttribute("aria-hidden", "true");
+      const placeholder = window.ImageStudioImagePlaceholder.create();
+      const syncImage = () => {
+        const ready = !!image.getAttribute("src") && image.complete && image.naturalWidth > 0;
+        element.classList.toggle("is-loading", !ready);
+        placeholder.classList.toggle("is-ready", ready);
+        image.style.visibility = ready ? "" : "hidden";
+      };
+      image.addEventListener("load", syncImage);
+      image.addEventListener("error", syncImage);
       if (source) image.src = source;
-      else element.classList.add("is-loading");
-      image.addEventListener("error", () => { image.style.visibility = "hidden"; }, { once: true });
-      element.append(image);
+      element.append(placeholder, image);
+      syncImage();
       return element;
     }
 
@@ -145,7 +153,6 @@
               // Keep a visible pane stable; only fill a previously empty pane.
               if (image && !image.getAttribute("src")) {
                 image.src = value.src;
-                element.classList.remove("is-loading");
               }
             };
             updatePreview();

@@ -77,25 +77,79 @@ async function motion(inner) {
     return { phase: frame?.dataset.detailSwipeState, width: frame?.clientWidth, x: track ? new DOMMatrixReadOnly(getComputedStyle(track).transform).m41 : null, target: track ? new DOMMatrixReadOnly(track.style.transform).m41 : null };
   });
 }
-async function swipe(inner, target, waitForSelection = true) {
+async function placeholder(inner, selector) {
+  return inner.evaluate(selector => {
+    const host = document.querySelector(selector), marker = host?.querySelector(".image-studio-image-placeholder");
+    const glyph = marker?.querySelector(".image-studio-placeholder-icon");
+    if (!glyph) return { missing: true };
+    const box = glyph.getBoundingClientRect(), bounds = host.getBoundingClientRect();
+    let visible = true;
+    for (let node = marker; node instanceof Element; node = node.parentElement) {
+      const style = getComputedStyle(node);
+      if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) visible = false;
+    }
+    return {
+      visible, count: host.querySelectorAll(".image-studio-image-placeholder").length,
+      x: box.x, y: box.y, width: box.width, height: box.height,
+      hostX: bounds.x, hostY: bounds.y, hostWidth: bounds.width, hostHeight: bounds.height,
+      color: getComputedStyle(glyph).color, stroke: Number.parseFloat(getComputedStyle(glyph).strokeWidth),
+      filter: getComputedStyle(marker).filter, glyphFilter: getComputedStyle(glyph).filter,
+      background: getComputedStyle(marker).backgroundColor,
+      text: host.textContent.trim(), after: getComputedStyle(host, "::after").content,
+      theme: document.documentElement.dataset.theme,
+    };
+  }, selector);
+}
+function assertPlaceholder(marker, label) {
+  assert.equal(marker.missing, undefined, `${label}: missing loading illustration`);
+  assert.equal(marker.visible, true, `${label}: illustration must remain visible while the image loads`);
+  assert.equal(marker.count, 1, `${label}: each pending pane should own one illustration`);
+  assert.ok(Math.abs(marker.width - Math.min(marker.hostWidth * .4, 220)) < 2, `${label}: illustration should match the lightbox sizing: ${JSON.stringify(marker)}`);
+  assert.ok(Math.abs(marker.x + marker.width / 2 - marker.hostX - marker.hostWidth / 2) < 2, `${label}: horizontally off center`);
+  assert.ok(Math.abs(marker.y + marker.height / 2 - marker.hostY - marker.hostHeight / 2) < 2, `${label}: vertically off center`);
+  assert.equal(marker.color, marker.theme === "dark" ? "rgb(170, 170, 170)" : "rgb(255, 255, 255)", `${label}: neutral stroke should not inherit the accent color`);
+  assert.equal(marker.stroke, 8, `${label}: retain the thick lightbox stroke`);
+  assert.equal(marker.filter, "none", `${label}: marker edges should remain sharp`);
+  assert.equal(marker.glyphFilter, "none", `${label}: glyph edges should remain sharp`);
+  assert.match(marker.background, /^(transparent|rgba\([^)]*,\s*0\))$/, `${label}: space around the line art must remain transparent`);
+  assert.ok(!marker.after.includes("正在读取图片"), `${label}: the former visual loading label should be removed`);
+}
+async function placeholderGone(inner) {
+  await inner.waitForFunction(() => {
+    const frame = document.querySelector(".detail-image-frame");
+    return [...frame.querySelectorAll(".image-studio-image-placeholder")].every(marker => {
+      const style = getComputedStyle(marker);
+      return style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0;
+    });
+  });
+}
+async function swipe(inner, target, waitForSelection = true, inspectPlaceholder = false) {
   await inner.locator("#drawerBody").evaluate(element => { element.scrollTop = 0; });
   await touch(inner, "touchstart");
   await touch(inner, "touchmove", -40); await frames(inner);
   const first = await motion(inner);
   assert.equal(first.phase, "dragging");
   assert.ok(Math.abs(first.x + 40) <= 2, `unloaded adjacent image must follow the full finger distance, not edge resistance: ${JSON.stringify(first)}`);
+  const beforeMarker = inspectPlaceholder ? await placeholder(inner, '.detail-swipe-pane[data-swipe-offset="1"]') : null;
+  if (beforeMarker) assertPlaceholder(beforeMarker, "cold adjacent image during drag");
   await touch(inner, "touchmove", -125); await frames(inner);
   const moved = await motion(inner);
   assert.ok(Math.abs((moved.x - first.x) + 85) <= 2, `cold-image drag must remain continuous: ${JSON.stringify({ first, moved })}`);
+  if (beforeMarker) {
+    const afterMarker = await placeholder(inner, '.detail-swipe-pane[data-swipe-offset="1"]');
+    assertPlaceholder(afterMarker, "cold adjacent image after moving farther");
+    assert.ok(Math.abs(afterMarker.x - beforeMarker.x + 85) <= 2, "loading illustration must follow its own image pane rather than remain fixed in the frame");
+  }
   await touch(inner, "touchend", -125); await frames(inner);
   const released = await motion(inner);
   assert.equal(released.phase, "settling", "release must start the transition while image requests are still blocked");
   assert.ok(Math.abs(released.target + released.width) <= 2, `release must animate to the next page immediately: ${JSON.stringify(released)}`);
   if (waitForSelection) await selected(inner, target);
 }
-async function noSource(inner) {
+async function noSource(inner, loading = true) {
   assert.equal(await inner.locator("[data-detail-image]").getAttribute("src"), null, "a pending cursor must clear the previous image without requiring a source to remain swipeable");
   assert.equal(await inner.locator(".detail-image-pending").count(), 1);
+  if (loading) assertPlaceholder(await placeholder(inner, ".detail-image-pending"), "settled pending selection");
 }
 
 async function run(browserName) {
@@ -105,7 +159,7 @@ async function run(browserName) {
   const errors = []; page.on("pageerror", error => errors.push(error.message));
   const marker = `${path.basename(output)}-${browserName}`;
   const files = JSON.parse(execFileSync(python, ["-c", fixtureScript, output, marker], { encoding: "utf8" }));
-  const created = [], previewGates = new Map(), manifestGates = new Map(), completed = new Set();
+  const created = [], previewGates = new Map(), manifestGates = new Map(), completed = new Set(), originalGate = gate();
   let inner, failedPreviewRequests = 0;
   try {
     created.push(...await seed(page, files, marker));
@@ -147,7 +201,8 @@ async function run(browserName) {
     });
     await page.route("**/gallery/image/*", async route => {
       const url = new URL(route.request().url()), id = url.pathname.split("/").at(-1), kind = url.searchParams.get("detail");
-      if (kind === "original" && id !== A.image_id) {
+      if (kind === "original" && id === F.image_id) await originalGate.promise;
+      else if (kind === "original" && id !== A.image_id) {
         await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "测试：原图暂时不可用" }) }); return;
       }
       if (kind === "preview" && id === D.image_id) {
@@ -166,7 +221,7 @@ async function run(browserName) {
     });
     await frames(inner, 5);
 
-    await swipe(inner, B, false);
+    await swipe(inner, B, false, true);
     // Start the next touch before the previous release animation finishes.
     // Waiting for selected()/idle here would miss the real rapid-swipe bug.
     const beforeRepeat = await motion(inner);
@@ -187,7 +242,7 @@ async function run(browserName) {
 
     await swipe(inner, D);
     assert.ok(failedPreviewRequests > 0, "the unavailable preview path must have been exercised");
-    await noSource(inner);
+    await noSource(inner, false);
     await swipe(inner, E);
     await inner.waitForFunction(() => window.__asyncSwipeDecodeCount > 0);
     await swipe(inner, F);
@@ -195,15 +250,37 @@ async function run(browserName) {
       const image = document.querySelector("[data-detail-image]");
       return image?.complete && image.naturalWidth > 1;
     });
+    await placeholderGone(inner);
     const finalSource = await inner.locator("[data-detail-image]").getAttribute("src");
     await inner.evaluate(() => window.__releaseAsyncSwipeDecode());
     previewGates.get(C.image_id).release(); manifestGates.get(C.generation_id).release(); manifestGates.get(D.generation_id).release();
     await frames(inner, 20); await selected(inner, F);
     assert.equal(await inner.locator("[data-detail-image]").getAttribute("src"), finalSource, "late decoding/preview/manifest responses must not roll back the image");
+    await inner.evaluate(() => {
+      window.__detailUpgradeSamples = [];
+      window.__detailWatchUpgrade = true;
+      const sample = () => {
+        const frame = document.querySelector(".detail-image-frame");
+        window.__detailUpgradeSamples.push([...frame.querySelectorAll(".image-studio-image-placeholder")].some(marker => {
+          const style = getComputedStyle(marker);
+          return style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity) > 0;
+        }));
+        if (window.__detailWatchUpgrade) requestAnimationFrame(sample);
+      };
+      requestAnimationFrame(sample);
+    });
+    originalGate.release();
+    await inner.waitForFunction(preview => {
+      const image = document.querySelector("[data-detail-image]");
+      return image?.getAttribute("src") !== preview && image.complete && image.naturalWidth > 1;
+    }, finalSource);
+    await frames(inner, 12);
+    assert.equal(await inner.evaluate(() => { window.__detailWatchUpgrade = false; return window.__detailUpgradeSamples.some(Boolean); }), false, "upgrading an already visible preview to the original must not restore the loading illustration");
     assert.deepEqual(await inner.locator("[data-gallery-id]").evaluateAll(cards => cards.map(card => card.dataset.galleryId)), visible, "cross-page details must not reload the obscured gallery");
     assert.deepEqual(errors, []);
-    console.log(`${browserName} mobile: cold previews follow the finger, release animates without I/O, source-less cursors remain swipeable, preview failure and delayed decoding do not trap navigation, stale results do not overwrite the current image`);
+    console.log(`${browserName} mobile: cold image illustrations follow each pane and persist after release, disappear after display without returning during original upgrades, and preserve continuous navigation through pending media or stale results`);
   } finally {
+    originalGate.release();
     for (const item of [...previewGates.values(), ...manifestGates.values()]) item.release();
     if (inner) await inner.evaluate(() => window.__releaseAsyncSwipeDecode?.()).catch(() => {});
     await page.unrouteAll({ behavior: "wait" });

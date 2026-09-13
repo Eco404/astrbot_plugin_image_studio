@@ -1113,6 +1113,19 @@
     return decodedDisplayImages.get(source).promise;
   }
 
+  function showDetailImagePending(frame, reset = false) {
+    let pending = frame.querySelector(".detail-image-pending");
+    if (!pending) {
+      pending = document.createElement("div"); pending.className = "detail-image-pending";
+      pending.setAttribute("role", "status"); frame.appendChild(pending);
+    }
+    if (!pending.querySelector(".image-studio-image-placeholder") && (!pending.textContent || reset)) {
+      const text = document.createElement("span"); text.className = "detail-image-loading-text";
+      text.textContent = "正在读取图片…";
+      pending.replaceChildren(window.ImageStudioImagePlaceholder.create(), text);
+    }
+  }
+
   async function paintDetailImage(frame, item, index) {
     const revision = ++detailImagePaintRevision;
     if (!frame) return false;
@@ -1129,10 +1142,7 @@
       if (!preview || !decodedDisplayImages.get(preview)?.ready) image.removeAttribute("src");
       frame.setAttribute("aria-busy", "true");
     }
-    if (!image.getAttribute("src") && !frame.querySelector(".detail-image-pending")) {
-      const pending = document.createElement("div"); pending.className = "detail-image-pending";
-      pending.textContent = "正在读取图片…"; frame.append(pending);
-    }
+    if (!image.getAttribute("src")) showDetailImagePending(frame, changed || !!item?.data_url);
     if (!item?.data_url) { frame.setAttribute("aria-busy", "true"); return false; }
     const current = () => frame.isConnected && image.dataset.imageKey === imageKey && frame.dataset.generationId === String(state.detailId) && revision === detailImagePaintRevision && (!mobileViewerSession?.active || mobileViewerSession.preparingDetail);
     const publish = async (source) => {
@@ -1182,7 +1192,8 @@
 
   function createDetailImageFrame(generationId) {
     const frame = document.createElement("div"); frame.className = "detail-image-frame"; frame.dataset.generationId = generationId;
-    frame.innerHTML = `<div class="detail-image-background" aria-hidden="true"><img class="detail-image-backdrop" ${detailBackdropSource ? `src="${escape(detailBackdropSource)}"` : ""} alt="" /></div><img class="detail-image" alt="生成结果" data-detail-image="0" /><div class="detail-image-pending">正在读取图片…</div><button class="detail-carousel-nav is-previous" data-detail-nav="-1" type="button" aria-label="查看上一张图片"><span aria-hidden="true">‹</span></button><button class="detail-carousel-nav is-next" data-detail-nav="1" type="button" aria-label="查看下一张图片"><span aria-hidden="true">›</span></button>`;
+    frame.innerHTML = `<div class="detail-image-background" aria-hidden="true"><img class="detail-image-backdrop" ${detailBackdropSource ? `src="${escape(detailBackdropSource)}"` : ""} alt="" /></div><img class="detail-image" alt="生成结果" data-detail-image="0" /><button class="detail-carousel-nav is-previous" data-detail-nav="-1" type="button" aria-label="查看上一张图片"><span aria-hidden="true">‹</span></button><button class="detail-carousel-nav is-next" data-detail-nav="1" type="button" aria-label="查看下一张图片"><span aria-hidden="true">›</span></button>`;
+    showDetailImagePending(frame);
     const current = () => frame.isConnected && frame.dataset.generationId === String(state.detailId);
     window.ImageStudioDetailSwipe.bind(frame, {
       getNeighbor: (direction) => {
@@ -1941,17 +1952,7 @@
         if (!session.active || pswp.isDestroying || !slide?.holderElement || destroyedSlides.has(slide)) return;
         let entry = placeholders.get(slide);
         if (!entry) {
-          const placeholder = document.createElement("div");
-          placeholder.className = "image-studio-image-placeholder";
-          placeholder.setAttribute("aria-hidden", "true");
-          const icon = window.StudioIcons.createElement(window.StudioIcons.Image);
-          icon.setAttribute("viewBox", "2 2 20 20");
-          icon.setAttribute("stroke-width", "8");
-          icon.setAttribute("aria-hidden", "true"); icon.setAttribute("focusable", "false");
-          // A fixed, slightly heavier stroke stays readable at phone sizes.
-          icon.querySelectorAll("path,rect,circle,line,polyline,polygon,ellipse").forEach(shape => shape.setAttribute("vector-effect", "non-scaling-stroke"));
-          icon.classList.add("image-studio-placeholder-icon");
-          placeholder.appendChild(icon);
+          const placeholder = window.ImageStudioImagePlaceholder.create();
           entry = { element: placeholder, displayedImages: new WeakSet(), pending: false };
           const syncAfterPaintChange = () => {
             if (entry.pending) return;
