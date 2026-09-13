@@ -68,6 +68,10 @@ def export_parameters(
     )
     raw = metadata.get("raw") or {}
     normalized = metadata.get("normalized") or {}
+    if not metadata_record and isinstance(
+        image.get("supplemental", {}).get("effective_request"), dict
+    ):
+        detail = {**detail, "parameters": image["supplemental"]["effective_request"]}
     request = request_snapshot(detail)
     if metadata_record:
         supplemental = detail.get("supplemental") or {}
@@ -310,24 +314,25 @@ def resolve_parameters(
                 matches = [
                     m
                     for m in candidates
-                    if m["provider_kind"] == "nai_direct" and m["id"].startswith(prefix)
+                    if m["provider_kind"] in {"nai_direct", "novelai_official"}
+                    and m["id"].startswith(prefix)
                 ]
         if len(matches) == 1:
             selected = matches[0]
             selection_reason = "model"
     if not selected and not requested_model and not requested_ref:
         family = {
-            "nai": "nai_direct",
-            "novelai": "nai_direct",
-            "openai_images": "openai_images",
-            "gemini": "gemini",
-        }.get(source_format)
+            "nai": {"nai_direct", "novelai_official"},
+            "novelai": {"nai_direct", "novelai_official"},
+            "openai_images": {"openai_images"},
+            "gemini": {"gemini"},
+        }.get(source_format, set())
         provider_id = str(source.get("provider_id") or "")
         matches = [
             item
             for item in candidates
             if family
-            and item["provider_kind"] == family
+            and item["provider_kind"] in family
             and (not provider_id or item["provider_id"] == provider_id)
         ]
         if len(matches) == 1:
@@ -419,6 +424,7 @@ def resolve_parameters(
         model=selected["id"],
     )
     is_nai = selected["provider_kind"] == "nai_direct"
+    is_official = selected["provider_kind"] == "novelai_official"
     descriptors = selected.get("parameters") or {}
     values = {
         key: copy.deepcopy(desc["default"])
@@ -452,9 +458,13 @@ def resolve_parameters(
         "steps": "steps",
         "seed": "seed",
         "sampler": "sampler",
-        "scheduler": "noise_schedule" if is_nai else "scheduler",
-        "guidance_scale": "scale" if is_nai else "cfg_scale",
+        "scheduler": "noise_schedule" if is_nai or is_official else "scheduler",
+        "guidance_scale": "scale" if is_nai or is_official else "cfg_scale",
         "cfg_rescale": "cfg" if is_nai else "cfg_rescale",
+        "strength": "strength",
+        "noise": "noise",
+        "extra_noise_seed": "extra_noise_seed",
+        "image_format": "image_format",
     }
     if not source or (
         isinstance(envelope, dict) and envelope.get("has_request_snapshot") is False
@@ -469,6 +479,14 @@ def resolve_parameters(
             supplied.setdefault("size", derived_size)
     if is_nai and source_format in {"nai", "novelai"} and not exact_snapshot:
         supplied.setdefault("artist", source.get("artist", ""))
+        if "cfg_rescale" in supplied:
+            supplied.setdefault("cfg", supplied.pop("cfg_rescale"))
+    elif is_official and source_format in {"nai", "novelai"}:
+        if "cfg" in supplied:
+            supplied.setdefault("cfg_rescale", supplied.pop("cfg"))
+        artist = supplied.pop("artist", "")
+        if artist and isinstance(artist, str):
+            draft["prompt"] = "\n".join([artist, draft.get("prompt", "")]).strip()
     elif not is_nai and source_format in {"nai", "novelai"}:
         for original, target in {
             "scale": "cfg_scale",
@@ -480,6 +498,18 @@ def resolve_parameters(
     for key in ("size", "count"):
         if key in source:
             supplied[key] = source[key]
+    if is_official and isinstance(supplied.get("size"), str):
+        supplied["size"] = {
+            "竖图": "832x1216",
+            "横图": "1216x832",
+            "方图": "1024x1024",
+            "2K竖图": "1088x1600",
+            "2K横图": "1600x1088",
+            "2K方图": "1344x1344",
+            "4K竖图": "1344x1984",
+            "4K横图": "1984x1344",
+            "4K方图": "1728x1728",
+        }.get(supplied["size"], supplied["size"])
     if "negative_prompt" in source:
         supplied["negative_prompt"] = source["negative_prompt"]
     elif not exact_snapshot and draft["negative_prompt"]:

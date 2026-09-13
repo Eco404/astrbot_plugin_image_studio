@@ -300,7 +300,7 @@ class GenerationStore:
         with self._connect() as conn:
             conn.execute(
                 "UPDATE generations SET generation_engine = CASE provider_kind "
-                "WHEN 'nai_direct' THEN 'novelai' WHEN '' THEN 'unknown' ELSE provider_kind END "
+                "WHEN 'nai_direct' THEN 'novelai' WHEN 'novelai_official' THEN 'novelai' WHEN '' THEN 'unknown' ELSE provider_kind END "
                 "WHERE generation_engine = 'unknown' AND source != 'import' "
                 "AND provider_kind != ''"
             )
@@ -1875,6 +1875,54 @@ class GenerationStore:
             }
             for name in denied & {"size", "count", "negative_prompt"}:
                 parameters.pop(name, None)
+            image_supplementals: dict[str, str] = {}
+            for (image_id, _, asset_id), image in zip(image_rows, images):
+                if not image.effective_parameters:
+                    continue
+                effective = dict(image.effective_parameters)
+                if "seed" not in effective:
+                    actual_seed = (
+                        metadata.get(asset_id, {}).get("normalized", {}).get("seed")
+                    )
+                    if actual_seed is not None:
+                        effective["seed"] = actual_seed
+                allowed = {"seed", "extra_noise_seed", "size", "count"} | {
+                    str(descriptor.get("request_key") or name)
+                    for name, descriptor in model.active_parameters.items()
+                }
+                effective = _redact_sensitive(
+                    {
+                        key: value
+                        for key, value in effective.items()
+                        if key in allowed
+                        and key not in denied
+                        and key != "params_version"
+                    }
+                )
+                resolved = {
+                    **parameters,
+                    "parameters": {
+                        **parameters["parameters"],
+                        **{
+                            key: value
+                            for key, value in effective.items()
+                            if key not in {"size", "count", "negative_prompt"}
+                        },
+                    },
+                    **{
+                        key: effective[key]
+                        for key in ("size", "count", "negative_prompt")
+                        if key in effective
+                    },
+                }
+                image_supplementals[image_id] = json.dumps(
+                    {
+                        "effective_request": resolved,
+                        "response_index": image.response_index,
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
             invocation = (
                 request.invocation_source.public_dict()
                 if record_invocation_identity
@@ -1944,10 +1992,16 @@ class GenerationStore:
                     ),
                 )
                 conn.executemany(
-                    "INSERT INTO generation_images (id, generation_id, ordinal, asset_id) "
-                    "VALUES (?, ?, ?, ?)",
+                    "INSERT INTO generation_images (id, generation_id, ordinal, asset_id, supplemental_json) "
+                    "VALUES (?, ?, ?, ?, ?)",
                     [
-                        (image_id, generation_id, ordinal, asset_id)
+                        (
+                            image_id,
+                            generation_id,
+                            ordinal,
+                            asset_id,
+                            image_supplementals.get(image_id, "{}"),
+                        )
                         for image_id, ordinal, asset_id in image_rows
                     ],
                 )
@@ -1963,7 +2017,9 @@ class GenerationStore:
                 conn.execute(
                     "UPDATE generations SET generation_engine = ? WHERE id = ?",
                     (
-                        "novelai" if provider.kind == "nai_direct" else provider.kind,
+                        "novelai"
+                        if provider.kind in {"nai_direct", "novelai_official"}
+                        else provider.kind,
                         generation_id,
                     ),
                 )

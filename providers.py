@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import json
@@ -18,11 +19,34 @@ from .models import (
     ImageProvider,
     positive_batch_size,
 )
+from .novelai import (
+    MAX_RESPONSE_BYTES,
+    build_generation_payload,
+    parse_generation_response,
+    parse_subscription,
+)
 from .storage import detect_mime_type, image_data_url
 
 
 class ProviderError(RuntimeError):
     """A user-presentable upstream provider failure."""
+
+
+class ProviderPartialResponseError(ProviderError):
+    """Preserve valid images when another result in one response is invalid."""
+
+    def __init__(
+        self,
+        images: tuple[GeneratedImage, ...],
+        failures: tuple[tuple[int, str], ...],
+    ) -> None:
+        self.images = images
+        self.failures = failures
+        details = "；".join(f"第 {index} 项：{reason}" for index, reason in failures)
+        super().__init__(
+            f"NovelAI 响应中有 {len(failures)} 项无效，已保留 {len(images)} 张图片。"
+            f"{details}。请求可能已消耗额度，请勿自动重试。"
+        )
 
 
 class ProviderBatchError(ProviderError):
@@ -35,18 +59,32 @@ class ProviderBatchError(ProviderError):
         failures: tuple[tuple[int, str], ...],
         *,
         request_sizes: tuple[int, ...] = (),
+        actual_response_counts: tuple[int, ...] = (),
     ) -> None:
         self.images = images
         self.failures = failures
         sizes = request_sizes or (1,) * requested
-        failed_images = sum(sizes[index - 1] for index, _ in failures)
+        failed_images = sum(
+            max(
+                0,
+                sizes[index - 1]
+                - (actual_response_counts[index - 1] if actual_response_counts else 0),
+            )
+            for index, _ in failures
+        )
         details = "；".join(
             f"第 {index} 次请求（计划 {sizes[index - 1]} 张）：{reason}"
             for index, reason in failures
         )
+        failure_label = (
+            "失败或部分失败"
+            if actual_response_counts
+            and any(actual_response_counts[index - 1] for index, _ in failures)
+            else "失败"
+        )
         summary = (
             f"本批目标 {requested} 张，发送 {len(sizes)} 次请求，"
-            f"成功 {len(sizes) - len(failures)} 次，失败 {len(failures)} 次"
+            f"成功 {len(sizes) - len(failures)} 次，{failure_label} {len(failures)} 次"
             f"（涉及目标图片 {failed_images} 张）；实际返回 {len(images)} 张，已全部保留。"
         )
         super().__init__(
@@ -63,6 +101,8 @@ class ProviderExecutor:
     async def fetch_quota(self, provider: ImageProvider) -> dict[str, Any]:
         """Read the saved NAI proxy account quota without generating an image."""
 
+        if provider.kind == "novelai_official":
+            return await self._novelai_quota(provider)
         if not provider.enabled or provider.kind != "nai_direct":
             raise ProviderError("仅支持查询已启用的 NAI 服务商额度")
         if not provider.api_key.strip():
@@ -116,6 +156,10 @@ class ProviderExecutor:
 
         if provider.kind == "nai_direct":
             raise ProviderError("NAI 第三方接口不支持获取模型列表")
+        if provider.kind == "novelai_official":
+            raise ProviderError(
+                "NovelAI 官方接口未提供图片模型自动发现；请选择内置模型预设"
+            )
         endpoint = _join_url(
             provider.base_url,
             provider.models_path
@@ -168,9 +212,93 @@ class ProviderExecutor:
             return await self._gemini(provider, request)
         if provider.kind == "nai_direct":
             return await self._nai_direct(provider, request)
+        if provider.kind == "novelai_official":
+            return await self._novelai_official(provider, request)
         if provider.kind == "custom_json":
             return await self._custom_json(provider, request)
         raise ProviderError(f"不支持的 Provider 类型: {provider.kind}")
+
+    async def _novelai_official(
+        self, provider: ImageProvider, request: GenerationRequest
+    ) -> tuple[GeneratedImage, ...]:
+        if not provider.enabled:
+            raise ProviderError("NovelAI 官方服务商未启用")
+        if not provider.api_key.strip():
+            raise ProviderError("NovelAI 官方服务商尚未配置 Persistent API Token")
+        if request.mode == "img2img" and not provider.get_model(request.model).img2img:
+            raise ProviderError("所选 NovelAI 模型尚未启用图生图")
+        try:
+            payload, effective = await asyncio.to_thread(
+                build_generation_payload, request, request.model or provider.model
+            )
+        except ValueError as exc:
+            raise ProviderError(str(exc)) from exc
+        endpoint = _join_url(
+            provider.base_url, provider.generate_path or "/ai/generate-image"
+        )
+        try:
+            async with self.session.post(
+                endpoint,
+                json=payload,
+                headers=_novelai_headers(provider),
+                timeout=aiohttp.ClientTimeout(total=provider.timeout_seconds),
+                allow_redirects=False,
+            ) as response:
+                if response.status not in {200, 201}:
+                    raise ProviderError(
+                        await _novelai_generation_error(response, provider)
+                    )
+                raw = await _bounded_response_body(response, MAX_RESPONSE_BYTES)
+                content_type = str(response.headers.get("Content-Type") or "")
+        except TimeoutError as exc:
+            raise ProviderError(
+                "NovelAI 生图超时，可能已消耗额度；不会自动重试，请先检查结果"
+            ) from exc
+        except aiohttp.ClientError as exc:
+            raise ProviderError(
+                "NovelAI 生图连接中断，可能已消耗额度；不会自动重试"
+            ) from exc
+        try:
+            images, failures = await asyncio.to_thread(
+                parse_generation_response,
+                raw,
+                content_type,
+                effective,
+                expected_count=request.count,
+            )
+        except ValueError as exc:
+            raise ProviderError(str(exc)) from exc
+        if failures:
+            raise ProviderPartialResponseError(images, failures)
+        if not images:
+            raise ProviderError("NovelAI 未返回可识别的图片")
+        return images
+
+    async def _novelai_quota(self, provider: ImageProvider) -> dict[str, Any]:
+        if not provider.enabled:
+            raise ProviderError("NovelAI 官方服务商未启用")
+        if not provider.api_key.strip():
+            raise ProviderError("NovelAI 官方服务商尚未配置 Persistent API Token")
+        try:
+            async with self.session.get(
+                _join_url(provider.base_url, "/user/subscription"),
+                headers=_novelai_headers(provider),
+                timeout=aiohttp.ClientTimeout(total=15),
+                allow_redirects=False,
+            ) as response:
+                if response.status != 200:
+                    raise ProviderError(
+                        _novelai_http_error(response.status, operation="额度查询")
+                    )
+                raw = await _bounded_response_body(response, 1024 * 1024)
+            payload = json.loads(raw)
+            return parse_subscription(payload)
+        except TimeoutError as exc:
+            raise ProviderError("NovelAI 额度查询超时，请稍后重试") from exc
+        except aiohttp.ClientError as exc:
+            raise ProviderError("NovelAI 额度查询失败：无法连接服务商") from exc
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise ProviderError("NovelAI 额度查询失败：上游响应格式无效") from exc
 
     async def _openai_images(
         self,
@@ -410,6 +538,90 @@ class ProviderExecutor:
                 return GeneratedImage(raw, detect_mime_type(raw, hint))
         except aiohttp.ClientError as exc:
             raise ProviderError("无法下载上游结果图") from exc
+
+
+async def _bounded_response_body(response: aiohttp.ClientResponse, limit: int) -> bytes:
+    """Bound both advertised and streamed response size before decoding."""
+
+    declared = str(response.headers.get("Content-Length") or "")
+    if declared.isdigit() and int(declared) > limit:
+        raise ProviderError("NovelAI 响应超过插件大小上限")
+    content = response.content
+    chunks = bytearray()
+    async for chunk in content.iter_chunked(64 * 1024):
+        chunks.extend(chunk)
+        if len(chunks) > limit:
+            raise ProviderError("NovelAI 响应超过插件大小上限")
+    return bytes(chunks)
+
+
+def _novelai_headers(provider: ImageProvider) -> dict[str, str]:
+    headers = {
+        key: value
+        for key, value in _parse_headers(provider.custom_headers).items()
+        if key.lower() not in {"authorization", "content-type", "accept"}
+    }
+    headers.update(
+        {
+            "Authorization": f"Bearer {provider.api_key.strip()}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+    )
+    return headers
+
+
+async def _novelai_generation_error(
+    response: aiohttp.ClientResponse, provider: ImageProvider
+) -> str:
+    message = _novelai_http_error(response.status, operation="生图")
+    if (
+        response.status not in {400, 422}
+        or "json" not in str(response.headers.get("Content-Type", "")).lower()
+    ):
+        return message
+    try:
+        body = await _bounded_response_body(response, 16 * 1024)
+        payload = json.loads(body)
+    except (ValueError, ProviderError, aiohttp.ClientError, TimeoutError):
+        return message
+    if not isinstance(payload, dict):
+        return message
+    detail = payload.get("message", payload.get("error", ""))
+    if isinstance(detail, dict):
+        detail = detail.get("message", "")
+    if not isinstance(detail, str):
+        return message
+    for secret in [
+        provider.api_key.strip(),
+        *_parse_headers(provider.custom_headers).values(),
+    ]:
+        if secret:
+            detail = detail.replace(secret, "[已隐藏]")
+    detail = re.sub(
+        r"pst-[A-Za-z0-9._~-]+|Bearer\s+\S+", "[已隐藏]", detail, flags=re.I
+    )
+    detail = re.sub(r"https?://\S+|[A-Za-z0-9+/=_-]{64,}", "[已隐藏]", detail)
+    detail = " ".join(detail.split())[:300]
+    return (
+        f"{message}；上游说明：{detail}" if detail and detail != "[已隐藏]" else message
+    )
+
+
+def _novelai_http_error(status: int, *, operation: str) -> str:
+    reasons = {
+        400: "请求参数无效，请检查模型、尺寸和采样参数",
+        401: "Token 无效或已失效",
+        403: "账户权限或订阅不允许本次操作",
+        402: "Anlas 或使用额度不足",
+        409: "账户已有正在执行的任务",
+        422: "请求参数组合不受支持",
+        429: "账户限流，请稍后手动重试",
+    }
+    reason = reasons.get(
+        status, "上游服务异常" if status >= 500 else "上游返回非成功响应"
+    )
+    return f"NovelAI {operation}失败：HTTP {status}，{reason}"
 
 
 def _openai_payload(

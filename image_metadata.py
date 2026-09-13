@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import gzip
 import hashlib
 import io
 import json
 import math
 import re
 import warnings
+import zlib
 from collections.abc import Callable
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -13,7 +15,7 @@ from typing import Any
 
 from PIL import Image
 
-PARSER_VERSION = 8
+PARSER_VERSION = 9
 MAX_IMAGE_BYTES = 64 * 1024 * 1024
 MAX_METADATA_BYTES = 4 * 1024 * 1024
 MAX_PIXELS = 64_000_000
@@ -238,6 +240,8 @@ def parse_image_metadata(data: bytes) -> dict:
     if not data or len(data) > MAX_IMAGE_BYTES:
         raise ValueError("图片为空或超过 64 MiB 限制")
     fields: dict[str, Any] = {}
+    stealth: dict[str, Any] | None = None
+    stealth_warning = ""
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
@@ -280,13 +284,144 @@ def parse_image_metadata(data: bytes) -> dict:
                     value = tags.get(tag)
                     if isinstance(value, (str, bytes)):
                         fields.setdefault(key, _decode_comment(value))
+                if image.format == "PNG":
+                    try:
+                        stealth = _read_novelai_stealth(image)
+                    except (
+                        ValueError,
+                        TypeError,
+                        OSError,
+                        EOFError,
+                        RecursionError,
+                        zlib.error,
+                    ) as exc:
+                        stealth_warning = f"NovelAI 隐写元数据无效，已忽略：{exc}"
     except (
         OSError,
         Image.DecompressionBombError,
         Image.DecompressionBombWarning,
     ) as exc:
         raise ValueError("无法读取图片或图片尺寸超出限制") from exc
-    return parse_metadata_fields(fields, width=width, height=height)
+    result = parse_metadata_fields(fields, width=width, height=height)
+    if stealth is not None:
+        try:
+            result = _merge_novelai_stealth(result, stealth)
+        except (ValueError, RecursionError) as exc:
+            stealth_warning = f"NovelAI 隐写元数据无效，已忽略：{exc}"
+    if stealth_warning:
+        _warning(result, stealth_warning)
+    return result
+
+
+def _read_novelai_stealth(image: Image.Image) -> dict[str, Any] | None:
+    """Read NovelAI's column-major alpha LSB gzip payload without changing pixels."""
+    if "A" not in image.getbands():
+        return None
+    width, height = image.size
+    capacity = width * height
+    magic = b"stealth_pngcomp"
+    if capacity < len(magic) * 8:
+        return None
+    pixels = image.load()
+    alpha_index = image.getbands().index("A")
+    position = 0
+
+    def read_bytes(count: int) -> bytes:
+        nonlocal position
+        if count * 8 > capacity - position:
+            raise ValueError("隐写数据超过图片容量或已被截断")
+        output = bytearray(count)
+        for index in range(count):
+            value = 0
+            for _ in range(8):
+                value = (value << 1) | (
+                    pixels[position // height, position % height][alpha_index] & 1
+                )
+                position += 1
+            output[index] = value
+        return bytes(output)
+
+    # Ordinary RGBA images only need a short magic probe, not a full alpha scan.
+    if read_bytes(len(magic)) != magic:
+        return None
+    bit_length = int.from_bytes(read_bytes(4), "big")
+    if not bit_length or bit_length % 8:
+        raise ValueError("隐写数据位长度必须为正数且是 8 的倍数")
+    compressed = read_bytes(bit_length // 8)
+    with gzip.GzipFile(fileobj=io.BytesIO(compressed)) as stream:
+        payload = stream.read(MAX_METADATA_BYTES + 1)
+    if len(payload) > MAX_METADATA_BYTES:
+        raise ValueError("隐写元数据解压后超过 4 MiB 限制")
+    metadata = json.loads(payload.decode("utf-8"))
+    if not isinstance(metadata, dict):
+        raise TypeError("隐写元数据必须为 JSON 对象")
+    return metadata
+
+
+def _metadata_values_equal(left: Any, right: Any) -> bool:
+    """Ignore JSON text whitespace and key order when comparing metadata sources."""
+
+    def decoded(value: Any) -> Any:
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+                if isinstance(parsed, (dict, list)):
+                    return _safe(parsed)
+            except (ValueError, RecursionError):
+                pass
+        return value
+
+    return decoded(left) == decoded(right)
+
+
+def _merge_novelai_stealth(result: dict, stealth: dict[str, Any]) -> dict:
+    hidden = parse_metadata_fields(stealth)
+    ordinary_raw = result["raw"]
+    raw = {**hidden["raw"], **ordinary_raw}
+    provenance = {"protocol": "stealth_pngcomp", "fields": hidden["raw"]}
+    if "StealthMetadata" in ordinary_raw:
+        provenance["ordinary_field"] = ordinary_raw["StealthMetadata"]
+    raw["StealthMetadata"] = provenance
+    if len(json.dumps(raw, ensure_ascii=False).encode("utf-8")) > MAX_METADATA_BYTES:
+        raise ValueError("合并后的图片元数据超过 4 MiB 限制")
+    merged = {
+        **result,
+        "raw": raw,
+        "normalized": dict(result["normalized"]),
+        "warnings": list(result["warnings"]),
+    }
+    if (
+        "Comment" not in ordinary_raw
+        and _json(hidden["raw"].get("Comment")) is not None
+    ):
+        merged["warnings"] = [
+            message
+            for message in merged["warnings"]
+            if message != "已识别 NovelAI 来源，但 Comment 不是可解析的 JSON"
+        ]
+    for key, value in hidden["raw"].items():
+        if key in ordinary_raw and not _metadata_values_equal(ordinary_raw[key], value):
+            _warning(
+                merged,
+                f"常规元数据与 NovelAI 隐写元数据的 {key} 不一致；"
+                "优先采用常规字段，隐写原值保留在 StealthMetadata",
+            )
+    if result["format"] != "unknown" and hidden["format"] not in {
+        "unknown",
+        result["format"],
+    }:
+        _warning(merged, "常规元数据与隐写元数据的生成格式不同，未混合生成参数")
+        return merged
+    if merged["format"] == "unknown":
+        merged["format"] = hidden["format"]
+    for key, value in hidden["normalized"].items():
+        if key not in merged["normalized"] or (
+            key == "mode" and merged["normalized"][key] == "unknown"
+        ):
+            merged["normalized"][key] = value
+    for message in hidden["warnings"]:
+        _warning(merged, f"NovelAI 隐写元数据：{message}")
+    return merged
 
 
 def parse_metadata_fields(
@@ -362,6 +497,8 @@ def _novelai(parameters: dict, result: dict) -> None:
         "n_samples": "count",
         "strength": "strength",
         "noise": "noise",
+        "extra_noise_seed": "extra_noise_seed",
+        "image_format": "image_format",
     }.items():
         if source in parameters and parameters[source] is not None:
             target[destination] = parameters[source]
@@ -1993,6 +2130,23 @@ def parse_parameter_text(content: str) -> dict:
         return parse_metadata_fields({"prompt": stripped})
     if isinstance(obj.get("nodes"), list) and "links" in obj:
         return parse_metadata_fields({"workflow": stripped})
+    if (
+        isinstance(obj.get("input"), str)
+        and isinstance(obj.get("parameters"), dict)
+        and str(obj.get("model", "")).startswith("nai-diffusion-")
+    ):
+        parameters = {
+            **obj["parameters"],
+            "prompt": obj["input"],
+            "model": obj["model"],
+            "action": obj.get("action", "generate"),
+        }
+        return parse_metadata_fields(
+            {
+                "Software": "NovelAI",
+                "Comment": json.dumps(parameters, ensure_ascii=False),
+            }
+        )
     if "tag" in obj or ("artist" in obj and "prompt" in obj):
         result = parse_metadata_fields({"nai_request": content})
         result["format"] = "novelai"

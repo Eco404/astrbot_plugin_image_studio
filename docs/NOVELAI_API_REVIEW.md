@@ -2,7 +2,34 @@
 
 核对日期：2026-09-13。目标开发版本：`1.3.0-dev.1`。
 
-已确定新增独立服务商类型 `novelai_official`，保留现有 `nai_direct` 第三方 GET 协议。本轮只核对公开文档与参考代码，未实现官方适配器，未使用真实 Token，也未调用生图、额度或账户接口。
+已实现独立服务商类型 `novelai_official`，保留现有 `nai_direct` 第三方 GET 协议。本文保留文档核对依据；实现已完成离线验证，尚未使用真实 Token 调用生图、额度或账户接口。
+
+## 当前实现状态
+
+- `novelai.py` / `providers.py`：Bearer 鉴权，JSON 优先、ZIP 兼容的完整原图接收，响应项错误与可读图片分别保留，单底图图生图，订阅查询。
+- `models.py` / `service.py`：四款内置模型的基础参数、按模式过滤参数、图生图默认关闭且最多一张底图、同 Token 跨 Provider 共享串行限制。
+- `storage.py` / `parameter_exchange.py`：逐图实际参数写入已有补充字段；按记录策略过滤，详情与复现跟随所选图片；官方与第三方同属 NovelAI 来源但各自映射参数。
+- `image_metadata.py`：常规元数据与 alpha 隐写元数据合并，保留冲突来源；解析器 9，数据库仍为 v2。
+- WebUI：官方服务商配置和预设、按模式显示重绘参数、Anlas 与 V5 使用额度分开显示。
+
+当前 V5 默认 `params_version=4`，V4.5 默认 3，均保留手工 schema 扩展覆盖的校验入口；不默认注入 `use_new_shared_trial`。这两个决定仍需真实账号验证。没有开放流式预览、多角色、Vibe Transfer、角色参考或局部重绘。
+
+参考源码快照：`caru-ini/novelai-sdk@72964b1`、`dafeiwu666/astrbot_plugin_ppnai@44c14c9`、`YayiMiko/astrbot_plugin_n5@3cc74dc`、`Aeka0/NAI-Utility-Tool@8f61bae` 及官方 `NovelAI/novelai-image-metadata@3428907`。采用协议事实独立实现，没有引入整套 SDK 或复制其高层工作流。
+
+## 真实联调验收
+
+以下项目尚未执行，不能以离线测试代替：
+
+| 项目 | 核实内容 | 完成依据 |
+| --- | --- | --- |
+| 模型请求 | 四款模型 ID、V4.5/V5 的 params_version 和基本采样组合 | 记录脱敏成功请求及实际返回 |
+| JSON 原图 | images 对象格式、seed/index、PNG/WebP 原图与元数据 | 原图可读取，逐图参数能复制和复现 |
+| 订阅查询 | PAT 对图片域名 /user/subscription 的权限、Anlas 字段与 usage | 对照同一账户官网显示；不保留完整账户原始响应 |
+| 试用与付费 | 不发送 shared_trial 的实际行为、V5 免费额度与 Anlas 变化 | 小量人工触发请求前后对照；不承诺本地条件判断等于免费 |
+| 图生图 | 单底图编码、输出尺寸、strength/noise/extra_noise_seed | 人工启用模型后验证可用，再考虑默认开放 |
+| 批次与并发 | 目标模型在不同尺寸下的样本上限、同账号实际限制 | 初期串行/原生1张可用；更高设置单独核实 |
+
+真实接口验证前不自动创建后台任务、读取既有真实配置密钥或发送测试生成请求。
 
 ## 官方资料
 

@@ -213,7 +213,7 @@
 
   function quotaProvider() {
     const provider = selectedProvider();
-    return state.view === "generate" && selectedModel() && provider?.kind === "nai_direct" ? provider : null;
+    return state.view === "generate" && selectedModel() && ["nai_direct", "novelai_official"].includes(provider?.kind) ? provider : null;
   }
 
   function renderProviderStatus() {
@@ -226,6 +226,17 @@
     const quota = providerQuotas.get(active.id);
     const failed = !!quota?.error;
     els.providerQuota.classList.toggle("is-unavailable", failed);
+    if (active.kind === "novelai_official") {
+      const data = quota?.data, usage = data?.usage;
+      const amount = value => value === null || value === undefined ? "未知" : value.toLocaleString("zh-CN");
+      const allowance = usage?.is_negative === true ? "已用尽" : usage?.percent === null || usage?.percent === undefined ? "未知" : `${Math.max(0, usage.percent)}%`;
+      els.providerQuota.classList.toggle("is-warning", !!data && (!data.enabled || usage?.is_negative === true));
+      els.providerQuota.textContent = failed ? "额度暂不可用" : data ? `Anlas ${amount(data.remaining)} · V5 ${allowance}${data.enabled ? "" : " · 已停用"}` : "额度查询中…";
+      const availability = usage?.is_negative === false ? "可用" : usage?.is_negative === true ? "已用尽" : "状态未知";
+      const refill = usage?.time_until_next_percent === null || usage?.time_until_next_percent === undefined ? "" : `\n距离下一个百分比恢复约 ${usage.time_until_next_percent} 秒`;
+      els.providerQuota.title = failed ? quota.error : data ? `服务商：${active.name}\nAnlas：订阅 ${amount(data.subscription_anlas)}，购买 ${amount(data.purchased_anlas)}\nV5 免费额度：${allowance}（${availability}），与 Anlas 余额独立${refill}\n更新于 ${formatDate(data.checked_at)}` : `正在查询 ${active.name} 的额度`;
+      return;
+    }
     els.providerQuota.classList.toggle("is-warning", !!quota?.data && (!quota.data.enabled || quota.data.remaining === 0));
     els.providerQuota.textContent = failed ? "额度暂不可用" : quota?.data ? `剩余额度 ${quota.data.remaining.toLocaleString("zh-CN")}${quota.data.enabled ? "" : " · 已停用"}` : "额度查询中…";
     els.providerQuota.title = failed ? quota.error : quota?.data ? `服务商：${active.name}\n更新于 ${formatDate(quota.data.checked_at)}` : `正在查询 ${active.name} 的额度`;
@@ -240,7 +251,15 @@
     providerQuotas.set(provider.id, entry);
     renderProviderStatus();
     void apiGet("studio/provider-quota", { provider_id: provider.id }).then((payload) => {
-      if (payload?.provider_id !== provider.id || !Number.isSafeInteger(payload.remaining) || payload.remaining < 0 || typeof payload.enabled !== "boolean" || !Number.isFinite(payload.checked_at)) throw new Error("额度查询返回的数据格式不正确");
+      const nullableAmount = value => value === null || Number.isSafeInteger(value) && value >= 0;
+      const nullableNumber = value => value === null || Number.isFinite(value) && value >= 0;
+      const usage = payload?.usage;
+      const validQuota = provider.kind === "novelai_official"
+        ? payload?.kind === "novelai_official" && nullableAmount(payload.tier)
+          && [payload.remaining, payload.subscription_anlas, payload.purchased_anlas].every(nullableAmount)
+          && (usage === null || usage && typeof usage === "object" && (usage.percent === null || Number.isFinite(usage.percent)) && (usage.is_negative === null || typeof usage.is_negative === "boolean") && nullableNumber(usage.time_until_next_percent))
+        : Number.isSafeInteger(payload?.remaining) && payload.remaining >= 0;
+      if (payload?.provider_id !== provider.id || !validQuota || typeof payload.enabled !== "boolean" || !Number.isFinite(payload.checked_at)) throw new Error("额度查询返回的数据格式不正确");
       entry.data = payload;
     }).catch((error) => { entry.error = errorMessage(error, "额度查询失败"); }).finally(() => {
       entry.pending = false; entry.updatedAt = Date.now();
@@ -387,7 +406,7 @@
       return;
     }
     els.modelProvider.textContent = model.provider_name || "";
-    els.modelParameters.innerHTML = effectiveModelParameters(model).filter(([, descriptor]) => descriptor.webui_visible !== false).map(([name, descriptor]) => renderModelParameter(name, descriptor)).join("") || '<div class="workspace-placeholder">该模型没有额外参数。</div>';
+    els.modelParameters.innerHTML = effectiveModelParameters(model).filter(([, descriptor]) => descriptor.webui_visible !== false && parameterAppliesToMode(descriptor)).map(([name, descriptor]) => renderModelParameter(name, descriptor)).join("") || '<div class="workspace-placeholder">该模型没有额外参数。</div>';
     els.modelParameters.querySelectorAll("[data-model-parameter]").forEach((input) => {
       if (!Object.prototype.hasOwnProperty.call(state.parameterValues, input.dataset.modelParameter)) input.dataset.unsetValue = "true";
       const update = () => {
@@ -528,6 +547,7 @@
     const mappedParameters = Object.fromEntries(Object.entries(collectModelParameters()).map(([name, value]) => [schema[name]?.request_key || name, value]));
     for (const [name, descriptor] of effectiveModelParameters(model)) {
       const key = descriptor.request_key || name;
+      if (!parameterAppliesToMode(descriptor)) { delete parameters[key]; delete parameters[name]; delete mappedParameters[key]; }
       if (descriptor.webui_visible === false && Object.prototype.hasOwnProperty.call(parameters, key)) delete mappedParameters[key];
     }
     const size = mappedParameters.size || "";
@@ -549,7 +569,7 @@
     } catch (error) { setError(els.generationError, errorMessage(error, "生成失败")); }
     finally {
       els.generateButton.disabled = false; els.generateButton.textContent = "生成图片";
-      if (provider.kind === "nai_direct") { providerQuotas.delete(provider.id); refreshProviderQuota(); }
+      if (["nai_direct", "novelai_official"].includes(provider.kind)) { providerQuotas.delete(provider.id); refreshProviderQuota(); }
     }
   }
 
@@ -2411,15 +2431,23 @@
     return loaded;
   }
 
-  const PROVIDER_KINDS = [["openai_images", "OpenAI Images"], ["gemini", "Gemini 图片输出"], ["nai_direct", "NAI 第三方 GET（nai.sta1n.cn）"], ["custom_json", "自定义 JSON"]];
+  const PROVIDER_KINDS = [["openai_images", "OpenAI Images"], ["gemini", "Gemini 图片输出"], ["novelai_official", "NovelAI 官方"], ["nai_direct", "NAI 第三方 GET（nai.sta1n.cn）"], ["custom_json", "自定义 JSON"]];
   const NAI_MODELS = [
     { id: "nai-diffusion-4-5-full", name: "NAI V4.5 完整版" },
     { id: "nai-diffusion-5-full", name: "NAI V5 完整版" },
   ];
+  const NOVELAI_OFFICIAL_MODELS = [
+    { id: "nai-diffusion-4-5-full", name: "NovelAI V4.5 完整版" },
+    { id: "nai-diffusion-4-5-curated", name: "NovelAI V4.5 精选版" },
+    { id: "nai-diffusion-5-full", name: "NovelAI V5 完整版" },
+    { id: "nai-diffusion-5-curated", name: "NovelAI V5 精选版" },
+  ];
+  function builtinProviderModels(provider) { return provider?.kind === "novelai_official" ? NOVELAI_OFFICIAL_MODELS : provider?.kind === "nai_direct" ? NAI_MODELS : null; }
   const PROVIDER_DEFAULTS = {
     openai_images: { base_url: "https://api.openai.com/v1", generate_path: "/images/generations", edit_path: "/images/edits", models_path: "/models", edit_request_format: "multipart", request_template: "", response_image_path: "", max_concurrent_generations: 2 },
     gemini: { base_url: "https://generativelanguage.googleapis.com", generate_path: "/v1beta/models/{model}:generateContent", edit_path: "/v1beta/models/{model}:generateContent", models_path: "/v1beta/models", edit_request_format: "json_data_url", request_template: "", response_image_path: "", max_concurrent_generations: 2 },
     nai_direct: { base_url: "https://nai.sta1n.cn", generate_path: "/generate", edit_path: "", models_path: "/models", edit_request_format: "json_data_url", request_template: "", response_image_path: "", max_concurrent_generations: 2 },
+    novelai_official: { base_url: "https://image.novelai.net", generate_path: "/ai/generate-image", edit_path: "/ai/generate-image", models_path: "", edit_request_format: "json_data_url", request_template: "", response_image_path: "", max_concurrent_generations: 1 },
     custom_json: { base_url: "", generate_path: "/v1/images/generations", edit_path: "/v1/images/edits", models_path: "/models", edit_request_format: "json_data_url", request_template: "", response_image_path: "", max_concurrent_generations: 2 },
   };
   const NAI_ARTIST_PRESETS = {
@@ -2453,6 +2481,19 @@
     count: { type: "integer", label: "生图张数", description: "本次生成的总图片数量，插件根据模型单次请求图片上限自动分批。取值范围：[1, 16]。", default: 1, min: 1, max: 16, step: 1, request_key: "count", refill_from_history: false },
   };
   const MODEL_PRESETS = {
+    novelai_official: {
+      ...BATCH_PRESET,
+      size: { type: "select", label: "尺寸", default: "1024x1024", choices: ["1024x1024", "832x1216", "1216x832", "1024x1536", "1536x1024"], request_key: "size" },
+      seed: { type: "integer", label: "随机种子", description: "-1 表示随机；固定种子可用于复现画面。", default: -1, min: -1, max: 4294967295, step: 1, request_key: "seed" },
+      steps: { type: "integer", label: "采样步数", description: "步数、尺寸和多样本设置可能影响 Anlas 消耗。", default: 28, min: 1, max: 50, step: 1, request_key: "steps" },
+      scale: { type: "number", label: "提示词引导强度", default: 5, min: 0, max: 20, step: 0.1, request_key: "scale" },
+      cfg_rescale: { type: "number", label: "CFG Rescale", description: "缓解高提示词引导造成的颜色过饱和。", default: 0, min: 0, max: 1, step: 0.05, request_key: "cfg_rescale" },
+      sampler: { type: "select", label: "采样器", default: "k_euler_ancestral", choices: ["k_euler_ancestral", "k_euler", "k_dpmpp_2m", "k_dpmpp_2m_sde", "k_dpmpp_sde", "k_dpmpp_2s_ancestral", "k_dpmpp_3m_sde", "k_dpm_2", "k_dpm_fast"], request_key: "sampler" },
+      noise_schedule: { type: "select", label: "噪声调度", default: "karras", choices: ["karras", "exponential", "polyexponential", "native"], request_key: "noise_schedule" },
+      image_format: { type: "select", label: "输出格式", default: "png", choices: ["png", "webp"], request_key: "image_format" },
+      strength: { type: "number", label: "重绘强度", description: "图生图时重新绘制参考图的程度。", default: 0.7, min: 0, max: 1, step: 0.05, request_key: "strength", modes: ["img2img"] },
+      noise: { type: "number", label: "参考图噪声", description: "图生图时加入参考图的噪声量。", default: 0, min: 0, max: 1, step: 0.05, request_key: "noise", modes: ["img2img"] },
+    },
     openai_images: { size: { type: "select", label: "尺寸", default: "1024x1024", choices: ["1024x1024", "1536x1024", "1024x1536"], request_key: "size" }, count: { type: "number", label: "数量", default: 1, min: 1, max: 4, step: 1, request_key: "count" }, quality: { type: "select", label: "质量", default: "auto", choices: ["auto", "low", "medium", "high"], request_key: "quality" }, background: { type: "select", label: "背景", default: "auto", choices: ["auto", "transparent", "opaque"], request_key: "background" }, output_format: { type: "select", label: "输出格式", default: "png", choices: ["png", "jpeg", "webp"], request_key: "output_format" } },
     gemini: { aspect_ratio: { type: "select", label: "画面比例", default: "1:1", choices: ["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"], request_key: "aspect_ratio" }, image_size: { type: "select", label: "图片尺寸", default: "1K", choices: ["1K", "2K", "4K"], request_key: "image_size" } },
     nai_direct: {
@@ -2463,11 +2504,13 @@
   function providerDefaults(kind) { return { ...(PROVIDER_DEFAULTS[kind] || PROVIDER_DEFAULTS.custom_json) }; }
   function modelPreset(kind) {
     const preset = JSON.parse(JSON.stringify({ ...BATCH_PRESET, ...(MODEL_PRESETS[kind] || MODEL_PRESETS.custom_json) }));
+    if (kind === "novelai_official") Object.values(preset).forEach(descriptor => Object.assign(descriptor, { webui_visible: true, record_in_history: true, refill_from_history: descriptor.refill_from_history !== false }));
     Object.entries(preset).forEach(([name, descriptor]) => { if (modelParameterMatches(name, descriptor, ["count", "n"])) descriptor.refill_from_history = false; });
     if (kind === "nai_direct") preset.style.record_in_history = false;
     return preset;
   }
   function modelParameterMatches(name, descriptor, keys) { return keys.includes(name) || keys.includes(descriptor?.request_key); }
+  function parameterAppliesToMode(descriptor) { return !Array.isArray(descriptor?.modes) || descriptor.modes.includes(state.mode); }
   const MODEL_SCHEDULING_FIELDS = ["batch_mode", "concurrency", "native_count_supported", "native_batch_size", "native_batch_size_source", "max_concurrent_requests"];
   function effectiveModelParameters(model) { return Object.entries(model?.parameters || {}).filter(([name, descriptor]) => !modelParameterMatches(name, descriptor, MODEL_SCHEDULING_FIELDS)); }
   function ensureBatchConfig(model, provider) {
@@ -2489,24 +2532,27 @@
   function renderProviderEditor() {
     const provider = currentSettingsProvider(); if (!provider) { els.providerForm.innerHTML = '<div class="provider-empty">选择或新增生图服务商后编辑详细配置。</div>'; return; }
     const kind = provider.kind || "custom_json";
-    const credentialField = kind === "nai_direct" ? `${field("api_key", "生图 Token（toUserId）", provider.api_key)}<div class="field"><span class="field-hint">填写在 nai.sta1n.cn 申请的 toUserId。</span></div>` : field("api_key", "接口密钥（API Key）", provider.api_key);
+    const official = kind === "novelai_official";
+    if (official) provider.max_concurrent_generations = 1;
+    const credentialField = official ? `${field("api_key", "NovelAI 完整 API Token", provider.api_key, "password")}<div class="field"><span class="field-hint">填写 NovelAI 账户设置中生成的完整 Persistent API Token，保留前缀，无需添加 Bearer。</span></div>` : kind === "nai_direct" ? `${field("api_key", "生图 Token（toUserId）", provider.api_key)}<div class="field"><span class="field-hint">填写在 nai.sta1n.cn 申请的 toUserId。</span></div>` : field("api_key", "接口密钥（API Key）", provider.api_key);
     const headersField = kind === "nai_direct" ? "" : textAreaField("custom_headers", "自定义请求头（JSON 或每行一个 Header）", provider.custom_headers);
-    const common = `${field("id", "ID", provider.id)}${field("name", "名称", provider.name)}${selectField("kind", "供应类型", kind, PROVIDER_KINDS)}${field("base_url", "接口地址（Base URL）", provider.base_url)}${credentialField}${field("timeout_seconds", "超时秒数", provider.timeout_seconds, "number")}${field("max_concurrent_generations", "Provider 最大并发", provider.max_concurrent_generations ?? 2, "number")}${toggleField("enabled", "启用", provider.enabled)}${headersField}`;
+    const common = `${field("id", "ID", provider.id)}${field("name", "名称", provider.name)}${selectField("kind", "供应类型", kind, PROVIDER_KINDS)}${field("base_url", "接口地址（Base URL）", provider.base_url)}${credentialField}${field("timeout_seconds", "超时秒数", provider.timeout_seconds, "number")}${field("max_concurrent_generations", "Provider 最大并发", provider.max_concurrent_generations ?? 2, "number", official)}${official ? '<div class="field"><span class="field-hint">官方服务商当前固定串行生成，同时最多处理 1 个请求。</span></div>' : ""}${toggleField("enabled", "启用", provider.enabled)}${headersField}`;
     const typeFields = kind === "openai_images" ? `${field("generate_path", "文生图路径", provider.generate_path)}${field("edit_path", "图生图路径", provider.edit_path)}${field("models_path", "模型列表路径", provider.models_path || "/models")}${selectField("edit_request_format", "图生图请求格式", provider.edit_request_format, [["multipart", "multipart"], ["json_data_url", "JSON data URL"]])}` : kind === "gemini" ? `${field("generate_path", "generateContent 路径（支持 {model}）", provider.generate_path)}${field("models_path", "模型列表路径", provider.models_path || "/v1beta/models")}` : kind === "nai_direct" ? `${field("generate_path", "生成路径", provider.generate_path)}<div class="field field-wide"><span class="field-hint">第三方服务协议：GET /generate；Token 作为 token 查询参数发送。该类型不是 NovelAI 官方 API，且仅支持文生图。</span></div>` : `${field("generate_path", "文生图路径", provider.generate_path)}${field("edit_path", "图生图路径", provider.edit_path)}${field("models_path", "模型列表路径", provider.models_path || "/models")}${selectField("edit_request_format", "图生图请求格式", provider.edit_request_format, [["multipart", "multipart"], ["json_data_url", "JSON data URL"]])}${textAreaField("request_template", "请求 JSON 模板（可选）", provider.request_template)}${field("response_image_path", "响应图片路径（可选）", provider.response_image_path)}<div class="field field-wide"><span class="field-hint">模板可使用 {{prompt}}、{{model}}、{{size}}、{{count}} 和参数字段。</span></div>`;
-    const discoveryButton = kind === "nai_direct" ? "" : '<button class="quiet-button" id="discoverModelsButton" type="button">获取模型</button>';
-    els.providerForm.innerHTML = `<h3>${escape(provider.name || "生图服务商")}</h3>${common}${typeFields}<div class="provider-editor-actions"><button class="danger-button" id="removeProviderButton" type="button">删除服务商</button>${discoveryButton}</div>`;
+    const officialFields = `${field("generate_path", "文生图路径", provider.generate_path)}${field("edit_path", "图生图路径", provider.edit_path)}<div class="field field-wide"><span class="field-hint">内置 V4.5 / V5 完整版与精选版模型；图生图可在模型设置中手动开启，最多使用 1 张参考图。</span></div>`;
+    const discoveryButton = builtinProviderModels(provider) ? "" : '<button class="quiet-button" id="discoverModelsButton" type="button">获取模型</button>';
+    els.providerForm.innerHTML = `<h3>${escape(provider.name || "生图服务商")}</h3>${common}${official ? officialFields : typeFields}<div class="provider-editor-actions"><button class="danger-button" id="removeProviderButton" type="button">删除服务商</button>${discoveryButton}</div>`;
     els.providerForm.querySelectorAll("[data-provider-field]").forEach((input) => input.addEventListener("input", () => updateProviderField(input))); els.providerForm.querySelectorAll("[data-provider-field]").forEach((input) => input.addEventListener("change", () => updateProviderField(input)));
     $("removeProviderButton")?.addEventListener("click", async () => { if (!await confirmAction("删除此生图服务商？历史记录不会删除。")) return; state.settings.webui.providers = state.settings.webui.providers.filter((item) => item.id !== provider.id); state.selectedSettingsProviderId = state.settings.webui.providers[0]?.id || ""; renderSettingsProviders(); showNotice("已从设置草稿中删除，保存全部设置后生效。", "success"); });
     $("discoverModelsButton")?.addEventListener("click", () => void discoverProviderModels(provider));
     window.ImageStudioSelect?.refresh(els.providerForm);
   }
-  function field(key, label, value, type = "text") { return `<div class="field"><label>${label}</label><input data-provider-field="${key}" type="${type}" value="${escape(value)}" /></div>`; }
+  function field(key, label, value, type = "text", disabled = false) { return `<div class="field"><label>${label}</label><input data-provider-field="${key}" type="${type}" value="${escape(value)}"${disabled ? " disabled" : ""} /></div>`; }
   function textAreaField(key, label, value) { return `<div class="field field-wide"><label>${label}</label><textarea data-provider-field="${key}" rows="3">${escape(value)}</textarea></div>`; }
   function selectField(key, label, value, options) { return `<div class="field"><label>${label}</label><select data-provider-field="${key}">${options.map(([id, name]) => `<option value="${id}" ${id === value ? "selected" : ""}>${name}</option>`).join("")}</select></div>`; }
   function toggleField(key, label, value) { return `<div class="toggle-row"><label>${label}</label><label class="toggle-control"><input data-provider-field="${key}" type="checkbox" ${value ? "checked" : ""} /><span aria-hidden="true"></span></label></div>`; }
   function updateProviderField(input) { const provider = currentSettingsProvider(); if (!provider) return; const key = input.dataset.providerField; const value = input.type === "checkbox" ? input.checked : input.type === "number" ? Number(input.value) : input.value; if (key === "kind" && value !== provider.kind) { Object.assign(provider, providerDefaults(value)); provider.kind = value; state.selectedSettingsModelId = ""; renderProviderEditor(); renderModelEditor(); return; } provider[key] = value; if (key === "id") { state.selectedSettingsProviderId = input.value; const activeRow = els.settingsProviderList.querySelector(".provider-row.is-active"); if (activeRow) { activeRow.dataset.settingsProvider = input.value; if (!provider.name) activeRow.querySelector("strong").textContent = input.value; } } refreshSettingsDefaultModels(); }
   async function discoverProviderModels(provider) { const button = $("discoverModelsButton"); if (button) { button.disabled = true; button.textContent = "获取中…"; } try { const payload = await apiPost("provider/models", { provider }); provider.discovered_models = payload.models || []; for (const model of provider.models || []) { const discovered = provider.discovered_models.find((item) => item.id === model.id); if (discovered && model.native_batch_size_source !== "manual") { model.native_batch_size = Number(discovered.native_batch_size) || 1; model.native_batch_size_source = discovered.native_batch_size_source || "default"; } } renderModelEditor(); updateSettingsDirty(); showNotice(`已获取 ${provider.discovered_models.length} 个模型，可在新增模型时选择。`, "success"); } catch (error) { showNotice(errorMessage(error, "获取模型失败"), "error"); } finally { if (button) { button.disabled = false; button.textContent = "获取模型"; } } }
-  function renderNewModelChoices(provider = currentSettingsProvider()) { const models = provider?.kind === "nai_direct" ? NAI_MODELS : provider?.discovered_models || []; els.newModelChoices.innerHTML = models.map((item) => `<option value="${escape(item.id)}">${escape(item.name || item.id)}${item.capability_source === "unknown" ? " · 能力未知" : ""}</option>`).join(""); els.newModelChoice.value = ""; els.newModelChoice.placeholder = provider?.kind === "nai_direct" ? "选择 NAI 模型或手动输入 ID" : "选择或输入模型 ID"; }
+  function renderNewModelChoices(provider = currentSettingsProvider()) { const builtin = builtinProviderModels(provider), models = builtin || provider?.discovered_models || []; els.newModelChoices.innerHTML = models.map((item) => `<option value="${escape(item.id)}">${escape(item.name || item.id)}${item.capability_source === "unknown" ? " · 能力未知" : ""}</option>`).join(""); els.newModelChoice.value = ""; els.newModelChoice.placeholder = provider?.kind === "novelai_official" ? "选择 NovelAI 官方模型" : builtin ? "选择 NAI 模型或手动输入 ID" : "选择或输入模型 ID"; }
 
   function currentSettingsModel() { const provider = currentSettingsProvider(); return provider?.models?.find((item) => item.id === state.selectedSettingsModelId) || null; }
   function renderModelEditor() {
@@ -2528,16 +2574,17 @@
     window.ImageStudioSelect?.refresh(els.modelForm);
   }
   function renderModelConfiguration(provider, model) {
+    const official = provider.kind === "novelai_official";
     const schemaText = JSON.stringify(model.parameters || modelPreset(provider.kind), null, 2);
-    const discoveredIds = (provider.discovered_models || []).map((item) => item.id); const modelChoices = provider.kind === "nai_direct" ? ["nai-diffusion-4-5-full", "nai-diffusion-5-full"] : discoveredIds;
-    const modelIdField = modelChoices.length ? modelSelectField("id", "模型 ID", model.id, modelChoices, true) : modelField("id", "模型 ID", model.id);
+    const discoveredIds = (provider.discovered_models || []).map((item) => item.id); const modelChoices = builtinProviderModels(provider)?.map(item => item.id) || discoveredIds;
+    const modelIdField = modelChoices.length ? modelSelectField("id", "模型 ID", model.id, modelChoices, !official) : modelField("id", "模型 ID", model.id);
     const negativeDefaultField = model.supports_negative_prompt ? modelTextAreaField("negative_prompt_default", "默认反向提示词", model.negative_prompt_default || "") : "";
     const testDisabled = !model.supports_text2img;
     const defaults = `<section class="schema-preview"><h4>参数默认值</h4>${effectiveModelParameters(model).map(([name, descriptor]) => renderSchemaDefault(name, descriptor)).join("") || '<span class="field-hint">当前 schema 没有参数。</span>'}</section>`;
-    const batchFields = `<div class="field"><label title="单次接口请求最多生成的图片张数；总张数超出时自动分批。">单次请求图片上限</label><input data-model-field="native_batch_size" type="number" min="1" step="1" value="${escape(model.native_batch_size)}"${provider.kind === "nai_direct" ? " disabled" : ""} /></div><div class="field"><label title="该模型在所有任务中共享的最大并发请求数，仍受服务商最大并发限制。取值范围：[1, 16]。">模型最大并发请求数</label><input data-model-field="max_concurrent_requests" type="number" min="1" max="16" step="1" value="${escape(model.max_concurrent_requests)}" /></div>`;
-    const raw = `<details class="schema-raw"><summary>高级：参数 Schema</summary><textarea id="modelParametersSchema" data-model-field="parameters" rows="14" spellcheck="false">${escape(schemaText)}</textarea><span class="field-hint">每个字段支持 type、label、description、default、request_key、min、max、step、choices、webui_visible、record_in_history、refill_from_history。</span></details>`;
-    const capabilityEditable = ["unknown", "manual"].includes(model.capability_source);
-    const capabilityHint = model.supports_img2img ? `<div class="field"><label>参考图能力上限</label><input data-model-field="max_reference_images" type="number" min="1" max="8" step="1" value="${configuredReferenceLimit(model.max_reference_images)}"${capabilityEditable ? "" : " disabled"} /><span class="field-hint">${capabilityEditable ? "无法获取时可手动填写，取值范围：1–8 张。" : `来源：${escape(model.capability_source)}，已获取的能力不可在此覆盖。`}</span></div>` : "";
+    const batchFields = `<div class="field"><label title="单次接口请求最多生成的图片张数；总张数超出时自动分批。">单次请求图片上限</label><input data-model-field="native_batch_size" type="number" min="1" step="1" value="${escape(model.native_batch_size)}"${provider.kind === "nai_direct" ? " disabled" : ""} />${official ? '<span class="field-hint">默认每次请求 1 张；提高此值使用官方多样本生成，额外样本可能消耗 Anlas。</span>' : ""}</div><div class="field"><label title="该模型在所有任务中共享的最大并发请求数，仍受服务商最大并发限制。取值范围：[1, 16]。">模型最大并发请求数</label><input data-model-field="max_concurrent_requests" type="number" min="1" max="16" step="1" value="${escape(model.max_concurrent_requests)}" />${official ? '<span class="field-hint">官方服务商当前串行处理，实际同时执行 1 个请求。</span>' : ""}</div>`;
+    const raw = `<details class="schema-raw"><summary>高级：参数 Schema</summary><textarea id="modelParametersSchema" data-model-field="parameters" rows="14" spellcheck="false">${escape(schemaText)}</textarea><span class="field-hint">每个字段支持 type、label、description、default、request_key、min、max、step、choices、modes、webui_visible、record_in_history、refill_from_history。</span></details>`;
+    const capabilityEditable = !official && ["unknown", "manual"].includes(model.capability_source);
+    const capabilityHint = model.supports_img2img ? `<div class="field"><label>参考图能力上限</label><input data-model-field="max_reference_images" type="number" min="1" max="${official ? 1 : 8}" step="1" value="${configuredReferenceLimit(model.max_reference_images)}"${capabilityEditable ? "" : " disabled"} /><span class="field-hint">${official ? "NovelAI 官方图生图最多使用 1 张参考图。" : capabilityEditable ? "无法获取时可手动填写，取值范围：1–8 张。" : `来源：${escape(model.capability_source)}，已获取的能力不可在此覆盖。`}</span></div>` : "";
     return `<h3>${escape(model.name || model.id)}</h3>${modelIdField}${modelField("name", "显示名称", model.name)}${batchFields}${modelToggle("supports_text2img", "支持文生图", model.supports_text2img)}${modelToggle("supports_img2img", "支持图生图", model.supports_img2img, provider.kind === "nai_direct")}${modelToggle("supports_negative_prompt", "支持专用反向提示词", model.supports_negative_prompt, provider.kind === "gemini")}${capabilityHint}${negativeDefaultField}${defaults}${raw}<div class="provider-editor-actions"><button class="danger-button" id="removeModelButton" type="button">删除模型</button><button class="quiet-button" id="testModelButton" type="button"${testDisabled ? ' disabled title="仅支持图生图的模型需要参考图，暂不能在此测试"' : ""}>测试模型</button></div>`;
   }
   function renderSchemaDefault(name, descriptor) {
@@ -2641,9 +2688,11 @@
   function ensureToolConfig(model, provider) {
     ensureBatchConfig(model, provider);
     const nai = provider.kind === "nai_direct";
-    model.max_reference_images = configuredReferenceLimit(model.max_reference_images);
+    const official = provider.kind === "novelai_official";
+    model.max_reference_images = configuredReferenceLimit(model.max_reference_images, official ? 1 : 8);
     if (nai) model.supports_img2img = false;
     const defaults = { enabled: true, selection_description: nai ? "仅在用户明确要求 NAI 或 NovelAI 风格标签生图时使用。" : "适合一般自然语言生图需求。", prompt_profile: nai ? "nai_tags" : "natural_language", prompt_instructions: nai ? "使用英文逗号分隔标签。必须完整描述主体数量、全身或半身范围、姿态、镜头距离、视角、背景、光照和画面边界，避免残图；不得改变用户明确指定的主体、数量、动作和服装。" : "使用清晰、连贯的自然语言描述，不要使用英文逗号分隔的 NAI tag 串。", negative_prompt_exposed: !!model.supports_negative_prompt, max_reference_images: model.max_reference_images, parameters: {} };
+    if (official) Object.assign(defaults, { selection_description: "适合 NovelAI 插画生成，支持英文标签或自然语言提示词。", prompt_profile: "custom", prompt_instructions: "支持英文逗号分隔标签或清晰的自然语言描述，可结合两者表达。完整描述主体、构图、动作、环境与光照，保留用户明确指定的内容。" });
     model.tool = { ...defaults, ...(model.tool || {}) }; if (!model.supports_negative_prompt) model.tool.negative_prompt_exposed = false; model.tool.parameters = model.tool.parameters || {};
     model.tool.max_reference_images = configuredReferenceLimit(model.tool.max_reference_images, model.max_reference_images);
     toolModelParameters(model).forEach(([name, descriptor]) => {
@@ -2731,8 +2780,10 @@
     const requestedId = els.newModelChoice.value.trim();
     if (!requestedId) { showNotice("请选择或输入模型 ID。", "error"); els.newModelChoice.focus(); return; }
     if (provider.models.some((item) => item.id === requestedId)) { showNotice("该服务商中已经存在相同模型 ID。", "error"); return; }
-    const discovered = (provider.discovered_models || []).find((item) => item.id === requestedId);
-    const naiChoice = provider.kind === "nai_direct" ? NAI_MODELS.find((item) => item.id === requestedId) : null;
+    const official = provider.kind === "novelai_official";
+    const discovered = builtinProviderModels(provider) ? null : (provider.discovered_models || []).find((item) => item.id === requestedId);
+    const naiChoice = builtinProviderModels(provider)?.find((item) => item.id === requestedId);
+    if (official && !naiChoice) { showNotice("请选择内置的 NovelAI 官方模型。", "error"); return; }
     const chosen = discovered || (naiChoice ? { ...naiChoice, supports_text2img: true, supports_img2img: false, supports_negative_prompt: true, max_reference_images: 1, capability_source: "builtin" } : null);
     const capabilityKnown = !!chosen?.capability_source && chosen.capability_source !== "unknown";
     const maxRefs = capabilityKnown ? configuredReferenceLimit(chosen.max_reference_images) : 1;

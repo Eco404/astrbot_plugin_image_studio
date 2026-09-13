@@ -1371,7 +1371,7 @@ class ImageStudioPlugin(Star):
         provider = self._settings.provider(provider_id)
         if provider is None:
             return error_response("服务商不存在或未启用", status_code=404)
-        if provider.kind != "nai_direct":
+        if provider.kind not in {"nai_direct", "novelai_official"}:
             return error_response("当前服务商不支持额度查询", status_code=400)
         if not provider.api_key.strip():
             return error_response("NAI 服务商尚未配置密钥", status_code=400)
@@ -1395,6 +1395,11 @@ class ImageStudioPlugin(Star):
         parameters: dict[str, Any] = {}
         for name, descriptor in model.active_parameters.items():
             if descriptor.get("ui_only") or "default" not in descriptor:
+                continue
+            if (
+                isinstance(descriptor.get("modes"), list)
+                and "text2img" not in descriptor["modes"]
+            ):
                 continue
             request_key = str(descriptor.get("request_key") or name)
             if request_key == "size":

@@ -1238,7 +1238,8 @@
       if (detail.lightweight && !image?._metadataLoaded) return `<div class="detail-block detail-metadata-loading" role="status"><p>${image?._metadataError ? "图片参数读取失败。" : "正在读取当前图片参数…"}</p>${image?._metadataError ? '<button class="quiet-button" data-detail-metadata-retry type="button">重试读取参数</button>' : ""}</div>`;
       const metadata = image?.metadata || {};
       const normalized = metadata.normalized || {};
-      const request = hooks.requestParameters(detail);
+      const effectiveRequest = image?.supplemental?.effective_request;
+      const request = hooks.requestParameters(effectiveRequest ? { ...detail, parameters: effectiveRequest } : detail);
       const supplemental = image?.supplemental && Object.keys(image.supplemental).length ? image.supplemental : detail.supplemental || {};
       const imageParameters = ["import", "external"].includes(detail.source);
       const directoryExternal = detail.source === "external" && detail.external_source?.type === "directory";
@@ -1259,7 +1260,7 @@
         const template = document.createElement("template"); template.innerHTML = comfyDetailsMarkup(metadata, true);
         template.content.firstElementChild.querySelector("summary").remove(); return template.content.firstElementChild.innerHTML;
       }) : "";
-      const requestMarkup = directoryExternal ? "" : `<div class="detail-block"><h3>${detail.source === "external" ? "外部图片参数" : detail.source === "import" ? "导入信息" : "原始请求"}</h3><div class="detail-parameter-grid">${parameterRows(requestRows)}</div></div>`;
+      const requestMarkup = directoryExternal ? "" : `<div class="detail-block"><h3>${detail.source === "external" ? "外部图片参数" : detail.source === "import" ? "导入信息" : effectiveRequest ? "实际请求" : "原始请求"}</h3><div class="detail-parameter-grid">${parameterRows(requestRows)}</div></div>`;
       return `${requestMarkup}${generated}${workflow}${rawMarkup}`;
     }
 
@@ -1283,14 +1284,17 @@
         if (detailActionsReady) return;
       }
       const providerKind = String(detail?.provider_kind || "").trim().toLowerCase();
-      const providerEngine = ["nai_direct", "openai_images", "gemini", "custom_json"].includes(providerKind) ? providerKind : "";
+      const providerEngine = ["nai_direct", "novelai_official", "openai_images", "gemini", "custom_json"].includes(providerKind) ? providerKind : "";
       const engineHint = [image?.supplemental?.generation_engine, detail?.generation_engine, providerEngine, image?.metadata?.format].map(value => String(value || "").trim().toLowerCase()).find(value => value && !["unknown", "mixed"].includes(value));
-      const engine = ["nai", "nai_direct"].includes(engineHint) ? "novelai" : engineHint;
+      const engine = ["nai", "nai_direct", "novelai_official"].includes(engineHint) ? "novelai" : engineHint;
       // A transferable prompt does not mean this plugin can reproduce its
       // source workflow. Keep native exports separate from workflow exports.
       const supportsReproduction = metadataReady && ["novelai", "openai_images", "gemini", "custom_json"].includes(engine);
       const formats = supportsReproduction ? { studio: "Image Studio 参数" } : {};
-      if (["nai", "novelai"].includes(engine) || image?.metadata?.format === "novelai") { formats.nai = "NAI 请求参数"; formats.novelai = "NovelAI 图片参数"; }
+      if (["nai", "novelai"].includes(engine) || image?.metadata?.format === "novelai") {
+        if (providerKind !== "novelai_official") formats.nai = "NAI 请求参数";
+        if (providerKind !== "novelai_official" || image?.metadata?.raw?.Comment || image?.metadata?.raw?.comment) formats.novelai = "NovelAI 图片参数";
+      }
       if (image?.metadata?.raw?.workflow) formats.workflow = "ComfyUI 工作流";
       if (image?.metadata?.format === "comfyui" && image?.metadata?.raw?.prompt) formats.comfy_api = "ComfyUI 执行图";
       if (engine === "a1111" || image?.metadata?.format === "a1111") formats.a1111 = "Stable Diffusion 参数";

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -68,6 +69,94 @@ NAI_TOOL_PROMPT_INSTRUCTIONS = (
     "视角、背景、光照和画面边界，避免残图；不得改变用户明确指定的主体、数量、动作和服装。"
 )
 
+NOVELAI_OFFICIAL_PARAMETERS: dict[str, dict[str, Any]] = {
+    "size": {
+        "type": "text",
+        "label": "尺寸",
+        "default": "1024x1024",
+        "request_key": "size",
+    },
+    "count": dict(BATCH_PARAMETERS["count"]),
+    "seed": {
+        "type": "integer",
+        "label": "种子",
+        "default": -1,
+        "min": -1,
+        "max": 4294967295,
+        "description": "-1 时每次请求使用随机种子；指定数字时保持该种子。",
+    },
+    "steps": {"type": "integer", "label": "步数", "default": 28, "min": 1, "max": 50},
+    "scale": {
+        "type": "number",
+        "label": "提示词引导强度",
+        "default": 5,
+        "min": 0,
+        "max": 20,
+        "step": 0.1,
+    },
+    "cfg_rescale": {
+        "type": "number",
+        "label": "引导重缩放",
+        "default": 0,
+        "min": 0,
+        "max": 1,
+        "step": 0.05,
+    },
+    "sampler": {
+        "type": "select",
+        "label": "采样器",
+        "default": "k_euler_ancestral",
+        "choices": [
+            "k_euler_ancestral",
+            "k_euler",
+            "k_dpmpp_2m",
+            "k_dpmpp_2m_sde",
+            "k_dpmpp_sde",
+            "k_dpmpp_2s_ancestral",
+            "k_dpmpp_3m_sde",
+            "k_dpm_2",
+            "k_dpm_fast",
+        ],
+    },
+    "noise_schedule": {
+        "type": "select",
+        "label": "噪声调度",
+        "default": "karras",
+        "choices": ["karras", "exponential", "polyexponential", "native"],
+    },
+    "image_format": {
+        "type": "select",
+        "label": "图片格式",
+        "default": "png",
+        "choices": ["png", "webp"],
+    },
+    "strength": {
+        "type": "number",
+        "label": "重绘强度",
+        "default": 0.7,
+        "min": 0,
+        "max": 1,
+        "step": 0.05,
+        "modes": ["img2img"],
+    },
+    "noise": {
+        "type": "number",
+        "label": "新增噪声",
+        "default": 0,
+        "min": 0,
+        "max": 1,
+        "step": 0.05,
+        "modes": ["img2img"],
+    },
+}
+
+
+def _model_parameters(value: Any, kind: str) -> dict[str, dict[str, Any]]:
+    if kind == "novelai_official" and not value:
+        value = copy.deepcopy(NOVELAI_OFFICIAL_PARAMETERS)
+    return _normalize_parameters(value)
+
+
 PROVIDER_TRANSPORT_DEFAULTS: dict[str, dict[str, str]] = {
     "openai_images": {
         "base_url": "https://api.openai.com/v1",
@@ -85,6 +174,12 @@ PROVIDER_TRANSPORT_DEFAULTS: dict[str, dict[str, str]] = {
         "base_url": "https://nai.sta1n.cn",
         "generate_path": "/generate",
         "edit_path": "",
+        "edit_request_format": "json_data_url",
+    },
+    "novelai_official": {
+        "base_url": "https://image.novelai.net",
+        "generate_path": "/ai/generate-image",
+        "edit_path": "/ai/generate-image",
         "edit_request_format": "json_data_url",
     },
     "custom_json": {
@@ -288,13 +383,18 @@ class ImageProvider:
             value, kind, discovered_by_id.get(legacy_model_id)
         )
         max_refs = max(1, min(8, _as_int(value.get("max_reference_images"), 1)))
+        if kind == "novelai_official":
+            max_refs = 1
         img2img = kind != "nai_direct" and _as_bool(
             value.get("supports_img2img"), False
         )
         supports_negative_prompt = (
             False
             if kind == "gemini"
-            else _as_bool(value.get("supports_negative_prompt"), kind == "nai_direct")
+            else _as_bool(
+                value.get("supports_negative_prompt"),
+                kind in {"nai_direct", "novelai_official"},
+            )
         )
         legacy_model = ImageModel(
             id=legacy_model_id,
@@ -304,7 +404,7 @@ class ImageProvider:
             negative_prompt=supports_negative_prompt,
             max_reference_images=max_refs,
             negative_prompt_default=_model_negative_default(value, kind),
-            parameters=_normalize_parameters(value.get("parameters")),
+            parameters=_model_parameters(value.get("parameters"), kind),
             tool=_normalize_tool(
                 value.get("tool"),
                 img2img,
@@ -371,7 +471,9 @@ class ImageProvider:
             response_image_path=_text(value.get("response_image_path"), 240),
             max_concurrent_generations=max(
                 1, min(16, _as_int(value.get("max_concurrent_generations"), 2))
-            ),
+            )
+            if kind != "novelai_official"
+            else 1,
             models_path=_normalized_path(
                 value.get("models_path"),
                 "/v1beta/models" if kind == "gemini" else "/models",
@@ -492,6 +594,8 @@ class GeneratedImage:
 
     data: bytes
     mime_type: str
+    effective_parameters: dict[str, Any] = field(default_factory=dict)
+    response_index: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -684,10 +788,15 @@ def _model_from_mapping(
     img2img = kind != "nai_direct" and _as_bool(value.get("supports_img2img"), False)
     capability_source = _text(value.get("capability_source"), 32) or "manual"
     max_reference_images = max(1, min(8, _as_int(value.get("max_reference_images"), 1)))
+    if kind == "novelai_official":
+        max_reference_images = 1
     supports_negative_prompt = (
         False
         if kind == "gemini"
-        else _as_bool(value.get("supports_negative_prompt"), kind == "nai_direct")
+        else _as_bool(
+            value.get("supports_negative_prompt"),
+            kind in {"nai_direct", "novelai_official"},
+        )
     )
     return ImageModel(
         id=model_id,
@@ -697,7 +806,7 @@ def _model_from_mapping(
         negative_prompt=supports_negative_prompt,
         max_reference_images=max_reference_images,
         negative_prompt_default=_model_negative_default(value, kind),
-        parameters=_normalize_parameters(value.get("parameters")),
+        parameters=_model_parameters(value.get("parameters"), kind),
         tool=_normalize_tool(
             value.get("tool"),
             img2img,
@@ -769,20 +878,25 @@ def _normalize_tool(
                 normalized_parameters[name] = item
     limit_default = max(1, min(8, max_reference_images))
     nai = kind == "nai_direct"
+    official = kind == "novelai_official"
     return {
         "enabled": _as_bool(raw.get("enabled", raw.get("available_to_llm")), True),
         "selection_description": _text(raw.get("selection_description"), 1200)
         or (
             "仅在用户明确要求 NAI 或 NovelAI 风格标签生图时使用。"
             if nai
+            else "使用 NovelAI 官方模型生成插画，支持标签或自然语言提示词。"
+            if official
             else "适合一般自然语言生图需求。"
         ),
         "prompt_profile": _text(raw.get("prompt_profile"), 48)
-        or ("nai_tags" if nai else "natural_language"),
+        or ("nai_tags" if nai else "custom" if official else "natural_language"),
         "prompt_instructions": _text(raw.get("prompt_instructions"), 4000)
         or (
             NAI_TOOL_PROMPT_INSTRUCTIONS
             if nai
+            else "可使用标签或自然语言描述主体、构图、动作、背景与光照；保留用户明确要求的内容。"
+            if official
             else "使用清晰、连贯的自然语言描述，不要使用英文逗号分隔的 NAI tag 串。"
         ),
         "negative_prompt_exposed": (

@@ -25,6 +25,7 @@ RUNTIME_FILES = (
     "gallery_preferences.py",
     "image_metadata.py",
     "models.py",
+    "novelai.py",
     "parameter_exchange.py",
     "providers.py",
     "service.py",

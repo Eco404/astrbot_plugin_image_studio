@@ -2,7 +2,9 @@
 
 面向维护者。使用说明见 [README](../README.md)，正式版本变化见 [CHANGELOG](../CHANGELOG.md)。
 
-当前开发线为插件 `1.3.0-dev.1`，基于正式插件 `1.2.0` 和数据库 v2。当前没有数据库结构变化，继续使用正式 `user_version=2`，无需新的迁移标记。计划新增独立的 `novelai_official` 服务商类型，目前仅核对官方文档与接口协议，尚未接入。
+当前开发线为插件 `1.3.0-dev.1`，基于正式插件 `1.2.0` 和数据库 v2。当前没有数据库结构变化，继续使用正式 `user_version=2`，无需新的迁移标记。已实现独立的 `novelai_official` 服务商、JSON／ZIP 图片接收、订阅查询和单底图图生图；目前为离线验证状态，待真实账号核实。
+
+官方协议构造与解析集中在 `novelai.py`，不依赖完整第三方 SDK。`GeneratedImage.effective_parameters` 通过 `generation_images.supplemental_json.effective_request` 保存经过记录策略过滤的实际参数；原始请求仍保留在生成记录上。隐写元数据解析器版本为 9，既有缓存更新沿用现有回填流程。
 
 官方资料、与 NAI2API 的差异和待验证项见 [NovelAI 官方接口核对](NOVELAI_API_REVIEW.md)。
 

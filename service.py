@@ -15,22 +15,26 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import aiohttp
-
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 from astrbot.core.utils.media_utils import MediaResolver, file_uri_to_path, is_file_uri
 
 from .config import RuntimeSettings
 from .models import (
+    MODEL_SCHEDULING_KEYS,
     GeneratedImage,
     GenerationRequest,
     GenerationResult,
     ImageModel,
     ImageProvider,
     InvocationSource,
-    MODEL_SCHEDULING_KEYS,
     ReferenceImage,
 )
-from .providers import ProviderBatchError, ProviderError, ProviderExecutor
+from .providers import (
+    ProviderBatchError,
+    ProviderError,
+    ProviderExecutor,
+    ProviderPartialResponseError,
+)
 from .storage import GenerationStore, detect_mime_type
 
 
@@ -74,6 +78,7 @@ class ImageGenerationService:
         self.store = store
         self._limiters: dict[str, _ProviderLimiter] = {}
         self._model_limiters: dict[tuple[str, str], _ProviderLimiter] = {}
+        self._account_limiters: dict[str, _ProviderLimiter] = {}
         self.update_settings(settings)
 
     def update_settings(self, settings: RuntimeSettings) -> None:
@@ -216,6 +221,9 @@ class ImageGenerationService:
             advanced_parameters, selected_model, source=source
         )
         model_parameters = _wire_parameters(parameter_values, selected_model)
+        model_parameters = _parameters_for_mode(
+            model_parameters, selected_model, normalized_mode
+        )
         if source == "command":
             model_parameters = {
                 key: value
@@ -325,6 +333,13 @@ class ImageGenerationService:
         pending = iter(enumerate(request_sizes))
         results: list[tuple[GeneratedImage, ...]] = [()] * len(request_sizes)
         failures: dict[int, str] = {}
+        response_counts = [0] * len(request_sizes)
+        account_limiter = None
+        if provider.kind == "novelai_official":
+            account_key = hashlib.sha256(provider.api_key.strip().encode()).hexdigest()
+            account_limiter = self._account_limiters.setdefault(
+                account_key, _ProviderLimiter(1)
+            )
 
         async def worker() -> None:
             for index, size in pending:
@@ -332,10 +347,21 @@ class ImageGenerationService:
                 try:
                     async with model_limiter.slot():
                         async with limiter.slot():
-                            images = await self.executor.generate(provider, chunk)
+                            if account_limiter is None:
+                                images = await self.executor.generate(provider, chunk)
+                            else:
+                                async with account_limiter.slot():
+                                    images = await self.executor.generate(
+                                        provider, chunk
+                                    )
                     if not images:
                         raise ProviderError("上游未返回可用图片")
                     results[index] = tuple(images)
+                    response_counts[index] = len(images)
+                except ProviderPartialResponseError as exc:
+                    results[index] = exc.images
+                    response_counts[index] = len(exc.images)
+                    failures[index + 1] = str(exc)
                 except (ProviderError, aiohttp.ClientError, TimeoutError) as exc:
                     failures[index + 1] = (
                         str(exc)[:500]
@@ -365,6 +391,7 @@ class ImageGenerationService:
                 images,
                 tuple(sorted(failures.items())),
                 request_sizes=request_sizes,
+                actual_response_counts=tuple(response_counts),
             )
         return images
 
@@ -809,6 +836,17 @@ def _resolved_model_values(
     _expand_parameter_presets(supplied, model, protected=set(supplied))
     values.update(supplied)
     return values
+
+
+def _parameters_for_mode(
+    values: dict[str, Any], model: ImageModel, mode: str
+) -> dict[str, Any]:
+    excluded = {
+        str(descriptor.get("request_key") or name)
+        for name, descriptor in model.active_parameters.items()
+        if isinstance(descriptor.get("modes"), list) and mode not in descriptor["modes"]
+    }
+    return {key: value for key, value in values.items() if key not in excluded}
 
 
 def _wire_parameters(values: dict[str, Any], model: ImageModel) -> dict[str, Any]:

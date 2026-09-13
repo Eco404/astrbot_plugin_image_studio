@@ -86,11 +86,20 @@ async function setup(browser, test, clock = false) {
   const page = await context.newPage(); page.setDefaultTimeout(12000);
   if (clock) await page.clock.install();
   const errors = []; const calls = []; const queues = new Map(); const holds = []; let bootstrapCount = 0; let settingsSaveCount = 0;
+  let storedSettings = null;
   let generation = { fail: false, wait: null }; const generations = [];
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("console", (message) => { if (message.type() === "error" && !message.text().includes("503 (Service Unavailable)")) errors.push(message.text()); });
   await page.route("**/studio/bootstrap", async (route) => {
     const response = await route.fetch(); const payload = await response.json(); bootstrapCount++;
+    for (const provider of payload.providers) {
+      const saved = storedSettings?.webui.providers.find(item => item.id === provider.id);
+      if (saved) provider.name = saved.name;
+    }
+    for (const model of payload.models) {
+      const provider = payload.providers.find(item => item.id === model.provider_id);
+      if (provider) model.provider_name = provider.name;
+    }
     const source = payload.models.find((model) => model.provider_id === "nai");
     const a = payload.providers.find((provider) => provider.id === "nai");
     const second = { ...structuredClone(source), id: "quota-second", name: "NAI 第二模型", model_ref: refs.a2 };
@@ -120,7 +129,20 @@ async function setup(browser, test, clock = false) {
     const data = generation.fail ? { message: "测试生图失败" } : { images: [], provider_name: "NAI 测试", model: "nai-diffusion-4-5-full", elapsed_ms: 1 };
     await route.fulfill({ status: generation.fail ? 503 : 200, contentType: "application/json", body: JSON.stringify(data) });
   });
-  await page.route("**/settings/save", async (route) => { settingsSaveCount++; await route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true }) }); });
+  await page.route("**/settings/get", async (route) => {
+    if (!storedSettings) storedSettings = await (await route.fetch()).json();
+    await route.fulfill({ json: structuredClone(storedSettings) });
+  });
+  await page.route("**/settings/save", async (route) => {
+    const draft = route.request().postDataJSON();
+    assert.equal(draft.settings_revision, storedSettings.webui.revision, "save uses the latest settings revision");
+    const revision = Number(draft.settings_revision) + 1;
+    storedSettings = { base: structuredClone(draft.base), webui: structuredClone(draft.studio), validation_errors: [] };
+    storedSettings.webui.revision = revision;
+    storedSettings.webui.ui = { ...(storedSettings.webui.ui || {}), settings_revision: revision };
+    settingsSaveCount++;
+    await route.fulfill({ json: { ok: true, settings_revision: revision } });
+  });
   function plan(providerId, remaining, options = {}) {
     const item = { remaining, enabled: options.enabled !== false, failure: !!options.failure, started: deferred(), done: deferred(), hold: options.hold ? deferred() : null };
     if (!queues.has(providerId)) queues.set(providerId, []);
@@ -131,7 +153,7 @@ async function setup(browser, test, clock = false) {
   const frame = page.frames().find((item) => item.url().includes("/ui/"));
   await frame.locator("#runtimeStatus").filter({ hasText: "已加载" }).waitFor({ state: "attached" });
   await frame.waitForFunction(() => document.documentElement.dataset.appearanceReady === "true");
-  await frame.evaluate(async (theme) => { await ImageStudioAppearance.ready; ImageStudioAppearance.set({ preference: theme }); await ImageStudioAppearance.saved(); }, test.theme);
+  await frame.evaluate(async (theme) => { await ImageStudioAppearance.ready; ImageStudioAppearance.set({ preference: theme }); await ImageStudioAppearance.save(); }, test.theme);
   return { page, frame, context, calls, errors, plan, generations, setGeneration: (value) => { generation = value; }, bootstrapCount: () => bootstrapCount, settingsSaveCount: () => settingsSaveCount, close: async () => { holds.forEach((hold) => hold.resolve()); await context.close(); } };
 }
 
@@ -193,10 +215,25 @@ async function matrix(browser, test) {
     assert.equal(await frame.locator("#providerQuota").isVisible(), false);
     await frame.locator("#saveSettingsButton").click();
     await frame.locator("#appNoticeMessage").filter({ hasText: "设置已保存并生效" }).waitFor();
+    await frame.locator("#saveSettingsButton:not(:disabled)").waitFor();
+    assert.equal(run.settingsSaveCount(), 0, "unchanged settings do not POST");
+    assert.equal(run.bootstrapCount(), 1, "unchanged settings keep bootstrap caches");
+    await frame.locator('[data-settings-provider="nai"]').click();
+    const providerName = frame.locator('[data-provider-field="name"]');
+    await providerName.fill("NAI quota settings refresh");
+    await providerName.dispatchEvent("change");
+    const saved = page.waitForResponse(response => new URL(response.url()).pathname.endsWith("/settings/save"));
+    await frame.locator("#saveSettingsButton").click();
+    assert.equal((await saved).status(), 200);
+    await frame.locator("#appNoticeMessage").filter({ hasText: "设置已保存并生效" }).waitFor();
+    await frame.locator("#saveSettingsButton:not(:disabled)").waitFor();
+    await frame.locator("#settingsDirtyStatus").filter({ hasText: "已保存" }).waitFor();
+    assert.equal(await frame.locator('[data-provider-field="name"]').inputValue(), "NAI quota settings refresh", "saved draft survives settings reread");
     assert.equal(run.settingsSaveCount(), 1); assert.equal(run.bootstrapCount(), 2);
     await frame.evaluate(() => window.scrollTo({ top: 0, behavior: "instant" }));
     await frame.locator('[data-view="generate"]').click();
     plan("nai", 777); await choose(frame, refs.a); await quotaText(frame, 777);
+    assert.match(await frame.locator("#providerStatusName").textContent(), /NAI quota settings refresh/, "bootstrap reflects saved provider settings");
     assert.ok(calls.every((id) => id === "nai" || id === "quota-b"), "natural provider must not be queried");
     assert.deepEqual(run.errors, [], `${name}: browser errors`);
     console.log(`${name}: quota races, provider cache, zero/disabled/error, generation refresh and bootstrap invalidation passed`);

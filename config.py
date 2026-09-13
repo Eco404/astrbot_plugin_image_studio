@@ -13,7 +13,7 @@ from typing import Any
 from .models import ImageModel, ImageProvider
 
 SUPPORTED_PROVIDER_KINDS = frozenset(
-    {"openai_images", "gemini", "nai_direct", "custom_json"}
+    {"openai_images", "gemini", "nai_direct", "novelai_official", "custom_json"}
 )
 STUDIO_CONFIG_FILENAME = "studio_config.json"
 
