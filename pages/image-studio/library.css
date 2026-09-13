@@ -368,12 +368,15 @@ html { scroll-padding-top: 112px; scroll-padding-bottom: calc(100px + env(safe-a
 .detail-references > .field-hint { grid-column: 1 / -1; }
 @media (prefers-reduced-motion: reduce) { .studio-modal, .import-card, .studio-icon-button { animation: none !important; transition: none !important; } }
 
+.image-studio-pswp { --pswp-placeholder-bg: transparent; }
 .image-studio-pswp .pswp__bg { overflow: hidden; background: var(--pswp-bg); transform: none; will-change: auto; }
 /* Fullscreen blur is pre-rendered; only the fixed opaque canvas changes pixels. */
 .image-studio-viewer-background { position: absolute; z-index: 0; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 .image-studio-viewer-backdrop { position: absolute; inset: 0; display: block; width: 100%; height: 100%; object-fit: cover; pointer-events: none; }
 .image-studio-image-status { position: absolute; z-index: 30; top: max(18px, env(safe-area-inset-top)); left: 50%; display: flex; align-items: center; gap: 10px; width: max-content; max-width: calc(100% - 24px); padding: 7px 8px 7px 12px; border-radius: 8px; transform: translateX(-50%); background: var(--topbar-glass); color: var(--text); box-shadow: var(--shadow); font-size: 12px; line-height: 1.4; backdrop-filter: blur(16px); }
 .image-studio-image-status > span { min-width: 0; overflow-wrap: anywhere; }
+.image-studio-image-status[hidden], .image-studio-image-retry[hidden] { display: none; }
+.image-studio-image-status[data-state="loading"] { top: 50%; padding: 0; transform: translate(-50%, -50%); background: transparent; box-shadow: none; backdrop-filter: none; pointer-events: none; }
 .image-studio-image-retry { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; min-width: 44px; padding: 0 10px; border: 0; border-radius: 8px; background: var(--surface); color: var(--text); font-size: 12px; white-space: nowrap; }
 .image-studio-image-retry:disabled { opacity: .55; }
 .image-studio-pswp .pswp__error-msg { display: grid; justify-items: center; gap: 12px; color: var(--text); }

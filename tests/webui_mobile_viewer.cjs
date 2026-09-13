@@ -93,7 +93,9 @@ async function swipe(page, inner, direction) {
       // A ready preview may repair the error in the next microtask; capture the actual error synchronously.
       assert.equal(forcedError.tag, "DIV", "forced error should exercise PhotoSwipe's error element");
       assert.equal(forcedError.state, "error");
-      assert.match(forcedError.message, /图片暂时无法加载/);
+      // PhotoSwipe's own fallback is silent: the shared status distinguishes
+      // an in-flight replacement from a terminal failure for both sources.
+      assert.equal(forcedError.message, "");
       assert.doesNotMatch(forcedError.message, /The image cannot be loaded/i);
       await screenshot(page, inner, `${test.width}-${test.theme}-forced-error`);
       releaseError(); await waitLoaded(inner, 3); await page.unroute("**/gallery/image/*", errorRoute);

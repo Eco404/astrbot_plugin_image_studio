@@ -37,6 +37,18 @@
     background: transparent;
   }
 
+  .detail-swipe-pane.is-loading::after {
+    content: "正在读取图片…";
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    color: var(--muted);
+    font-size: 12px;
+  }
+
+  .detail-swipe-image:not([src]) { visibility: hidden; }
+
   .detail-swipe-pane > .detail-swipe-image {
     position: absolute;
     z-index: 1;

@@ -87,9 +87,15 @@ async function watchBackdropTransition(inner) {
 }
 
 async function checkCommittedBackground(inner, previousSource, index, reduced) {
+  // The stable backdrop keeps the previous src until the decoded candidate
+  // completes its fade; observe that completion rather than an eager src swap.
+  await inner.waitForFunction(previous => {
+    const backdrop = document.querySelector(".detail-image-backdrop:not(.detail-backdrop-previous)");
+    return backdrop?.src !== previous && backdrop?.dataset.backdropState === "idle";
+  }, previousSource);
   const current = await bounds(inner);
   assert.notEqual(current.backdrop.src, previousSource, "background source must update only after the selected image changes");
-  const transitioned = await inner.evaluate(({ previous, current, index }) => window.__swipeBackdropTransitions.some((item) => item.previous === previous && item.current === current && item.index === index), { previous: previousSource, current: current.backdrop.src, index });
+  const transitioned = await inner.evaluate(({ previous, current, index }) => window.__swipeBackdropTransitions.some((item) => (item.previous === previous && item.current === current || item.previous === current && item.current === previous) && item.index === index), { previous: previousSource, current: current.backdrop.src, index });
   assert.equal(transitioned, true, `committed image should crossfade previous and current stationary backdrops${reduced ? " with reduced duration" : ""}`);
   await inner.locator(".detail-backdrop-previous").waitFor({ state: "detached" });
   await inner.waitForFunction(() => !document.querySelector(".detail-image-backdrop:not(.detail-backdrop-previous)")?.getAnimations().some((animation) => animation.playState === "running"));

@@ -69,7 +69,7 @@ async function navigate(inner, direction, mobile) {
 async function pending(inner) {
   assert.equal(await inner.locator(".detail-manifest-loading").count(), 1, "metadata must have its own pending placeholder");
   assert.equal(await inner.locator(".detail-parameter-row").count(), 0, "pending group must not show previous group parameters");
-  assert.equal(await inner.locator("#detailCopy").isDisabled(), true, "metadata-dependent actions must stay disabled");
+  assert.equal(await inner.locator("#detailFooter").evaluate(footer => footer.inert), true, "metadata-dependent actions must stay non-interactive");
 }
 
 async function run(browserName, width) {
