@@ -8,7 +8,12 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
-from .novelai_catalog import MODEL_NAMES, advanced_parameters, model_capabilities
+from .novelai_catalog import (
+    MODEL_NAMES,
+    SAMPLERS,
+    advanced_parameters,
+    model_capabilities,
+)
 
 GenerationMode = Literal["text2img", "img2img"]
 
@@ -109,17 +114,7 @@ NOVELAI_OFFICIAL_PARAMETERS: dict[str, dict[str, Any]] = {
         "type": "select",
         "label": "采样器",
         "default": "k_euler_ancestral",
-        "choices": [
-            "k_euler_ancestral",
-            "k_euler",
-            "k_dpmpp_2m",
-            "k_dpmpp_2m_sde",
-            "k_dpmpp_sde",
-            "k_dpmpp_2s_ancestral",
-            "k_dpmpp_3m_sde",
-            "k_dpm_2",
-            "k_dpm_fast",
-        ],
+        "choices": list(SAMPLERS),
     },
     "noise_schedule": {
         "type": "select",
@@ -200,6 +195,20 @@ def _model_parameters(
                     descriptor["choices"] = caps["noise_schedules"]
                     if descriptor.get("default") not in caps["noise_schedules"]:
                         descriptor["default"] = "karras"
+                elif key == "sampler":
+                    descriptor["choices"] = caps["samplers"]
+                    if descriptor.get("default") not in caps["samplers"]:
+                        descriptor["default"] = "k_euler_ancestral"
+                elif key in {"straight_alpha", "tag_hint_transparent_background"}:
+                    current = advanced_parameters(model_id)[key]
+                    # Correct old explanatory text without replacing saved
+                    # defaults, custom titles, or parameter behavior policies.
+                    if (
+                        key == "straight_alpha"
+                        and descriptor.get("label") == "透明通道输出"
+                    ):
+                        descriptor["label"] = current["label"]
+                    descriptor["description"] = current["description"]
         # Add new controls without changing saved defaults or parameter policies.
         keys = {item.get("request_key", name) for name, item in result.items()}
         for name, descriptor in advanced_parameters(model_id).items():

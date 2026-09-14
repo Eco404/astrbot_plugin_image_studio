@@ -417,15 +417,39 @@ class ImageGenerationService:
             )
         return images
 
-    async def staged_references(self, reference_ids: Any) -> tuple[ReferenceImage, ...]:
+    async def staged_references(
+        self,
+        reference_ids: Any,
+        *,
+        mode: str = "",
+        provider_id: str = "",
+        model_ref: str = "",
+        model: str = "",
+    ) -> tuple[ReferenceImage, ...]:
         """Resolve an API request's opaque reference IDs."""
 
         if isinstance(reference_ids, str):
             reference_ids = [reference_ids]
         if not isinstance(reference_ids, list):
             return ()
+        load_options: dict[str, Any] = {}
+        if mode and reference_ids:
+            normalized_mode = _mode(mode)
+            provider, selected_model = self._select_model(
+                self.settings,
+                provider_id,
+                model_ref,
+                model,
+                normalized_mode,
+                self.settings.default_model_ref(normalized_mode, "webui"),
+            )
+            if provider.kind == "novelai_official" and normalized_mode == "img2img":
+                load_options = {
+                    "max_images": selected_model.max_reference_images,
+                    "reject_excess": True,
+                }
         return await self.store.load_staged_references(
-            [str(item or "") for item in reference_ids]
+            [str(item or "") for item in reference_ids], **load_options
         )
 
     async def reference_from_safe_path(

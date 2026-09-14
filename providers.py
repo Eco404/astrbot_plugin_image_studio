@@ -247,9 +247,10 @@ class ProviderExecutor:
             payload["parameters"]["reference_image_multiple"] = [
                 await self._encode_vibe(provider, item) for item in vibes
             ]
-        endpoint = _join_url(
-            provider.base_url, provider.generate_path or "/ai/generate-image"
+        path = (
+            provider.edit_path if request.mode == "img2img" else provider.generate_path
         )
+        endpoint = _join_url(provider.base_url, path or "/ai/generate-image")
         try:
             async with self.session.post(
                 endpoint,

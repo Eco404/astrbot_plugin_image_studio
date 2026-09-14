@@ -180,7 +180,7 @@ def test_inpainting_selects_actual_model_and_keeps_mask_separate_from_base(model
     payload, effective, vibes = prepare(
         model,
         refs=(reference(), reference("white", name="mask")),
-        parameters={"reference_mode": "inpaint", "strength": 0.8},
+        parameters={"reference_mode": "inpaint", "inpaint_strength": 0.8},
     )
     expected_model = V45_CURATED if model == V5_CURATED else model
     assert payload["model"] == expected_model + "-inpainting"
@@ -340,6 +340,10 @@ def test_v5_transparency_parameters_and_prompt_hint(model):
 def test_actual_v45_model_rejects_v5_transparency(model, key):
     refs = (reference(), reference("white")) if model == V5_CURATED else ()
     parameters = {key: True, **({"reference_mode": "inpaint"} if refs else {})}
+    if model == V5_CURATED and key == "straight_alpha":
+        payload, _, _ = prepare(model, refs=refs, parameters=parameters)
+        assert "straight_alpha" not in payload["parameters"]
+        return
     with pytest.raises(ValueError, match="不支持透明背景"):
         prepare(model, refs=refs, parameters=parameters)
 

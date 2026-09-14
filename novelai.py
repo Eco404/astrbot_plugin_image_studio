@@ -92,9 +92,12 @@ def prepare_generation_payload(request: GenerationRequest, model_id: str):
     if unknown:
         raise ValueError("NovelAI 官方接口不支持参数：" + "、".join(unknown))
     if request.mode == "text2img" and any(
-        key in supplied for key in ("strength", "noise", "extra_noise_seed")
+        key in supplied
+        for key in ("strength", "inpaint_strength", "noise", "extra_noise_seed")
     ):
-        raise ValueError("strength、noise 和 extra_noise_seed 仅用于图生图")
+        raise ValueError(
+            "strength、inpaint_strength、noise 和 extra_noise_seed 仅用于图生图"
+        )
     if request.mode == "text2img" and request.references:
         raise ValueError("文生图不能包含底图；请使用图生图模式")
     size = str(request.size or "1024x1024").strip()
@@ -143,33 +146,35 @@ def prepare_generation_payload(request: GenerationRequest, model_id: str):
         "image_format"
     ] not in {"png", "webp"}:
         raise ValueError("NovelAI image_format 仅支持 png 或 webp")
-    capabilities = model_capabilities(model_id)
-    samplers = {
-        "k_euler_ancestral",
-        "k_euler",
-        "k_dpmpp_2m",
-        "k_dpmpp_2m_sde",
-        "k_dpmpp_sde",
-        "k_dpmpp_2s_ancestral",
-        "k_dpmpp_3m_sde",
-        "k_dpm_2",
-        "k_dpm_fast",
-    }
-    if parameters["sampler"] not in samplers:
+    fields, advanced_effective, vibes, wire_model, action, prompt = prepare_advanced(
+        request, model_id, width, height
+    )
+    capabilities = model_capabilities(wire_model.removesuffix("-inpainting"))
+    if parameters["sampler"] not in capabilities["samplers"]:
         raise ValueError("NovelAI 当前模型不支持所选 sampler")
     if parameters["noise_schedule"] not in capabilities["noise_schedules"]:
         raise ValueError(
             f"当前模型噪声调度仅支持：{'、'.join(capabilities['noise_schedules'])}"
         )
-    if parameters["sampler"] == "k_dpm_2" and parameters["noise_schedule"] == "karras":
+    schedules = capabilities["sampler_noise_schedules"][parameters["sampler"]]
+    if parameters["noise_schedule"] not in schedules:
         raise ValueError(
-            "k_dpm_2 不支持 karras，请选择 exponential 或 polyexponential；V5请改用其他采样器"
+            f"{parameters['sampler']} 不支持 {parameters['noise_schedule']}，"
+            f"请选择 {'、'.join(schedules)}"
         )
-    if parameters["sampler"] in {"k_dpm_fast", "k_dpmpp_3m_sde"}:
+    if not wire_model.startswith("nai-diffusion-5-") and parameters["sampler"] in {
+        "k_dpm_fast",
+        "k_dpmpp_3m_sde",
+    }:
         parameters.pop("noise_schedule", None)
-    fields, advanced_effective, vibes, wire_model, action, prompt = prepare_advanced(
-        request, model_id, width, height
-    )
+    if (
+        parameters["sampler"] == "k_euler_ancestral"
+        and parameters.get("noise_schedule") != "native"
+    ):
+        # Match the current official client explicitly instead of relying on
+        # the API's legacy Euler Ancestral compatibility default.
+        parameters["deliberate_euler_ancestral_bug"] = False
+        parameters["prefer_brownian"] = True
     parameters.update(
         {
             "width": width,
@@ -195,28 +200,32 @@ def prepare_generation_payload(request: GenerationRequest, model_id: str):
     parameters.update(fields)
     roles = [item["type"] for item in advanced_effective.get("reference_settings", [])]
     if "base" in roles:
-        parameters["strength"] = _number(
-            parameters.get("strength", 0.7), "strength", 0, 1
-        )
-        parameters["noise"] = _number(parameters.get("noise", 0), "noise", 0, 1)
-        parameters["extra_noise_seed"] = _seed(
-            parameters.get("extra_noise_seed", parameters["seed"]), "extra_noise_seed"
-        )
         parameters["image"] = _reference_base64(
             request.references[roles.index("base")].data,
             width,
             height,
-            preserve_alpha=model_capabilities(wire_model.removesuffix("-inpainting"))[
-                "transparency"
-            ],
+            preserve_alpha=capabilities["transparency"],
         )
         if action == "infill":
-            parameters["img2img"] = {
-                "strength": parameters["strength"],
-                "noise": parameters["noise"],
-                "extra_noise_seed": parameters["extra_noise_seed"],
-                "color_correct": parameters["color_correct"],
-            }
+            # Full inpainting is independent of the ordinary img2img defaults.
+            # Only add the masked-region img2img constraint below full strength.
+            strength = advanced_effective["inpaint_strength"]
+            if strength < 1:
+                parameters["img2img"] = {
+                    "strength": strength,
+                    "color_correct": parameters["color_correct"],
+                }
+            for key in ("strength", "noise", "extra_noise_seed"):
+                parameters.pop(key, None)
+        else:
+            parameters["strength"] = _number(
+                parameters.get("strength", 0.7), "strength", 0, 1
+            )
+            parameters["noise"] = _number(parameters.get("noise", 0), "noise", 0, 1)
+            parameters["extra_noise_seed"] = _seed(
+                parameters.get("extra_noise_seed", parameters["seed"]),
+                "extra_noise_seed",
+            )
     else:
         for key in ("strength", "noise", "extra_noise_seed"):
             parameters.pop(key, None)
@@ -454,9 +463,12 @@ def _reference_base64(
     _validate_image(data)
     try:
         with Image.open(io.BytesIO(data)) as source:
-            image = ImageOps.exif_transpose(source).convert(
-                "RGBA" if preserve_alpha else "RGB"
-            )
+            image = ImageOps.exif_transpose(source).convert("RGBA")
+            if not preserve_alpha:
+                # Removing alpha directly exposes invisible RGB pixels. The
+                # official client composites non-transparent models on white.
+                background = Image.new("RGBA", image.size, "white")
+                image = Image.alpha_composite(background, image).convert("RGB")
             image = image.resize((width, height), Image.Resampling.LANCZOS)
             output = io.BytesIO()
             image.save(output, format="PNG")

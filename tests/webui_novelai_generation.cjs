@@ -46,6 +46,11 @@ async function run(browser, width) {
     assert.equal(await frame.locator('[data-model-parameter="steps"]').inputValue(), "23");
     assert.equal(await frame.locator('[data-model-parameter="straight_alpha"]').count(), 0);
     assert.equal(await frame.locator('[data-model-parameter="variety_boost"]').count(), 1);
+    await choose(frame, '[data-model-parameter="sampler"]', "k_dpm_2");
+    assert.equal(await frame.locator('[data-model-parameter="noise_schedule"]').inputValue(), "exponential");
+    assert.deepEqual(await frame.locator('[data-model-parameter="noise_schedule"] option').evaluateAll(options => options.map(option => option.value)), ["exponential", "polyexponential"]);
+    await choose(frame, '[data-model-parameter="sampler"]', "k_euler_ancestral");
+    assert.equal(await frame.locator('[data-model-parameter="noise_schedule"]').inputValue(), "exponential", "a compatible chosen schedule survives sampler changes");
     await frame.locator("#prompt").fill("two travelers, forest");
     await frame.locator("[data-novelai-character-add]").click();
     await frame.locator('[data-character-field="prompt"]').fill("blue hair, explorer");
@@ -61,6 +66,9 @@ async function run(browser, width) {
 
     await frame.locator('[data-mode="img2img"]').click();
     await choose(frame, "#modelChoice", "official:" + modelIds[0]);
+    assert.equal(await frame.locator('[data-model-parameter="strength"]').isVisible(), true);
+    assert.equal(await frame.locator('[data-model-parameter="inpaint_strength"]').isVisible(), false);
+    await frame.locator('[data-model-parameter="strength"]').fill("0.45");
     await mode("precise"); await upload(2);
     assert.equal(await frame.locator('[data-novelai-reference-setting="strength"]').first().inputValue(), "0.6");
     assert.equal(await frame.locator('[data-novelai-reference-setting="fidelity"]').first().inputValue(), "0.6");
@@ -93,6 +101,11 @@ async function run(browser, width) {
     await mode("img2img"); await upload(2);
     await role(1, "mask");
     assert.equal(await frame.locator('[data-model-parameter="reference_mode"]').inputValue(), "inpaint", "assigning a mask enters inpaint without dropping other image roles");
+    assert.equal(await frame.locator('[data-model-parameter="strength"]').isVisible(), false);
+    assert.equal(await frame.locator('[data-model-parameter="noise"]').isVisible(), false);
+    assert.equal(await frame.locator('[data-model-parameter="inpaint_strength"]').isVisible(), true);
+    assert.equal(await frame.locator('[data-model-parameter="inpaint_strength"]').inputValue(), "1");
+    await frame.locator('[data-model-parameter="inpaint_strength"]').fill("0.85");
     assert.equal(await frame.locator('[data-novelai-reference-setting="type"][data-novelai-reference-index="0"]').inputValue(), "base");
     await upload(1); await role(2, "vibe");
     const beforeInpaintConflict = generations.length;
@@ -102,8 +115,12 @@ async function run(browser, width) {
     await role(2, "character");
     result = await generate();
     assert.deepEqual(result.parameters.reference_settings.map(item => item.type), ["base", "mask", "character"]);
+    assert.equal(result.parameters.inpaint_strength, .85);
 
     await mode("img2img"); await upload(1);
+    assert.equal(await frame.locator('[data-model-parameter="strength"]').inputValue(), "0.45");
+    assert.equal(await frame.locator('[data-model-parameter="noise"]').isVisible(), true);
+    assert.equal(await frame.locator('[data-model-parameter="inpaint_strength"]').isVisible(), false);
     await frame.evaluate(() => {
       const bridge = window.AstrBotPluginPage, upload = bridge.upload;
       bridge.upload = async function (endpoint, file) { if (file.name === "inpaint-mask.png") window.__testMaskBytes = Array.from(new Uint8Array(await file.arrayBuffer())); return upload.call(this, endpoint, file); };
@@ -136,6 +153,8 @@ async function run(browser, width) {
     assert.deepEqual(await frame.locator('[data-model-parameter="reference_mode"] option').evaluateAll(options => options.map(option => option.value)), ["img2img", "inpaint"]);
     assert.equal(await frame.locator('[data-model-parameter="variety_boost"]').count(), 0);
     assert.equal(await frame.locator('[data-model-parameter="straight_alpha"]').count(), 1);
+    assert.equal(await frame.locator('[data-model-parameter="straight_alpha"]').isChecked(), true);
+    assert.ok(!(await frame.locator('[data-model-parameter="sampler"] option').evaluateAll(options => options.map(option => option.value))).includes("k_dpm_2"));
     await mode("inpaint"); await upload(2);
     assert.equal(await frame.locator("#referenceUpload").isDisabled(), true);
     assert.deepEqual(await frame.locator('[data-novelai-reference-setting="type"]').first().locator("option").evaluateAll(options => options.map(option => option.value)), ["base", "mask"]);
@@ -146,6 +165,10 @@ async function run(browser, width) {
     assert.match(await frame.locator("#modelParameters").textContent(), /V5 精选版的局部重绘使用 V4.5 精选版/);
     assert.match(await frame.locator("[data-novelai-character-hint]").textContent(), /最多 6 个/);
     assert.equal(await frame.locator('select[data-character-field="x"]').count(), 1);
+    assert.equal(await frame.locator('[data-model-parameter="straight_alpha"]').isVisible(), false);
+    await upload(2);
+    result = await generate();
+    assert.equal(result.parameters.straight_alpha, true, "fallback accepts the saved alpha representation without treating it as transparency request");
     await frame.locator('[data-mode="text2img"]').click();
     await choose(frame, "#modelChoice", "official:" + modelIds[1]);
     assert.equal(await frame.locator("[data-novelai-characters]").count(), 0, "schema visibility controls the specialized editor");

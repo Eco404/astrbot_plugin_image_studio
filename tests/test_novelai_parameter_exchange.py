@@ -6,7 +6,9 @@ import math
 import pytest
 from astrbot_plugin_image_studio.config import HistorySettings, RuntimeSettings
 from astrbot_plugin_image_studio.models import ImageProvider
+from astrbot_plugin_image_studio.novelai_inputs import prepare_advanced
 from astrbot_plugin_image_studio.parameter_exchange import resolve_parameters
+from astrbot_plugin_image_studio.tests.test_novelai_provider import request
 
 V45 = "nai-diffusion-4-5-full"
 V5 = "nai-diffusion-5-full"
@@ -173,10 +175,135 @@ def test_infill_maps_inpainting_variant_to_base_model_and_rebuilds_reference_rol
         {"type": "base"},
         {"type": "mask"},
     ]
-    assert result["draft"]["parameters"]["strength"] == 0.8
+    assert result["draft"]["parameters"]["inpaint_strength"] == 0.8
+    assert result["draft"]["parameters"]["strength"] == 0.7
     assert result["draft"]["parameters"]["color_correct"] is False
     assert "PRIVATE_" not in json.dumps(result)
     assert any("第 1 张底图、第 2 张蒙版" in warning for warning in result["warnings"])
+
+
+@pytest.mark.parametrize("strength", [0, 0.4, 1])
+def test_official_nested_infill_strength_is_restored_including_explicit_zero(strength):
+    result = resolve_parameters(
+        wire(
+            {
+                "image": "PRIVATE_BASE",
+                "mask": "PRIVATE_MASK",
+                "img2img": {"strength": strength, "color_correct": False},
+            },
+            model=V5 + "-inpainting",
+            action="infill",
+        ),
+        settings(),
+    )
+    assert result["draft"]["parameters"]["inpaint_strength"] == strength
+    assert result["draft"]["parameters"]["strength"] == 0.7
+    assert result["draft"]["parameters"]["color_correct"] is False
+    assert "img2img" not in result["unmapped"]
+
+
+def test_official_infill_without_img2img_influence_uses_full_redraw_default():
+    result = resolve_parameters(
+        wire(
+            {"image": "PRIVATE_BASE", "mask": "PRIVATE_MASK"},
+            model=V45 + "-inpainting",
+            action="infill",
+        ),
+        settings(),
+    )
+    assert result["draft"]["parameters"]["inpaint_strength"] == 1
+
+
+@pytest.mark.parametrize(
+    "historical,expected",
+    [
+        ({"strength": 0}, 0),
+        ({"strength": 0.4}, 0.4),
+        ({"strength": 0.7, "inpaint_strength": 0}, 0),
+    ],
+)
+def test_legacy_infill_history_migrates_strength_without_overriding_new_control(
+    historical, expected
+):
+    result = resolve_parameters(
+        json.dumps(
+            {
+                "format": "image_studio",
+                "version": 1,
+                "generation_engine": "novelai",
+                "has_request_snapshot": True,
+                "data": {
+                    "model": V45,
+                    "mode": "img2img",
+                    "parameters": {"reference_mode": "inpaint", **historical},
+                },
+            }
+        ),
+        settings(),
+        for_reproduction=True,
+    )
+    assert result["draft"]["parameters"]["inpaint_strength"] == expected
+    assert result["draft"]["parameters"]["strength"] == 0.7
+
+
+def test_unhandled_nested_infill_parameters_remain_visible_for_manual_review():
+    result = resolve_parameters(
+        wire(
+            {"img2img": {"strength": 0.6, "noise": 0.2, "image": "PRIVATE_BASE"}},
+            action="infill",
+        ),
+        settings(),
+    )
+    assert result["draft"]["parameters"]["inpaint_strength"] == 0.6
+    assert result["unmapped"]["img2img"] == {"noise": 0.2}
+    assert "PRIVATE_BASE" not in json.dumps(result)
+
+
+@pytest.mark.parametrize(
+    "prompt,expected",
+    [
+        ("a cat, transparent background", "a cat, transparent background"),
+        ("Transparent Background, a cat", "Transparent Background, a cat"),
+        (
+            "a cat, transparent background, white fur",
+            "a cat, transparent background, white fur",
+        ),
+        (
+            "a cat beside a transparent background panel",
+            "a cat beside a transparent background panel, transparent background",
+        ),
+    ],
+)
+def test_raw_official_transparent_prompt_refill_does_not_expand_existing_tag_twice(
+    prompt, expected
+):
+    raw = json.loads(wire({"tag_hint_transparent_background": True}, model=V5))
+    raw["input"] = prompt
+    draft = resolve_parameters(json.dumps(raw), settings())["draft"]
+    assert draft["prompt"] == prompt
+    for _ in range(2):
+        fields, _, _, _, _, expanded = prepare_advanced(
+            request(prompt=draft["prompt"], parameters=draft["parameters"]),
+            V5,
+            832,
+            1216,
+        )
+        assert expanded == expected
+        assert fields["v4_prompt"]["caption"]["base_caption"] == expected
+        raw["input"] = expanded
+        draft = resolve_parameters(json.dumps(raw), settings())["draft"]
+
+
+def test_disabled_transparency_hint_does_not_remove_explicit_prompt_tags():
+    prompt = "a cat, transparent background"
+    fields, _, _, _, _, expanded = prepare_advanced(
+        request(prompt=prompt, parameters={"tag_hint_transparent_background": False}),
+        V5,
+        832,
+        1216,
+    )
+    assert expanded == prompt
+    assert fields["tag_hint_transparent_background"] is False
 
 
 def test_vibe_metadata_retains_per_image_strength_and_information_without_embeddings():

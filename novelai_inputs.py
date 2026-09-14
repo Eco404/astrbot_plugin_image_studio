@@ -19,6 +19,7 @@ ADVANCED_KEYS = frozenset(
         "characters",
         "use_coords",
         "color_correct",
+        "inpaint_strength",
         "normalize_reference_strength_multiple",
         "variety_boost",
         "quality_preset",
@@ -267,6 +268,10 @@ def prepare_advanced(request, model_id: str, width: int, height: int):
     wire_model = caps["inpainting_model"] if inpaint else model_id
     actual_caps = model_capabilities(wire_model.removesuffix("-inpainting"))
     fields, effective, vibes = {}, {}, []
+    if inpaint:
+        effective["inpaint_strength"] = number(
+            values.get("inpaint_strength", 1), "inpaint_strength"
+        )
     use_coords = boolean(values.get("use_coords", False), "use_coords")
     positive, negative, characters = character_prompts(
         values.get("characters", []), use_coords, actual_caps
@@ -292,13 +297,28 @@ def prepare_advanced(request, model_id: str, width: int, height: int):
         prompt = prompt.rstrip(", ") + ", " + suffix
     effective["quality_preset"] = quality
     for key in ("straight_alpha", "tag_hint_transparent_background"):
-        value = boolean(values.get(key, False), key)
+        value = boolean(
+            values.get(key, key == "straight_alpha" and actual_caps["transparency"]),
+            key,
+        )
+        # V5 Curated falls back to V4.5 for infill. Its normal-model Alpha
+        # representation setting has no meaning for the RGB fallback and must
+        # not reject the default request. A transparent-background request is
+        # still incompatible and is reported below.
+        if (
+            key == "straight_alpha"
+            and caps["transparency"]
+            and not actual_caps["transparency"]
+        ):
+            continue
         if value and not actual_caps["transparency"]:
             raise ValueError(f"当前实际模型 {wire_model} 不支持透明背景；请关闭 {key}")
         if actual_caps["transparency"]:
             fields[key] = value
             effective[key] = value
-    if fields.get("tag_hint_transparent_background"):
+    if fields.get("tag_hint_transparent_background") and not any(
+        tag.strip().casefold() == "transparent background" for tag in prompt.split(",")
+    ):
         prompt = prompt.rstrip(", ") + ", transparent background"
     fields.update(
         qualityToggle=quality != "none",

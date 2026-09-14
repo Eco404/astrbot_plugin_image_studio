@@ -1469,17 +1469,27 @@ class GenerationStore:
         }
 
     async def load_staged_references(
-        self, reference_ids: list[str]
+        self,
+        reference_ids: list[str],
+        *,
+        max_images: int = 8,
+        reject_excess: bool = False,
     ) -> tuple[ReferenceImage, ...]:
         """Load selected plugin-owned staged references by opaque IDs."""
 
-        return await asyncio.to_thread(self._load_staged_references_sync, reference_ids)
+        if reject_excess and len(reference_ids) > max_images:
+            raise ValueError(
+                f"当前模型/工具最多允许 {max_images} 张参考图；请减少输入，避免底图、蒙版与角色参考编号错位"
+            )
+        return await asyncio.to_thread(
+            self._load_staged_references_sync, reference_ids[:max_images]
+        )
 
     def _load_staged_references_sync(
         self, reference_ids: list[str]
     ) -> tuple[ReferenceImage, ...]:
         refs: list[ReferenceImage] = []
-        for ref_id in reference_ids[:8]:
+        for ref_id in reference_ids:
             clean_id = str(ref_id or "").strip().lower()
             if not _SAFE_ID_RE.fullmatch(clean_id):
                 raise ValueError("参考图 ID 无效")

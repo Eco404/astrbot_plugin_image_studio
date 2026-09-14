@@ -26,9 +26,35 @@
       }
     }
     const referenceMode = () => value("reference_mode", "img2img");
+    const inpainting = () => state.mode === "img2img" && (referenceMode() === "inpaint" || referenceSettings().some(item => item.type === "mask"));
+    function updateSamplerControls(correct = false) {
+      const input = inputFor("noise_schedule");
+      if (!input) return;
+      const choices = capabilities(selectedModel()).sampler_noise_schedules?.[value("sampler", "k_euler_ancestral")];
+      if (!choices) return;
+      input.closest(".field")?.classList.toggle("is-hidden", choices.length === 0);
+      if (!choices.length) return;
+      const previous = value("noise_schedule", "karras");
+      const selected = choices.includes(previous) || !correct ? previous : choices[0];
+      input.innerHTML = (choices.includes(selected) ? "" : `<option value="${escape(selected)}" selected>当前采样器不支持：${escape(selected)}</option>`) + choices.map(choice => `<option value="${escape(choice)}"${choice === selected ? " selected" : ""}>${escape(choice)}</option>`).join("");
+      if (selected !== previous) save("noise_schedule", selected);
+      window.ImageStudioSelect?.refresh(input);
+    }
+    function updateApplicableControls() {
+      if (!active()) return;
+      const infill = inpainting();
+      const setVisible = (key, shown) => inputFor(key)?.closest(".field, .toggle-row")?.classList.toggle("is-hidden", !shown);
+      // Keep both values mounted so changing reference modes preserves the
+      // user's last strengths, while only the applicable control is shown.
+      setVisible("strength", !infill);
+      setVisible("noise", !infill);
+      setVisible("extra_noise_seed", !infill);
+      setVisible("inpaint_strength", infill);
+      setVisible("straight_alpha", !(infill && selectedModel().id === "nai-diffusion-5-curated"));
+    }
     function characterCapabilities() {
       const caps = capabilities(selectedModel());
-      return state.mode === "img2img" && (referenceMode() === "inpaint" || referenceSettings().some(item => item.type === "mask")) ? { ...caps, max_characters: caps.inpainting_max_characters ?? caps.max_characters, character_position_grid: caps.inpainting_character_position_grid ?? caps.character_position_grid } : caps;
+      return inpainting() ? { ...caps, max_characters: caps.inpainting_max_characters ?? caps.max_characters, character_position_grid: caps.inpainting_character_position_grid ?? caps.character_position_grid } : caps;
     }
     function defaultRole(index) {
       const mode = referenceMode();
@@ -83,6 +109,7 @@
     }
     function bindParameters() {
       if (!active()) return;
+      inputFor("sampler")?.addEventListener("change", () => updateSamplerControls(true));
       document.querySelector("[data-novelai-character-add]")?.addEventListener("click", () => { const values = parse(value("characters", [])); if (values.length >= characterCapabilities().max_characters) return; values.push({ prompt: "", negative_prompt: "", x: .5, y: .5 }); save("characters", values); renderCharacters(); });
       inputFor("use_coords")?.addEventListener("change", renderCharacters);
       inputFor("reference_mode")?.addEventListener("change", () => {
@@ -91,12 +118,14 @@
         if (visible("reference_settings")) save("reference_settings", []);
         rerenderReferences(); renderCharacters();
       });
+      updateSamplerControls(); updateApplicableControls();
       renderCharacters();
     }
     function numberField(index, key, title, current) {
       return `<label class="field">${title}<input type="number" min="0" max="1" step="0.05" data-novelai-reference-setting="${key}" data-novelai-reference-index="${index}" value="${escape(current)}" /></label>`;
     }
     function renderReferences(host, remove) {
+      updateApplicableControls();
       host.classList.toggle("novelai-reference-strip", active() && visible("reference_settings"));
       if (!active() || !visible("reference_settings")) return false;
       const settings = referenceSettings(), allowed = roles();
@@ -140,7 +169,7 @@
       if (types.filter(type => type === "mask").length > 1) return "局部重绘只支持 1 张蒙版。";
       if ((referenceMode() === "inpaint" || types.includes("mask")) && (!types.includes("base") || !types.includes("mask"))) return "局部重绘需要 1 张底图与 1 张蒙版。";
       if ((referenceMode() === "inpaint" || types.includes("mask")) && types.includes("vibe")) return "局部重绘不支持 Vibe Transfer，请移除 Vibe 参考或切换参考方式。";
-      if ((referenceMode() === "inpaint" || types.includes("mask")) && selectedModel().id === "nai-diffusion-5-curated" && (value("straight_alpha", false) || value("tag_hint_transparent_background", false))) return "V5 精选版局部重绘使用 V4.5 精选版，请关闭透明通道输出与透明背景提示。";
+      if (inpainting() && selectedModel().id === "nai-diffusion-5-curated" && value("tag_hint_transparent_background", false)) return "V5 精选版局部重绘使用 V4.5 精选版，请关闭透明背景提示。";
       if (types.includes("vibe") && types.some(type => ["character", "style", "character_style"].includes(type))) return "精确参考与 Vibe Transfer 不能在同一次生成中使用。";
       return "";
     }

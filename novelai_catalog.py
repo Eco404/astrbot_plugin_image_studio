@@ -12,11 +12,25 @@ MODEL_NAMES = {
     "nai-diffusion-5-curated": "NovelAI V5 精选版",
 }
 
+SAMPLERS = (
+    "k_euler_ancestral",
+    "k_euler",
+    "k_dpmpp_2m",
+    "k_dpmpp_2m_sde",
+    "k_dpmpp_sde",
+    "k_dpmpp_2s_ancestral",
+    "k_dpmpp_3m_sde",
+    "k_dpm_2",
+    "k_dpm_fast",
+)
+
 
 def model_capabilities(model_id: str) -> dict[str, Any]:
     if model_id not in MODEL_NAMES:
         return {}
     v5 = model_id.startswith("nai-diffusion-5-")
+    samplers = [sampler for sampler in SAMPLERS if not v5 or sampler != "k_dpm_2"]
+    schedules = ["karras"] if v5 else ["karras", "exponential", "polyexponential"]
     return {
         "precise_reference": not v5,
         "vibe_transfer": not v5,
@@ -40,9 +54,17 @@ def model_capabilities(model_id: str) -> dict[str, Any]:
         if model_id == "nai-diffusion-5-curated" or not v5
         else 0,
         "variety_boost": not v5,
-        "noise_schedules": ["karras"]
-        if v5
-        else ["karras", "exponential", "polyexponential"],
+        # V5 only supports Karras, which is incompatible with DPM2.
+        "samplers": samplers,
+        "noise_schedules": schedules,
+        "sampler_noise_schedules": {
+            sampler: [
+                schedule
+                for schedule in schedules
+                if sampler != "k_dpm_2" or schedule != "karras"
+            ]
+            for sampler in samplers
+        },
     }
 
 
@@ -75,6 +97,16 @@ def advanced_parameters(model_id: str) -> dict[str, dict[str, Any]]:
             "ui_widget": "novelai_references",
             "modes": ["img2img"],
             "description": "与 references 按顺序一一对应的数组，每项 {type,strength,fidelity,information_extracted}。type: base底图、mask蒙版、character角色、style风格、character_style角色与风格、vibe氛围；其余数值0–1。省略/空数组按reference_mode自动分配。仅一张底图及一张蒙版；角色/风格不能与vibe混用。不得传入图片Base64。",
+        },
+        "inpaint_strength": {
+            "type": "number",
+            "label": "局部重绘强度",
+            "default": 1,
+            "min": 0,
+            "max": 1,
+            "step": 0.05,
+            "modes": ["img2img"],
+            "description": "仅局部重绘使用。1 按新提示词重绘蒙版区域；降低时保留更多底图内容。普通图生图使用 strength。",
         },
         "characters": {
             "type": "json",
@@ -131,15 +163,15 @@ def advanced_parameters(model_id: str) -> dict[str, dict[str, Any]]:
             {
                 "straight_alpha": {
                     "type": "boolean",
-                    "label": "透明通道输出",
-                    "default": False,
-                    "description": "V5输出带独立透明通道的PNG/WebP。",
+                    "label": "直通 Alpha",
+                    "default": True,
+                    "description": "V5透明图片的Alpha表示方式：开启为直通（Straight），关闭为预乘（Premultiplied）。不控制是否生成透明背景。",
                 },
                 "tag_hint_transparent_background": {
                     "type": "boolean",
                     "label": "透明背景提示",
                     "default": False,
-                    "description": "V5提示模型生成透明背景，配合透明通道输出使用。",
+                    "description": "向V5提示词加入 transparent background，以提示模型生成透明背景；与Alpha表示方式独立。V5精选版局部重绘回退至V4.5，不支持此提示。",
                 },
             }
         )

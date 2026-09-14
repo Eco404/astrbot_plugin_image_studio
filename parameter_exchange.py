@@ -997,6 +997,26 @@ def resolve_parameters(
         supplied["negative_prompt"] = source["negative_prompt"]
     elif not exact_snapshot and draft["negative_prompt"]:
         supplied["negative_prompt"] = draft["negative_prompt"]
+    if is_official and supplied.get("reference_mode") == "inpaint":
+        # Official infill keeps its optional img2img influence nested; older
+        # Image Studio snapshots used ordinary strength for this same control.
+        # An explicit zero is meaningful, and the new control takes precedence
+        # when a snapshot already contains it.
+        nested_img2img = supplied.pop("img2img", None)
+        if isinstance(nested_img2img, dict):
+            if "strength" in nested_img2img:
+                supplied.setdefault("inpaint_strength", nested_img2img.pop("strength"))
+            if "color_correct" in nested_img2img:
+                supplied.setdefault(
+                    "color_correct", nested_img2img.pop("color_correct")
+                )
+        if nested_img2img is not None and nested_img2img != {}:
+            novelai_unmapped["img2img"] = nested_img2img
+            warnings.append(
+                "局部重绘 img2img 中有无法回填的参数，已保留原值，请检查未映射参数。"
+            )
+        if "strength" in supplied:
+            supplied.setdefault("inpaint_strength", supplied.pop("strength"))
     unmapped: dict[str, Any] = novelai_unmapped
     accepted: dict[str, Any] = {}
     for key, value in supplied.items():

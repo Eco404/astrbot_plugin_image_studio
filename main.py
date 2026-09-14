@@ -1300,7 +1300,11 @@ class ImageStudioPlugin(Star):
             return error_response("请求体必须是 JSON 对象", status_code=400)
         try:
             references = await self._service_or_raise().staged_references(
-                body.get("reference_ids")
+                body.get("reference_ids"),
+                mode=str(body.get("mode") or "text2img"),
+                provider_id=str(body.get("provider_id") or ""),
+                model_ref=str(body.get("model_ref") or ""),
+                model=str(body.get("model") or ""),
             )
             result = await self._service_or_raise().generate(
                 mode=str(body.get("mode") or "text2img"),
@@ -1660,7 +1664,7 @@ class ImageStudioPlugin(Star):
             )
             if not options["mode_explicit"] and sources:
                 mode = "img2img"
-            _, selected_model = service.resolve_command_model(
+            selected_provider, selected_model = service.resolve_command_model(
                 mode=mode, provider_id=options["provider_id"], model=options["model"]
             )
             references = (
@@ -1668,6 +1672,7 @@ class ImageStudioPlugin(Star):
                     event,
                     ordered_sources=sources,
                     max_images=selected_model.max_reference_images,
+                    reject_excess=selected_provider.kind == "novelai_official",
                 )
                 if sources
                 else ()
@@ -1733,17 +1738,41 @@ class ImageStudioPlugin(Star):
         include_event_references: bool = True,
         ordered_sources: list[tuple[Any, bool]] | None = None,
         max_images: int = 8,
+        reject_excess: bool = False,
     ) -> tuple[Any, ...]:
+        def limit_error() -> ValueError:
+            return ValueError(
+                f"当前模型/工具最多允许 {max_images} 张参考图；请减少输入，避免底图、蒙版与角色参考编号错位"
+            )
+
+        # Explicit entries have positional meaning, including duplicate images
+        # assigned to different NovelAI roles. Validate their count before I/O.
+        required_count = (
+            sum(required for _, required in ordered_sources)
+            if ordered_sources is not None
+            else len(explicit_references or [])
+        )
+        if reject_excess and required_count > max_images:
+            raise limit_error()
         service = self._service_or_raise()
         references: list[Any] = []
         seen: set[str] = set()
+        # Automatic discovery can encounter aliases for the same image. Read
+        # one additional unique image to detect overflow after deduplication.
+        read_limit = max_images + int(reject_excess)
+
+        def result() -> tuple[Any, ...]:
+            if reject_excess and len(references) > max_images:
+                raise limit_error()
+            return tuple(references[:max_images])
+
         workspace_root = await _event_workspace_root(
             event,
             getattr(self, "context", None),
         )
 
         async def append_reference(raw_ref: str, *, required: bool = False) -> bool:
-            if len(references) >= max_images:
+            if len(references) >= read_limit:
                 return True
             try:
                 reference = await service.reference_from_media_ref(
@@ -1764,14 +1793,14 @@ class ImageStudioPlugin(Star):
                     raise ValueError("显式参考图不存在或不是有效图片")
                 return False
             digest = hashlib.sha256(reference.data).hexdigest()
-            if digest not in seen:
+            if required or digest not in seen:
                 seen.add(digest)
                 references.append(reference)
             return True
 
         if ordered_sources is not None:
             for source, required in ordered_sources:
-                if len(references) >= max_images:
+                if len(references) >= read_limit:
                     break
                 if isinstance(source, Image):
                     try:
@@ -1782,9 +1811,9 @@ class ImageStudioPlugin(Star):
                         )
                         continue
                 await append_reference(str(source or ""), required=required)
-            return tuple(references)
+            return result()
 
-        for item in (explicit_references or [])[:8]:
+        for item in (explicit_references or [])[:read_limit]:
             if isinstance(item, dict):
                 asset_id = str(item.get("asset_id") or "").strip().lower()
                 path = str(item.get("path") or "").strip()
@@ -1804,22 +1833,21 @@ class ImageStudioPlugin(Star):
                         )
                     image, internal_path = loaded
                     digest = hashlib.sha256(image.data).hexdigest()
-                    if digest not in seen:
-                        seen.add(digest)
-                        references.append(
-                            ReferenceImage(
-                                id=f"asset-{asset_id[:24]}",
-                                filename=Path(internal_path).name,
-                                data=image.data,
-                                mime_type=image.mime_type,
-                            )
+                    seen.add(digest)
+                    references.append(
+                        ReferenceImage(
+                            id=f"asset-{asset_id[:24]}",
+                            filename=Path(internal_path).name,
+                            data=image.data,
+                            mime_type=image.mime_type,
                         )
+                    )
                     continue
                 await append_reference(path, required=True)
                 continue
             await append_reference(str(item or ""), required=True)
         if not include_event_references:
-            return tuple(references[:8])
+            return result()
         message_chain = event.get_messages() if hasattr(event, "get_messages") else []
         for component in _iter_event_images(message_chain):
             try:
@@ -1846,7 +1874,7 @@ class ImageStudioPlugin(Star):
             await append_reference(raw_ref)
         for raw_ref in _provider_request_image_refs(event):
             await append_reference(raw_ref)
-        return tuple(references[:8])
+        return result()
 
     @filter.on_llm_request()
     async def inject_agent_workflow_prompt(
@@ -2194,12 +2222,30 @@ class ImageStudioPlugin(Star):
             normalized_requested_mode = (
                 _llm_mode(requested_mode) if requested_mode else ""
             )
+            reference_options: dict[str, Any] = {}
+            if normalized_requested_mode != "text2img":
+                try:
+                    reference_provider, reference_model, _ = _select_llm_tool_model(
+                        self._settings, "img2img", model_ref=model_ref
+                    )
+                except ValueError:
+                    # With an omitted mode and no explicit images, retain the
+                    # existing message-image fallback and text-mode inference.
+                    if normalized_requested_mode or explicit_references:
+                        raise
+                else:
+                    if reference_provider.kind == "novelai_official":
+                        reference_options = {
+                            "max_images": reference_model.llm_max_reference_images,
+                            "reject_excess": True,
+                        }
             resolved_references = await self._event_references(
                 event,
                 explicit_references,
                 include_event_references=(
                     not explicit_references and normalized_requested_mode != "text2img"
                 ),
+                **reference_options,
             )
             normalized_mode = normalized_requested_mode or (
                 "img2img" if resolved_references else "text2img"
