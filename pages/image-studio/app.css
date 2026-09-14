@@ -325,6 +325,7 @@ select:focus {
 
 .provider-editor-heading { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; }
 .provider-editor-heading h3 { min-width: 0; overflow-wrap: anywhere; }
+.model-parameters .field > label, .model-parameters .toggle-row > label:first-child, .model-parameters .field-label-row > label, .schema-preview .field-label-row > label { min-width: 0; overflow-wrap: anywhere; }
 .provider-editor-heading .toggle-control { flex: 0 0 44px; min-height: 44px; align-items: center; justify-content: flex-end; }
 
 @media (prefers-reduced-motion: reduce) {
