@@ -27,8 +27,8 @@ async function matrix(browser, width) {
   const page = await context.newPage();
   page.setDefaultTimeout(15000);
   const errors = [], generations = [], discoveries = [], uploads = [];
-  let settings, officialId = "", quotaCalls = 0, saves = 0;
-  let quota = { kind: "novelai_official", enabled: true, tier: 3, remaining: 1234, subscription_anlas: 1000, purchased_anlas: 234, usage: { percent: 0, is_negative: false, time_until_next_percent: 20 }, checked_at: 1789320000 };
+  let settings, officialId = "", quotaCalls = 0, saves = 0, thirdPartyEnabled = true;
+  let quota = { kind: "novelai_official", subscription_active: true, tier: 3, remaining: 1234, subscription_anlas: 1000, purchased_anlas: 234, usage: { percent: 0, is_negative: false, time_until_next_percent: 20 }, checked_at: 1789320000 };
   page.on("pageerror", error => errors.push(error.message));
   try {
     settings = await (await page.request.get(`${base}/astrbot_plugin_image_studio/settings/get`)).json();
@@ -59,7 +59,7 @@ async function matrix(browser, width) {
     await page.route("**/studio/provider-quota?*", async route => {
       const id = new URL(route.request().url()).searchParams.get("provider_id");
       quotaCalls++;
-      await route.fulfill({ json: id === officialId ? { provider_id: id, ...quota } : { provider_id: id, enabled: true, remaining: 943, checked_at: 1789320000 } });
+      await route.fulfill({ json: id === officialId ? { provider_id: id, ...quota } : { provider_id: id, enabled: thirdPartyEnabled, remaining: 943, checked_at: 1789320000 } });
     });
     await page.route("**/studio/generate", async route => {
       generations.push(route.request().postDataJSON());
@@ -156,6 +156,27 @@ async function matrix(browser, width) {
       await frame.evaluate(() => { window.__quotaTimeOffset += 31000; window.dispatchEvent(new Event("focus")); });
       await frame.locator("#providerQuota").filter({ hasText: expectedText }).waitFor();
     }
+    await choose(frame, "#modelChoice", `${officialId}:${modelIds[0]}`);
+    await refreshQuota({ subscription_active: false, tier: 0, remaining: 0, subscription_anlas: 0, purchased_anlas: 0, usage: null }, "Anlas 0 · 未订阅");
+    assert.equal(await frame.locator("#providerQuota").textContent(), "Anlas 0 · 未订阅");
+    assert.doesNotMatch(await frame.locator("#providerQuota").getAttribute("title"), /V5/);
+    assert.match(await frame.locator("#providerQuota").getAttribute("title"), /Anlas 余额不代表免费试用剩余次数/);
+    assert.equal(await frame.locator("#providerQuota").evaluate(element => element.classList.contains("is-warning")), false, "no subscription is informative, not a disabled provider");
+    assert.equal(await frame.locator("#generateButton").isEnabled(), true);
+    await frame.evaluate(() => { window.__dismissImageStudioNotice(); window.scrollTo({ top: 0, behavior: "instant" }); });
+    await page.screenshot({ path: path.join(output, `${engine}-${width}-unsubscribed.png`) });
+    const beforeModelSwitch = quotaCalls;
+    for (const modelId of modelIds) {
+      await choose(frame, "#modelChoice", `${officialId}:${modelId}`);
+      const expectedQuota = modelId.startsWith("nai-diffusion-5-") ? "Anlas 0 · V5 未知 · 未订阅" : "Anlas 0 · 未订阅";
+      assert.equal(await frame.locator("#providerQuota").textContent(), expectedQuota);
+      assert.equal(await frame.locator("#providerQuota").evaluate(element => element.classList.contains("is-warning")), false);
+    }
+    assert.equal(quotaCalls, beforeModelSwitch, "model changes reuse quota while adapting the visible fields");
+    await choose(frame, "#modelChoice", `${officialId}:${modelIds[2]}`);
+    await refreshQuota({ subscription_active: true, tier: 3 }, "Anlas 0 · V5 未知");
+    assert.doesNotMatch(await frame.locator("#providerQuota").textContent(), /未订阅/);
+    assert.match(await frame.locator("#providerQuota").getAttribute("title"), /订阅：有效/);
     await refreshQuota({ tier: null, remaining: null, subscription_anlas: null, purchased_anlas: null, usage: null }, "Anlas 未知 · V5 未知");
     assert.equal(await frame.locator("#generateButton").isEnabled(), true);
     await refreshQuota({ remaining: 0, usage: { percent: 0, is_negative: false, time_until_next_percent: null } }, "Anlas 0 · V5 0%");
@@ -163,6 +184,12 @@ async function matrix(browser, width) {
     await refreshQuota({ usage: { percent: -1, is_negative: true, time_until_next_percent: 50 } }, "Anlas 0 · V5 已用尽");
     assert.equal(await frame.locator("#providerQuota").evaluate(element => element.classList.contains("is-warning")), true);
     assert.equal(await frame.locator("#generateButton").isEnabled(), true, "quota is informative");
+    await choose(frame, "#modelChoice", `${officialId}:${modelIds[0]}`);
+    assert.equal(await frame.locator("#providerQuota").textContent(), "Anlas 0");
+    assert.equal(await frame.locator("#providerQuota").evaluate(element => element.classList.contains("is-warning")), false, "V5 exhaustion does not apply to V4.5");
+    assert.doesNotMatch(await frame.locator("#providerQuota").getAttribute("title"), /V5|下一个百分比/);
+    await choose(frame, "#modelChoice", `${officialId}:${modelIds[2]}`);
+    assert.equal(await frame.locator("#providerQuota").evaluate(element => element.classList.contains("is-warning")), true);
     await refreshQuota({ remaining: -1 }, "额度暂不可用");
     assert.equal(await frame.locator("#generateButton").isEnabled(), true);
     await refreshQuota({ remaining: 1234, usage: { percent: 23, is_negative: false, time_until_next_percent: 10 } }, "Anlas 1,234 · V5 23%");
@@ -194,6 +221,9 @@ async function matrix(browser, width) {
     await frame.locator('[data-mode="text2img"]').click();
     await choose(frame, "#modelChoice", "nai:nai-diffusion-4-5-full");
     await frame.locator("#providerQuota").filter({ hasText: "剩余额度 943" }).waitFor();
+    thirdPartyEnabled = false;
+    await refreshQuota({}, "剩余额度 943 · 已停用");
+    assert.equal(await frame.locator("#providerQuota").evaluate(element => element.classList.contains("is-warning")), true, "third-party account enablement keeps its existing meaning");
     assert.deepEqual(errors, []);
     console.log(`${engine}-${width}: official settings, defaults, capability limits, mode parameters and independent quota passed`);
   } finally { await context.close(); }

@@ -424,6 +424,23 @@ def test_invalid_parameter_reports_sanitized_upstream_detail():
 
 
 @pytest.mark.parametrize(
+    "payload",
+    [
+        {"message": "Recaptcha token is required for trial generation"},
+        {"error": {"message": "Invalid reCAPTCHA token for trial generation"}},
+    ],
+)
+def test_trial_captcha_error_explains_account_flow_without_parameter_advice(payload):
+    session = Session(Response(payload, status=400))
+    with pytest.raises(ProviderError, match="免费试用需要官方验证码验证") as error:
+        asyncio.run(ProviderExecutor(session).generate(provider(), request()))
+    assert "尚未接入试用验证码流程" in str(error.value)
+    assert "参数无效" not in str(error.value)
+    assert "检查模型" not in str(error.value)
+    assert len(session.calls) == 1
+
+
+@pytest.mark.parametrize(
     "error", [TimeoutError(), aiohttp.ClientConnectionError("sensitive wire data")]
 )
 def test_generation_transport_failures_do_not_retry(error):
@@ -473,7 +490,8 @@ def test_subscription_uses_pat_get_and_keeps_usage_separate_from_anlas():
     )
     quota = asyncio.run(ProviderExecutor(session).fetch_quota(provider()))
     assert quota["remaining"] == 350 and quota["subscription_anlas"] == 100
-    assert quota["purchased_anlas"] == 250 and quota["enabled"] is True
+    assert quota["purchased_anlas"] == 250 and quota["subscription_active"] is True
+    assert "enabled" not in quota
     assert quota["usage"] == {
         "percent": 120,
         "is_negative": False,
@@ -490,6 +508,8 @@ def test_missing_subscription_fields_stay_unknown_and_zero_percent_is_not_exhaus
     quota = novelai.parse_subscription({"active": False, "usage": {"percent": 0}})
     assert quota["remaining"] is None and quota["tier"] is None
     assert quota["subscription_anlas"] is None and quota["purchased_anlas"] is None
+    assert quota["subscription_active"] is False
+    assert "enabled" not in quota
     assert quota["usage"] == {
         "percent": 0,
         "is_negative": None,

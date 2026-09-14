@@ -165,7 +165,11 @@ def normalize_webui_settings(value: Any) -> tuple[dict[str, Any], list[str]]:
         if not isinstance(raw, dict):
             errors.append(f"Provider #{index} 必须是对象")
             continue
-        provider = ImageProvider.from_mapping(raw)
+        try:
+            provider = ImageProvider.from_mapping(raw)
+        except ValueError as exc:
+            errors.append(f"Provider #{index}：{exc}")
+            continue
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", provider.id):
             errors.append(f"Provider #{index} 的 id 只能包含字母、数字、- 和 _")
             continue

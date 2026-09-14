@@ -6,6 +6,7 @@ import copy
 import json
 from dataclasses import dataclass, field
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 GenerationMode = Literal["text2img", "img2img"]
 
@@ -367,6 +368,7 @@ class ImageProvider:
     max_concurrent_generations: int = 2
     models_path: str = ""
     discovered_models: tuple[dict[str, Any], ...] = ()
+    proxy: str = field(default="", repr=False)
 
     @classmethod
     def from_mapping(cls, value: dict[str, Any]) -> ImageProvider:
@@ -479,6 +481,7 @@ class ImageProvider:
                 "/v1beta/models" if kind == "gemini" else "/models",
             ),
             discovered_models=discovered_models,
+            proxy=_provider_proxy(value.get("proxy")),
         )
 
     def public_dict(self) -> dict[str, Any]:
@@ -495,6 +498,7 @@ class ImageProvider:
             "model": self.model,
             "api_key": self.api_key,
             "custom_headers": self.custom_headers,
+            "proxy": self.proxy,
             "timeout_seconds": self.timeout_seconds,
             "supports_text2img": self.capabilities.text2img,
             "supports_img2img": self.capabilities.img2img,
@@ -643,6 +647,35 @@ class GenerationResult:
     generation_id: str = ""
     error: str = ""
     warning: str = ""
+
+
+def _provider_proxy(value: Any) -> str:
+    """Validate an optional HTTP(S) proxy without echoing its credentials."""
+
+    if value is None:
+        return ""
+    error = "网络代理地址无效，请填写 http:// 或 https:// 开头的代理地址，或留空不启用"
+    if not isinstance(value, str):
+        raise ValueError(error)
+    proxy = value.strip()
+    if not proxy:
+        return ""
+    if len(proxy) > 2048 or any(char.isspace() or ord(char) < 32 for char in proxy):
+        raise ValueError(error)
+    try:
+        parsed = urlsplit(proxy)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.port == 0
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError(error)
+    except ValueError:
+        raise ValueError(error) from None
+    return proxy
 
 
 def _as_bool(value: Any, default: bool) -> bool:

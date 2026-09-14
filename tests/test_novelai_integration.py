@@ -326,7 +326,10 @@ def test_paste_novelai_and_third_party_parameters_matches_official_model():
     assert official_wire["draft"]["parameters"]["image_format"] == "webp"
 
 
-def test_official_quota_api_uses_saved_provider_and_returns_no_credentials(tmp_path):
+@pytest.mark.parametrize("subscribed", [True, False])
+def test_official_quota_api_uses_saved_provider_and_returns_no_credentials(
+    tmp_path, subscribed
+):
     from astrbot_plugin_image_studio.tests.webui_harness import create_app
 
     async def run():
@@ -339,7 +342,7 @@ def test_official_quota_api_uses_saved_provider_and_returns_no_credentials(tmp_p
             observed.append(configured)
             return {
                 "kind": "novelai_official",
-                "enabled": True,
+                "subscription_active": subscribed,
                 "tier": 3,
                 "remaining": 123,
                 "usage": None,
@@ -355,6 +358,8 @@ def test_official_quota_api_uses_saved_provider_and_returns_no_credentials(tmp_p
             )
         assert result.status_code == 200
         assert result.json()["remaining"] == 123
+        assert result.json()["subscription_active"] is subscribed
+        assert "enabled" not in result.json()
         assert result.headers["cache-control"] == "no-store"
         assert observed[0].api_key == "pst-offline-token"
         assert "pst-offline-token" not in result.text

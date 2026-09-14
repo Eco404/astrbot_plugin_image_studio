@@ -117,6 +117,7 @@ class ProviderExecutor:
             async with self.session.post(
                 f"{provider.base_url.rstrip('/')}/api/api/getUser",
                 json={"toUserId": provider.api_key},
+                proxy=provider.proxy or None,
                 headers=headers,
                 timeout=aiohttp.ClientTimeout(total=15),
                 allow_redirects=False,
@@ -173,6 +174,7 @@ class ProviderExecutor:
             async with self.session.get(
                 endpoint,
                 headers=headers,
+                proxy=provider.proxy or None,
                 timeout=aiohttp.ClientTimeout(total=provider.timeout_seconds),
             ) as response:
                 raw = await response.read()
@@ -241,6 +243,7 @@ class ProviderExecutor:
                 endpoint,
                 json=payload,
                 headers=_novelai_headers(provider),
+                proxy=provider.proxy or None,
                 timeout=aiohttp.ClientTimeout(total=provider.timeout_seconds),
                 allow_redirects=False,
             ) as response:
@@ -282,6 +285,7 @@ class ProviderExecutor:
         try:
             async with self.session.get(
                 _join_url(provider.base_url, "/user/subscription"),
+                proxy=provider.proxy or None,
                 headers=_novelai_headers(provider),
                 timeout=aiohttp.ClientTimeout(total=15),
                 allow_redirects=False,
@@ -335,7 +339,11 @@ class ProviderExecutor:
                 )
             headers.pop("Content-Type", None)
             async with self.session.post(
-                endpoint, headers=headers, data=form, timeout=timeout
+                endpoint,
+                headers=headers,
+                data=form,
+                timeout=timeout,
+                proxy=provider.proxy or None,
             ) as response:
                 return await self._read_response_images(response, provider)
 
@@ -347,7 +355,11 @@ class ProviderExecutor:
             if len(payload["image"]) == 1:
                 payload["image"] = payload["image"][0]
         async with self.session.post(
-            endpoint, headers=headers, json=payload, timeout=timeout
+            endpoint,
+            headers=headers,
+            json=payload,
+            timeout=timeout,
+            proxy=provider.proxy or None,
         ) as response:
             return await self._read_response_images(response, provider)
 
@@ -411,6 +423,7 @@ class ProviderExecutor:
             headers=headers,
             json=payload,
             timeout=aiohttp.ClientTimeout(total=provider.timeout_seconds),
+            proxy=provider.proxy or None,
         ) as response:
             return await self._read_response_images(response, provider)
 
@@ -427,6 +440,7 @@ class ProviderExecutor:
             async with self.session.get(
                 endpoint,
                 params=query,
+                proxy=provider.proxy or None,
                 headers=_headers(provider, bearer=False),
                 timeout=aiohttp.ClientTimeout(total=provider.timeout_seconds),
             ) as response:
@@ -462,6 +476,7 @@ class ProviderExecutor:
         async with self.session.post(
             endpoint,
             headers=_headers(provider, bearer=True),
+            proxy=provider.proxy or None,
             json=payload,
             timeout=aiohttp.ClientTimeout(total=provider.timeout_seconds),
         ) as response:
@@ -517,14 +532,18 @@ class ProviderExecutor:
                 images.append(GeneratedImage(decoded, detect_mime_type(decoded, "")))
                 continue
             if value.startswith(("http://", "https://")):
-                downloaded = await self._download_image(value)
+                downloaded = await self._download_image(value, provider)
                 images.append(downloaded)
         return images
 
-    async def _download_image(self, url: str) -> GeneratedImage:
+    async def _download_image(
+        self, url: str, provider: ImageProvider
+    ) -> GeneratedImage:
         try:
             async with self.session.get(
-                url, timeout=aiohttp.ClientTimeout(total=60)
+                url,
+                timeout=aiohttp.ClientTimeout(total=60),
+                proxy=provider.proxy or None,
             ) as response:
                 if response.status >= 400:
                     raise ProviderError(f"结果图下载失败: HTTP {response.status}")
@@ -603,6 +622,14 @@ async def _novelai_generation_error(
     )
     detail = re.sub(r"https?://\S+|[A-Za-z0-9+/=_-]{64,}", "[已隐藏]", detail)
     detail = " ".join(detail.split())[:300]
+    if re.search(r"\brecaptcha\b", detail, re.I) and re.search(
+        r"\btrial\b", detail, re.I
+    ):
+        return (
+            f"NovelAI 生图失败：HTTP {response.status}，免费试用需要官方验证码验证；"
+            "当前插件尚未接入试用验证码流程，请在 NovelAI 官网使用免费试用，"
+            "或使用具备生图权限和额度的账户。"
+        )
     return (
         f"{message}；上游说明：{detail}" if detail and detail != "[已隐藏]" else message
     )

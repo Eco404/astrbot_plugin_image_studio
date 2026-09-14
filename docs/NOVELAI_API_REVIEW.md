@@ -1,8 +1,8 @@
 # NovelAI 官方接口核对
 
-核对日期：2026-09-13。目标开发版本：`1.3.0-dev.1`。
+核对日期：2026-09-13；真实账户验证补充于 2026-09-14。目标开发版本：`1.3.0-dev.1`。
 
-已实现独立服务商类型 `novelai_official`，保留现有 `nai_direct` 第三方 GET 协议。本文保留文档核对依据；实现已完成离线验证，尚未使用真实 Token 调用生图、额度或账户接口。
+已实现独立服务商类型 `novelai_official`，保留现有 `nai_direct` 第三方 GET 协议。实现已完成离线验证，真实免费账户的 PAT 订阅查询成功；生成请求因缺少试用验证码凭证被官方拒绝，尚未取得生成图片。
 
 ## 当前实现状态
 
@@ -18,18 +18,18 @@
 
 ## 真实联调验收
 
-以下项目尚未执行，不能以离线测试代替：
+以下验收仍需成功生成或付费账户进一步验证，不能以离线测试代替；免费账户已验证的部分列于下表：
 
 | 项目 | 核实内容 | 完成依据 |
 | --- | --- | --- |
 | 模型请求 | 四款模型 ID、V4.5/V5 的 params_version 和基本采样组合 | 记录脱敏成功请求及实际返回 |
 | JSON 原图 | images 对象格式、seed/index、PNG/WebP 原图与元数据 | 原图可读取，逐图参数能复制和复现 |
-| 订阅查询 | PAT 对图片域名 /user/subscription 的权限、Anlas 字段与 usage | 对照同一账户官网显示；不保留完整账户原始响应 |
+| 订阅查询 | PAT 对图片域名 /user/subscription 的权限、Anlas 字段与 usage | 免费账户查询成功，active=false、tier=0、Anlas=0、usage 缺失；付费账户字段仍待与官网对照 |
 | 试用与付费 | 不发送 shared_trial 的实际行为、V5 免费额度与 Anlas 变化 | 小量人工触发请求前后对照；不承诺本地条件判断等于免费 |
 | 图生图 | 单底图编码、输出尺寸、strength/noise/extra_noise_seed | 四款内置模型均按官方 Image2Image 能力默认开启；仍需用真实账号验证具体模型和尺寸组合 |
 | 批次与并发 | 目标模型在不同尺寸下的样本上限、同账号实际限制 | 初期串行/原生1张可用；更高设置单独核实 |
 
-真实接口验证前不自动创建后台任务、读取既有真实配置密钥或发送测试生成请求。
+真实接口测试须由用户明确授权，不自动创建后台测试任务。
 
 ## 官方资料
 
@@ -132,6 +132,10 @@ V5 的 Opus 免费生成另受可恢复的 Usage Limit 限制；FAQ 明确其他
 
 `user.SubscriptionResponse` 包含 `active`、`expiresAt`、`tier`、`trainingStepsLeft` 与 `usage`。`trainingStepsLeft` 下有 `fixedTrainingStepsLeft`、`purchasedTrainingSteps`。NAI2API 把两者相加显示为点数；当前 schema 没有完整解释它们与 Anlas 的对应关系，旧 Primary schema 仍沿用 module training steps 的描述，实际账户余额应在接入时对照官网核验。
 
+`active` 表示订阅是否有效，插件将其映射为 `subscription_active`，与 Provider 配置的 `enabled` 分开。无有效订阅显示“未订阅”，不会因此标为“已停用”或阻止请求。V5 的 usage 信息及其用尽提醒仅在选中 V5 模型时显示；未返回 usage 时不推断为额度已用尽。第三方 NAI 的 enabled 仍表示其账户启用状态。
+
+2026-09-14 的免费账户测试确认 PAT 订阅查询可用；V4.5/V5 文生图、图生图及独立 V4.5 角色参考探测均返回 HTTP 400，正文为 `Recaptcha token is required for trial generation`。此类错误优先显示免费试用验证码要求，不再引导用户修改模型或采样参数。插件没有接入验证码流程；成功生成与图片解析仍未通过真实联调。Anlas=0 不代表免费试用次数为 0。
+
 `usage` 的官方定义是：
 
 | 字段 | 官方说明 |
@@ -163,4 +167,4 @@ NAI2API 写死的 `params_version=3`、`uncond_scale`、`cfg_sched_eligibility`�
 
 官方生成接口说明所有生成请求应由人的操作发起，禁止制造过量负载的自动生成。插件应以用户发起的任务为入口，不增加无人触发的后台循环生图。
 
-本次证据包括：在线读取官方 Swagger 和用户文档；离线模拟官方 JSON 响应，核对 NAI2API 的解码不兼容。尚未证明任何真实账户、模型、免费额度或图生图组合可用。当前图片 schema 已可指导基础接入，详细限值和未公开的固定参数仍需后续实测。
+本次证据包括：在线读取官方 Swagger 和用户文档；离线模拟官方 JSON 响应，核对 NAI2API 的解码不兼容；真实 PAT 订阅查询成功，以及五次被试用验证码要求拦截的生成请求。成功生图、详细限值和未公开的固定参数仍需后续实测。

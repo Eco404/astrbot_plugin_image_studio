@@ -267,7 +267,7 @@ def parse_subscription(payload: Any) -> dict[str, Any]:
         }
     return {
         "kind": "novelai_official",
-        "enabled": payload["active"],
+        "subscription_active": payload["active"],
         "tier": _optional_nonnegative_integer(payload.get("tier")),
         "remaining": subscription + purchased
         if subscription is not None and purchased is not None

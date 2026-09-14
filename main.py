@@ -1323,7 +1323,10 @@ class ImageStudioPlugin(Star):
         body = await web_request.json(default={})
         if not isinstance(body, dict) or not isinstance(body.get("provider"), dict):
             return error_response("需要服务商配置", status_code=400)
-        provider = ImageProvider.from_mapping(body["provider"])
+        try:
+            provider = ImageProvider.from_mapping(body["provider"])
+        except ValueError as exc:
+            return error_response(str(exc), status_code=400)
         model_id = str(body.get("model_id") or "").strip()
         test_model = next(
             (item for item in provider.models if item.id == model_id), None

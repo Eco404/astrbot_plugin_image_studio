@@ -228,13 +228,15 @@
     els.providerQuota.classList.toggle("is-unavailable", failed);
     if (active.kind === "novelai_official") {
       const data = quota?.data, usage = data?.usage;
+      const showV5Usage = model?.id?.startsWith("nai-diffusion-5-") === true;
       const amount = value => value === null || value === undefined ? "未知" : value.toLocaleString("zh-CN");
       const allowance = usage?.is_negative === true ? "已用尽" : usage?.percent === null || usage?.percent === undefined ? "未知" : `${Math.max(0, usage.percent)}%`;
-      els.providerQuota.classList.toggle("is-warning", !!data && (!data.enabled || usage?.is_negative === true));
-      els.providerQuota.textContent = failed ? "额度暂不可用" : data ? `Anlas ${amount(data.remaining)} · V5 ${allowance}${data.enabled ? "" : " · 已停用"}` : "额度查询中…";
+      els.providerQuota.classList.toggle("is-warning", !!data && showV5Usage && usage?.is_negative === true);
+      els.providerQuota.textContent = failed ? "额度暂不可用" : data ? `Anlas ${amount(data.remaining)}${showV5Usage ? ` · V5 ${allowance}` : ""}${data.subscription_active ? "" : " · 未订阅"}` : "额度查询中…";
       const availability = usage?.is_negative === false ? "可用" : usage?.is_negative === true ? "已用尽" : "状态未知";
       const refill = usage?.time_until_next_percent === null || usage?.time_until_next_percent === undefined ? "" : `\n距离下一个百分比恢复约 ${usage.time_until_next_percent} 秒`;
-      els.providerQuota.title = failed ? quota.error : data ? `服务商：${active.name}\nAnlas：订阅 ${amount(data.subscription_anlas)}，购买 ${amount(data.purchased_anlas)}\nV5 免费额度：${allowance}（${availability}），与 Anlas 余额独立${refill}\n更新于 ${formatDate(data.checked_at)}` : `正在查询 ${active.name} 的额度`;
+      const usageDetail = showV5Usage ? `\nV5 免费额度：${allowance}（${availability}），与 Anlas 余额独立${refill}` : "";
+      els.providerQuota.title = failed ? quota.error : data ? `服务商：${active.name}\n订阅：${data.subscription_active ? "有效" : "未订阅"}\nAnlas：订阅 ${amount(data.subscription_anlas)}，购买 ${amount(data.purchased_anlas)}${usageDetail}${data.subscription_active ? "" : "\n未订阅不代表服务商已停用；Anlas 余额不代表免费试用剩余次数。"}\n更新于 ${formatDate(data.checked_at)}` : `正在查询 ${active.name} 的额度`;
       return;
     }
     els.providerQuota.classList.toggle("is-warning", !!quota?.data && (!quota.data.enabled || quota.data.remaining === 0));
@@ -255,11 +257,11 @@
       const nullableNumber = value => value === null || Number.isFinite(value) && value >= 0;
       const usage = payload?.usage;
       const validQuota = provider.kind === "novelai_official"
-        ? payload?.kind === "novelai_official" && nullableAmount(payload.tier)
+        ? payload?.kind === "novelai_official" && typeof payload.subscription_active === "boolean" && nullableAmount(payload.tier)
           && [payload.remaining, payload.subscription_anlas, payload.purchased_anlas].every(nullableAmount)
           && (usage === null || usage && typeof usage === "object" && (usage.percent === null || Number.isFinite(usage.percent)) && (usage.is_negative === null || typeof usage.is_negative === "boolean") && nullableNumber(usage.time_until_next_percent))
-        : Number.isSafeInteger(payload?.remaining) && payload.remaining >= 0;
-      if (payload?.provider_id !== provider.id || !validQuota || typeof payload.enabled !== "boolean" || !Number.isFinite(payload.checked_at)) throw new Error("额度查询返回的数据格式不正确");
+        : Number.isSafeInteger(payload?.remaining) && payload.remaining >= 0 && typeof payload.enabled === "boolean";
+      if (payload?.provider_id !== provider.id || !validQuota || !Number.isFinite(payload.checked_at)) throw new Error("额度查询返回的数据格式不正确");
       entry.data = payload;
     }).catch((error) => { entry.error = errorMessage(error, "额度查询失败"); }).finally(() => {
       entry.pending = false; entry.updatedAt = Date.now();
@@ -2536,11 +2538,13 @@
     if (official) provider.max_concurrent_generations = 1;
     const credentialField = official ? `${field("api_key", "NovelAI 完整 API Token", provider.api_key)}<div class="field"><span class="field-hint">填写 NovelAI 账户设置中生成的完整 Persistent API Token，保留前缀，无需添加 Bearer。</span></div>` : kind === "nai_direct" ? `${field("api_key", "生图 Token（toUserId）", provider.api_key)}<div class="field"><span class="field-hint">填写在 nai.sta1n.cn 申请的 toUserId。</span></div>` : field("api_key", "接口密钥（API Key）", provider.api_key);
     const headersField = kind === "nai_direct" ? "" : textAreaField("custom_headers", "自定义请求头（JSON 或每行一个 Header）", provider.custom_headers);
-    const common = `${field("id", "ID", provider.id)}${field("name", "名称", provider.name)}${selectField("kind", "供应类型", kind, PROVIDER_KINDS)}${field("base_url", "接口地址（Base URL）", provider.base_url)}${credentialField}${field("timeout_seconds", "超时秒数", provider.timeout_seconds, "number")}${field("max_concurrent_generations", "Provider 最大并发", provider.max_concurrent_generations ?? 2, "number", official)}${official ? '<div class="field"><span class="field-hint">官方服务商当前固定串行生成，同时最多处理 1 个请求。</span></div>' : ""}${toggleField("enabled", "启用", provider.enabled)}${headersField}`;
+    const proxyField = `${field("proxy", "网络代理（可选）", provider.proxy || "")}<div class="field field-wide"><span class="field-hint">留空不启用。支持 HTTP/HTTPS 代理，例如 http://192.168.1.2:7890；此服务商的生图、模型查询、额度查询和结果图下载均使用该代理。</span></div>`;
+    const common = `${field("id", "ID", provider.id)}${field("name", "名称", provider.name)}${selectField("kind", "供应类型", kind, PROVIDER_KINDS)}${field("base_url", "接口地址（Base URL）", provider.base_url)}${credentialField}${field("timeout_seconds", "超时秒数", provider.timeout_seconds, "number")}${field("max_concurrent_generations", "Provider 最大并发", provider.max_concurrent_generations ?? 2, "number", official)}${official ? '<div class="field"><span class="field-hint">官方服务商当前固定串行生成，同时最多处理 1 个请求。</span></div>' : ""}${proxyField}${headersField}`;
     const typeFields = kind === "openai_images" ? `${field("generate_path", "文生图路径", provider.generate_path)}${field("edit_path", "图生图路径", provider.edit_path)}${field("models_path", "模型列表路径", provider.models_path || "/models")}${selectField("edit_request_format", "图生图请求格式", provider.edit_request_format, [["multipart", "multipart"], ["json_data_url", "JSON data URL"]])}` : kind === "gemini" ? `${field("generate_path", "generateContent 路径（支持 {model}）", provider.generate_path)}${field("models_path", "模型列表路径", provider.models_path || "/v1beta/models")}` : kind === "nai_direct" ? `${field("generate_path", "生成路径", provider.generate_path)}<div class="field field-wide"><span class="field-hint">第三方服务协议：GET /generate；Token 作为 token 查询参数发送。该类型不是 NovelAI 官方 API，且仅支持文生图。</span></div>` : `${field("generate_path", "文生图路径", provider.generate_path)}${field("edit_path", "图生图路径", provider.edit_path)}${field("models_path", "模型列表路径", provider.models_path || "/models")}${selectField("edit_request_format", "图生图请求格式", provider.edit_request_format, [["multipart", "multipart"], ["json_data_url", "JSON data URL"]])}${textAreaField("request_template", "请求 JSON 模板（可选）", provider.request_template)}${field("response_image_path", "响应图片路径（可选）", provider.response_image_path)}<div class="field field-wide"><span class="field-hint">模板可使用 {{prompt}}、{{model}}、{{size}}、{{count}} 和参数字段。</span></div>`;
     const officialFields = `${field("generate_path", "文生图路径", provider.generate_path)}${field("edit_path", "图生图路径", provider.edit_path)}<div class="field field-wide"><span class="field-hint">内置 V4.5 / V5 完整版与精选版模型均支持基础单底图图生图，最多使用 1 张参考图；Vibe Transfer 和角色参考暂未接入。</span></div>`;
     const discoveryButton = builtinProviderModels(provider) ? "" : '<button class="quiet-button" id="discoverModelsButton" type="button">获取模型</button>';
-    els.providerForm.innerHTML = `<h3>${escape(provider.name || "生图服务商")}</h3>${common}${official ? officialFields : typeFields}<div class="provider-editor-actions"><button class="danger-button" id="removeProviderButton" type="button">删除服务商</button>${discoveryButton}</div>`;
+    const heading = `<div class="provider-editor-heading"><h3>${escape(provider.name || "生图服务商")}</h3><label class="toggle-control"><input data-provider-field="enabled" type="checkbox" aria-label="启用生图服务商" ${provider.enabled ? "checked" : ""} /><span aria-hidden="true"></span></label></div>`;
+    els.providerForm.innerHTML = `${heading}${common}${official ? officialFields : typeFields}<div class="provider-editor-actions"><button class="danger-button" id="removeProviderButton" type="button">删除服务商</button>${discoveryButton}</div>`;
     els.providerForm.querySelectorAll("[data-provider-field]").forEach((input) => input.addEventListener("input", () => updateProviderField(input))); els.providerForm.querySelectorAll("[data-provider-field]").forEach((input) => input.addEventListener("change", () => updateProviderField(input)));
     $("removeProviderButton")?.addEventListener("click", async () => { if (!await confirmAction("删除此生图服务商？历史记录不会删除。")) return; state.settings.webui.providers = state.settings.webui.providers.filter((item) => item.id !== provider.id); state.selectedSettingsProviderId = state.settings.webui.providers[0]?.id || ""; renderSettingsProviders(); showNotice("已从设置草稿中删除，保存全部设置后生效。", "success"); });
     $("discoverModelsButton")?.addEventListener("click", () => void discoverProviderModels(provider));
@@ -2549,7 +2553,6 @@
   function field(key, label, value, type = "text", disabled = false) { return `<div class="field"><label>${label}</label><input data-provider-field="${key}" type="${type}" value="${escape(value)}"${disabled ? " disabled" : ""} /></div>`; }
   function textAreaField(key, label, value) { return `<div class="field field-wide"><label>${label}</label><textarea data-provider-field="${key}" rows="3">${escape(value)}</textarea></div>`; }
   function selectField(key, label, value, options) { return `<div class="field"><label>${label}</label><select data-provider-field="${key}">${options.map(([id, name]) => `<option value="${id}" ${id === value ? "selected" : ""}>${name}</option>`).join("")}</select></div>`; }
-  function toggleField(key, label, value) { return `<div class="toggle-row"><label>${label}</label><label class="toggle-control"><input data-provider-field="${key}" type="checkbox" ${value ? "checked" : ""} /><span aria-hidden="true"></span></label></div>`; }
   function updateProviderField(input) { const provider = currentSettingsProvider(); if (!provider) return; const key = input.dataset.providerField; const value = input.type === "checkbox" ? input.checked : input.type === "number" ? Number(input.value) : input.value; if (key === "kind" && value !== provider.kind) { Object.assign(provider, providerDefaults(value)); provider.kind = value; state.selectedSettingsModelId = ""; renderProviderEditor(); renderModelEditor(); return; } provider[key] = value; if (key === "id") { state.selectedSettingsProviderId = input.value; const activeRow = els.settingsProviderList.querySelector(".provider-row.is-active"); if (activeRow) { activeRow.dataset.settingsProvider = input.value; if (!provider.name) activeRow.querySelector("strong").textContent = input.value; } } refreshSettingsDefaultModels(); }
   async function discoverProviderModels(provider) { const button = $("discoverModelsButton"); if (button) { button.disabled = true; button.textContent = "获取中…"; } try { const payload = await apiPost("provider/models", { provider }); provider.discovered_models = payload.models || []; for (const model of provider.models || []) { const discovered = provider.discovered_models.find((item) => item.id === model.id); if (discovered && model.native_batch_size_source !== "manual") { model.native_batch_size = Number(discovered.native_batch_size) || 1; model.native_batch_size_source = discovered.native_batch_size_source || "default"; } } renderModelEditor(); updateSettingsDirty(); showNotice(`已获取 ${provider.discovered_models.length} 个模型，可在新增模型时选择。`, "success"); } catch (error) { showNotice(errorMessage(error, "获取模型失败"), "error"); } finally { if (button) { button.disabled = false; button.textContent = "获取模型"; } } }
   function renderNewModelChoices(provider = currentSettingsProvider()) { const builtin = builtinProviderModels(provider), models = builtin || provider?.discovered_models || []; els.newModelChoices.innerHTML = models.map((item) => `<option value="${escape(item.id)}">${escape(item.name || item.id)}${item.capability_source === "unknown" ? " · 能力未知" : ""}</option>`).join(""); els.newModelChoice.value = ""; els.newModelChoice.placeholder = provider?.kind === "novelai_official" ? "选择 NovelAI 官方模型" : builtin ? "选择 NAI 模型或手动输入 ID" : "选择或输入模型 ID"; }
@@ -2769,7 +2772,7 @@
   async function addProvider() {
     if (!state.settings && !await loadSettings()) return;
     const id = `provider_${Date.now().toString(36)}`;
-    state.settings.webui.providers.push({ id, name: "新服务商", enabled: true, kind: "openai_images", ...providerDefaults("openai_images"), api_key: "", custom_headers: "", timeout_seconds: 180, discovered_models: [], models: [] });
+    state.settings.webui.providers.push({ id, name: "新服务商", enabled: true, kind: "openai_images", ...providerDefaults("openai_images"), api_key: "", proxy: "", custom_headers: "", timeout_seconds: 180, discovered_models: [], models: [] });
     state.selectedSettingsProviderId = id; state.selectedSettingsModelId = ""; renderSettingsProviders(); showNotice("已新增生图服务商，请填写连接配置并添加模型。", "success");
   }
   async function addModel() {
