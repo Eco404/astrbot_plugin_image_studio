@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
+from .novelai_catalog import MODEL_NAMES, advanced_parameters, model_capabilities
+
 GenerationMode = Literal["text2img", "img2img"]
 
 
@@ -152,10 +154,58 @@ NOVELAI_OFFICIAL_PARAMETERS: dict[str, dict[str, Any]] = {
 }
 
 
-def _model_parameters(value: Any, kind: str) -> dict[str, dict[str, Any]]:
+def _model_parameters(
+    value: Any, kind: str, model_id: str = ""
+) -> dict[str, dict[str, Any]]:
     if kind == "novelai_official" and not value:
         value = copy.deepcopy(NOVELAI_OFFICIAL_PARAMETERS)
-    return _normalize_parameters(value)
+        value["steps"]["default"] = 23
+        value["scale"]["default"] = 7 if model_id.startswith("nai-diffusion-5-") else 5
+        value["scale"]["max"] = 10
+        value["size"].update(
+            type="select",
+            choices=["1024x1024", "832x1216", "1216x832", "1024x1536", "1536x1024"],
+        )
+        if model_id.startswith("nai-diffusion-5-"):
+            value["noise_schedule"]["choices"] = ["karras"]
+        else:
+            value["noise_schedule"]["choices"] = [
+                "karras",
+                "exponential",
+                "polyexponential",
+            ]
+    result = _normalize_parameters(value)
+    if kind == "novelai_official":
+        caps = model_capabilities(model_id)
+        if caps:
+            unsupported = (
+                {"straight_alpha", "tag_hint_transparent_background"}
+                if not caps["transparency"]
+                else {"variety_boost", "normalize_reference_strength_multiple"}
+            )
+            result = {
+                name: descriptor
+                for name, descriptor in result.items()
+                if descriptor.get("request_key", name) not in unsupported
+            }
+            for name, descriptor in result.items():
+                key = descriptor.get("request_key", name)
+                if key == "reference_mode":
+                    descriptor["choices"] = advanced_parameters(model_id)[
+                        "reference_mode"
+                    ]["choices"]
+                    if descriptor.get("default") not in caps["reference_modes"]:
+                        descriptor["default"] = "img2img"
+                elif key == "noise_schedule":
+                    descriptor["choices"] = caps["noise_schedules"]
+                    if descriptor.get("default") not in caps["noise_schedules"]:
+                        descriptor["default"] = "karras"
+        # Add new controls without changing saved defaults or parameter policies.
+        keys = {item.get("request_key", name) for name, item in result.items()}
+        for name, descriptor in advanced_parameters(model_id).items():
+            if name not in result and name not in keys:
+                result[name] = descriptor
+    return result
 
 
 PROVIDER_TRANSPORT_DEFAULTS: dict[str, dict[str, str]] = {
@@ -209,6 +259,7 @@ class ImageModel:
     native_batch_size: int = 1
     max_concurrent_requests: int = 8
     native_batch_size_source: str = "default"
+    novelai_capabilities: dict[str, Any] = field(default_factory=dict)
 
     @property
     def active_parameters(self) -> dict[str, dict[str, Any]]:
@@ -243,6 +294,11 @@ class ImageModel:
             "native_batch_size": self.native_batch_size,
             "max_concurrent_requests": self.max_concurrent_requests,
             "native_batch_size_source": self.native_batch_size_source,
+            **(
+                {"novelai_capabilities": self.novelai_capabilities}
+                if self.novelai_capabilities
+                else {}
+            ),
         }
 
     @property
@@ -386,7 +442,9 @@ class ImageProvider:
         )
         max_refs = max(1, min(8, _as_int(value.get("max_reference_images"), 1)))
         if kind == "novelai_official":
-            max_refs = 1
+            max_refs = model_capabilities(legacy_model_id).get(
+                "max_reference_images", 1
+            )
         img2img = kind != "nai_direct" and _as_bool(
             value.get("supports_img2img"), kind == "novelai_official"
         )
@@ -406,7 +464,9 @@ class ImageProvider:
             negative_prompt=supports_negative_prompt,
             max_reference_images=max_refs,
             negative_prompt_default=_model_negative_default(value, kind),
-            parameters=_model_parameters(value.get("parameters"), kind),
+            parameters=_model_parameters(
+                value.get("parameters"), kind, legacy_model_id
+            ),
             tool=_normalize_tool(
                 value.get("tool"),
                 img2img,
@@ -416,6 +476,9 @@ class ImageProvider:
                 model_parameters=value.get("parameters"),
             ),
             capability_source=_text(value.get("capability_source"), 32) or "manual",
+            novelai_capabilities=model_capabilities(legacy_model_id)
+            if kind == "novelai_official"
+            else {},
             native_batch_size=native_size,
             max_concurrent_requests=max(
                 1, min(16, _as_int(value.get("max_concurrent_requests"), 8))
@@ -533,6 +596,23 @@ class ImageProvider:
                 tool={"enabled": True},
             )
         )
+
+
+def novelai_model_presets() -> list[dict[str, Any]]:
+    """Return one source of model defaults for the settings and generation UI."""
+    return [
+        ImageProvider.from_mapping(
+            {
+                "kind": "novelai_official",
+                "models": [
+                    {"id": model_id, "name": name, "capability_source": "builtin"}
+                ],
+            }
+        )
+        .models[0]
+        .public_dict()
+        for model_id, name in MODEL_NAMES.items()
+    ]
 
 
 @dataclass(frozen=True, slots=True)
@@ -824,7 +904,9 @@ def _model_from_mapping(
     capability_source = _text(value.get("capability_source"), 32) or "manual"
     max_reference_images = max(1, min(8, _as_int(value.get("max_reference_images"), 1)))
     if kind == "novelai_official":
-        max_reference_images = 1
+        max_reference_images = model_capabilities(model_id).get(
+            "max_reference_images", 1
+        )
     supports_negative_prompt = (
         False
         if kind == "gemini"
@@ -841,7 +923,7 @@ def _model_from_mapping(
         negative_prompt=supports_negative_prompt,
         max_reference_images=max_reference_images,
         negative_prompt_default=_model_negative_default(value, kind),
-        parameters=_model_parameters(value.get("parameters"), kind),
+        parameters=_model_parameters(value.get("parameters"), kind, model_id),
         tool=_normalize_tool(
             value.get("tool"),
             img2img,
@@ -851,6 +933,9 @@ def _model_from_mapping(
             model_parameters=value.get("parameters"),
         ),
         capability_source=capability_source,
+        novelai_capabilities=model_capabilities(model_id)
+        if kind == "novelai_official"
+        else {},
         native_batch_size=native_size,
         max_concurrent_requests=max(
             1, min(16, _as_int(value.get("max_concurrent_requests"), 8))

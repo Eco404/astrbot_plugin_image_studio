@@ -134,7 +134,7 @@ def test_official_config_defaults_and_img2img_capability_are_bounded():
     assert (
         enabled.models[0].max_reference_images
         == enabled.models[0].llm_max_reference_images
-        == 1
+        == 8
     )
 
 
@@ -209,7 +209,7 @@ def test_actual_parameters_cannot_bypass_recording_or_current_refill_policy(tmp_
         )["draft"]
         assert draft["parameters"]["seed"] == -1
         assert draft["parameters"]["scale"] == 7
-        assert draft["parameters"]["steps"] == 28
+        assert draft["parameters"]["steps"] == 23
 
     asyncio.run(run())
 

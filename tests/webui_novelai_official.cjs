@@ -93,15 +93,40 @@ async function matrix(browser, width) {
       await frame.locator("#addModelButton").click();
       assert.equal(await frame.locator('[data-model-field="supports_img2img"]').isChecked(), true);
       assert.equal(await frame.locator('[data-model-field="supports_img2img"]').isDisabled(), false);
+      if (modelId === modelIds[0]) {
+        const original = JSON.parse(await frame.locator("#modelParametersSchema").inputValue());
+        const edited = structuredClone(original);
+        Object.assign(edited.steps, { default: 31, webui_visible: false, record_in_history: false, refill_from_history: false });
+        edited.reference_mode.default = "precise"; edited.noise_schedule.default = "native";
+        edited.custom_note = { type: "text", default: "keep me", webui_visible: false };
+        await frame.locator(".schema-raw > summary").click();
+        await frame.locator("#modelParametersSchema").fill(JSON.stringify(edited));
+        await choose(frame, '[data-model-field="id"]', modelIds[2]);
+        const v5 = JSON.parse(await frame.locator("#modelParametersSchema").inputValue());
+        assert.equal(v5.variety_boost, undefined); assert.equal(v5.normalize_reference_strength_multiple, undefined);
+        assert.equal(await frame.locator('[data-schema-default="variety_boost"]').count(), 0);
+        assert.equal(await frame.locator('[data-schema-default="straight_alpha"]').count(), 1);
+        assert.equal(v5.reference_mode.default, "img2img"); assert.deepEqual(v5.reference_mode.choices.map(item => item.value), ["img2img", "inpaint"]);
+        assert.equal(v5.noise_schedule.default, "karras"); assert.deepEqual(v5.noise_schedule.choices, ["karras"]);
+        for (const field of ["default", "webui_visible", "record_in_history", "refill_from_history"]) assert.equal(v5.steps[field], edited.steps[field]);
+        assert.deepEqual(v5.custom_note, edited.custom_note);
+        await choose(frame, '[data-model-field="id"]', modelIds[0]);
+        const v45 = JSON.parse(await frame.locator("#modelParametersSchema").inputValue());
+        assert.equal(v45.straight_alpha, undefined); assert.equal(v45.tag_hint_transparent_background, undefined);
+        assert.equal(await frame.locator('[data-schema-default="variety_boost"]').count(), 1);
+        assert.deepEqual(v45.custom_note, edited.custom_note);
+        await frame.locator(".schema-raw > summary").click();
+        await frame.locator("#modelParametersSchema").fill(JSON.stringify(original));
+      }
     }
     await frame.locator(`[data-settings-model="${modelIds[2]}"]`).click();
-    const expected = { size: "1024x1024", count: 1, seed: -1, steps: 28, scale: 5, cfg_rescale: 0, sampler: "k_euler_ancestral", noise_schedule: "karras", image_format: "png", strength: 0.7, noise: 0 };
+    const expected = { size: "1024x1024", count: 1, seed: -1, steps: 23, scale: 7, cfg_rescale: 0, sampler: "k_euler_ancestral", noise_schedule: "karras", image_format: "png", strength: 0.7, noise: 0 };
     const schema = JSON.parse(await frame.locator("#modelParametersSchema").inputValue());
     for (const [key, value] of Object.entries(expected)) {
       assert.equal(schema[key].default, value, `${key} default`);
-      assert.equal(schema[key].webui_visible, true);
-      assert.equal(schema[key].record_in_history, true);
-      assert.equal(schema[key].refill_from_history, key !== "count");
+      assert.equal(schema[key].webui_visible ?? true, true);
+      assert.equal(schema[key].record_in_history ?? true, true);
+      assert.equal(schema[key].refill_from_history ?? true, key !== "count");
     }
     assert.deepEqual(schema.strength.modes, ["img2img"]);
     assert.deepEqual(schema.noise.modes, ["img2img"]);
@@ -115,11 +140,11 @@ async function matrix(browser, width) {
     assert.equal(await frame.locator('[data-model-field="supports_img2img"]').isChecked(), false, "官方模型可以手动关闭图生图");
     await frame.locator('[data-model-field="supports_img2img"]').locator("..").click();
     assert.equal(await frame.locator('[data-model-field="supports_img2img"]').isChecked(), true, "官方模型默认支持单底图图生图");
-    assert.equal(await frame.locator('[data-model-field="max_reference_images"]').inputValue(), "1");
+    assert.equal(await frame.locator('[data-model-field="max_reference_images"]').inputValue(), "2");
     assert.equal(await frame.locator('[data-model-field="max_reference_images"]').isDisabled(), true);
     await frame.locator('[data-model-tab="tool"]').click();
     assert.match(await frame.locator('[data-model-field="tool_prompt_instructions"]').inputValue(), /标签.*自然语言/);
-    assert.equal(await frame.locator('[data-tool-field="max_reference_images"]').getAttribute("max"), "1");
+    assert.equal(await frame.locator('[data-tool-field="max_reference_images"]').getAttribute("max"), "2");
     assert.equal(await frame.locator('[data-edit-tool-parameter="params_version"]').count(), 0);
     await frame.locator("#saveSettingsButton").click();
     await frame.locator("#appNoticeMessage").filter({ hasText: "设置已保存并生效" }).waitFor();
@@ -128,7 +153,7 @@ async function matrix(browser, width) {
     const savedProvider = settings.webui.providers.find(provider => provider.id === officialId);
     assert.equal(savedProvider.max_concurrent_generations, 1);
     assert.equal(savedProvider.models.length, 4);
-    assert.ok(savedProvider.models.every(model => model.capability_source === "builtin" && model.max_reference_images === 1));
+    assert.ok(savedProvider.models.every(model => model.capability_source === "builtin" && model.max_reference_images === (model.id.startsWith("nai-diffusion-5-") ? 2 : 8)));
     assert.equal(savedProvider.models.find(model => model.id === modelIds[2]).native_batch_size, 2);
     assert.deepEqual(discoveries, []);
 
@@ -200,12 +225,11 @@ async function matrix(browser, width) {
     assert.equal(await frame.locator("#referenceField").isVisible(), true);
     await frame.locator("#referenceUpload").setInputFiles([
       { name: "reference-one.png", mimeType: "image/png", buffer: referenceBytes },
-      { name: "reference-two.png", mimeType: "image/png", buffer: referenceBytes },
     ]);
-    await frame.locator(".reference-item").waitFor();
-    assert.equal(await frame.locator(".reference-item").count(), 1);
-    assert.equal(await frame.locator("#referenceUpload").isDisabled(), true);
-    assert.equal(uploads.length, 1, "only one image is uploaded");
+    await frame.locator(".novelai-reference-card").waitFor();
+    assert.equal(await frame.locator(".novelai-reference-card").count(), 1);
+    assert.equal(await frame.locator("#referenceUpload").isDisabled(), false, "a second slot remains available for an inpaint mask");
+    assert.equal(uploads.length, 1, "one base image uploaded");
     await frame.locator('[data-model-parameter="strength"]').fill("0.45");
     await frame.locator('[data-model-parameter="noise"]').fill("0.2");
     await frame.locator("#generateButton").click();

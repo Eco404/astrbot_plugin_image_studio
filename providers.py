@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
+import hashlib
 import json
 import re
 import time
+from collections import OrderedDict
 from typing import Any
 from urllib.parse import quote
 
@@ -21,10 +23,11 @@ from .models import (
 )
 from .novelai import (
     MAX_RESPONSE_BYTES,
-    build_generation_payload,
+    prepare_generation_payload,
     parse_generation_response,
     parse_subscription,
 )
+from .novelai_inpaint import composite_inpaint_results
 from .storage import detect_mime_type, image_data_url
 
 
@@ -97,6 +100,10 @@ class ProviderExecutor:
 
     def __init__(self, session: aiohttp.ClientSession) -> None:
         self.session = session
+        self._vibe_cache: OrderedDict[str, str] = OrderedDict()
+        self._vibe_locks: dict[str, asyncio.Lock] = {}
+        self._vibe_cache_bytes = 0
+        self._vibe_failures: OrderedDict[str, tuple[float, str]] = OrderedDict()
 
     async def fetch_quota(self, provider: ImageProvider) -> dict[str, Any]:
         """Read the saved NAI proxy account quota without generating an image."""
@@ -230,11 +237,16 @@ class ProviderExecutor:
         if request.mode == "img2img" and not provider.get_model(request.model).img2img:
             raise ProviderError("所选 NovelAI 模型尚未启用图生图")
         try:
-            payload, effective = await asyncio.to_thread(
-                build_generation_payload, request, request.model or provider.model
+            payload, effective, vibes = await asyncio.to_thread(
+                prepare_generation_payload, request, request.model or provider.model
             )
         except ValueError as exc:
             raise ProviderError(str(exc)) from exc
+        if vibes:
+            # Validate and prepare the whole request before incurring encoding fees.
+            payload["parameters"]["reference_image_multiple"] = [
+                await self._encode_vibe(provider, item) for item in vibes
+            ]
         endpoint = _join_url(
             provider.base_url, provider.generate_path or "/ai/generate-image"
         )
@@ -271,11 +283,108 @@ class ProviderExecutor:
             )
         except ValueError as exc:
             raise ProviderError(str(exc)) from exc
+        if payload["action"] == "infill":
+            composed = []
+            failures = list(failures)
+            for position, image in enumerate(images, 1):
+                try:
+                    result = await asyncio.to_thread(
+                        composite_inpaint_results, (image,), payload
+                    )
+                    composed.extend(result)
+                except ValueError as exc:
+                    composed.append(image)
+                    failures.append(
+                        (position, f"未完成蒙版合成，已保留上游原始返回：{exc}")
+                    )
+            images = tuple(composed)
         if failures:
-            raise ProviderPartialResponseError(images, failures)
+            raise ProviderPartialResponseError(images, tuple(failures))
         if not images:
             raise ProviderError("NovelAI 未返回可识别的图片")
         return images
+
+    async def _encode_vibe(
+        self, provider: ImageProvider, payload: dict[str, Any]
+    ) -> str:
+        """Cache paid encodings per account, endpoint, model, image and extract level."""
+        key = hashlib.sha256(
+            json.dumps(
+                [provider.base_url, provider.api_key.strip(), payload],
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        lock = self._vibe_locks.setdefault(key, asyncio.Lock())
+        try:
+            async with lock:
+                previous = self._vibe_failures.get(key)
+                if previous and previous[0] > time.monotonic():
+                    raise ProviderError(
+                        previous[1]
+                        + "；同一编码近期失败，60 秒内不重复请求，请稍后手动重试"
+                    )
+                if key in self._vibe_cache:
+                    self._vibe_cache.move_to_end(key)
+                    return self._vibe_cache[key]
+                try:
+                    async with self.session.post(
+                        _join_url(provider.base_url, "/ai/encode-vibe"),
+                        json=payload,
+                        headers={
+                            **_novelai_headers(provider),
+                            "Accept": "application/octet-stream",
+                        },
+                        proxy=provider.proxy or None,
+                        timeout=aiohttp.ClientTimeout(total=provider.timeout_seconds),
+                        allow_redirects=False,
+                    ) as response:
+                        if response.status not in {200, 201}:
+                            reason = await _novelai_generation_error(response, provider)
+                            raise ProviderError(
+                                f"Vibe 编码失败：{reason}；未发送生图请求"
+                            )
+                        raw = await _bounded_response_body(response, 16 * 1024 * 1024)
+                        if (
+                            not raw
+                            or "json"
+                            in response.headers.get("Content-Type", "").lower()
+                            or raw.lstrip().startswith((b"{", b"<"))
+                        ):
+                            raise ProviderError("Vibe 编码返回格式无效；未发送生图请求")
+                except (aiohttp.ClientError, TimeoutError) as exc:
+                    message = "Vibe 编码请求失败，可能已产生编码费用；不会自动重试，未发送生图请求"
+                    self._remember_vibe_failure(key, message)
+                    raise ProviderError(message) from exc
+                except ProviderError as exc:
+                    self._remember_vibe_failure(key, str(exc))
+                    raise
+                except asyncio.CancelledError:
+                    self._remember_vibe_failure(
+                        key, "Vibe 编码等待已取消，官方可能仍在处理，未发送生图请求"
+                    )
+                    raise
+                encoded = base64.b64encode(raw).decode("ascii")
+                while self._vibe_cache and (
+                    len(self._vibe_cache) >= 32
+                    or self._vibe_cache_bytes + len(encoded) > 64 * 1024 * 1024
+                ):
+                    _, evicted = self._vibe_cache.popitem(last=False)
+                    self._vibe_cache_bytes -= len(evicted)
+                self._vibe_cache[key] = encoded
+                self._vibe_failures.pop(key, None)
+                self._vibe_cache_bytes += len(encoded)
+                return encoded
+        finally:
+            # Keep a shared lock until its queued callers have also completed.
+            if not lock.locked() and not getattr(lock, "_waiters", None):
+                self._vibe_locks.pop(key, None)
+
+    def _remember_vibe_failure(self, key: str, message: str) -> None:
+        self._vibe_failures[key] = (time.monotonic() + 60, message)
+        self._vibe_failures.move_to_end(key)
+        while len(self._vibe_failures) > 32:
+            self._vibe_failures.popitem(last=False)
 
     async def _novelai_quota(self, provider: ImageProvider) -> dict[str, Any]:
         if not provider.enabled:

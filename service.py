@@ -187,6 +187,14 @@ class ImageGenerationService:
                     "或传入当前 Agent 工作区内的有效图片路径"
                 )
         normalized_refs = references[:reference_limit]
+        if (
+            provider.kind == "novelai_official"
+            and normalized_mode == "img2img"
+            and len(references) > reference_limit
+        ):
+            raise ValueError(
+                f"当前模型/工具最多允许 {reference_limit} 张参考图；请减少输入，避免底图、蒙版与角色参考编号错位"
+            )
         advanced_parameters = parameters
         if source == "command":
             normalized_count, advanced_parameters = _command_count(
@@ -276,6 +284,20 @@ class ImageGenerationService:
             warning = (
                 f"本次目标 {request.count} 张，上游实际返回 {len(images)} 张；"
                 "已保留全部返回图片，未自动追加请求。"
+            )
+        if (
+            provider.kind == "novelai_official"
+            and request.model == "nai-diffusion-5-curated"
+            and request.parameters.get("reference_mode") == "inpaint"
+        ):
+            warning = "；".join(
+                filter(
+                    None,
+                    [
+                        warning,
+                        "V5 精选版局部重绘按官网行为使用 V4.5 精选版重绘模型；实际模型已记录。",
+                    ],
+                )
             )
         elapsed_ms = round((time.perf_counter() - started) * 1000)
         generation_id = await self.store.record_success(
@@ -527,11 +549,21 @@ class ImageGenerationService:
         )
         imported = detail.get("source") in {"import", "external"}
         staged = (
-            await self.store.stage_generation_references(generation_id)
+            await self.store.stage_generation_references(
+                generation_id, strict=detail.get("provider_kind") == "novelai_official"
+            )
             if not imported
             else []
         )
         warnings = list(resolved["warnings"])
+        if (
+            detail.get("provider_kind") == "novelai_official"
+            and detail.get("mode") == "img2img"
+            and not staged
+        ):
+            warnings.append(
+                "参考图未保留或部分已不可用，未自动填入图片，避免底图、蒙版与角色参考顺序错位；请按逐图设置补齐。"
+            )
         if staged:
             warnings = [
                 text

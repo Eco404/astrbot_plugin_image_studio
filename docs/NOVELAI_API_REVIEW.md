@@ -6,15 +6,42 @@
 
 ## 当前实现状态
 
-- `novelai.py` / `providers.py`：Bearer 鉴权，JSON 优先、ZIP 兼容的完整原图接收，响应项错误与可读图片分别保留，单底图图生图，订阅查询。
+- `novelai.py` / `novelai_inputs.py` / `providers.py`：Bearer 鉴权，JSON 优先、ZIP 兼容的完整原图接收，单底图、逐图角色/风格参考、Vibe 编码、多角色、局部重绘及订阅查询。
 - `models.py` / `service.py`：四款内置模型的基础参数、按模式过滤参数、基础图生图默认开启且最多一张底图、同 Token 跨 Provider 共享串行限制。
 - `storage.py` / `parameter_exchange.py`：逐图实际参数写入已有补充字段；按记录策略过滤，详情与复现跟随所选图片；官方与第三方同属 NovelAI 来源但各自映射参数。
 - `image_metadata.py`：常规元数据与 alpha 隐写元数据合并，保留冲突来源；解析器 9，数据库仍为 v2。
 - WebUI：官方服务商配置和预设、按模式显示重绘参数、Anlas 与 V5 使用额度分开显示。
 
-当前 V5 默认 `params_version=4`，V4.5 默认 3，均保留手工 schema 扩展覆盖的校验入口；不默认注入 `use_new_shared_trial`。这两个决定仍需真实账号验证。没有开放流式预览、多角色、Vibe Transfer、角色参考或局部重绘。
+按 2026-09-14 当前官网公开代码，四款模型默认均使用 `params_version=4`，新建模型 23 步，V4.5 scale=5、V5 scale=7；已有用户配置不覆盖。不注入 `use_new_shared_trial`，也未集成试用验证码流程。流式预览、放大和 Director Tools 等独立工具不在本次范围内。
 
 参考源码快照：`caru-ini/novelai-sdk@72964b1`、`dafeiwu666/astrbot_plugin_ppnai@44c14c9`、`YayiMiko/astrbot_plugin_n5@3cc74dc`、`Aeka0/NAI-Utility-Tool@8f61bae` 及官方 `NovelAI/novelai-image-metadata@3428907`。采用协议事实独立实现，没有引入整套 SDK 或复制其高层工作流。
+
+## 核心能力补齐与当前官网差异
+
+核对 [官网公开应用脚本](https://novelai.net/_next/static/chunks/pages/_app-b7172cc1a6a0b340.js)，构建 `3102745-production`，以及 [Precise Reference](https://docs.novelai.net/en/image/precisereference)、[Vibe Transfer](https://docs.novelai.net/en/image/vibetransfer)、[Inpaint](https://docs.novelai.net/en/image/inpaint)、[Multiple Characters](https://docs.novelai.net/en/image/multiplecharacters)。以官网当前请求构造与公开 API 为主要依据，客户端库仅交叉核对。
+
+| 能力 | V4.5 Full / Curated | V5 Full | V5 Curated |
+| --- | --- | --- | --- |
+| 普通文生图 / 图生图 | 支持 | 支持 | 支持 |
+| Precise 的 character/style/character&style | 支持 | 不支持 | 不支持 |
+| Vibe Transfer | 支持 | 不支持 | 不支持 |
+| Inpaint | 各自 `-inpainting` | `nai-diffusion-5-full-inpainting` | 官网映射到 `nai-diffusion-4-5-curated-inpainting` |
+| 多角色数量 / 位置 | 6 / 5×5 格点 | 32 / 自由坐标 | 32 / 自由坐标；重绘使用 6 / 格点 |
+| Alpha 透明 | 无 | 支持 | 支持，重绘除外 |
+| Variety Boost | 支持，阈值随尺寸缩放 | 无 | 无 |
+| Noise Schedule | Karras / Exponential / Polyexponential，取决于采样器 | Karras | Karras |
+
+文档仍写 V5 最多 22 个角色，当前官网能力表为 32；本实现跟随当前代码。V5 Curated 的 API 枚举虽出现原生 Inpaint ID，官网实际映射回 V4.5；插件跟随该映射并在生成前提示、结果警告和实际参数中标出目标模型，不宣称原生 V5 Curated Inpaint 已验证。
+
+`novelai_catalog.py` 提供模型能力和新增 schema，后端经 `novelai_models` 将统一预设交给 WebUI。仍使用插件的 text2img/img2img 两个工作区；img2img 内由 `reference_mode` 选择用途，`reference_settings` 数组按输入顺序标出 base/mask/character/style/character_style/vibe 及数值。普通底图只允许一张，蒙版只允许一张；支持底图+精准、底图+Vibe、底图+蒙版+精准，拒绝精准+Vibe与蒙版+Vibe。角色参考不等于多角色提示词。
+
+精准图片按最接近的官方大画幅保持比例、居中黑色填边，保存无损 PNG；Fidelity 映射为 `secondary_strength=1-fidelity`。Vibe 在生成前通过 `/ai/encode-vibe` 取得二进制编码，将其 Base64 放入 `reference_image_multiple`；归一化在客户端执行。运行期缓存按账号、地址、模型、图像内容、提取量隔离，并用并发锁避免成功编码重复计费，最大 32 项/64 MiB。缓存不落盘，重启或淘汰后重新编码；本插件图片输入总上限 8 张（V5 为 2），低于官网 Vibe 的 16 张上限。
+
+局部重绘使用 `action=infill` 与重绘模型；蒙版按亮度解释，透明铺黑、缩到目标尺寸的1/8并阈值化后恢复全幅。图生图强度经嵌套 `img2img` 传入。`novelai_inpaint.py` 在收到图片后合成原始底图未遮罩区域，保留元数据和透明像素；个别返回尺寸异常时保留上游结果并明确报告合成失败。
+
+生成参数在付费编码前统一校验：已知采样器和调度组合、最多50步、scale≤10、像素数≤3145728；原生批次按面积限制8/6/4张。预设及实际角色位置、参考设置、实际模型/动作随历史保存，图片和蒙版仅通过已有资产关系持有，schema 禁止记录的字段仍不写入。复制官网参数时剥离内嵌图片/编码，并提示需要补充参考图；历史参考缺失时不重排剩余图片造成角色错位。
+
+离线协议、存储复现和浏览器测试可以验证代码路径，不能代替真实生成效果。本轮没有继续消耗该免费账户的请求；角色一致性、Vibe效果、Inpaint视觉结果与费用仍需要有权使用接口的账户验证。
 
 ## 真实联调验收
 
@@ -152,7 +179,7 @@ Primary Swagger 前言建议第三方通常不要使用 Primary API 的 `/ai/` �
 
 官方模型页已经介绍 V5 Full/Curated、V4.5 Full/Curated 等模型，但 ImageGenerationRequest 中的 `model` 只是字符串，没有提供完整 API ID 枚举。`/oa/v1/models` 声明返回的是 OpenAI 兼容接口的文本模型结构，不能据此自动填充图片模型列表。首批官方模型 ID 需要结合已知参考实现与一次实际请求验证。
 
-官方用户文档明确支持 Image2Image，API 参数也列出 `image`、`strength`、`noise`、`extra_noise_seed`、`mask`、`img2img`、角色参考与 Vibe Transfer 数组。当前可确认的普通参考图能力是：V4.5 Full、V4.5 Curated、V5 Full、V5 Curated 均支持单张底图 Image2Image；插件因此在创建这四个内置模型时默认开启图生图并将参考图上限预填为 1。Vibe Transfer 和角色参考使用独立的 API 参数与预处理流程，不能等同于普通参考图，当前未接入。action 值、编码细节、数组配对和兼容组合没有全部在 schema 中解释。NAI2API 当前只发文生图，不能作为这些功能的完整范例。
+官方用户文档明确支持 Image2Image，API 参数也列出 `image`、`strength`、`noise`、`extra_noise_seed`、`mask`、`img2img`、角色参考与 Vibe Transfer 数组。四个内置模型均支持单张底图 Image2Image；角色/风格、Vibe 与局部重绘作为独立图片用途接入，按本文能力表及实际模型校验。action、编码和兼容组合并未全部在 Swagger 中说明，需结合当前官网公开代码核对；NAI2API 只发文生图，不能作为这些功能的完整范例。
 
 NAI2API 写死的 `params_version=3`、`uncond_scale`、`cfg_sched_eligibility`、`use_new_shared_trial` 等应分别核验：字段存在不代表固定值正确，未出现在当前 schema 的字段也不能擅自认定必填。特别是启用试用或免费额度的开关，不应在没有确认语义的情况下默默注入。
 

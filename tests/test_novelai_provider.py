@@ -130,7 +130,7 @@ def test_builds_v45_and_v5_nested_prompts_without_proxy_fields(model):
         == params["v4_negative_prompt"]["caption"]["base_caption"]
         == "blur"
     )
-    assert params["params_version"] == (3 if "4-5" in model else 4)
+    assert params["params_version"] == 4
     assert params["seed"] == effective["seed"] == 42
     assert params["width"] == params["height"] == 1024
     assert params["n_samples"] == effective["count"] == 1
@@ -203,7 +203,7 @@ def test_img2img_resizes_base_image_without_data_url_or_snapshot_binary():
 
 @pytest.mark.parametrize("refs", [(), (1, 2)])
 def test_img2img_requires_exactly_one_base_image(refs):
-    with pytest.raises(ValueError, match="一张底图"):
+    with pytest.raises(ValueError, match="一张底图|一张参考图"):
         novelai.build_generation_payload(
             request(mode="img2img", references=refs), "nai-diffusion-5-full"
         )

@@ -50,7 +50,12 @@ from .gallery_preferences import (
     encode_gallery_preferences,
     merge_gallery_preferences,
 )
-from .models import ImageProvider, InvocationSource, ReferenceImage
+from .models import (
+    ImageProvider,
+    InvocationSource,
+    ReferenceImage,
+    novelai_model_presets,
+)
 from .image_metadata import parse_metadata_fields
 from .parameter_exchange import export_parameters, resolve_parameters
 from .providers import ProviderError, ProviderExecutor
@@ -555,6 +560,7 @@ class ImageStudioPlugin(Star):
                     for model in provider.models
                 ],
                 "modes": ["text2img", "img2img"],
+                "novelai_models": novelai_model_presets(),
             }
         )
 
@@ -567,6 +573,7 @@ class ImageStudioPlugin(Star):
                 },
                 "studio": studio,
                 "webui": studio,
+                "novelai_models": novelai_model_presets(),
                 "validation_errors": errors,
             }
         )
@@ -2076,6 +2083,11 @@ class ImageStudioPlugin(Star):
                         ),
                     },
                     "parameters": exposed_parameters,
+                    **(
+                        {"novelai_capabilities": model.novelai_capabilities}
+                        if model.novelai_capabilities
+                        else {}
+                    ),
                 }
                 if default_for_modes:
                     entry["default_for_modes"] = default_for_modes

@@ -11,7 +11,374 @@ from typing import Any
 from .config import RuntimeSettings
 from .image_metadata import parse_parameter_text
 from .models import MODEL_SCHEDULING_KEYS, parameter_flag
+from .novelai_catalog import model_capabilities
 from .storage import project_import_metadata
+
+_NOVELAI_IMAGE_FIELDS = frozenset(
+    {
+        "image",
+        "mask",
+        "reference_image",
+        "reference_image_multiple",
+        "director_reference_images",
+        "reference_vibe_multiple",
+        "controlnet_condition",
+        "imageBase64",
+        "image_base64",
+        "encoded_image",
+    }
+)
+
+
+def _without_image_payloads(value: Any, removed: list[str], path: str = "") -> Any:
+    """Copied settings must never turn embedded image bytes into draft parameters."""
+
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            item_path = f"{path}.{key}" if path else key
+            if key in _NOVELAI_IMAGE_FIELDS:
+                if item:
+                    removed.append(item_path)
+                continue
+            result[key] = _without_image_payloads(item, removed, item_path)
+        return result
+    if isinstance(value, list):
+        return [
+            _without_image_payloads(item, removed, f"{path}[{index}]")
+            for index, item in enumerate(value)
+        ]
+    if isinstance(value, str) and value.lstrip().lower().startswith("data:image/"):
+        removed.append(path)
+        return "[图片数据未导入，请重新选择原始参考图]"
+    return value
+
+
+def _novelai_metadata_parameters(metadata: dict[str, Any]) -> dict[str, Any]:
+    raw = metadata.get("raw") or {}
+    if not isinstance(raw, dict):
+        return {}
+    value = raw.get("Comment", raw.get("comment"))
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (ValueError, RecursionError):
+            return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _novelai_reference_mode(parameters: dict[str, Any], model: str = "") -> str:
+    action = str(parameters.get("action") or "").lower()
+    if (
+        action in {"infill", "inpaint", "inpainting"}
+        or model.endswith("-inpainting")
+        or parameters.get("mask")
+    ):
+        return "inpaint"
+    if any(
+        value
+        for key, value in parameters.items()
+        if key.startswith("director_reference_")
+    ):
+        return "precise"
+    if any(
+        parameters.get(key)
+        for key in (
+            "reference_image",
+            "reference_image_multiple",
+            "reference_vibe_multiple",
+            "reference_strength_multiple",
+            "reference_information_extracted_multiple",
+        )
+    ):
+        return "vibe"
+    return str(parameters.get("reference_mode") or "")
+
+
+def _novelai_characters(
+    parameters: dict[str, Any], normalized: dict[str, Any], warnings: list[str]
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Pair captions by their original index; refuse ambiguous coordinate groups."""
+
+    captions = {}
+    for field, name in (
+        ("v4_prompt", "prompt"),
+        ("v4_negative_prompt", "negative_prompt"),
+    ):
+        value = parameters.get(field)
+        if isinstance(value, dict) and isinstance(value.get("caption"), dict):
+            captions[name] = value["caption"].get("char_captions", [])
+    if not captions and isinstance(normalized.get("characters"), dict):
+        captions = normalized["characters"]
+    positive, negative = captions.get("prompt", []), captions.get("negative_prompt", [])
+    if not positive and not negative:
+        return {}, {}
+    invalid = (
+        not isinstance(positive, list)
+        or not isinstance(negative, list)
+        or len(negative) > len(positive)
+    )
+    characters = []
+    if not invalid:
+        for index, caption in enumerate(positive):
+            unwanted = negative[index] if index < len(negative) else {}
+            if not isinstance(caption, dict) or not isinstance(unwanted, dict):
+                invalid = True
+                break
+            centers = caption.get("centers") or []
+            negative_centers = unwanted.get("centers") or []
+            if (
+                not isinstance(centers, list)
+                or len(centers) > 1
+                or not isinstance(negative_centers, list)
+                or len(negative_centers) > 1
+                or (centers and negative_centers and centers != negative_centers)
+            ):
+                invalid = True
+                break
+            center = (centers or negative_centers or [{"x": 0.5, "y": 0.5}])[0]
+            prompt, negative_prompt = (
+                caption.get("char_caption", ""),
+                unwanted.get("char_caption", ""),
+            )
+            if (
+                not isinstance(center, dict)
+                or not isinstance(prompt, str)
+                or not isinstance(negative_prompt, str)
+                or any(
+                    not isinstance(center.get(axis, 0.5), (int, float))
+                    or isinstance(center.get(axis), bool)
+                    or not 0 <= center.get(axis, 0.5) <= 1
+                    for axis in ("x", "y")
+                )
+            ):
+                invalid = True
+                break
+            characters.append(
+                {
+                    "prompt": prompt,
+                    "negative_prompt": negative_prompt,
+                    "x": center.get("x", 0.5),
+                    "y": center.get("y", 0.5),
+                }
+            )
+    if invalid:
+        warnings.append(
+            "NovelAI 多角色的正反向编号或位置不对应，无法安全配对；已保留原始角色结构，未自动回填。"
+        )
+        return {}, {"characters": captions}
+    result: dict[str, Any] = {"characters": characters}
+    prompt = parameters.get("v4_prompt")
+    if isinstance(prompt, dict) and "use_coords" in prompt:
+        result["use_coords"] = prompt["use_coords"]
+    return result, {}
+
+
+def _novelai_reference_settings(
+    parameters: dict[str, Any], reference_mode: str, warnings: list[str]
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    prefix: list[dict[str, Any]] = []
+    if reference_mode == "inpaint":
+        prefix = [{"type": "base"}, {"type": "mask"}]
+        if not any(
+            value
+            for key, value in parameters.items()
+            if key.startswith("director_reference_")
+        ):
+            return prefix, {}
+        reference_mode = "precise"
+    elif (
+        parameters.get("image")
+        or parameters.get("action") == "img2img"
+        or parameters.get("request_type") == "ImageGenerateRequest"
+    ):
+        prefix = [{"type": "base"}]
+    if reference_mode not in {"precise", "vibe"}:
+        return [], {}
+    if reference_mode == "precise":
+        keys = {
+            "type": "director_reference_descriptions",
+            "strength": "director_reference_strength_values",
+            "fidelity": "director_reference_secondary_strength_values",
+            "information_extracted": "director_reference_information_extracted",
+        }
+        image_keys = ("director_reference_images",)
+    else:
+        keys = {
+            "strength": "reference_strength_multiple",
+            "information_extracted": "reference_information_extracted_multiple",
+        }
+        image_keys = ("reference_image_multiple", "reference_vibe_multiple")
+    arrays = {
+        name: parameters[key] for name, key in keys.items() if parameters.get(key)
+    }
+    image_lengths = [
+        len(parameters[key])
+        for key in image_keys
+        if isinstance(parameters.get(key), list) and parameters[key]
+    ]
+    lengths = image_lengths + [
+        len(value) for value in arrays.values() if isinstance(value, list)
+    ]
+    if not lengths and reference_mode == "vibe" and parameters.get("reference_image"):
+        return prefix + [
+            {
+                "type": "vibe",
+                "strength": parameters.get("reference_strength", 0.6),
+                "information_extracted": parameters.get(
+                    "reference_information_extracted", 1.0
+                ),
+            }
+        ], {}
+    if (
+        not lengths
+        or any(not isinstance(value, list) for value in arrays.values())
+        or len(set(lengths)) != 1
+    ):
+        warnings.append(
+            "NovelAI 参考图数量与逐图设置不一致，无法保证编号对应；未回填逐图设置，请按原始顺序重新选择并配置参考图。"
+        )
+        return [], {key: parameters[key] for key in keys.values() if key in parameters}
+    settings = []
+    for index in range(lengths[0]):
+        item: dict[str, Any] = {
+            "type": "vibe" if reference_mode == "vibe" else "character"
+        }
+        for name, values in arrays.items():
+            value = values[index]
+            if name == "type":
+                caption = value.get("caption", {}) if isinstance(value, dict) else {}
+                if not isinstance(caption, dict):
+                    caption = {}
+                value = {
+                    "character": "character",
+                    "style": "style",
+                    "character&style": "character_style",
+                }.get(caption.get("base_caption"))
+                if value is None:
+                    warnings.append(
+                        f"NovelAI 第 {index + 1} 张精准参考的类型无法识别，未回填逐图设置。"
+                    )
+                    return [], {
+                        key: parameters[key]
+                        for key in keys.values()
+                        if key in parameters
+                    }
+            else:
+                if (
+                    not isinstance(value, (int, float))
+                    or isinstance(value, bool)
+                    or not 0 <= value <= 1
+                ):
+                    warnings.append(
+                        f"NovelAI 第 {index + 1} 张参考图的 {keys[name]} 不是 0–1 的有效数值，未回填逐图设置。"
+                    )
+                    return [], {
+                        key: parameters[key]
+                        for key in keys.values()
+                        if key in parameters
+                    }
+                if name == "fidelity":
+                    value = round(1.0 - value, 10)
+            item[name] = value
+        settings.append(item)
+    return prefix + settings, {}
+
+
+def _novelai_projection(
+    wire: dict[str, Any], normalized: dict[str, Any], warnings: list[str]
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    excluded = {
+        "prompt",
+        "uc",
+        "negative_prompt",
+        "model",
+        "model_name",
+        "action",
+        "request_type",
+        "width",
+        "height",
+        "v4_prompt",
+        "v4_negative_prompt",
+        *(_NOVELAI_IMAGE_FIELDS),
+        "director_reference_descriptions",
+        "director_reference_strength_values",
+        "director_reference_secondary_strength_values",
+        "director_reference_information_extracted",
+    }
+    result = {
+        key: value
+        for key, value in wire.items()
+        if key not in excluded
+        and key
+        not in {
+            "reference_strength_multiple",
+            "reference_information_extracted_multiple",
+            "reference_strength",
+            "reference_information_extracted",
+        }
+    }
+    if "n_samples" in result:
+        result["count"] = result.pop("n_samples")
+    if "skip_cfg_above_sigma" in result:
+        threshold = result["skip_cfg_above_sigma"]
+        expected_threshold = 58.0
+        width, height = wire.get("width"), wire.get("height")
+        if (
+            isinstance(width, (int, float))
+            and isinstance(height, (int, float))
+            and min(width, height) >= 64
+        ):
+            expected_threshold *= math.sqrt(
+                ((width // 8) * (height // 8)) / (104 * 152)
+            )
+        matches_boost = (
+            isinstance(threshold, (int, float))
+            and not isinstance(threshold, bool)
+            and math.isclose(threshold, expected_threshold, rel_tol=1e-7, abs_tol=1e-7)
+        )
+        if threshold is None or matches_boost:
+            result.setdefault("variety_boost", matches_boost)
+            result.pop("skip_cfg_above_sigma")
+        else:
+            warnings.append(
+                "skip_cfg_above_sigma 不符合官方 Variety Boost 基准阈值 58 按尺寸缩放的结果，已保留原值但未启用该开关。"
+            )
+    character_values, unmapped = _novelai_characters(wire, normalized, warnings)
+    result.update(character_values)
+    reference_mode = _novelai_reference_mode(
+        wire, str(wire.get("model", wire.get("model_name", "")))
+    )
+    if reference_mode:
+        result["reference_mode"] = reference_mode
+        reference_settings, unrecognized = _novelai_reference_settings(
+            wire, reference_mode, warnings
+        )
+        if reference_settings:
+            result.setdefault("reference_settings", reference_settings)
+        unmapped.update(unrecognized)
+    has_vibe = any(
+        wire.get(key)
+        for key in (
+            "reference_image",
+            "reference_image_multiple",
+            "reference_vibe_multiple",
+            "reference_strength_multiple",
+        )
+    )
+    if reference_mode in {"precise", "inpaint"} and has_vibe:
+        warnings.append(
+            "原始请求混用了 Vibe 与精准参考或局部重绘，当前官方接口组合不受支持；未回填参考设置，不能直接复现。"
+        )
+        result.pop("reference_settings", None)
+        unmapped["reference_combination"] = {
+            "reference_mode": reference_mode,
+            "reference_strength_multiple": wire.get("reference_strength_multiple", []),
+            "director_reference_descriptions": wire.get(
+                "director_reference_descriptions", []
+            ),
+        }
+    return result, unmapped
 
 
 def request_snapshot(detail: dict[str, Any]) -> dict[str, Any]:
@@ -257,6 +624,29 @@ def resolve_parameters(
         source.get("parameters", {}), dict
     ):
         raise ValueError("请求及 parameters 必须是对象")
+    metadata = (
+        envelope.get("metadata", {})
+        if isinstance(envelope, dict) and not exact_snapshot
+        else parsed
+    )
+    wire = (
+        _novelai_metadata_parameters(metadata)
+        if source_format in {"novelai", "nai"} and not exact_snapshot
+        else {}
+    )
+    reference_mode = (
+        _novelai_reference_mode(
+            {**wire, **(source.get("parameters") or {})},
+            str(source.get("model") or normalized.get("model") or ""),
+        )
+        if source_format in {"novelai", "nai"}
+        else ""
+    )
+    removed_images: list[str] = []
+    if source_format in {"novelai", "nai"}:
+        source = _without_image_payloads(source, removed_images)
+        normalized = _without_image_payloads(normalized, removed_images)
+        _without_image_payloads(wire, removed_images)
     mode_aliases = {
         "text2img": "text2img",
         "txt2img": "text2img",
@@ -265,6 +655,9 @@ def resolve_parameters(
         "img2img": "img2img",
         "image2image": "img2img",
         "i2i": "img2img",
+        "infill": "img2img",
+        "inpaint": "img2img",
+        "inpainting": "img2img",
     }
     explicit_mode = next(
         (
@@ -273,16 +666,22 @@ def resolve_parameters(
                 source.get("mode"),
                 normalized.get("mode"),
                 source.get("action"),
+                wire.get("action"),
             )
             if str(value).strip().lower() in mode_aliases
         ),
         "",
     )
+    if reference_mode in {"precise", "vibe", "inpaint"}:
+        explicit_mode = "img2img"
     mode = explicit_mode or "text2img"
     requested_model = str(source.get("model") or normalized.get("model") or "")
     requested_ref = str(source.get("model_ref") or "")
     if not requested_ref and source.get("provider_id") and requested_model:
         requested_ref = f"{source['provider_id']}:{requested_model}"
+    if source_format in {"novelai", "nai"} and requested_model.endswith("-inpainting"):
+        requested_model = requested_model.removesuffix("-inpainting")
+        requested_ref = requested_ref.removesuffix("-inpainting")
     candidates = [
         {
             **model.public_dict(),
@@ -339,6 +738,10 @@ def resolve_parameters(
             selected = matches[0]
             selection_reason = "source_unique"
     warnings = list(parsed.get("warnings") or [])
+    if removed_images:
+        warnings.append(
+            "参数内嵌的参考图、蒙版或编码数据不会导入草稿，请重新选择原始图片；逐图设置按原始输入顺序保留。"
+        )
     if source_format == "comfyui":
         warnings.append(
             "ComfyUI 文本候选仅供静态检查和人工采用，不会将全部候选自动加入提示词。"
@@ -363,7 +766,17 @@ def resolve_parameters(
     if selection_reason == "source_unique":
         warnings.append("参数未指定型号，已选择当前来源唯一可用的模型，请核对。")
     if mode == "img2img":
-        warnings.append("参数文本不包含原始参考图，请补充参考图后生成。")
+        if reference_mode == "inpaint":
+            warnings.append(
+                "局部重绘需要重新选择原始底图和蒙版，顺序为第 1 张底图、第 2 张蒙版；生成结果图不能替代原始底图。"
+            )
+        elif reference_mode in {"precise", "vibe"}:
+            label = "精准参考" if reference_mode == "precise" else "Vibe Transfer"
+            warnings.append(
+                f"{label} 需要原始参考图；请按原始编号顺序补充图片，以对应逐图强度等设置。"
+            )
+        else:
+            warnings.append("参数文本不包含原始参考图，请补充参考图后生成。")
     draft = {
         "mode": mode,
         "model": requested_model,
@@ -434,6 +847,76 @@ def resolve_parameters(
     if not for_reproduction:
         _apply_preset_values(values, descriptors)
     supplied = copy.deepcopy(source.get("parameters") or {})
+    novelai_unmapped: dict[str, Any] = {}
+    if is_official and source_format in {"nai", "novelai"} and not exact_snapshot:
+        projected, novelai_unmapped = _novelai_projection(wire, normalized, warnings)
+        supplied = {**projected, **supplied}
+        if reference_mode:
+            supplied.setdefault("reference_mode", reference_mode)
+    if is_official:
+        supplied = _without_image_payloads(supplied, removed_images)
+        capabilities = model_capabilities(selected["id"])
+        selected_reference_mode = supplied.get("reference_mode")
+        if selected_reference_mode and selected_reference_mode not in capabilities.get(
+            "reference_modes", []
+        ):
+            novelai_unmapped["reference_mode"] = supplied.pop("reference_mode")
+            if "reference_settings" in supplied:
+                novelai_unmapped["reference_settings"] = supplied.pop(
+                    "reference_settings"
+                )
+            warnings.append(
+                f"所选模型 {selected['id']} 不支持 {selected_reference_mode} 参考模式，未回填该模式及逐图设置，不能直接复现。"
+            )
+        max_characters = capabilities.get(
+            "inpainting_max_characters"
+            if selected_reference_mode == "inpaint"
+            else "max_characters",
+            0,
+        )
+        if (
+            isinstance(supplied.get("characters"), list)
+            and len(supplied["characters"]) > max_characters
+        ):
+            novelai_unmapped["characters"] = supplied.pop("characters")
+            warnings.append(
+                f"角色数量超过所选模型在当前模式支持的 {max_characters} 个，未回填角色；请手动调整。"
+            )
+        for key, capability in (
+            ("straight_alpha", "transparency"),
+            ("tag_hint_transparent_background", "transparency"),
+            ("variety_boost", "variety_boost"),
+        ):
+            if supplied.get(key) and not capabilities.get(capability):
+                novelai_unmapped[key] = supplied.pop(key)
+                warnings.append(
+                    f"所选模型 {selected['id']} 不支持 {key}，已保留原值但未回填。"
+                )
+        reference_settings = supplied.get("reference_settings")
+        if isinstance(reference_settings, list) and len(
+            reference_settings
+        ) > selected.get("max_reference_images", 1):
+            novelai_unmapped["reference_settings"] = supplied.pop("reference_settings")
+            warnings.append(
+                f"原始参考图数量超过所选模型在插件中的 {selected.get('max_reference_images', 1)} 张上限，未截断或重排，请手动选择。"
+            )
+        elif isinstance(reference_settings, list) and any(
+            isinstance(item, dict)
+            and (
+                (
+                    item.get("type") in {"character", "style", "character_style"}
+                    and not capabilities.get("precise_reference")
+                )
+                or (
+                    item.get("type") == "vibe" and not capabilities.get("vibe_transfer")
+                )
+            )
+            for item in reference_settings
+        ):
+            novelai_unmapped["reference_settings"] = supplied.pop("reference_settings")
+            warnings.append(
+                f"逐图设置包含所选模型 {selected['id']} 不支持的参考类型，未回填整组参考设置，不能直接复现。"
+            )
     if source.get("tag") is not None:
         supplied.update(
             {
@@ -514,7 +997,7 @@ def resolve_parameters(
         supplied["negative_prompt"] = source["negative_prompt"]
     elif not exact_snapshot and draft["negative_prompt"]:
         supplied["negative_prompt"] = draft["negative_prompt"]
-    unmapped: dict[str, Any] = {}
+    unmapped: dict[str, Any] = novelai_unmapped
     accepted: dict[str, Any] = {}
     for key, value in supplied.items():
         if key in MODEL_SCHEDULING_KEYS:
@@ -632,7 +1115,9 @@ def resolve_parameters(
         "characters",
         "character_prompts",
     ):
-        if normalized.get(key):
+        if normalized.get(key) and not (
+            is_official and key == "characters" and "characters" in supplied
+        ):
             unmapped.setdefault(key, normalized[key])
     if source_format in {"comfyui", "a1111"}:
         warnings.append(
@@ -656,7 +1141,9 @@ def resolve_parameters(
         "requires_model_selection": False,
         "selection_reason": selection_reason,
         "warnings": list(dict.fromkeys(warnings)),
-        "unmapped": unmapped,
+        "unmapped": _without_image_payloads(unmapped, removed_images)
+        if is_official or source_format in {"novelai", "nai"}
+        else unmapped,
     }
 
 

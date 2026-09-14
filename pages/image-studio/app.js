@@ -18,6 +18,7 @@
   let settingsNavigationPending = false;
   let storageRetention = null;
   let referencesUploading = false;
+  let novelaiModels = [];
   let eventsBound = false;
   const providerQuotas = new Map();
   const PROVIDER_QUOTA_TTL = 30_000;
@@ -331,6 +332,7 @@
   }
 
   function collectModelParameters() {
+    novelaiControls.collect();
     const values = {};
     effectiveModelParameters(selectedModel()).forEach(([name, descriptor]) => {
       if (descriptor.webui_visible === false && Object.prototype.hasOwnProperty.call(state.parameterValues, name)) values[name] = state.parameterValues[name];
@@ -349,9 +351,11 @@
 
   function renderModelParameter(name, descriptor) {
     const type = String(descriptor.type || "text").toLowerCase();
-    const label = escape(name);
+    const label = escape(selectedModel()?.provider_kind === "novelai_official" ? descriptor.label || name : name);
     const description = escape(descriptor.description || descriptor.label || name);
     let value = Object.prototype.hasOwnProperty.call(state.parameterValues, name) ? state.parameterValues[name] : descriptor.default ?? "";
+    const specialized = novelaiControls.parameter(name, descriptor, value);
+    if (specialized !== null) return specialized;
     const requestKey = escape(descriptor.request_key || name);
     if (type === "preset" && Array.isArray(descriptor.choices)) {
       const options = descriptor.choices.map((choice) => `<option value="${escape(choice.value)}" ${String(choice.value) === String(value) ? "selected" : ""}>${escape(choice.label || choice.value)}</option>`).join("");
@@ -420,6 +424,7 @@
       input.addEventListener("input", update); input.addEventListener("change", update);
     });
     effectiveModelParameters(model).forEach(([, descriptor]) => { if (descriptor.target) syncParameterPresets(descriptor.target); });
+    novelaiControls.bindParameters();
     renderGenerationForm();
   }
 
@@ -492,12 +497,14 @@
     $("referenceChooseButton").disabled = disabled;
     $("referenceChooseButton").setAttribute("aria-busy", String(referencesUploading));
     els.referenceUpload.disabled = disabled;
+    if (novelaiControls.renderReferences(els.referenceStrip, index => { state.references.splice(index, 1); renderReferences(); })) return;
     els.referenceStrip.innerHTML = state.references.map((item, index) => `<div class="reference-item"><img src="${item.preview_data_url}" alt="参考图 ${index + 1}" /><button type="button" data-reference-index="${index}" aria-label="移除参考图"><span aria-hidden="true">×</span></button></div>`).join("");
     els.referenceStrip.querySelectorAll("[data-reference-index]").forEach((button) => button.addEventListener("click", () => { state.references.splice(Number(button.dataset.referenceIndex), 1); renderReferences(); }));
   }
 
   async function bootstrap() {
     const payload = await apiGet("studio/bootstrap");
+    if (Array.isArray(payload.novelai_models)) novelaiModels = payload.novelai_models;
     providerQuotas.clear();
     state.providers = Array.isArray(payload.providers) ? payload.providers : [];
     state.models = Array.isArray(payload.models) ? payload.models : [];
@@ -545,6 +552,8 @@
     const provider = selectedProvider();
     if (!model || !provider) { setError(els.generationError, "请先选择支持当前模式的模型"); return; }
     if (state.mode === "img2img" && !state.references.length) { setError(els.generationError, "图生图需要至少一张参考图"); return; }
+    const novelaiError = novelaiControls.validate();
+    if (novelaiError) { setError(els.generationError, novelaiError); return; }
     const schema = model.parameters || {};
     const mappedParameters = Object.fromEntries(Object.entries(collectModelParameters()).map(([name, value]) => [schema[name]?.request_key || name, value]));
     for (const [name, descriptor] of effectiveModelParameters(model)) {
@@ -562,7 +571,9 @@
     els.generateButton.disabled = true; els.generateButton.textContent = "生成中";
     try {
       const result = await apiPost("studio/generate", { mode: state.mode, provider_id: provider.id, model_ref: model.model_ref, prompt: els.prompt.value, negative_prompt: els.negativePrompt.value, model: model.id, size, count: Number(count), parameters: { ...parameters, ...mappedParameters }, reference_ids: state.references.map((item) => item.id) });
-      state.resultImages = result.images || []; state.references = []; renderReferences();
+      state.resultImages = result.images || []; state.references = [];
+      for (const [name, descriptor] of effectiveModelParameters(model)) if ((descriptor.request_key || name) === "reference_settings") state.parameterValues[name] = [];
+      renderReferences();
       els.resultEmpty.classList.toggle("is-hidden", state.resultImages.length > 0); els.resultGrid.innerHTML = state.resultImages.map((image, index) => `<div class="result-card"><div class="result-frame"><img class="result-image-backdrop" src="${image.data_url}" alt="" aria-hidden="true" /><img class="result-image" src="${image.data_url}" alt="生成结果" data-result-preview="${index}" /></div><div class="result-card-actions"><button class="quiet-button" data-result-reference="${index}" type="button">用作参考图</button></div></div>`).join("");
       els.resultGrid.querySelectorAll("[data-result-reference]").forEach((button) => button.addEventListener("click", () => void useDataUrlAsReference(state.resultImages[Number(button.dataset.resultReference)].data_url, "generated-reference.png")));
       els.resultGrid.querySelectorAll("[data-result-preview]").forEach((image) => image.addEventListener("click", () => { const index = Number(image.dataset.resultPreview); openImagePreview(image.src, `生成结果-${index + 1}`, state.resultImages[index]?.download_filename, state.resultImages, index); }));
@@ -2404,6 +2415,7 @@
         normalizeSettingsModelDefaults(payload);
         savedSettingsPayload = structuredClone(payload);
         state.settings = payload;
+        if (Array.isArray(payload.novelai_models)) novelaiModels = payload.novelai_models;
         els.settingTool.checked = !!payload.base.enable_llm_tool;
         const llmPolicy = payload.webui.llm_policy || {}; const assetPolicy = payload.webui.asset_policy || {}; els.agentImageReturnMode.value = ["asset", "preview", "original"].includes(llmPolicy.image_return_mode) ? llmPolicy.image_return_mode : "preview"; els.agentPreviewMaxEdge.value = Number(assetPolicy.preview_max_edge || 768); els.agentPreviewQuality.value = Number(assetPolicy.preview_quality || 80); syncAgentImageSettings();
         const history = payload.webui.history; els.historyEnabled.checked = !!history.enabled; els.retainReferences.checked = !!history.retain_reference_images; els.recordInvocationIdentity.checked = !!history.record_invocation_identity; els.historyRecords.value = history.max_records; els.historyMegabytes.value = history.max_megabytes;
@@ -2439,12 +2451,12 @@
     { id: "nai-diffusion-5-full", name: "NAI V5 完整版" },
   ];
   const NOVELAI_OFFICIAL_MODELS = [
-    { id: "nai-diffusion-4-5-full", name: "NovelAI V4.5 完整版", supports_text2img: true, supports_img2img: true, supports_negative_prompt: true, max_reference_images: 1, capability_source: "builtin" },
-    { id: "nai-diffusion-4-5-curated", name: "NovelAI V4.5 精选版", supports_text2img: true, supports_img2img: true, supports_negative_prompt: true, max_reference_images: 1, capability_source: "builtin" },
-    { id: "nai-diffusion-5-full", name: "NovelAI V5 完整版", supports_text2img: true, supports_img2img: true, supports_negative_prompt: true, max_reference_images: 1, capability_source: "builtin" },
-    { id: "nai-diffusion-5-curated", name: "NovelAI V5 精选版", supports_text2img: true, supports_img2img: true, supports_negative_prompt: true, max_reference_images: 1, capability_source: "builtin" },
+    { id: "nai-diffusion-4-5-full", name: "NovelAI V4.5 完整版", supports_text2img: true, supports_img2img: true, supports_negative_prompt: true, max_reference_images: 8, capability_source: "builtin" },
+    { id: "nai-diffusion-4-5-curated", name: "NovelAI V4.5 精选版", supports_text2img: true, supports_img2img: true, supports_negative_prompt: true, max_reference_images: 8, capability_source: "builtin" },
+    { id: "nai-diffusion-5-full", name: "NovelAI V5 完整版", supports_text2img: true, supports_img2img: true, supports_negative_prompt: true, max_reference_images: 2, capability_source: "builtin" },
+    { id: "nai-diffusion-5-curated", name: "NovelAI V5 精选版", supports_text2img: true, supports_img2img: true, supports_negative_prompt: true, max_reference_images: 2, capability_source: "builtin" },
   ];
-  function builtinProviderModels(provider) { return provider?.kind === "novelai_official" ? NOVELAI_OFFICIAL_MODELS : provider?.kind === "nai_direct" ? NAI_MODELS : null; }
+  function builtinProviderModels(provider) { return provider?.kind === "novelai_official" ? novelaiModels.length ? novelaiModels : NOVELAI_OFFICIAL_MODELS : provider?.kind === "nai_direct" ? NAI_MODELS : null; }
   const PROVIDER_DEFAULTS = {
     openai_images: { base_url: "https://api.openai.com/v1", generate_path: "/images/generations", edit_path: "/images/edits", models_path: "/models", edit_request_format: "multipart", request_template: "", response_image_path: "", max_concurrent_generations: 2 },
     gemini: { base_url: "https://generativelanguage.googleapis.com", generate_path: "/v1beta/models/{model}:generateContent", edit_path: "/v1beta/models/{model}:generateContent", models_path: "/v1beta/models", edit_request_format: "json_data_url", request_template: "", response_image_path: "", max_concurrent_generations: 2 },
@@ -2483,19 +2495,6 @@
     count: { type: "integer", label: "生图张数", description: "本次生成的总图片数量，插件根据模型单次请求图片上限自动分批。取值范围：[1, 16]。", default: 1, min: 1, max: 16, step: 1, request_key: "count", refill_from_history: false },
   };
   const MODEL_PRESETS = {
-    novelai_official: {
-      ...BATCH_PRESET,
-      size: { type: "select", label: "尺寸", default: "1024x1024", choices: ["1024x1024", "832x1216", "1216x832", "1024x1536", "1536x1024"], request_key: "size" },
-      seed: { type: "integer", label: "随机种子", description: "-1 表示随机；固定种子可用于复现画面。", default: -1, min: -1, max: 4294967295, step: 1, request_key: "seed" },
-      steps: { type: "integer", label: "采样步数", description: "步数、尺寸和多样本设置可能影响 Anlas 消耗。", default: 28, min: 1, max: 50, step: 1, request_key: "steps" },
-      scale: { type: "number", label: "提示词引导强度", default: 5, min: 0, max: 20, step: 0.1, request_key: "scale" },
-      cfg_rescale: { type: "number", label: "CFG Rescale", description: "缓解高提示词引导造成的颜色过饱和。", default: 0, min: 0, max: 1, step: 0.05, request_key: "cfg_rescale" },
-      sampler: { type: "select", label: "采样器", default: "k_euler_ancestral", choices: ["k_euler_ancestral", "k_euler", "k_dpmpp_2m", "k_dpmpp_2m_sde", "k_dpmpp_sde", "k_dpmpp_2s_ancestral", "k_dpmpp_3m_sde", "k_dpm_2", "k_dpm_fast"], request_key: "sampler" },
-      noise_schedule: { type: "select", label: "噪声调度", default: "karras", choices: ["karras", "exponential", "polyexponential", "native"], request_key: "noise_schedule" },
-      image_format: { type: "select", label: "输出格式", default: "png", choices: ["png", "webp"], request_key: "image_format" },
-      strength: { type: "number", label: "重绘强度", description: "图生图时重新绘制参考图的程度。", default: 0.7, min: 0, max: 1, step: 0.05, request_key: "strength", modes: ["img2img"] },
-      noise: { type: "number", label: "参考图噪声", description: "图生图时加入参考图的噪声量。", default: 0, min: 0, max: 1, step: 0.05, request_key: "noise", modes: ["img2img"] },
-    },
     openai_images: { size: { type: "select", label: "尺寸", default: "1024x1024", choices: ["1024x1024", "1536x1024", "1024x1536"], request_key: "size" }, count: { type: "number", label: "数量", default: 1, min: 1, max: 4, step: 1, request_key: "count" }, quality: { type: "select", label: "质量", default: "auto", choices: ["auto", "low", "medium", "high"], request_key: "quality" }, background: { type: "select", label: "背景", default: "auto", choices: ["auto", "transparent", "opaque"], request_key: "background" }, output_format: { type: "select", label: "输出格式", default: "png", choices: ["png", "jpeg", "webp"], request_key: "output_format" } },
     gemini: { aspect_ratio: { type: "select", label: "画面比例", default: "1:1", choices: ["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"], request_key: "aspect_ratio" }, image_size: { type: "select", label: "图片尺寸", default: "1K", choices: ["1K", "2K", "4K"], request_key: "image_size" } },
     nai_direct: {
@@ -2504,9 +2503,11 @@
     custom_json: { size: { type: "text", label: "尺寸（可选）", default: "1024x1024", request_key: "size" }, count: { type: "number", label: "数量", default: 1, min: 1, max: 4, step: 1, request_key: "count" } },
   };
   function providerDefaults(kind) { return { ...(PROVIDER_DEFAULTS[kind] || PROVIDER_DEFAULTS.custom_json) }; }
-  function modelPreset(kind) {
+  function modelPreset(kind, modelId) {
+    // Official defaults and supported fields come from the same catalog as
+    // request validation, including the different V4.5 / V5 capabilities.
+    if (kind === "novelai_official") return structuredClone(novelaiModels.find(model => model.id === modelId)?.parameters || novelaiModels[0]?.parameters || {});
     const preset = JSON.parse(JSON.stringify({ ...BATCH_PRESET, ...(MODEL_PRESETS[kind] || MODEL_PRESETS.custom_json) }));
-    if (kind === "novelai_official") Object.values(preset).forEach(descriptor => Object.assign(descriptor, { webui_visible: true, record_in_history: true, refill_from_history: descriptor.refill_from_history !== false }));
     Object.entries(preset).forEach(([name, descriptor]) => { if (modelParameterMatches(name, descriptor, ["count", "n"])) descriptor.refill_from_history = false; });
     if (kind === "nai_direct") preset.style.record_in_history = false;
     return preset;
@@ -2541,7 +2542,7 @@
     const proxyField = `${field("proxy", "网络代理（可选）", provider.proxy || "")}<div class="field field-wide"><span class="field-hint">留空不启用。支持 HTTP/HTTPS 代理，例如 http://192.168.1.2:7890；此服务商的生图、模型查询、额度查询和结果图下载均使用该代理。</span></div>`;
     const common = `${field("id", "ID", provider.id)}${field("name", "名称", provider.name)}${selectField("kind", "供应类型", kind, PROVIDER_KINDS)}${field("base_url", "接口地址（Base URL）", provider.base_url)}${credentialField}${field("timeout_seconds", "超时秒数", provider.timeout_seconds, "number")}${field("max_concurrent_generations", "Provider 最大并发", provider.max_concurrent_generations ?? 2, "number", official)}${official ? '<div class="field"><span class="field-hint">官方服务商当前固定串行生成，同时最多处理 1 个请求。</span></div>' : ""}${proxyField}${headersField}`;
     const typeFields = kind === "openai_images" ? `${field("generate_path", "文生图路径", provider.generate_path)}${field("edit_path", "图生图路径", provider.edit_path)}${field("models_path", "模型列表路径", provider.models_path || "/models")}${selectField("edit_request_format", "图生图请求格式", provider.edit_request_format, [["multipart", "multipart"], ["json_data_url", "JSON data URL"]])}` : kind === "gemini" ? `${field("generate_path", "generateContent 路径（支持 {model}）", provider.generate_path)}${field("models_path", "模型列表路径", provider.models_path || "/v1beta/models")}` : kind === "nai_direct" ? `${field("generate_path", "生成路径", provider.generate_path)}<div class="field field-wide"><span class="field-hint">第三方服务协议：GET /generate；Token 作为 token 查询参数发送。该类型不是 NovelAI 官方 API，且仅支持文生图。</span></div>` : `${field("generate_path", "文生图路径", provider.generate_path)}${field("edit_path", "图生图路径", provider.edit_path)}${field("models_path", "模型列表路径", provider.models_path || "/models")}${selectField("edit_request_format", "图生图请求格式", provider.edit_request_format, [["multipart", "multipart"], ["json_data_url", "JSON data URL"]])}${textAreaField("request_template", "请求 JSON 模板（可选）", provider.request_template)}${field("response_image_path", "响应图片路径（可选）", provider.response_image_path)}<div class="field field-wide"><span class="field-hint">模板可使用 {{prompt}}、{{model}}、{{size}}、{{count}} 和参数字段。</span></div>`;
-    const officialFields = `${field("generate_path", "文生图路径", provider.generate_path)}${field("edit_path", "图生图路径", provider.edit_path)}<div class="field field-wide"><span class="field-hint">内置 V4.5 / V5 完整版与精选版模型均支持基础单底图图生图，最多使用 1 张参考图；Vibe Transfer 和角色参考暂未接入。</span></div>`;
+    const officialFields = `${field("generate_path", "文生图路径", provider.generate_path)}${field("edit_path", "图生图路径", provider.edit_path)}<div class="field field-wide"><span class="field-hint">V4.5 支持单底图、精确角色 / 风格参考、Vibe、多角色与局部重绘；V5 支持单底图、多角色、透明背景与局部重绘。V5 精选版局部重绘使用 V4.5 精选版。</span></div>`;
     const discoveryButton = builtinProviderModels(provider) ? "" : '<button class="quiet-button" id="discoverModelsButton" type="button">获取模型</button>';
     const heading = `<div class="provider-editor-heading"><h3>${escape(provider.name || "生图服务商")}</h3><label class="toggle-control"><input data-provider-field="enabled" type="checkbox" aria-label="启用生图服务商" ${provider.enabled ? "checked" : ""} /><span aria-hidden="true"></span></label></div>`;
     els.providerForm.innerHTML = `${heading}${common}${official ? officialFields : typeFields}<div class="provider-editor-actions"><button class="danger-button" id="removeProviderButton" type="button">删除服务商</button>${discoveryButton}</div>`;
@@ -2578,7 +2579,7 @@
   }
   function renderModelConfiguration(provider, model) {
     const official = provider.kind === "novelai_official";
-    const schemaText = JSON.stringify(model.parameters || modelPreset(provider.kind), null, 2);
+    const schemaText = JSON.stringify(model.parameters || modelPreset(provider.kind, model.id), null, 2);
     const discoveredIds = (provider.discovered_models || []).map((item) => item.id); const modelChoices = builtinProviderModels(provider)?.map(item => item.id) || discoveredIds;
     const modelIdField = modelChoices.length ? modelSelectField("id", "模型 ID", model.id, modelChoices, !official) : modelField("id", "模型 ID", model.id);
     const negativeDefaultField = model.supports_negative_prompt ? modelTextAreaField("negative_prompt_default", "默认反向提示词", model.negative_prompt_default || "") : "";
@@ -2587,7 +2588,7 @@
     const batchFields = `<div class="field"><label title="单次接口请求最多生成的图片张数；总张数超出时自动分批。">单次请求图片上限</label><input data-model-field="native_batch_size" type="number" min="1" step="1" value="${escape(model.native_batch_size)}"${provider.kind === "nai_direct" ? " disabled" : ""} />${official ? '<span class="field-hint">默认每次请求 1 张；提高此值使用官方多样本生成，额外样本可能消耗 Anlas。</span>' : ""}</div><div class="field"><label title="该模型在所有任务中共享的最大并发请求数，仍受服务商最大并发限制。取值范围：[1, 16]。">模型最大并发请求数</label><input data-model-field="max_concurrent_requests" type="number" min="1" max="16" step="1" value="${escape(model.max_concurrent_requests)}" />${official ? '<span class="field-hint">官方服务商当前串行处理，实际同时执行 1 个请求。</span>' : ""}</div>`;
     const raw = `<details class="schema-raw"><summary>高级：参数 Schema</summary><textarea id="modelParametersSchema" data-model-field="parameters" rows="14" spellcheck="false">${escape(schemaText)}</textarea><span class="field-hint">每个字段支持 type、label、description、default、request_key、min、max、step、choices、modes、webui_visible、record_in_history、refill_from_history。</span></details>`;
     const capabilityEditable = !official && ["unknown", "manual"].includes(model.capability_source);
-    const capabilityHint = model.supports_img2img ? `<div class="field"><label>参考图能力上限</label><input data-model-field="max_reference_images" type="number" min="1" max="${official ? 1 : 8}" step="1" value="${configuredReferenceLimit(model.max_reference_images)}"${capabilityEditable ? "" : " disabled"} /><span class="field-hint">${official ? "NovelAI 官方图生图最多使用 1 张参考图。" : capabilityEditable ? "无法获取时可手动填写，取值范围：1–8 张。" : `来源：${escape(model.capability_source)}，已获取的能力不可在此覆盖。`}</span></div>` : "";
+    const capabilityHint = model.supports_img2img ? `<div class="field"><label>参考图能力上限</label><input data-model-field="max_reference_images" type="number" min="1" max="8" step="1" value="${configuredReferenceLimit(model.max_reference_images)}"${capabilityEditable ? "" : " disabled"} /><span class="field-hint">${official ? "底图与蒙版分别最多 1 张；V4.5 可组合参考图，总计最多 8 张，V5 最多使用底图与蒙版共 2 张。" : capabilityEditable ? "无法获取时可手动填写，取值范围：1–8 张。" : `来源：${escape(model.capability_source)}，已获取的能力不可在此覆盖。`}</span></div>` : "";
     return `<h3>${escape(model.name || model.id)}</h3>${modelIdField}${modelField("name", "显示名称", model.name)}${batchFields}${modelToggle("supports_text2img", "支持文生图", model.supports_text2img)}${modelToggle("supports_img2img", "支持图生图", model.supports_img2img, provider.kind === "nai_direct")}${modelToggle("supports_negative_prompt", "支持专用反向提示词", model.supports_negative_prompt, provider.kind === "gemini")}${capabilityHint}${negativeDefaultField}${defaults}${raw}<div class="provider-editor-actions"><button class="danger-button" id="removeModelButton" type="button">删除模型</button><button class="quiet-button" id="testModelButton" type="button"${testDisabled ? ' disabled title="仅支持图生图的模型需要参考图，暂不能在此测试"' : ""}>测试模型</button></div>`;
   }
   function renderSchemaDefault(name, descriptor) {
@@ -2597,6 +2598,7 @@
     const label = `<div class="field-label-row"><label title="${title}">${escape(name)}</label>${library.schemaPolicyButton(name)}</div>`;
     if ((type === "select" || type === "preset") && Array.isArray(descriptor.choices)) return `<div class="field">${label}<select data-schema-default="${escape(name)}">${descriptor.choices.map((choice) => { const item = typeof choice === "object" ? choice : { value: choice, label: choice }; return `<option value="${escape(item.value)}" ${String(item.value) === String(value) ? "selected" : ""}>${escape(item.label || item.value)}</option>`; }).join("")}</select></div>`;
     if (type === "boolean" || type === "bool") return `<div class="field">${label}<label class="toggle-control"><input data-schema-default="${escape(name)}" aria-label="${escape(name)} 默认值" type="checkbox" ${value ? "checked" : ""} /><span aria-hidden="true"></span></label></div>`;
+    if (["json", "object"].includes(type)) return `<div class="field field-wide">${label}<textarea data-schema-default="${escape(name)}" data-schema-json="true" rows="2" spellcheck="false">${escape(typeof value === "string" ? value : JSON.stringify(value, null, 2))}</textarea></div>`;
     const inputType = ["number", "int", "integer", "float"].includes(type) ? "number" : "text";
     return `<div class="field">${label}<input data-schema-default="${escape(name)}" type="${inputType}" value="${escape(value)}"${descriptor.min !== undefined ? ` min="${escape(descriptor.min)}"` : ""}${descriptor.max !== undefined ? ` max="${escape(descriptor.max)}"` : ""}${descriptor.step !== undefined ? ` step="${escape(descriptor.step)}"` : ""} /></div>`;
   }
@@ -2609,7 +2611,12 @@
   function renderToolConfiguration(model) { const tool = model.tool; const configuredLimit = configuredReferenceLimit(model.max_reference_images); const refLimit = model.supports_img2img ? `<div class="field"><label>LLM 最大参考图数量</label><input data-tool-field="max_reference_images" type="number" min="1" max="${configuredLimit}" step="1" value="${configuredReferenceLimit(tool.max_reference_images, configuredLimit)}" /><span class="field-hint">不能超过模型能力上限 ${configuredLimit}</span></div>` : ""; const rows = toolModelParameters(model).map(([name, descriptor]) => { const policy = tool.parameters?.[name] || {}; return `<div class="tool-parameter-row"><strong title="${escape(policy.description || descriptor.description || descriptor.label || name)}">${escape(name)}</strong><span>${policy.exposed === false ? "未暴露" : "已暴露"}</span><button class="quiet-button" data-edit-tool-parameter="${escape(name)}" type="button">编辑</button></div>`; }).join(""); return `<h3>${escape(model.name || model.id)}</h3>${modelToggle("tool_enabled", "允许 LLM 调用此模型", tool.enabled !== false)}${modelTextAreaField("tool_selection_description", "什么时候使用", tool.selection_description || "")}${modelSelectField("tool_prompt_profile", "提示词类型", tool.prompt_profile || "natural_language", ["natural_language", "nai_tags", "custom"])}${modelTextAreaField("tool_prompt_instructions", "提示词编写要求", tool.prompt_instructions || "")}${refLimit}<div class="tool-parameter-list"><span class="field-hint">LLM 可用参数</span>${rows || '<span class="field-hint">当前模型没有可暴露参数。</span>'}</div>`; }
   function bindModelConfiguration(provider, model) {
     els.modelForm.querySelectorAll("[data-model-field]").forEach((input) => { input.addEventListener("input", () => updateModelField(input)); input.addEventListener("change", () => updateModelField(input, true)); });
-    els.modelForm.querySelectorAll("[data-schema-default]").forEach((input) => input.addEventListener("change", () => { const descriptor = model.parameters[input.dataset.schemaDefault]; descriptor.default = input.type === "checkbox" ? input.checked : input.type === "number" ? Number(input.value) : input.value; const raw = $("modelParametersSchema"); if (raw) raw.value = JSON.stringify(model.parameters, null, 2); }));
+    els.modelForm.querySelectorAll("[data-schema-default]").forEach((input) => input.addEventListener("change", () => {
+      const descriptor = model.parameters[input.dataset.schemaDefault];
+      if (input.dataset.schemaJson) { try { descriptor.default = JSON.parse(input.value); input.setCustomValidity(""); } catch { input.setCustomValidity("默认值必须是合法 JSON"); return; } }
+      else descriptor.default = input.type === "checkbox" ? input.checked : input.type === "number" ? Number(input.value) : input.value;
+      const raw = $("modelParametersSchema"); if (raw) raw.value = JSON.stringify(model.parameters, null, 2);
+    }));
     els.modelForm.querySelectorAll("[data-tool-field]").forEach((input) => {
       const update = (commit) => { const key = input.dataset.toolField; model.tool[key] = key === "max_reference_images" ? configuredReferenceLimit(input.value, configuredReferenceLimit(model.max_reference_images)) : input.type === "number" ? Number(input.value) : input.value; if (commit && key === "max_reference_images") input.value = model.tool[key]; refreshSettingsDefaultModels(); };
       input.addEventListener("input", () => update(false)); input.addEventListener("change", () => update(true));
@@ -2630,6 +2637,20 @@
   function modelTextAreaField(key, label, value) { return `<div class="field field-wide"><label>${label}</label><textarea data-model-field="${key}" rows="4">${escape(value)}</textarea></div>`; }
   function modelSelectField(key, label, value, choices, editable = false) { const values = choices.includes(value) ? choices : [value, ...choices]; return `<div class="field"><label>${label}</label><select data-model-field="${key}">${values.map((item) => `<option value="${escape(item)}" ${item === value ? "selected" : ""}>${escape(item)}</option>`).join("")}${editable ? '<option value="__manual__">手动输入…</option>' : ""}</select></div>`; }
   function modelToggle(key, label, value, disabled = false) { return `<div class="toggle-row"><label>${label}</label><label class="toggle-control"><input data-model-field="${key}" type="checkbox" ${value ? "checked" : ""}${disabled ? " disabled" : ""} /><span aria-hidden="true"></span></label></div>`; }
+  function reconcileOfficialParameters(current, preset) {
+    const keyOf = ([name, descriptor]) => descriptor.request_key || name;
+    const knownKeys = new Set(novelaiModels.flatMap(model => Object.entries(model.parameters || {}).map(keyOf)));
+    const previous = new Map(Object.entries(current || {}).map(entry => [keyOf(entry), entry]));
+    const result = Object.fromEntries(Object.entries(current || {}).filter(entry => !knownKeys.has(keyOf(entry))));
+    for (const [name, descriptor] of Object.entries(preset.parameters || {})) {
+      const key = descriptor.request_key || name, existing = previous.get(key);
+      const merged = { ...(existing?.[1] || {}), ...structuredClone(descriptor) };
+      for (const field of ["default", "webui_visible", "record_in_history", "refill_from_history"]) if (existing && Object.prototype.hasOwnProperty.call(existing[1], field)) merged[field] = structuredClone(existing[1][field]);
+      if (["reference_mode", "noise_schedule", "sampler", "quality_preset"].includes(key) && descriptor.choices && !descriptor.choices.some(choice => (typeof choice === "object" ? choice.value : choice) === merged.default)) merged.default = descriptor.default;
+      result[existing?.[0] || name] = merged;
+    }
+    return result;
+  }
   function updateModelField(input, commit = false) {
     const model = currentSettingsModel(); if (!model) return;
     const key = input.dataset.modelField;
@@ -2652,9 +2673,14 @@
       if (key === "supports_negative_prompt" && !model.supports_negative_prompt) model.tool.negative_prompt_exposed = false;
       renderModelEditor();
     } else if (key === "id") {
+      if (currentSettingsProvider()?.kind === "novelai_official") {
+        const preset = novelaiModels.find(item => item.id === input.value);
+        if (preset) { model.novelai_capabilities = structuredClone(preset.novelai_capabilities); model.max_reference_images = preset.max_reference_images; model.tool.max_reference_images = Math.min(model.tool.max_reference_images, model.max_reference_images); model.parameters = reconcileOfficialParameters(model.parameters, preset); }
+      }
       state.selectedSettingsModelId = input.value;
       const activeRow = els.settingsModelList.querySelector(".provider-row.is-active");
       if (activeRow) { activeRow.dataset.settingsModel = input.value; if (!model.name) activeRow.querySelector("strong").textContent = input.value; }
+      if (currentSettingsProvider()?.kind === "novelai_official" && commit) renderModelEditor();
     }
     refreshSettingsDefaultModels();
   }
@@ -2692,7 +2718,7 @@
     ensureBatchConfig(model, provider);
     const nai = provider.kind === "nai_direct";
     const official = provider.kind === "novelai_official";
-    model.max_reference_images = configuredReferenceLimit(model.max_reference_images, official ? 1 : 8);
+    model.max_reference_images = official ? Number(model.novelai_capabilities?.max_reference_images || novelaiModels.find(item => item.id === model.id)?.max_reference_images || (model.id.startsWith("nai-diffusion-5-") ? 2 : 8)) : configuredReferenceLimit(model.max_reference_images);
     if (nai) model.supports_img2img = false;
     const defaults = { enabled: true, selection_description: nai ? "仅在用户明确要求 NAI 或 NovelAI 风格标签生图时使用。" : "适合一般自然语言生图需求。", prompt_profile: nai ? "nai_tags" : "natural_language", prompt_instructions: nai ? "使用英文逗号分隔标签。必须完整描述主体数量、全身或半身范围、姿态、镜头距离、视角、背景、光照和画面边界，避免残图；不得改变用户明确指定的主体、数量、动作和服装。" : "使用清晰、连贯的自然语言描述，不要使用英文逗号分隔的 NAI tag 串。", negative_prompt_exposed: !!model.supports_negative_prompt, max_reference_images: model.max_reference_images, parameters: {} };
     if (official) Object.assign(defaults, { selection_description: "适合 NovelAI 插画生成，支持英文标签或自然语言提示词。", prompt_profile: "custom", prompt_instructions: "支持英文逗号分隔标签或清晰的自然语言描述，可结合两者表达。完整描述主体、构图、动作、环境与光照，保留用户明确指定的内容。" });
@@ -2787,10 +2813,11 @@
     const discovered = builtinProviderModels(provider) ? null : (provider.discovered_models || []).find((item) => item.id === requestedId);
     const naiChoice = builtinProviderModels(provider)?.find((item) => item.id === requestedId);
     if (official && !naiChoice) { showNotice("请选择内置的 NovelAI 官方模型。", "error"); return; }
+    if (official && !naiChoice.parameters) { showNotice("未能读取官方模型预设，请刷新页面后重试。", "error"); return; }
     const chosen = discovered || (naiChoice ? { ...naiChoice } : null);
     const capabilityKnown = !!chosen?.capability_source && chosen.capability_source !== "unknown";
     const maxRefs = capabilityKnown ? configuredReferenceLimit(chosen.max_reference_images) : 1;
-    provider.models.push({ id: requestedId, name: chosen?.name || requestedId, native_batch_size: provider.kind === "nai_direct" ? 1 : Number(chosen?.native_batch_size) || 1, native_batch_size_source: provider.kind === "nai_direct" ? "fixed" : chosen?.native_batch_size_source || "default", max_concurrent_requests: 8, supports_text2img: chosen ? !!chosen.supports_text2img : true, supports_img2img: provider.kind !== "nai_direct" && capabilityKnown ? !!chosen.supports_img2img : false, supports_negative_prompt: chosen ? !!chosen.supports_negative_prompt : provider.kind === "nai_direct", negative_prompt_default: provider.kind === "nai_direct" ? NAI_DEFAULT_NEGATIVE : "", max_reference_images: maxRefs, capability_source: chosen?.capability_source || "manual", parameters: modelPreset(provider.kind), tool: { enabled: true, max_reference_images: maxRefs } });
+    provider.models.push({ id: requestedId, name: chosen?.name || requestedId, native_batch_size: provider.kind === "nai_direct" ? 1 : Number(chosen?.native_batch_size) || 1, native_batch_size_source: provider.kind === "nai_direct" ? "fixed" : chosen?.native_batch_size_source || "default", max_concurrent_requests: 8, supports_text2img: chosen ? !!chosen.supports_text2img : true, supports_img2img: provider.kind !== "nai_direct" && capabilityKnown ? !!chosen.supports_img2img : false, supports_negative_prompt: chosen ? !!chosen.supports_negative_prompt : provider.kind === "nai_direct", negative_prompt_default: provider.kind === "nai_direct" ? NAI_DEFAULT_NEGATIVE : "", max_reference_images: maxRefs, capability_source: chosen?.capability_source || "manual", ...(chosen?.novelai_capabilities ? { novelai_capabilities: structuredClone(chosen.novelai_capabilities) } : {}), parameters: modelPreset(provider.kind, requestedId), tool: { enabled: true, max_reference_images: maxRefs } });
     state.selectedSettingsModelId = requestedId; renderModelEditor(); showNotice("已新增模型，请填写能力和参数 schema。", "success");
   }
   async function saveSettings() {
@@ -3060,6 +3087,7 @@
 
   const externalSources = window.ImageStudioExternalSources({ state, apiGet, apiPost, escape, formatBytes, formatDate, showNotice, errorMessage, updateSettingsDirty, invalidateBrowseCache, openModal: (...args) => library.openModal(...args) });
   const library = window.ImageStudioLibrary({ state, escape, apiGet, apiPost, bridge, showNotice, errorMessage, formatDate, formatBytes, sourceLabel, getGallerySort: () => gallerySort, syncPageScrollLock, switchView, requestParameters, loadGallery, clearGallerySelection, openDetail, closeDetail, reproduce, applyDraft, useDataUrlAsReference, useGalleryImageAsReference, ensureDetailMetadata, ensureDetailPreview, getImageMedia, cacheImageMedia, loadImageMedia, checkGalleryAction });
+  const novelaiControls = window.ImageStudioNovelAI({ state, model: selectedModel, escape, rerenderReferences: renderReferences, uploadFile: async file => (await bridge()).upload("studio/reference/upload", file), openModal: (...args) => library.openModal(...args), showNotice });
 
   async function start() {
     try {

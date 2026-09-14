@@ -1445,7 +1445,7 @@ class GenerationStore:
         filename: str,
         content: bytes,
         mime_type: str,
-    ) -> dict[str, str]:
+    ) -> dict[str, Any]:
         """Persist a WebUI upload until the generation request consumes it."""
 
         if not content:
@@ -1456,10 +1456,13 @@ class GenerationStore:
         suffix = _image_suffix(mime_type, content)
         target = self.staging_dir / f"{ref_id}{suffix}"
         await asyncio.to_thread(_atomic_write, target, content)
+        width, height = await asyncio.to_thread(_image_dimensions, content)
         return {
             "id": ref_id,
             "filename": _safe_filename(filename) or f"reference{suffix}",
             "mime_type": detect_mime_type(content, mime_type),
+            "width": width,
+            "height": height,
             "preview_data_url": image_data_url(
                 content, detect_mime_type(content, mime_type)
             ),
@@ -1890,6 +1893,8 @@ class GenerationStore:
                     str(descriptor.get("request_key") or name)
                     for name, descriptor in model.active_parameters.items()
                 }
+                if provider.kind == "novelai_official":
+                    allowed.update({"actual_model", "actual_action"})
                 effective = _redact_sensitive(
                     {
                         key: value
@@ -3802,27 +3807,40 @@ class GenerationStore:
         }
 
     async def stage_generation_references(
-        self, generation_id: str
-    ) -> list[dict[str, str]]:
+        self, generation_id: str, *, strict: bool = False
+    ) -> list[dict[str, Any]]:
         """Copy retained references into the transient input area for reproduction."""
 
         if not _SAFE_ID_RE.fullmatch(generation_id):
             return []
         return await asyncio.to_thread(
-            self._stage_generation_references_sync, generation_id
+            self._stage_generation_references_sync, generation_id, strict
         )
 
     def _stage_generation_references_sync(
-        self, generation_id: str
-    ) -> list[dict[str, str]]:
+        self, generation_id: str, strict: bool = False
+    ) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT r.id, r.filename, a.path, a.mime_type "
+                "SELECT r.id, r.filename, a.path, a.mime_type, a.width, a.height "
                 "FROM generation_references r JOIN image_assets a ON a.id = r.asset_id "
                 "WHERE r.generation_id = ? AND r.available = 1 "
                 "AND a.file_state = 'available' ORDER BY r.ordinal",
                 (generation_id,),
             ).fetchall()
+            if strict:
+                expected = conn.execute(
+                    "SELECT COUNT(*) FROM generation_references WHERE generation_id=?",
+                    (generation_id,),
+                ).fetchone()[0]
+                if expected != len(rows):
+                    return []
+        if strict and any(
+            not (self.data_dir / str(row["path"])).is_file()
+            or not _is_within(self.data_dir / str(row["path"]), self.assets_dir)
+            for row in rows
+        ):
+            return []
         staged: list[dict[str, str]] = []
         for row in rows:
             source = self.data_dir / str(row["path"])
@@ -3838,6 +3856,8 @@ class GenerationStore:
                     "id": staging_id,
                     "filename": str(row["filename"]),
                     "mime_type": mime_type,
+                    "width": row["width"],
+                    "height": row["height"],
                     "preview_data_url": image_data_url(raw, mime_type),
                 }
             )
