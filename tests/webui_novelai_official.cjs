@@ -86,12 +86,12 @@ async function matrix(browser, width) {
     assert.equal(await frame.locator('[data-provider-field="max_concurrent_generations"]').isDisabled(), true);
     assert.equal(await frame.locator("#discoverModelsButton").count(), 0);
     assert.match(await frame.locator("#providerForm").textContent(), /完整 Persistent API Token/);
-    assert.equal(await frame.locator('[data-provider-field="api_key"]').getAttribute("type"), "password");
+    assert.equal(await frame.locator('[data-provider-field="api_key"]').getAttribute("type"), "text");
     assert.deepEqual(await frame.locator("#newModelChoices option").evaluateAll(options => options.map(option => option.value)), modelIds);
     for (const modelId of modelIds) {
       await frame.locator("#newModelChoice").fill(modelId);
       await frame.locator("#addModelButton").click();
-      assert.equal(await frame.locator('[data-model-field="supports_img2img"]').isChecked(), false);
+      assert.equal(await frame.locator('[data-model-field="supports_img2img"]').isChecked(), true);
       assert.equal(await frame.locator('[data-model-field="supports_img2img"]').isDisabled(), false);
     }
     await frame.locator(`[data-settings-model="${modelIds[2]}"]`).click();
@@ -112,7 +112,9 @@ async function matrix(browser, width) {
     assert.match(await frame.locator("#modelForm").textContent(), /多样本.*Anlas/);
     await frame.locator('[data-model-field="native_batch_size"]').fill("2");
     await frame.locator('[data-model-field="supports_img2img"]').locator("..").click();
-    assert.equal(await frame.locator('[data-model-field="supports_img2img"]').isChecked(), true);
+    assert.equal(await frame.locator('[data-model-field="supports_img2img"]').isChecked(), false, "官方模型可以手动关闭图生图");
+    await frame.locator('[data-model-field="supports_img2img"]').locator("..").click();
+    assert.equal(await frame.locator('[data-model-field="supports_img2img"]').isChecked(), true, "官方模型默认支持单底图图生图");
     assert.equal(await frame.locator('[data-model-field="max_reference_images"]').inputValue(), "1");
     assert.equal(await frame.locator('[data-model-field="max_reference_images"]').isDisabled(), true);
     await frame.locator('[data-model-tab="tool"]').click();

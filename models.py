@@ -386,7 +386,7 @@ class ImageProvider:
         if kind == "novelai_official":
             max_refs = 1
         img2img = kind != "nai_direct" and _as_bool(
-            value.get("supports_img2img"), False
+            value.get("supports_img2img"), kind == "novelai_official"
         )
         supports_negative_prompt = (
             False
@@ -785,7 +785,9 @@ def _model_from_mapping(
 
     model_id = _text(value.get("id"), 160)
     native_size, native_source = _native_batch_fields(value, kind, discovered)
-    img2img = kind != "nai_direct" and _as_bool(value.get("supports_img2img"), False)
+    img2img = kind != "nai_direct" and _as_bool(
+        value.get("supports_img2img"), kind == "novelai_official"
+    )
     capability_source = _text(value.get("capability_source"), 32) or "manual"
     max_reference_images = max(1, min(8, _as_int(value.get("max_reference_images"), 1)))
     if kind == "novelai_official":

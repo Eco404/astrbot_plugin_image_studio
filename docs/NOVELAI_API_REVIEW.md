@@ -7,7 +7,7 @@
 ## 当前实现状态
 
 - `novelai.py` / `providers.py`：Bearer 鉴权，JSON 优先、ZIP 兼容的完整原图接收，响应项错误与可读图片分别保留，单底图图生图，订阅查询。
-- `models.py` / `service.py`：四款内置模型的基础参数、按模式过滤参数、图生图默认关闭且最多一张底图、同 Token 跨 Provider 共享串行限制。
+- `models.py` / `service.py`：四款内置模型的基础参数、按模式过滤参数、基础图生图默认开启且最多一张底图、同 Token 跨 Provider 共享串行限制。
 - `storage.py` / `parameter_exchange.py`：逐图实际参数写入已有补充字段；按记录策略过滤，详情与复现跟随所选图片；官方与第三方同属 NovelAI 来源但各自映射参数。
 - `image_metadata.py`：常规元数据与 alpha 隐写元数据合并，保留冲突来源；解析器 9，数据库仍为 v2。
 - WebUI：官方服务商配置和预设、按模式显示重绘参数、Anlas 与 V5 使用额度分开显示。
@@ -26,7 +26,7 @@
 | JSON 原图 | images 对象格式、seed/index、PNG/WebP 原图与元数据 | 原图可读取，逐图参数能复制和复现 |
 | 订阅查询 | PAT 对图片域名 /user/subscription 的权限、Anlas 字段与 usage | 对照同一账户官网显示；不保留完整账户原始响应 |
 | 试用与付费 | 不发送 shared_trial 的实际行为、V5 免费额度与 Anlas 变化 | 小量人工触发请求前后对照；不承诺本地条件判断等于免费 |
-| 图生图 | 单底图编码、输出尺寸、strength/noise/extra_noise_seed | 人工启用模型后验证可用，再考虑默认开放 |
+| 图生图 | 单底图编码、输出尺寸、strength/noise/extra_noise_seed | 四款内置模型均按官方 Image2Image 能力默认开启；仍需用真实账号验证具体模型和尺寸组合 |
 | 批次与并发 | 目标模型在不同尺寸下的样本上限、同账号实际限制 | 初期串行/原生1张可用；更高设置单独核实 |
 
 真实接口验证前不自动创建后台任务、读取既有真实配置密钥或发送测试生成请求。
@@ -148,7 +148,7 @@ Primary Swagger 前言建议第三方通常不要使用 Primary API 的 `/ai/` �
 
 官方模型页已经介绍 V5 Full/Curated、V4.5 Full/Curated 等模型，但 ImageGenerationRequest 中的 `model` 只是字符串，没有提供完整 API ID 枚举。`/oa/v1/models` 声明返回的是 OpenAI 兼容接口的文本模型结构，不能据此自动填充图片模型列表。首批官方模型 ID 需要结合已知参考实现与一次实际请求验证。
 
-官方用户文档明确支持 Image2Image，API 参数也列出 `image`、`strength`、`noise`、`extra_noise_seed`、`mask`、`img2img`、角色参考与 Vibe Transfer 数组。但 action 值、编码细节、模型适用范围、数组配对和兼容组合没有全部在 schema 中解释。NAI2API 当前只发文生图，不能作为这些功能的完整范例。
+官方用户文档明确支持 Image2Image，API 参数也列出 `image`、`strength`、`noise`、`extra_noise_seed`、`mask`、`img2img`、角色参考与 Vibe Transfer 数组。当前可确认的普通参考图能力是：V4.5 Full、V4.5 Curated、V5 Full、V5 Curated 均支持单张底图 Image2Image；插件因此在创建这四个内置模型时默认开启图生图并将参考图上限预填为 1。Vibe Transfer 和角色参考使用独立的 API 参数与预处理流程，不能等同于普通参考图，当前未接入。action 值、编码细节、数组配对和兼容组合没有全部在 schema 中解释。NAI2API 当前只发文生图，不能作为这些功能的完整范例。
 
 NAI2API 写死的 `params_version=3`、`uncond_scale`、`cfg_sched_eligibility`、`use_new_shared_trial` 等应分别核验：字段存在不代表固定值正确，未出现在当前 schema 的字段也不能擅自认定必填。特别是启用试用或免费额度的开关，不应在没有确认语义的情况下默默注入。
 

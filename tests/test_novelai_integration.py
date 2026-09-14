@@ -91,7 +91,7 @@ async def generate(service, identifier="official", **kwargs):
     )
 
 
-def test_official_config_defaults_and_manual_img2img_are_bounded():
+def test_official_config_defaults_and_img2img_capability_are_bounded():
     normalized, errors = normalize_webui_settings(
         {
             "providers": [
@@ -110,13 +110,25 @@ def test_official_config_defaults_and_manual_img2img_are_bounded():
     assert result["generate_path"] == result["edit_path"] == "/ai/generate-image"
     assert result["max_concurrent_generations"] == 1
     model = result["models"][0]
-    assert model["supports_img2img"] is False
+    assert model["supports_img2img"] is True
     assert model["supports_negative_prompt"] is True
     assert model["native_batch_size"] == 1
     assert model["max_concurrent_requests"] == 8
     assert model["parameters"]["count"]["default"] == 1
     assert model["parameters"]["seed"]["default"] == -1
     assert model["parameters"]["strength"]["modes"] == ["img2img"]
+    parsed_default = ImageProvider.from_mapping(
+        {"id": "official", "kind": "novelai_official", "models": [{"id": MODEL}]}
+    )
+    assert parsed_default.models[0].img2img is True
+    parsed_disabled = ImageProvider.from_mapping(
+        {
+            "id": "official",
+            "kind": "novelai_official",
+            "models": [{"id": MODEL, "supports_img2img": False}],
+        }
+    )
+    assert parsed_disabled.models[0].img2img is False
     enabled = provider()
     assert enabled.models[0].img2img
     assert (

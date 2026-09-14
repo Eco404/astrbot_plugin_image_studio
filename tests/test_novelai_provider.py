@@ -209,11 +209,13 @@ def test_img2img_requires_exactly_one_base_image(refs):
         )
 
 
-def test_img2img_must_be_explicitly_enabled_on_model():
+def test_img2img_can_be_explicitly_disabled_on_model():
     session = Session()
     with pytest.raises(ProviderError, match="尚未启用图生图"):
         asyncio.run(
-            ProviderExecutor(session).generate(provider(), request(mode="img2img"))
+            ProviderExecutor(session).generate(
+                provider(supports_img2img=False), request(mode="img2img")
+            )
         )
     assert not session.calls
 

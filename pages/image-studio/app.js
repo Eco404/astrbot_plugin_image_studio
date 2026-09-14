@@ -2437,10 +2437,10 @@
     { id: "nai-diffusion-5-full", name: "NAI V5 完整版" },
   ];
   const NOVELAI_OFFICIAL_MODELS = [
-    { id: "nai-diffusion-4-5-full", name: "NovelAI V4.5 完整版" },
-    { id: "nai-diffusion-4-5-curated", name: "NovelAI V4.5 精选版" },
-    { id: "nai-diffusion-5-full", name: "NovelAI V5 完整版" },
-    { id: "nai-diffusion-5-curated", name: "NovelAI V5 精选版" },
+    { id: "nai-diffusion-4-5-full", name: "NovelAI V4.5 完整版", supports_text2img: true, supports_img2img: true, supports_negative_prompt: true, max_reference_images: 1, capability_source: "builtin" },
+    { id: "nai-diffusion-4-5-curated", name: "NovelAI V4.5 精选版", supports_text2img: true, supports_img2img: true, supports_negative_prompt: true, max_reference_images: 1, capability_source: "builtin" },
+    { id: "nai-diffusion-5-full", name: "NovelAI V5 完整版", supports_text2img: true, supports_img2img: true, supports_negative_prompt: true, max_reference_images: 1, capability_source: "builtin" },
+    { id: "nai-diffusion-5-curated", name: "NovelAI V5 精选版", supports_text2img: true, supports_img2img: true, supports_negative_prompt: true, max_reference_images: 1, capability_source: "builtin" },
   ];
   function builtinProviderModels(provider) { return provider?.kind === "novelai_official" ? NOVELAI_OFFICIAL_MODELS : provider?.kind === "nai_direct" ? NAI_MODELS : null; }
   const PROVIDER_DEFAULTS = {
@@ -2534,11 +2534,11 @@
     const kind = provider.kind || "custom_json";
     const official = kind === "novelai_official";
     if (official) provider.max_concurrent_generations = 1;
-    const credentialField = official ? `${field("api_key", "NovelAI 完整 API Token", provider.api_key, "password")}<div class="field"><span class="field-hint">填写 NovelAI 账户设置中生成的完整 Persistent API Token，保留前缀，无需添加 Bearer。</span></div>` : kind === "nai_direct" ? `${field("api_key", "生图 Token（toUserId）", provider.api_key)}<div class="field"><span class="field-hint">填写在 nai.sta1n.cn 申请的 toUserId。</span></div>` : field("api_key", "接口密钥（API Key）", provider.api_key);
+    const credentialField = official ? `${field("api_key", "NovelAI 完整 API Token", provider.api_key)}<div class="field"><span class="field-hint">填写 NovelAI 账户设置中生成的完整 Persistent API Token，保留前缀，无需添加 Bearer。</span></div>` : kind === "nai_direct" ? `${field("api_key", "生图 Token（toUserId）", provider.api_key)}<div class="field"><span class="field-hint">填写在 nai.sta1n.cn 申请的 toUserId。</span></div>` : field("api_key", "接口密钥（API Key）", provider.api_key);
     const headersField = kind === "nai_direct" ? "" : textAreaField("custom_headers", "自定义请求头（JSON 或每行一个 Header）", provider.custom_headers);
     const common = `${field("id", "ID", provider.id)}${field("name", "名称", provider.name)}${selectField("kind", "供应类型", kind, PROVIDER_KINDS)}${field("base_url", "接口地址（Base URL）", provider.base_url)}${credentialField}${field("timeout_seconds", "超时秒数", provider.timeout_seconds, "number")}${field("max_concurrent_generations", "Provider 最大并发", provider.max_concurrent_generations ?? 2, "number", official)}${official ? '<div class="field"><span class="field-hint">官方服务商当前固定串行生成，同时最多处理 1 个请求。</span></div>' : ""}${toggleField("enabled", "启用", provider.enabled)}${headersField}`;
     const typeFields = kind === "openai_images" ? `${field("generate_path", "文生图路径", provider.generate_path)}${field("edit_path", "图生图路径", provider.edit_path)}${field("models_path", "模型列表路径", provider.models_path || "/models")}${selectField("edit_request_format", "图生图请求格式", provider.edit_request_format, [["multipart", "multipart"], ["json_data_url", "JSON data URL"]])}` : kind === "gemini" ? `${field("generate_path", "generateContent 路径（支持 {model}）", provider.generate_path)}${field("models_path", "模型列表路径", provider.models_path || "/v1beta/models")}` : kind === "nai_direct" ? `${field("generate_path", "生成路径", provider.generate_path)}<div class="field field-wide"><span class="field-hint">第三方服务协议：GET /generate；Token 作为 token 查询参数发送。该类型不是 NovelAI 官方 API，且仅支持文生图。</span></div>` : `${field("generate_path", "文生图路径", provider.generate_path)}${field("edit_path", "图生图路径", provider.edit_path)}${field("models_path", "模型列表路径", provider.models_path || "/models")}${selectField("edit_request_format", "图生图请求格式", provider.edit_request_format, [["multipart", "multipart"], ["json_data_url", "JSON data URL"]])}${textAreaField("request_template", "请求 JSON 模板（可选）", provider.request_template)}${field("response_image_path", "响应图片路径（可选）", provider.response_image_path)}<div class="field field-wide"><span class="field-hint">模板可使用 {{prompt}}、{{model}}、{{size}}、{{count}} 和参数字段。</span></div>`;
-    const officialFields = `${field("generate_path", "文生图路径", provider.generate_path)}${field("edit_path", "图生图路径", provider.edit_path)}<div class="field field-wide"><span class="field-hint">内置 V4.5 / V5 完整版与精选版模型；图生图可在模型设置中手动开启，最多使用 1 张参考图。</span></div>`;
+    const officialFields = `${field("generate_path", "文生图路径", provider.generate_path)}${field("edit_path", "图生图路径", provider.edit_path)}<div class="field field-wide"><span class="field-hint">内置 V4.5 / V5 完整版与精选版模型均支持基础单底图图生图，最多使用 1 张参考图；Vibe Transfer 和角色参考暂未接入。</span></div>`;
     const discoveryButton = builtinProviderModels(provider) ? "" : '<button class="quiet-button" id="discoverModelsButton" type="button">获取模型</button>';
     els.providerForm.innerHTML = `<h3>${escape(provider.name || "生图服务商")}</h3>${common}${official ? officialFields : typeFields}<div class="provider-editor-actions"><button class="danger-button" id="removeProviderButton" type="button">删除服务商</button>${discoveryButton}</div>`;
     els.providerForm.querySelectorAll("[data-provider-field]").forEach((input) => input.addEventListener("input", () => updateProviderField(input))); els.providerForm.querySelectorAll("[data-provider-field]").forEach((input) => input.addEventListener("change", () => updateProviderField(input)));
@@ -2784,7 +2784,7 @@
     const discovered = builtinProviderModels(provider) ? null : (provider.discovered_models || []).find((item) => item.id === requestedId);
     const naiChoice = builtinProviderModels(provider)?.find((item) => item.id === requestedId);
     if (official && !naiChoice) { showNotice("请选择内置的 NovelAI 官方模型。", "error"); return; }
-    const chosen = discovered || (naiChoice ? { ...naiChoice, supports_text2img: true, supports_img2img: false, supports_negative_prompt: true, max_reference_images: 1, capability_source: "builtin" } : null);
+    const chosen = discovered || (naiChoice ? { ...naiChoice } : null);
     const capabilityKnown = !!chosen?.capability_source && chosen.capability_source !== "unknown";
     const maxRefs = capabilityKnown ? configuredReferenceLimit(chosen.max_reference_images) : 1;
     provider.models.push({ id: requestedId, name: chosen?.name || requestedId, native_batch_size: provider.kind === "nai_direct" ? 1 : Number(chosen?.native_batch_size) || 1, native_batch_size_source: provider.kind === "nai_direct" ? "fixed" : chosen?.native_batch_size_source || "default", max_concurrent_requests: 8, supports_text2img: chosen ? !!chosen.supports_text2img : true, supports_img2img: provider.kind !== "nai_direct" && capabilityKnown ? !!chosen.supports_img2img : false, supports_negative_prompt: chosen ? !!chosen.supports_negative_prompt : provider.kind === "nai_direct", negative_prompt_default: provider.kind === "nai_direct" ? NAI_DEFAULT_NEGATIVE : "", max_reference_images: maxRefs, capability_source: chosen?.capability_source || "manual", parameters: modelPreset(provider.kind), tool: { enabled: true, max_reference_images: maxRefs } });
