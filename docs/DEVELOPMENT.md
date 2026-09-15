@@ -2,7 +2,7 @@
 
 面向维护者。使用说明见 [README](../README.md)，正式版本变化见 [CHANGELOG](../CHANGELOG.md)。
 
-当前开发线为插件 `1.3.0-dev.1`，基于正式插件 `1.2.0` 和数据库 v2。当前没有数据库结构变化，继续使用正式 `user_version=2`，无需新的迁移标记。已实现独立的 `novelai_official` 服务商、JSON／ZIP 图片接收、订阅查询和单底图图生图；目前为离线验证状态，待真实账号核实。
+当前开发线为插件 `1.3.0-dev.2`，基于正式插件 `1.2.0` 和数据库 v2。当前没有数据库结构变化，继续使用正式 `user_version=2`，无需新的迁移标记。已实现独立的 `novelai_official` 服务商、JSON／ZIP 图片接收、订阅查询和单底图图生图；目前为离线验证状态，待真实账号核实。
 
 官方协议构造与解析集中在 `novelai.py`，不依赖完整第三方 SDK。`GeneratedImage.effective_parameters` 通过 `generation_images.supplemental_json.effective_request` 保存经过记录策略过滤的实际参数；原始请求仍保留在生成记录上。隐写元数据解析器版本为 9，既有缓存更新沿用现有回填流程。
 
@@ -79,7 +79,7 @@ data/plugin_data/astrbot_plugin_image_studio/backups/
 1. 从 `1.2.0` 和数据库正式 v2 基线继续开发，不修改已发布结构的版本含义。
 2. 普通 UI、指令或 Provider 修改可继续使用数据库 v2。只有结构变化时才启用下一个数据库目标版本。
 3. 若下一次结构目标为 v3，开发库保留 `user_version=2`，另以 `schema_meta(target_version=3, dev_revision=1,2,...)` 标识 `3-dev.1` 等修订；结构和开发标记在同一事务内提交。
-4. 本轮插件开发版本使用 `1.3.0-dev.1` 等名称，与数据库版本独立。开发测试使用临时目录或独立数据副本，不与正式部署共用数据目录。
+4. 本轮插件开发版本使用 `1.3.0-dev.2` 等名称，与数据库版本独立。开发测试使用临时目录或独立数据副本，不与正式部署共用数据目录。
 5. 正式版只接纳明确支持的正式基线和最终开发布局，拒绝其他未发布标记；不能通过“缺列就补”绕过结构校验。
 6. 下次发布前将当期开发修订压缩为一次正式迁移，同时保留最终开发库到正式库的受控转换入口。
 7. 已发布迁移不得删除。未来 v3 需保留 `v1 → v2 → v3` 的升级路径，并验证最终结构与直接创建 v3 一致。
@@ -103,7 +103,7 @@ git -C "$studio_repo_dir" diff --check
 conda run -n astrbot python "$studio_repo_dir/scripts/build_plugin_package.py"
 ```
 
-当前开发版构建默认输出 `dist/astrbot_plugin_image_studio-v1.3.0-dev.1.zip`，实际文件名跟随元数据版本；支持 `--root` 和 `--output`。构建读取当前工作区，不要求先提交，不执行数据库转换。
+当前开发版构建默认输出 `dist/astrbot_plugin_image_studio-v1.3.0-dev.2.zip`，实际文件名跟随元数据版本；支持 `--root` 和 `--output`。构建读取当前工作区，不要求先提交，不执行数据库转换。
 
 安装包只包含运行模块、WebUI、使用说明和指定的演示截图，不包含真实数据、日志、开发数据库、测试或维护文档。新增运行模块或 README 图片时，同步更新构建白名单和测试；第三方静态资源的许可证随包保留。
 
