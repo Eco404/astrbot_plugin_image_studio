@@ -12,7 +12,7 @@ from .config import RuntimeSettings
 from .image_metadata import parse_parameter_text
 from .models import MODEL_SCHEDULING_KEYS, parameter_flag
 from .novelai_catalog import model_capabilities
-from .storage import project_import_metadata
+from .storage import compact_comfy_request, has_request_value, project_import_metadata
 
 _NOVELAI_IMAGE_FIELDS = frozenset(
     {
@@ -406,7 +406,66 @@ def request_snapshot(detail: dict[str, Any]) -> dict[str, Any]:
     ):
         if name in parameters:
             snapshot[name] = parameters[name]
-    return snapshot
+    return (
+        compact_comfy_request(snapshot)
+        if detail.get("provider_kind") == "comfyui"
+        else snapshot
+    )
+
+
+def _restore_empty_comfy_inputs(
+    source: dict[str, Any], config: dict[str, Any]
+) -> dict[str, Any]:
+    """Recover intentional empty node values omitted from the request summary.
+
+    The executed graph remains authoritative; current refill/display policy is
+    still applied by the normal draft resolver below. Unrecorded controls must
+    not regain their values through this fallback.
+    """
+    result = dict(source)
+    parameters = dict(source.get("parameters") or {})
+    schema = config.get("parameters_schema") or {}
+    graph = config.get("api_graph") or {}
+    for key, binding in config.get("bindings", {}).items():
+        kind = binding.get("source", "parameter")
+        if kind not in {
+            "parameter",
+            "prompt",
+            "negative_prompt",
+            "width",
+            "height",
+            "seed",
+        }:
+            continue
+        targets = binding.get("targets") or []
+        values = [
+            graph.get(target["node_id"], {}).get("inputs", {}).get(target["input_name"])
+            for target in targets
+        ]
+        if (
+            not values
+            or has_request_value(values[0])
+            or any(value != values[0] for value in values[1:])
+        ):
+            continue
+        wire_key = kind if kind in {"prompt", "negative_prompt"} else key
+        descriptor = next(
+            (
+                item
+                for name, item in schema.items()
+                if (item.get("request_key") or name) == wire_key
+            ),
+            {},
+        )
+        if not parameter_flag(descriptor, "record_in_history"):
+            continue
+        if kind in {"prompt", "negative_prompt"}:
+            result.setdefault(wire_key, values[0])
+        else:
+            parameters.setdefault(wire_key, values[0])
+    if parameters:
+        result["parameters"] = parameters
+    return result
 
 
 def export_parameters(
@@ -691,9 +750,13 @@ def resolve_parameters(
         else None
     )
     if source_format == "comfyui" and comfy_snapshot:
-        from .comfyui_workflows import normalize_workflow
+        from .comfyui_workflows import migrate_fixed_outputs
 
-        comfy_snapshot = normalize_workflow(comfy_snapshot)
+        comfy_snapshot = migrate_fixed_outputs(
+            comfy_snapshot, prefer_graph_values=True
+        )["comfyui"]
+        if exact_snapshot:
+            source = _restore_empty_comfy_inputs(source, comfy_snapshot)
         mode = (
             "img2img"
             if any(

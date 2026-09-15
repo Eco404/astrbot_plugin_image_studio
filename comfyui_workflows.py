@@ -16,6 +16,22 @@ from typing import Any
 
 MAX_GRAPH_BYTES = 16 * 1024 * 1024
 MAX_NODES = 10000
+FIXED_OUTPUT_POLICY = "fixed_outputs_v1"
+FIXED_OUTPUT_COUNT_DESCRIPTION = (
+    "本次期望获取的总图片数；按每轮出图张数安排固定轮次，超量截断，"
+    "不足时不自动补齐，不修改工作流节点参数。"
+)
+FIXED_OUTPUT_COUNT_SCHEMA = {
+    "type": "integer",
+    "label": "本次总张数",
+    "description": FIXED_OUTPUT_COUNT_DESCRIPTION,
+    "default": 1,
+    "min": 1,
+    "max": 16,
+    "step": 1,
+    "request_key": "count",
+    "refill_from_history": False,
+}
 BINDING_TYPES = {"text", "number", "boolean", "select", "image", "mask"}
 BINDING_SOURCES = {
     "prompt",
@@ -262,6 +278,9 @@ def normalize_workflow(value: Any) -> dict[str, Any]:
     )
     if ui is not None and not isinstance(ui, dict):
         raise ValueError("ComfyUI 界面工作流必须是 JSON 对象")
+    policy = owner.get("execution_policy", envelope.get("execution_policy"))
+    if policy not in (None, "", FIXED_OUTPUT_POLICY):
+        raise ValueError(f"不支持的 ComfyUI 执行策略：{policy}")
     return {
         "api_graph": graph,
         "api_graph_json": raw,
@@ -272,12 +291,203 @@ def normalize_workflow(value: Any) -> dict[str, Any]:
         "bindings": bindings,
         "outputs": outputs,
         "fingerprint": graph_fingerprint(graph),
+        **({"execution_policy": policy} if policy else {}),
         **(
             {"parameters_schema": copy.deepcopy(owner["parameters_schema"])}
             if isinstance(owner.get("parameters_schema"), dict)
             else {}
         ),
     }
+
+
+def migrate_fixed_outputs(
+    config: Any,
+    parameters: Any = None,
+    tool: Any = None,
+    *,
+    prefer_graph_values: bool = False,
+) -> dict[str, Any]:
+    """Migrate editable model configuration, never immutable execution revisions.
+
+    Plugin count is an independent output target. Former count-to-node bindings
+    become ordinary parameters, keeping their configured defaults and policy.
+    """
+    config = normalize_workflow(config)
+    if parameters is None:
+        parameters = config.get("parameters_schema", {})
+    if isinstance(parameters, str):
+        parameters = _object(parameters) if parameters.strip() else {}
+    raw_schema = copy.deepcopy(parameters) if isinstance(parameters, dict) else {}
+    raw_schema = {
+        key: value for key, value in raw_schema.items() if isinstance(value, dict)
+    }
+    raw_tool = copy.deepcopy(tool) if isinstance(tool, dict) else {}
+    original_tool_parameters = raw_tool.get("parameters")
+    original_tool_parameters = (
+        copy.deepcopy(original_tool_parameters)
+        if isinstance(original_tool_parameters, dict)
+        else {}
+    )
+    tool_parameters = copy.deepcopy(original_tool_parameters)
+    aliases = {"count", "n"}
+    bindings = config["bindings"]
+    occupied = set(bindings) | set(raw_schema) | aliases
+    migrated_bindings, migrated_schema = {}, copy.deepcopy(raw_schema)
+    consumed = set()
+
+    def unused_key(base: str) -> str:
+        if len(base) > 64:
+            base = base[:51] + "_" + hashlib.sha256(base.encode()).hexdigest()[:12]
+        key, index = base, 2
+        while key in occupied:
+            suffix = f"_{index}"
+            key = base[: 64 - len(suffix)] + suffix
+            index += 1
+        occupied.add(key)
+        return key
+
+    plans = []
+    for old_key, original_binding in bindings.items():
+        targets = original_binding["targets"]
+        values = [
+            config["api_graph"][target["node_id"]]["inputs"][target["input_name"]]
+            for target in targets
+        ]
+        if (
+            prefer_graph_values
+            and original_binding["source"] == "count"
+            and any(value != values[0] for value in values[1:])
+        ):
+            # Old execution snapshots occasionally contain manually edited,
+            # differing targets. Preserve each one rather than choosing a value.
+            for index, target in enumerate(targets):
+                base = "workflow_count" if old_key in aliases else old_key[:48]
+                new_key = unused_key(f"{base}_node_{index + 1}")
+                plans.append(
+                    (old_key, {**original_binding, "targets": [target]}, new_key)
+                )
+        else:
+            plans.append((old_key, original_binding, None))
+
+    for old_key, original_binding, forced_key in plans:
+        binding = copy.deepcopy(original_binding)
+        source = binding["source"]
+        parameter_input = source not in {"prompt", "negative_prompt", "reference"}
+        exact_matches = [old_key] if parameter_input and old_key in raw_schema else []
+        wire_matches = []
+        if parameter_input:
+            wire_matches = [
+                name
+                for name, descriptor in raw_schema.items()
+                if str(descriptor.get("request_key") or name) == old_key
+            ]
+        matches = (
+            (exact_matches or wire_matches)
+            if source == "count" or old_key in aliases
+            else (wire_matches or exact_matches)
+        )
+        if not matches and source == "count":
+            # Old source=count consumed the shared count control even when the
+            # binding itself used an unrelated node-based name.
+            matches = [
+                name
+                for name, descriptor in raw_schema.items()
+                if name in aliases or descriptor.get("request_key") in aliases
+            ]
+        schema_key = matches[0] if matches else None
+        descriptor = copy.deepcopy(raw_schema.get(schema_key, {}))
+        new_key = forced_key or (
+            unused_key("workflow_count") if old_key in aliases else old_key
+        )
+        if source == "count":
+            binding["source"] = "parameter"
+        if binding.get("request_key") in aliases or new_key != old_key:
+            binding["request_key"] = new_key
+        migrated_bindings[new_key] = binding
+        if not parameter_input:
+            continue
+        public_key = forced_key or (
+            schema_key if schema_key and schema_key not in aliases else new_key
+        )
+        reused_schema = schema_key in consumed
+        if reused_schema:
+            public_key = new_key
+        # A renamed public field must not overwrite an unrelated schema entry.
+        if (
+            public_key != schema_key or reused_schema
+        ) and public_key in migrated_schema:
+            public_key = unused_key(new_key + "_input")
+        target = binding["targets"][0]
+        graph_default = config["api_graph"][target["node_id"]]["inputs"][
+            target["input_name"]
+        ]
+        descriptor.setdefault("type", binding["type"])
+        descriptor.setdefault("label", binding.get("label", public_key))
+        descriptor.setdefault("default", binding.get("default", graph_default))
+        if source == "count" and prefer_graph_values:
+            descriptor["default"] = copy.deepcopy(graph_default)
+        descriptor["request_key"] = new_key
+        for name in ("min", "max", "description", "step"):
+            if name in binding:
+                descriptor.setdefault(name, binding[name])
+        if "options" in binding:
+            descriptor.setdefault("choices", copy.deepcopy(binding["options"]))
+        if schema_key:
+            consumed.add(schema_key)
+            if not reused_schema:
+                migrated_schema.pop(schema_key, None)
+            if schema_key in original_tool_parameters:
+                if not reused_schema:
+                    tool_parameters.pop(schema_key, None)
+                tool_parameters[public_key] = copy.deepcopy(
+                    original_tool_parameters[schema_key]
+                )
+        migrated_schema[public_key] = descriptor
+        # Source=count previously ignored binding.default. Pin the ordinary
+        # fallback to the actual configured control (or the graph literal).
+        if source == "count":
+            binding["default"] = copy.deepcopy(descriptor["default"])
+
+    independent = [
+        name
+        for name, descriptor in raw_schema.items()
+        if name not in consumed
+        and (name in aliases or descriptor.get("request_key") in aliases)
+    ]
+    total_key = (
+        "count" if "count" in independent else independent[0] if independent else None
+    )
+    total = copy.deepcopy(raw_schema[total_key]) if total_key else {}
+    old_generic = (
+        "本次希望生成的总图片数；按模型原生批次上限自动拆分请求，实际返回取决于上游。"
+    )
+    description = str(total.get("description") or "")
+    if not description or description.startswith(old_generic):
+        total["description"] = FIXED_OUTPUT_COUNT_DESCRIPTION
+    for name in independent:
+        migrated_schema.pop(name, None)
+        if name != "count":
+            tool_parameters.pop(name, None)
+    if total_key and total_key in original_tool_parameters:
+        tool_parameters["count"] = copy.deepcopy(original_tool_parameters[total_key])
+    total = {
+        **FIXED_OUTPUT_COUNT_SCHEMA,
+        **total,
+        "request_key": "count",
+        "refill_from_history": False,
+    }
+    migrated_schema["count"] = total
+    if any(name != "negative_prompt" for name in original_tool_parameters):
+        # Existing per-field policies restrict tool exposure. The newly added
+        # independent output count is available unless it already had a policy.
+        tool_parameters.setdefault("count", {"exposed": True})
+    if "parameters" in raw_tool or tool_parameters:
+        raw_tool["parameters"] = tool_parameters
+    config["bindings"] = migrated_bindings
+    config["execution_policy"] = FIXED_OUTPUT_POLICY
+    if "parameters_schema" in config:
+        config["parameters_schema"] = copy.deepcopy(migrated_schema)
+    return {"comfyui": config, "parameters": migrated_schema, "tool": raw_tool}
 
 
 def inspect_workflow(config: Any) -> dict[str, Any]:
@@ -332,13 +542,7 @@ def inspect_workflow(config: Any) -> dict[str, Any]:
                 if isinstance(value, (int, float))
                 else "text"
             )
-            source = (
-                name
-                if name in {"width", "height", "seed"}
-                else "count"
-                if name == "batch_size"
-                else "parameter"
-            )
+            source = name if name in {"width", "height", "seed"} else "parameter"
             if node["class_type"] == "LoadImage" and name == "image":
                 kind, source = "image", "reference"
             # Even familiar CLIP text nodes may serve several conditioning
@@ -465,11 +669,29 @@ def _typed_value(key: str, binding: dict, value: Any) -> Any:
     return value
 
 
+def clear_execution_cache_markers(graph: dict) -> None:
+    """Clear prior-run fingerprints on an execution copy, not archived metadata."""
+    for node in graph.values():
+        # ComfyUI trusts this field instead of calling the node's IS_CHANGED.
+        # Replaying it can freeze random nodes even when their seed stays -1.
+        node.pop("is_changed", None)
+
+
 def prepare_graph(
     config: Any, request: Any, uploadedrefs: list[str] | tuple[str, ...] = ()
 ) -> dict:
     config = normalize_workflow(config)
+    if config.get("execution_policy") == FIXED_OUTPUT_POLICY and any(
+        binding["source"] == "count"
+        or key in {"count", "n"}
+        or binding.get("request_key") in {"count", "n"}
+        for key, binding in config["bindings"].items()
+    ):
+        raise ValueError(
+            "固定出图策略不允许把插件总量 count/n 绑定到工作流节点，请迁移为普通参数"
+        )
     graph = config["api_graph"]
+    clear_execution_cache_markers(graph)
     references = list(uploadedrefs)
     used_reference_indices = set()
     for key, binding in config["bindings"].items():

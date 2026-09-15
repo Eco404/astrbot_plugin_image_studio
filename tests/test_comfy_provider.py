@@ -262,6 +262,38 @@ def test_one_parameter_fans_out_to_explicit_targets_with_large_seed_preserved():
     assert result["4"]["inputs"]["seed"] == result["3"]["inputs"]["batch_size"] == seed
 
 
+@pytest.mark.parametrize("canonical", [False, True])
+def test_execution_clears_old_fingerprints_but_preserves_seed_inputs_and_archive(
+    canonical,
+):
+    value = config()
+    value["api_graph"]["91"] = {
+        "class_type": "Seed (rgthree)",
+        "inputs": {"seed": -1},
+        "is_changed": [862058598661582],
+    }
+    value["api_graph"]["4"]["inputs"]["seed"] = ["91", 0]
+    value["api_graph"]["99"] = {
+        "class_type": "CustomNode",
+        "inputs": {"is_changed": "legitimate node input"},
+        "is_changed": False,
+        "_meta": {"is_changed": "keep metadata"},
+    }
+    if canonical:
+        value["api_graph_json"] = json.dumps(value["api_graph"])
+    original = copy.deepcopy(value)
+    normalized = normalize_workflow(value)
+    assert normalized["api_graph"]["91"]["is_changed"] == [862058598661582]
+    for _ in range(2):
+        prepared = prepare_graph(value, request())
+        assert all("is_changed" not in node for node in prepared.values())
+        assert prepared["91"]["inputs"]["seed"] == -1
+        assert prepared["4"]["inputs"]["seed"] == ["91", 0]
+        assert prepared["99"]["inputs"]["is_changed"] == "legitimate node input"
+        assert prepared["99"]["_meta"]["is_changed"] == "keep metadata"
+    assert value == original
+
+
 def test_width_height_count_only_change_when_explicitly_bound():
     value = config(
         {
@@ -399,6 +431,34 @@ def test_submit_records_api_and_ui_graph_without_mutation_and_keeps_partial_erro
     assert payload["prompt"] == value["api_graph"]
     assert payload["extra_data"]["extra_pnginfo"]["workflow"] == value["workflow"]
     assert result["node_errors"] == errors
+
+
+def test_direct_submission_drops_old_fingerprints_on_every_request_without_mutation():
+    async def run():
+        session = Session(
+            [Response({"prompt_id": "one"}), Response({"prompt_id": "two"})]
+        )
+        client = ComfyClient(session)
+        value = config()
+        value["api_graph"]["91"] = {
+            "class_type": "Seed (rgthree)",
+            "inputs": {"seed": -1},
+            "is_changed": [862058598661582],
+        }
+        value["api_graph"]["4"]["inputs"]["seed"] = ["91", 0]
+        original = copy.deepcopy(value)
+        for _ in range(2):
+            await client.submit(provider(), value["api_graph"], value["workflow"])
+            payload = session.calls[-1][2]["json"]
+            assert "is_changed" not in payload["prompt"]["91"]
+            assert payload["prompt"]["91"]["inputs"]["seed"] == -1
+            assert payload["prompt"]["4"]["inputs"]["seed"] == ["91", 0]
+            # ComfyUI may add a new fingerprint to the submitted graph while
+            # executing. Neither this nor the old archive can seed a new request.
+            payload["prompt"]["91"]["is_changed"] = [123456]
+        assert value == original
+
+    asyncio.run(run())
 
 
 def test_uncertain_submission_never_retries_and_redacts_transport_credentials():

@@ -19,6 +19,7 @@ from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 from astrbot.core.utils.media_utils import MediaResolver, file_uri_to_path, is_file_uri
 
 from .config import RuntimeSettings
+from .comfyui_workflows import FIXED_OUTPUT_POLICY
 from .models import (
     MODEL_SCHEDULING_KEYS,
     GeneratedImage,
@@ -329,11 +330,17 @@ class ImageGenerationService:
             and not batch_failures
             and not (
                 provider.kind == "comfyui"
+                and selected_model.comfyui.get("execution_policy")
+                != FIXED_OUTPUT_POLICY
                 and not selected_model.comfyui_capabilities["count_bound"]
             )
         ):
             warning = (
-                f"本次目标 {request.count} 张，上游实际返回 {len(images)} 张；"
+                f"本次目标 {request.count} 张，实际取得 {len(images)} 张；未自动追加请求。"
+                if provider.kind == "comfyui"
+                and selected_model.comfyui.get("execution_policy")
+                == FIXED_OUTPUT_POLICY
+                else f"本次目标 {request.count} 张，上游实际返回 {len(images)} 张；"
                 "已保留全部返回图片，未自动追加请求。"
             )
         if (
@@ -394,16 +401,19 @@ class ImageGenerationService:
         model_limiter: _ProviderLimiter,
     ) -> tuple[GeneratedImage, ...]:
         if provider.kind == "comfyui":
-            # A workflow execution may contain several output nodes and batches.
-            # Keep its outputs intact unless an explicit count input is mapped.
-            if not model.comfyui_capabilities["count_bound"] and request.count != 1:
+            fixed_outputs = model.comfyui.get("execution_policy") == FIXED_OUTPUT_POLICY
+            # Unmarked persisted jobs retain their original count-binding contract.
+            if (
+                not fixed_outputs
+                and not model.comfyui_capabilities["count_bound"]
+                and request.count != 1
+            ):
                 raise ValueError(
                     "此工作流未绑定数量参数；一次运行保留工作流原有的全部输出"
                 )
             if (
-                model.comfyui_capabilities["count_bound"]
-                and request.count > model.native_batch_size
-            ):
+                fixed_outputs or model.comfyui_capabilities["count_bound"]
+            ) and request.count > model.native_batch_size:
                 managed_batch = getattr(self.executor, "generate_batch", None)
                 if (
                     not request.local_parameters.get("_comfy_job_id")
@@ -415,7 +425,15 @@ class ImageGenerationService:
                 return await managed_batch(provider, request)
             async with model_limiter.slot():
                 async with limiter.slot():
-                    return await self.executor.generate(provider, request)
+                    try:
+                        images = await self.executor.generate(provider, request)
+                    except ProviderPartialResponseError as exc:
+                        if not fixed_outputs:
+                            raise
+                        raise ProviderPartialResponseError(
+                            exc.images[: request.count], exc.failures
+                        ) from exc
+                    return images[: request.count] if fixed_outputs else images
         count = _batch_integer(request.count, "count")
         native_size = _batch_integer(model.native_batch_size, "native_batch_size")
         request_sizes = tuple(
@@ -629,6 +647,7 @@ class ImageGenerationService:
         """Return a reproducible draft and stage retained references when available."""
 
         from .parameter_exchange import export_parameters, resolve_parameters
+        from .comfyui_workflows import migrate_fixed_outputs
 
         detail = await self.store.generation_image_context(generation_id, image_id)
         if detail is None:
@@ -684,7 +703,20 @@ class ImageGenerationService:
                         }
                         for key, descriptor in schema.items()
                     }
-                    raw.update(comfyui=config, parameters=schema)
+                    migrated = migrate_fixed_outputs(
+                        config, schema, raw.get("tool"), prefer_graph_values=True
+                    )
+                    current_count = model.parameters.get(
+                        _control_parameter_name(model, "count"), {}
+                    )
+                    for key, descriptor in migrated["parameters"].items():
+                        if (
+                            descriptor.get("request_key", key) in {"count", "n"}
+                            and "default" in current_count
+                        ):
+                            descriptor["default"] = current_count["default"]
+                    migrated["comfyui"]["parameters_schema"] = migrated["parameters"]
+                    raw.update(migrated)
                     saved_provider = ImageProvider.from_mapping(
                         {**provider.public_dict(), "models": [raw]}
                     )

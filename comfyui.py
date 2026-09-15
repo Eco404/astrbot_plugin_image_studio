@@ -15,6 +15,8 @@ import aiohttp
 from PIL import Image, ImageOps
 
 from .comfyui_workflows import (
+    FIXED_OUTPUT_POLICY,
+    clear_execution_cache_markers,
     graph_fingerprint,
     inspect_workflow,
     is_link,
@@ -653,6 +655,9 @@ class ComfyClient:
         prompt_id: str = "",
     ) -> dict:
         graph = normalize_workflow(graph)["api_graph"]
+        # Also guard direct submissions that bypass prepare_graph. Normalizing
+        # above made a copy, leaving the imported workflow and its history intact.
+        clear_execution_cache_markers(graph)
         payload: dict[str, Any] = {
             "prompt": graph,
             "client_id": client_id or "image-studio-" + uuid.uuid4().hex,
@@ -838,15 +843,28 @@ class ComfyClient:
                 await ws.close()
 
     async def download_outputs(
-        self, provider: Any, history: dict, outputs: Any = ()
+        self,
+        provider: Any,
+        history: dict,
+        outputs: Any = (),
+        *,
+        output_limit: int | None = None,
     ) -> tuple[GeneratedImage, ...]:
+        if output_limit is not None and (
+            isinstance(output_limit, bool)
+            or not isinstance(output_limit, int)
+            or output_limit < 1
+        ):
+            raise ValueError("工作流图片收集额度必须为正整数")
         available = history.get("outputs") or {}
         if not isinstance(available, dict):
             raise ComfyExecutionError("ComfyUI 返回的输出结构无效", history=history)
         selected = list(dict.fromkeys(str(item) for item in outputs)) or list(available)
         images, failures, seen = [], [], set()
-        index, total = 0, 0
+        index, total, allocated = 0, 0, 0
         for node_id in selected:
+            if output_limit is not None and allocated >= output_limit:
+                break
             node = available.get(node_id) or {}
             entries = node.get("images") or [] if isinstance(node, dict) else []
             if not entries:
@@ -854,6 +872,8 @@ class ComfyClient:
                     failures.append((index + 1, f"输出节点 #{node_id} 未返回图片"))
                 continue
             for item in entries:
+                if output_limit is not None and allocated >= output_limit:
+                    break
                 index += 1
                 if index > MAX_OUTPUT_IMAGES:
                     failures.append((index, "输出图片超过 256 张上限"))
@@ -873,6 +893,9 @@ class ComfyClient:
                 if params["type"] not in {"output", "temp", "input"}:
                     failures.append((index, f"输出节点 #{node_id} 的图片目录类型无效"))
                     continue
+                # Reserve result positions before downloading. A failed download
+                # does not pull an extra image from beyond this execution's quota.
+                allocated += 1
                 try:
                     raw = await self._request(
                         provider, "GET", "/view", params=params, image=True
@@ -1032,7 +1055,21 @@ class ComfyClient:
                 raise
             execution_error, history = exc, exc.history
         try:
-            images = await self.download_outputs(provider, history, config["outputs"])
+            images = await self.download_outputs(
+                provider,
+                history,
+                config["outputs"],
+                **(
+                    {
+                        "output_limit": min(
+                            request.count,
+                            provider.get_model(request.model).native_batch_size,
+                        )
+                    }
+                    if config.get("execution_policy") == FIXED_OUTPUT_POLICY
+                    else {}
+                ),
+            )
         except ComfyExecutionError as exc:
             exc.prompt_id = remote_id
             if execution_error:

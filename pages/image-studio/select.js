@@ -9,7 +9,7 @@
   let typeahead = "";
   let typeaheadAt = 0;
   let lastTouchY = 0;
-  const ATTRIBUTE_NAMES = ["disabled", "hidden", "class", "style", "selected", "multiple", "data-all-label", "label", "value", "required", "name", "data-tooltip", "aria-label", "aria-labelledby", "aria-describedby", "tabindex", "list"];
+  const ATTRIBUTE_NAMES = ["disabled", "hidden", "class", "style", "selected", "multiple", "data-all-label", "data-menu-layout", "data-menu-align", "label", "value", "required", "name", "data-tooltip", "aria-label", "aria-labelledby", "aria-describedby", "tabindex", "list"];
   const SOURCE_SELECTOR = "select, input[list], input[data-studio-datalist]";
   const GALLERY_SELECT_IDS = new Set(["galleryProvider", "galleryMode", "gallerySource", "galleryEngine"]);
 
@@ -449,7 +449,20 @@
     const rightEdge = (viewport?.offsetLeft || 0) + (viewport?.width || document.documentElement.clientWidth) - 8;
     const bottomEdge = (viewport?.offsetTop || 0) + (viewport?.height || window.innerHeight) - 8;
     if (rect.bottom < topEdge || rect.top > bottomEdge || rect.right < leftEdge || rect.left > rightEdge) { close(); return; }
-    const width = Math.max(0, Math.min(Math.max(rect.width, 180), rightEdge - leftEdge));
+    const contentSized = control.select.dataset.menuLayout === "content";
+    const dialog = contentSized ? control.select.closest(".studio-modal")?.getBoundingClientRect() : null;
+    const menuLeft = Math.max(leftEdge, dialog ? dialog.left + 12 : leftEdge);
+    const menuRight = Math.min(rightEdge, dialog ? dialog.right - 12 : rightEdge);
+    const availableWidth = Math.max(0, menuRight - menuLeft);
+    let width = Math.min(Math.max(rect.width, 180), availableWidth);
+    if (contentSized) {
+      // Use the option text's intrinsic width, keeping long workflow node names
+      // readable while allowing wrapping at the dialog/viewport boundary.
+      menu.style.minWidth = `${Math.min(width, 560)}px`;
+      menu.style.maxWidth = `${Math.min(560, availableWidth)}px`;
+      menu.style.width = "max-content";
+      width = menu.getBoundingClientRect().width;
+    } else { menu.style.minWidth = ""; menu.style.maxWidth = ""; }
     menu.style.width = `${width}px`;
     const contentHeight = (control.listbox?.scrollHeight || 0) + (menu.querySelector(".studio-select-actions")?.offsetHeight || 0) + 2;
     const naturalHeight = Math.min(contentHeight || 44, 300);
@@ -460,7 +473,8 @@
     menu.style.maxHeight = `${maxHeight}px`;
     const height = Math.min(contentHeight, maxHeight);
     const top = placeAbove ? rect.top - height - 5 : rect.bottom + 5;
-    menu.style.left = `${Math.max(leftEdge, Math.min(rect.left, rightEdge - width))}px`;
+    const preferredLeft = control.select.dataset.menuAlign === "end" ? rect.right - width : rect.left;
+    menu.style.left = `${Math.max(menuLeft, Math.min(preferredLeft, menuRight - width))}px`;
     menu.style.top = `${Math.max(topEdge, Math.min(top, bottomEdge - height))}px`;
     menu.dataset.placement = placeAbove ? "above" : "below";
   }

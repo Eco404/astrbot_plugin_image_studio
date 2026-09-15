@@ -11,6 +11,7 @@ from dataclasses import replace
 
 from .comfyui import ComfyClient, ComfyExecutionError, normalize_workflow
 from .comfyui_jobs import ComfyJobManager, ComfyJobStore
+from .comfyui_workflows import FIXED_OUTPUT_POLICY, migrate_fixed_outputs
 from .models import (
     PARAMETER_POLICY_FIELDS,
     GenerationRequest,
@@ -53,6 +54,13 @@ class ComfyRuntime:
                     for flag in PARAMETER_POLICY_FIELDS:
                         descriptor[flag] = current.get(flag, True)
             snapshot["parameters"] = parameters
+        migrated = migrate_fixed_outputs(
+            config, snapshot.get("parameters"), snapshot.get("tool")
+        )
+        config = migrated["comfyui"]
+        snapshot.update(
+            comfyui=config, parameters=migrated["parameters"], tool=migrated["tool"]
+        )
         identity = values.get("invocation_source")
         if isinstance(identity, InvocationSource):
             values["invocation_source"] = identity.public_dict()
@@ -89,7 +97,10 @@ class ComfyRuntime:
             raise ProviderError("ComfyUI 地址已改变，无法在新服务器上恢复旧任务")
         raw = current.public_dict()
         raw["models"] = [job["request"]["model"]]
-        return ImageProvider.from_mapping(raw)
+        # Discovery is live configuration; execution limits belong to the job's
+        # resolved model snapshot, including legacy remote capability values.
+        raw["discovered_models"] = []
+        return ImageProvider.from_mapping(raw, migrate_comfyui=False)
 
     async def _run(self, job):
         if job["request"].get("parent_job_id"):
@@ -101,6 +112,7 @@ class ComfyRuntime:
         runtime = self
         client = ComfyClient(self.service.executor.session)
         config = await self.store.get_revision(job["revision_id"])
+        fixed_outputs = config.get("execution_policy") == FIXED_OUTPUT_POLICY
         references = await self.store.load_references(job["id"])
         values = dict(job["request"]["values"])
         identity = values.pop("invocation_source", None) or {}
@@ -129,12 +141,40 @@ class ComfyRuntime:
                 saved = await runtime.store.get_job(job["id"])
                 if saved["status"] == "cancelled":
                     raise asyncio.CancelledError
+                if saved["status"] in {"submitting", "unknown"} and not saved.get(
+                    "remote_id"
+                ):
+                    # Recovery can reach a child through its parent before the
+                    # manager has classified interrupted submissions as unknown.
+                    # An unacknowledged POST must never be sent a second time.
+                    await runtime.store.update_job(
+                        job["id"],
+                        status="unknown",
+                        error="提交结果未知，未重复提交 ComfyUI 任务",
+                    )
+                    raise ProviderError(
+                        "提交结果未知，请先核实远端任务，不能自动重复提交"
+                    )
+                output_limit = None
+                if fixed_outputs:
+                    output_limit = request.count
+                    previous_limit = (saved.get("result") or {}).get("collection_limit")
+                    if previous_limit is not None and previous_limit != output_limit:
+                        raise ProviderError("ComfyUI 图片收集额度与保存的任务不一致")
+                    if previous_limit is None:
+                        await runtime.store.update_job(
+                            job["id"],
+                            result={
+                                **(saved.get("result") or {}),
+                                "collection_limit": output_limit,
+                            },
+                        )
                 cached = await runtime.store.load_outputs(job["id"])
                 if cached:
                     warning = (saved.get("result") or {}).get("partial_warning")
                     if warning:
                         raise ProviderPartialResponseError(cached, ((1, warning),))
-                    return cached
+                    return cached[:output_limit] if output_limit is not None else cached
                 remote_id = saved.get("remote_id", "")
                 graph = (saved.get("result") or {}).get("api_graph")
                 if not remote_id:
@@ -176,8 +216,14 @@ class ComfyRuntime:
                         "status"
                     ] == "cancelled":
                         raise asyncio.CancelledError
+                    prepared_state = await runtime.store.get_job(job["id"])
                     await runtime.store.update_job(
-                        job["id"], status="submitting", result={"api_graph": graph}
+                        job["id"],
+                        status="submitting",
+                        result={
+                            **(prepared_state.get("result") or {}),
+                            "api_graph": graph,
+                        },
                     )
                     try:
                         submitted = await client.submit(
@@ -202,6 +248,7 @@ class ComfyRuntime:
                         status="submitted",
                         remote_id=remote_id,
                         result={
+                            **(prepared_state.get("result") or {}),
                             "api_graph": graph,
                             "node_errors": submitted.get("node_errors", {}),
                         },
@@ -241,13 +288,24 @@ class ComfyRuntime:
                     failure = str(exc)
                 try:
                     images = await client.download_outputs(
-                        selected_provider, history, config["outputs"]
+                        selected_provider,
+                        history,
+                        config["outputs"],
+                        **(
+                            {"output_limit": output_limit}
+                            if output_limit is not None
+                            else {}
+                        ),
                     )
                 except ComfyExecutionError as exc:
                     images = getattr(exc, "images", ())
                     if not images:
                         raise ProviderError(str(exc)) from exc
                     failure = str(exc)
+                if output_limit is not None:
+                    images = images[:output_limit]
+                if not images:
+                    raise ProviderError("ComfyUI 本轮未取得可用图片，未追加执行")
                 actual_graph = graph or config["api_graph"]
                 snapshot = {
                     **config,
@@ -302,6 +360,11 @@ class ComfyRuntime:
         )
         persisted = (await self.store.get_job(job["id"])).get("result") or {}
         return {
+            **{
+                key: persisted[key]
+                for key in ("batch_plan", "collection_limit")
+                if key in persisted
+            },
             **(
                 {
                     "child_ids": persisted["child_ids"],
@@ -325,11 +388,13 @@ class ComfyRuntime:
             "elapsed_ms": result.elapsed_ms,
             "provider_name": provider.name,
             "model": job["model_id"],
-            "status": "partial" if result.warning else "succeeded",
+            "status": "partial"
+            if (persisted.get("partial_warning") if fixed_outputs else result.warning)
+            else "succeeded",
         }
 
     async def _run_children(self, parent, provider, request, config):
-        """Split bound native batches into independently durable remote tasks."""
+        """Persist fixed execution quotas, or resume a legacy native-batch plan."""
         saved = await self.store.get_job(parent["id"])
         if saved["status"] == "cancelled":
             raise asyncio.CancelledError
@@ -360,6 +425,16 @@ class ComfyRuntime:
             min(native, request.count - offset)
             for offset in range(0, request.count, native)
         ]
+        fixed_outputs = config.get("execution_policy") == FIXED_OUTPUT_POLICY
+        batch_plan = {
+            "execution_policy": config.get("execution_policy", "legacy_count_binding"),
+            "count": request.count,
+            "images_per_run": native,
+            "quotas": sizes,
+        }
+        previous_plan = (saved.get("result") or {}).get("batch_plan")
+        if previous_plan is not None and previous_plan != batch_plan:
+            raise ProviderError("ComfyUI 执行计划与保存的任务不一致，未重新提交")
         child_ids = [
             uuid.uuid5(
                 uuid.NAMESPACE_URL, f"image-studio-comfy:{parent['id']}:{index}"
@@ -376,6 +451,7 @@ class ComfyRuntime:
                 **(saved.get("result") or {}),
                 "child_ids": child_ids,
                 "request_sizes": sizes,
+                "batch_plan": batch_plan,
                 "progress": {"status": "running", "completed": 0, "total": len(sizes)},
             },
         )
@@ -477,6 +553,8 @@ class ComfyRuntime:
                 except (ValueError, OSError) as exc:
                     failures.append((index + 1, str(exc)))
                     continue
+                if fixed_outputs:
+                    outputs = outputs[: sizes[index]]
                 start_index = len(images)
                 images.extend(
                     replace(
@@ -547,7 +625,8 @@ class ComfyRuntime:
             }
         )
         raw["models"] = [job["request"]["model"]]
-        provider = ImageProvider.from_mapping(raw)
+        raw["discovered_models"] = []
+        provider = ImageProvider.from_mapping(raw, migrate_comfyui=False)
         details = job.get("result") or {}
         values = details.get("resolved_request") or job["request"]["values"]
         terminal = job.get("status") in {"succeeded", "partial"}

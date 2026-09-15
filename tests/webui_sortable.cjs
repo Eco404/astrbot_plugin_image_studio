@@ -57,6 +57,22 @@ async function verify(browser, name, width) {
     await moveTo("a", "b", true); await page.mouse.up();
     assert.deepEqual(await order(), ["b", "a", "c", "d", "e", "f"], "desktop preview can also be dragged");
     await handle("a").press("Home");
+    await card("a").locator("[data-sort-surface]").evaluate(original => {
+      const button = document.createElement("button");
+      button.type = "button"; button.className = original.className;
+      button.dataset.sortSurface = ""; button.textContent = "选择条目 A";
+      original.replaceWith(button);
+    });
+    const surface = card("a").locator("[data-sort-surface]");
+    for (const selected of ["true", "false", null]) {
+      await surface.evaluate((button, value) => value === null ? button.removeAttribute("aria-pressed") : button.setAttribute("aria-pressed", value), selected);
+      await moveTo("a", "b", true); await page.mouse.up();
+      assert.equal(await surface.getAttribute("aria-pressed"), selected, "surface dragging preserves the existing selection attribute");
+      await handle("a").press("Home");
+    }
+    await surface.evaluate(button => button.setAttribute("aria-pressed", "true"));
+    await moveTo("a", "b", true); await page.keyboard.press("Escape"); await page.mouse.up();
+    assert.equal(await surface.getAttribute("aria-pressed"), "true", "canceling a surface drag also restores selection");
     await page.locator("#scroller").evaluate(element => { element.scrollTop = 0; });
     if (name === "chromium" && width < 600) {
       const session = await page.context().newCDPSession(page);

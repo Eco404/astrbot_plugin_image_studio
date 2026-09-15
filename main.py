@@ -54,6 +54,7 @@ from .models import (
     ImageProvider,
     InvocationSource,
     ReferenceImage,
+    browser_safe_integers,
     novelai_model_presets,
 )
 from .image_metadata import parse_metadata_fields
@@ -61,6 +62,7 @@ from .parameter_exchange import export_parameters, resolve_parameters
 from .providers import ProviderError, ProviderExecutor
 from .comfyui_runtime import ComfyRuntime
 from .comfyui import ComfyExecutionError
+from .comfyui_workflows import FIXED_OUTPUT_POLICY
 from .service import ImageGenerationService
 from .storage import (
     WORKFLOW_ASSET_RETENTION_SECONDS,
@@ -260,6 +262,12 @@ class ImageStudioPlugin(Star):
                 self._api_comfy_resume,
                 ["POST"],
                 "Image Studio: resume checking existing ComfyUI job",
+            ),
+            (
+                "comfy/jobs/dismiss",
+                self._api_comfy_dismiss,
+                ["POST"],
+                "Image Studio: dismiss finished ComfyUI job from queue",
             ),
             (
                 "appearance",
@@ -557,8 +565,11 @@ class ImageStudioPlugin(Star):
     async def _api_comfy_import(self):
         from .comfyui import normalize_workflow
         from .comfyui_support import import_result
+        from .comfyui_workflows import migrate_fixed_outputs
 
         try:
+            parameters = tool = None
+            historical = False
             files = await web_request.files()
             if files:
                 upload = files.get("file") or next(iter(files.values()))
@@ -571,6 +582,7 @@ class ImageStudioPlugin(Star):
                 if not isinstance(body, dict):
                     raise ValueError("请求体必须是对象")
                 if body.get("image_id"):
+                    historical = True
                     info = await self.store.gallery_image_info(
                         str(body["image_id"]), include_preview=False
                     )
@@ -582,6 +594,7 @@ class ImageStudioPlugin(Star):
                         "metadata", {}
                     ).get("raw", {})
                 elif body.get("generation_id"):
+                    historical = True
                     detail = await self.store.generation_detail(
                         str(body["generation_id"]), include_assets=False
                     )
@@ -599,8 +612,17 @@ class ImageStudioPlugin(Star):
                     ).get("raw", {})
                 else:
                     config = body.get("content", body.get("comfyui", body))
+                    parameters, tool = body.get("parameters"), body.get("tool")
                 config = normalize_workflow(config)
-            return json_response(import_result(config))
+            migrated = migrate_fixed_outputs(
+                config, parameters, tool, prefer_graph_values=historical
+            )
+            result = import_result(migrated["comfyui"])
+            result.update(
+                parameters=browser_safe_integers(migrated["parameters"]),
+                tool=browser_safe_integers(migrated["tool"]),
+            )
+            return json_response(result)
         except (ValueError, OSError) as exc:
             return error_response(str(exc), status_code=400)
 
@@ -740,7 +762,9 @@ class ImageStudioPlugin(Star):
                 {
                     "jobs": [
                         runtime.public_job(job)
-                        for job in await runtime.store.list_jobs(include_children=False)
+                        for job in await runtime.store.list_jobs(
+                            include_children=False, queue_only=True
+                        )
                     ]
                 }
             )
@@ -779,6 +803,17 @@ class ImageStudioPlugin(Star):
             job = await runtime.manager.resume(str(body.get("id") or ""))
             return json_response({"job": runtime.public_job(job)})
         except (ValueError, ProviderError) as exc:
+            return error_response(str(exc), status_code=400)
+
+    async def _api_comfy_dismiss(self):
+        try:
+            body = await web_request.json(default={})
+            if not isinstance(body, dict):
+                raise ValueError("请求体必须是 JSON 对象")
+            runtime = self._comfy_or_raise()
+            job = await runtime.store.dismiss_job(str(body.get("id") or ""))
+            return json_response({"job": runtime.public_job(job)})
+        except ValueError as exc:
             return error_response(str(exc), status_code=400)
 
     async def _api_get_appearance(self) -> Any:
@@ -2382,9 +2417,16 @@ class ImageStudioPlugin(Star):
                         continue
                     if name not in exposed_parameter_names:
                         continue
-                    if provider.kind == "comfyui" and str(
-                        descriptor.get("request_key") or name
-                    ) in {"count", "n", "size"}:
+                    request_key = str(descriptor.get("request_key") or name)
+                    if (
+                        provider.kind == "comfyui"
+                        and request_key in {"count", "n", "size"}
+                        and (
+                            request_key == "size"
+                            or model.comfyui.get("execution_policy")
+                            != FIXED_OUTPUT_POLICY
+                        )
+                    ):
                         source = (
                             "count"
                             if str(descriptor.get("request_key") or name)

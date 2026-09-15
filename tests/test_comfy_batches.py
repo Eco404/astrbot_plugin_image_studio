@@ -30,14 +30,19 @@ class BatchClient(FakeComfyClient):
         self.maximum = 0
         self.two_started = asyncio.Event()
         self.extra_outputs = 0
+        self.output_counts = None
+        self.collection_limits = []
+        self.store = None
 
     async def submit(self, provider, graph, ui_workflow, *, client_id):
+        job = await self.store.get_job(client_id) if self.store is not None else None
         index = len(self.remote)
         remote_id = f"remote-{client_id}"
         self.calls.append(("submit", copy.deepcopy(graph), client_id))
         self.remote[remote_id] = {
             "size": graph["2"]["inputs"]["batch_size"],
             "index": index,
+            "chunk_index": job["request"].get("chunk_index", 0) if job else index,
         }
         if index in self.unknown_indices:
             raise ComfyExecutionError("response lost", unknown_submission=True)
@@ -61,21 +66,27 @@ class BatchClient(FakeComfyClient):
         finally:
             self.active -= 1
 
-    async def download_outputs(self, provider, history, outputs):
+    async def download_outputs(self, provider, history, outputs, *, output_limit=None):
         details = self.remote[history["test_remote_id"]]
+        self.collection_limits.append(output_limit)
+        count = (
+            self.output_counts[details["chunk_index"]]
+            if self.output_counts is not None
+            else details["size"] + self.extra_outputs
+        )
         colors = ("red", "blue", "green", "yellow")
         return tuple(
             replace(
                 image(colors[details["index"] % len(colors)]),
                 effective_parameters={"batch_index": details["index"]},
             )
-            for _ in range(details["size"] + self.extra_outputs)
-        )
+            for _ in range(count)
+        )[:output_limit]
 
 
 async def fixture(tmp_path, monkeypatch, *, native=2, model_limit=2, provider_limit=2):
     runtime, service, provider, _ = await runtime_fixture(
-        tmp_path, monkeypatch, config=workflow(count_bound=True)
+        tmp_path, monkeypatch, config=workflow()
     )
     raw = provider.public_dict()
     raw["max_concurrent_generations"] = provider_limit
@@ -85,6 +96,7 @@ async def fixture(tmp_path, monkeypatch, *, native=2, model_limit=2, provider_li
     provider = ImageProvider.from_mapping(raw)
     service.update_settings(replace(service.settings, providers=(provider,)))
     client = BatchClient()
+    client.store = runtime.store
     monkeypatch.setattr(comfyui_runtime, "ComfyClient", lambda _: client)
     return runtime, service, provider, client
 
@@ -99,7 +111,7 @@ async def submit(runtime, provider, count):
     )
 
 
-def test_bound_count_splits_into_durable_children_and_one_ordered_gallery_group(
+def test_fixed_count_splits_into_durable_children_and_one_ordered_gallery_group(
     tmp_path, monkeypatch
 ):
     async def run():
@@ -140,7 +152,9 @@ def test_bound_count_splits_into_durable_children_and_one_ordered_gallery_group(
                 call[1]["2"]["inputs"]["batch_size"]
                 for call in client.calls
                 if call[0] == "submit"
-            ) == [1, 2, 2]
+            ) == [3, 3, 3]
+            assert sorted(client.collection_limits) == [1, 2, 2]
+            assert completed["result"]["batch_plan"]["quotas"] == [2, 2, 1]
             assert client.maximum == 2
             with service.store._connect() as connection:
                 assert (
@@ -198,7 +212,7 @@ def test_partial_child_failure_preserves_all_successes_in_one_record(
             assert completed["status"] == "partial", completed
             result = await runtime.result(completed)
             expected = 5 - sum(
-                item["size"]
+                min(2, 5 - item["chunk_index"] * 2)
                 for item in client.remote.values()
                 if item["index"] in client.fail_indices
             )
@@ -221,7 +235,9 @@ def test_partial_child_failure_preserves_all_successes_in_one_record(
     asyncio.run(run())
 
 
-def test_extra_images_from_selected_outputs_are_never_truncated(tmp_path, monkeypatch):
+def test_extra_images_from_selected_outputs_are_truncated_without_warning(
+    tmp_path, monkeypatch
+):
     async def run():
         runtime, _, provider, client = await fixture(tmp_path, monkeypatch)
         client.extra_outputs = 1
@@ -229,8 +245,9 @@ def test_extra_images_from_selected_outputs_are_never_truncated(tmp_path, monkey
             job = await submit(runtime, provider, 3)
             completed = await runtime.manager.wait(job["id"])
             result = await runtime.result(completed)
-            assert len(result.images) == 5
-            assert result.warning
+            assert len(result.images) == 3
+            assert not result.warning
+            assert completed["status"] == "succeeded"
         finally:
             await runtime.close()
 
@@ -437,7 +454,7 @@ def test_parent_progress_updates_before_all_children_finish_and_survives_summary
 
 def alias_provider(provider, *, hidden_count=False):
     raw = provider.public_dict()
-    definition = workflow(count_bound=True)
+    definition = workflow()
     definition["bindings"].update(
         {
             "bound_seed": {
@@ -546,7 +563,7 @@ def test_hidden_tool_count_default_is_resolved_once_before_native_splitting(
             assert result.request.count == 3 and len(result.images) == 3
             graphs = [call[1] for call in client.calls if call[0] == "submit"]
             assert len(graphs) == 3
-            assert all(item["2"]["inputs"]["batch_size"] == 1 for item in graphs)
+            assert all(item["2"]["inputs"]["batch_size"] == 3 for item in graphs)
             assert all(item["3"]["inputs"]["seed"] == 987654 for item in graphs)
             jobs = await runtime.store.list_jobs()
             roots = [item for item in jobs if not item["request"].get("parent_job_id")]

@@ -60,7 +60,7 @@
   const $ = (id) => document.getElementById(id);
   const els = {
     pageTitle: $("pageTitle"), pageSubtitle: $("pageSubtitle"), runtimeStatus: $("runtimeStatus"), providerStatus: $("providerStatus"), providerStatusName: $("providerStatusName"), providerQuota: $("providerQuota"),
-    modelChoice: $("modelChoice"), modelProvider: $("modelProvider"), workspaceEmpty: $("workspaceEmpty"), generatorWorkspace: $("generatorWorkspace"), modelParameters: $("modelParameters"), referenceField: $("referenceField"), referenceUpload: $("referenceUpload"), referenceStrip: $("referenceStrip"),
+    modelChoice: $("modelChoice"), modelProvider: $("modelProvider"), comfyWorkflowWorkspace: $("comfyWorkflowWorkspace"), comfyWorkflowChoice: $("comfyWorkflowChoice"), workspaceEmpty: $("workspaceEmpty"), generatorWorkspace: $("generatorWorkspace"), modelParameters: $("modelParameters"), referenceField: $("referenceField"), referenceUpload: $("referenceUpload"), referenceStrip: $("referenceStrip"),
     generationForm: $("generationForm"), prompt: $("prompt"), negativePromptField: $("negativePromptField"), negativePrompt: $("negativePrompt"), negativePromptHint: $("negativePromptHint"), resetNegativePromptButton: $("resetNegativePromptButton"), advancedParameters: $("advancedParameters"), parameters: $("parameters"), generationError: $("generationError"), generateButton: $("generateButton"), resultEmpty: $("resultEmpty"), resultGrid: $("resultGrid"), resultMeta: $("resultMeta"),
     galleryGrid: $("galleryGrid"), galleryEmpty: $("galleryEmpty"), galleryPagination: $("galleryPagination"), galleryPrev: $("galleryPrev"), galleryNext: $("galleryNext"), galleryPageLabel: $("galleryPageLabel"), gallerySearch: $("gallerySearch"), galleryProvider: $("galleryProvider"), galleryMode: $("galleryMode"), gallerySource: $("gallerySource"), selectionBar: $("selectionBar"), selectionCount: $("selectionCount"),
     detailDrawer: $("detailDrawer"), drawerBody: $("drawerBody"), detailDate: $("detailDate"), scrim: $("scrim"), imagePreview: $("imagePreview"), imagePreviewBody: $("imagePreviewBody"), imagePreviewPrev: $("imagePreviewPrev"), imagePreviewNext: $("imagePreviewNext"), imagePreviewDots: $("imagePreviewDots"), previewImage: $("previewImage"), imagePreviewTitle: $("imagePreviewTitle"), downloadImageButton: $("downloadImageButton"),
@@ -188,7 +188,7 @@
 
   function configuredReferenceLimit(value, maximum = 8) { const number = Number(value); return Math.max(1, Math.min(maximum, Number.isFinite(number) ? Math.trunc(number) : 1)); }
   function referenceLimitForModel(model) { return model?.supports_img2img ? configuredReferenceLimit(model.max_reference_images) : 0; }
-  function modelsForMode() { return state.models.filter((item) => state.mode === "text2img" ? item.supports_text2img : referenceLimitForModel(item) > 0); }
+  function modelsForMode() { const current = selectedModel(); return state.models.map(item => item.model_ref === current?.model_ref ? current : item).filter((item) => state.mode === "text2img" ? item.supports_text2img : referenceLimitForModel(item) > 0); }
   function selectedModel() {
     const model = state.models.find(item => item.model_ref === state.selectedModelRef) || null;
     const snapshot = state.comfyuiModelOverride;
@@ -406,9 +406,30 @@
   function renderModelChoices() {
     const available = modelsForMode();
     if (!available.some((item) => item.model_ref === state.selectedModelRef)) state.selectedModelRef = "";
-    els.modelChoice.innerHTML = available.length ? `<option value="">请选择模型</option>${available.map((item) => `<option value="${escape(item.model_ref)}" ${item.model_ref === state.selectedModelRef ? "selected" : ""}>${escape(item.name)} · ${escape(item.provider_name)}</option>`).join("")}` : '<option value="">当前模式没有可用模型</option>';
+    const comfyProviders = new Map(available.filter(item => item.provider_kind === "comfyui").map(item => [item.provider_id, item.provider_name]));
+    const model = selectedModel();
+    if (model) state.selectedProviderId = model.provider_id;
+    else if (!comfyProviders.has(state.selectedProviderId)) state.selectedProviderId = "";
+    const listed = new Set();
+    const options = available.map(item => {
+      if (item.provider_kind !== "comfyui") return `<option value="${escape(item.model_ref)}">${escape(item.name)} · ${escape(item.provider_name)}</option>`;
+      if (listed.has(item.provider_id)) return "";
+      listed.add(item.provider_id);
+      return `<option value="${escape(`@comfy:${item.provider_id}`)}">${escape(item.provider_name)} · ComfyUI</option>`;
+    }).join("");
+    els.modelChoice.innerHTML = available.length ? `<option value="">请选择模型或 ComfyUI</option>${options}` : '<option value="">当前模式没有可用模型</option>';
     els.modelChoice.disabled = available.length === 0;
-    els.modelChoice.value = state.selectedModelRef;
+    const comfy = comfyProviders.has(state.selectedProviderId);
+    els.modelChoice.value = comfy ? `@comfy:${state.selectedProviderId}` : state.selectedModelRef;
+    document.querySelector('.model-select-row > label').textContent = comfy ? "服务商" : "模型";
+    const workflows = comfy ? available.filter(item => item.provider_id === state.selectedProviderId && item.provider_kind === "comfyui") : [];
+    $("generationSelectors").classList.toggle("has-workflow", comfy);
+    els.comfyWorkflowWorkspace.classList.toggle("is-hidden", !comfy);
+    els.comfyWorkflowChoice.disabled = !workflows.length;
+    els.comfyWorkflowChoice.innerHTML = '<option value="">请选择工作流</option>' + workflows.map(item => `<option value="${escape(item.model_ref)}">${escape(item.name || item.id)}</option>`).join("");
+    els.comfyWorkflowChoice.value = comfy ? state.selectedModelRef : "";
+    els.workspaceEmpty.textContent = comfy ? "请选择工作流" : "请选择模型";
+    els.modelProvider.textContent = comfy ? `${workflows.length} 个工作流` : model?.provider_name || "";
     renderModelWorkspace();
   }
 
@@ -434,15 +455,12 @@
     els.generatorWorkspace.classList.toggle("is-hidden", !model);
     if (!model) {
       els.modelParameters.innerHTML = "";
-      els.modelProvider.textContent = "";
       renderGenerationForm();
       return;
     }
-    els.modelProvider.textContent = model.provider_name || "";
     els.prompt.closest(".field").classList.toggle("is-hidden", !comfyuiControls.promptRequired(model));
     els.prompt.setAttribute("aria-required", String(comfyuiControls.promptRequired(model)));
-    document.querySelector('.model-select-row > label').textContent = comfyuiControls.active(model) ? "工作流" : "模型";
-    els.modelParameters.innerHTML = effectiveModelParameters(model).filter(([name, descriptor]) => descriptor.webui_visible !== false && parameterAppliesToMode(descriptor) && (comfyuiControls.countBound(model) || !modelParameterMatches(name, descriptor, ["count", "n"]))).map(([name, descriptor]) => renderModelParameter(name, descriptor)).join("") || '<div class="workspace-placeholder">该模型没有额外参数。</div>';
+    els.modelParameters.innerHTML = effectiveModelParameters(model).filter(([, descriptor]) => descriptor.webui_visible !== false && parameterAppliesToMode(descriptor)).map(([name, descriptor]) => renderModelParameter(name, descriptor)).join("") || '<div class="workspace-placeholder">该模型没有额外参数。</div>';
     els.modelParameters.querySelectorAll("[data-model-parameter]").forEach((input) => {
       if (!Object.prototype.hasOwnProperty.call(state.parameterValues, input.dataset.modelParameter)) input.dataset.unsetValue = "true";
       const update = () => {
@@ -511,11 +529,12 @@
     return values;
   }
 
-  function applyGenerationSelection(mode, modelRef) {
-    state.comfyuiSnapshot = null;
-    state.comfyuiModelOverride = null;
+  function applyGenerationSelection(mode, modelRef, providerId = "") {
     const previousModel = selectedModel(); if (previousModel?.supports_negative_prompt) { state.negativePromptCarry = els.negativePrompt.value; state.hasNegativePromptCarry = true; }
-    const carried = carriedParameterValues(); state.parameterCarry = carried; state.mode = mode; state.selectedModelRef = modelRef || "";
+    const carried = carriedParameterValues();
+    state.comfyuiSnapshot = null; state.comfyuiModelOverride = null;
+    state.parameterCarry = carried; state.mode = mode; state.selectedModelRef = modelRef || "";
+    state.selectedProviderId = selectedModel()?.provider_id || providerId;
     state.parameterValues = parameterValuesForModel(selectedModel(), carried);
     const nextModel = selectedModel(); if (nextModel?.supports_negative_prompt) { els.negativePrompt.value = state.hasNegativePromptCarry ? state.negativePromptCarry : (nextModel.negative_prompt_default || ""); state.negativePromptCarry = els.negativePrompt.value; state.hasNegativePromptCarry = true; }
     document.querySelectorAll(".segment").forEach((button) => button.classList.toggle("is-active", button.dataset.mode === state.mode));
@@ -544,6 +563,7 @@
     state.parameterValues = {}; state.parameterCarry = {}; state.negativePromptCarry = ""; state.hasNegativePromptCarry = false;
     state.defaultModelRefs = { text2img: payload.defaults?.text2img_model_ref || "", img2img: payload.defaults?.img2img_model_ref || "" };
     state.selectedModelRef = state.defaultModelRefs[state.mode] || "";
+    state.selectedProviderId = selectedModel()?.provider_id || "";
     state.parameterValues = parameterValuesForModel(selectedModel(), {});
     els.negativePrompt.value = selectedModel()?.negative_prompt_default || "";
     if (selectedModel()?.supports_negative_prompt) { state.negativePromptCarry = els.negativePrompt.value; state.hasNegativePromptCarry = true; }
@@ -605,7 +625,7 @@
     els.generateButton.disabled = true; els.generateButton.textContent = "生成中";
     try {
       const request = { mode: state.mode, provider_id: provider.id, model_ref: model.model_ref, prompt: els.prompt.value, negative_prompt: els.negativePrompt.value, model: model.id, size, count: Number(count), parameters: { ...parameters, ...mappedParameters }, reference_ids: state.references.map((item) => item.id), ...(provider.kind === "comfyui" && state.comfyuiSnapshot ? { comfyui: state.comfyuiSnapshot } : {}) };
-      if (provider.kind === "comfyui") { await comfyuiControls.submit(request); showNotice("工作流任务已提交，可在结果区查看进度。", "success"); return; }
+      if (provider.kind === "comfyui") { await comfyuiControls.submit(request); showNotice("工作流任务已提交，可展开任务队列查看进度。", "success"); return; }
       const result = await apiPost("studio/generate", request);
       state.resultImages = result.images || []; state.references = [];
       for (const [name, descriptor] of effectiveModelParameters(model)) if ((descriptor.request_key || name) === "reference_settings") state.parameterValues[name] = [];
@@ -2559,7 +2579,7 @@
   };
   function providerDefaults(kind) { return { ...(PROVIDER_DEFAULTS[kind] || PROVIDER_DEFAULTS.custom_json) }; }
   function modelPreset(kind, modelId) {
-    if (kind === "comfyui") return {};
+    if (kind === "comfyui") return comfyuiControls.totalParameters();
     // Official defaults and supported fields come from the same catalog as
     // request validation, including the different V4.5 / V5 capabilities.
     if (kind === "novelai_official") return structuredClone(novelaiModels.find(model => model.id === modelId)?.parameters || novelaiModels[0]?.parameters || {});
@@ -2578,12 +2598,50 @@
     model.native_batch_size_source = nai ? "fixed" : model.native_batch_size_source || "default";
     model.max_concurrent_requests = Number(model.max_concurrent_requests ?? 8);
     model.parameters = model.parameters || {};
-    if (provider.kind !== "comfyui" && !Object.entries(model.parameters).some(([name, descriptor]) => modelParameterMatches(name, descriptor, ["count", "n"]))) model.parameters.count = JSON.parse(JSON.stringify(BATCH_PRESET.count));
+    if (provider.kind === "comfyui") model.parameters = comfyuiControls.totalParameters(model.parameters);
+    else if (!Object.entries(model.parameters).some(([name, descriptor]) => modelParameterMatches(name, descriptor, ["count", "n"]))) model.parameters.count = JSON.parse(JSON.stringify(BATCH_PRESET.count));
   }
   function currentSettingsProvider() { return state.settings?.webui.providers.find((item) => item.id === state.selectedSettingsProviderId) || null; }
+  function settingsOrderRow(item, kind, selected, status, movable) {
+    const name = item.name || item.id;
+    const grip = '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true"><circle cx="9" cy="5" r="1.5"/><circle cx="15" cy="5" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="19" r="1.5"/><circle cx="15" cy="19" r="1.5"/></svg>';
+    return `<div class="provider-row settings-sortable-row ${selected ? "is-active" : ""}" data-settings-order-id="${escape(item.id)}" role="listitem"><button class="settings-row-select" type="button" data-settings-${kind}="${escape(item.id)}" data-sort-surface aria-pressed="${selected}" data-tooltip="${escape(name)}" data-tooltip-overflow="strong"><strong>${escape(name)}</strong><span>${escape(status)}</span></button><button class="settings-sort-handle" data-sort-handle type="button" aria-label="调整 ${escape(name)} 的顺序" data-tooltip="拖动排序，也可使用方向键或 Home / End"${movable ? "" : " disabled"}>${grip}</button></div>`;
+  }
+
+  function bindSettingsOrder(list, kind, provider = null) {
+    const values = () => kind === "provider" ? state.settings?.webui.providers || [] : currentSettingsProvider() === provider ? provider.models || [] : [];
+    const itemName = kind === "provider" ? "服务商" : provider?.kind === "comfyui" ? "工作流" : "模型";
+    list.setAttribute("role", "list"); list.setAttribute("aria-label", `${itemName}顺序`);
+    const canSort = () => state.view === "settings" && !settingsSaving && !settingsNavigationPending && !activeConfirmation && !library.modalOpen() && els.parameterDialog.classList.contains("is-hidden");
+    window.ImageStudioSortable.bind(list, {
+      itemSelector: "[data-settings-order-id]", getId: item => item.dataset.settingsOrderId,
+      getLabel: item => { const value = values().find(value => value.id === item.dataset.settingsOrderId); return value?.name || value?.id || itemName; },
+      itemName, itemUnit: "项", isEnabled: canSort,
+      onReorder: ids => {
+        const items = values(), byId = new Map(items.map(item => [item.id, item]));
+        if (!canSort() || ids.length !== items.length || new Set(ids).size !== ids.length || ids.some(id => !byId.has(id))) return;
+        const reordered = ids.map(id => byId.get(id));
+        if (kind === "provider") state.settings.webui.providers = reordered;
+        else provider.models = reordered;
+        // Only the order changes. Existing editor nodes, selected IDs and
+        // typed values remain mounted; explicit default model refs stay put.
+        refreshSettingsDefaultModels(); updateSettingsDirty();
+      },
+    });
+  }
+
+  function updateSettingsRowId(list, kind, id) {
+    const row = list.querySelector(".provider-row.is-active");
+    if (!row) return;
+    row.dataset.settingsOrderId = id;
+    const select = row.querySelector(`[data-settings-${kind}]`);
+    if (select) select.dataset[kind === "provider" ? "settingsProvider" : "settingsModel"] = id;
+  }
+
   function renderSettingsProviders() {
-    const providers = state.settings?.webui.providers || []; els.settingsProviderList.innerHTML = providers.length ? providers.map((item) => `<button class="provider-row ${item.id === state.selectedSettingsProviderId ? "is-active" : ""}" type="button" data-settings-provider="${escape(item.id)}"><strong>${escape(item.name || item.id)}</strong><span>${item.enabled ? "启用" : "停用"}</span></button>`).join("") : '<div class="provider-empty">尚未添加生图服务商</div>';
+    const providers = state.settings?.webui.providers || []; els.settingsProviderList.innerHTML = providers.length ? providers.map(item => settingsOrderRow(item, "provider", item.id === state.selectedSettingsProviderId, item.enabled ? "启用" : "停用", providers.length > 1)).join("") : '<div class="provider-empty">尚未添加生图服务商</div>';
     els.settingsProviderList.querySelectorAll("[data-settings-provider]").forEach((button) => button.addEventListener("click", () => { state.selectedSettingsProviderId = button.dataset.settingsProvider; state.selectedSettingsModelId = ""; renderSettingsProviders(); }));
+    bindSettingsOrder(els.settingsProviderList, "provider");
     renderProviderEditor();
     renderModelEditor();
     updateSettingsDirty();
@@ -2611,7 +2669,7 @@
   function field(key, label, value, type = "text", disabled = false) { return `<div class="field"><label>${label}</label><input data-provider-field="${key}" type="${type}" value="${escape(value)}"${disabled ? " disabled" : ""} /></div>`; }
   function textAreaField(key, label, value) { return `<div class="field field-wide"><label>${label}</label><textarea data-provider-field="${key}" rows="3">${escape(value)}</textarea></div>`; }
   function selectField(key, label, value, options) { return `<div class="field"><label>${label}</label><select data-provider-field="${key}">${options.map(([id, name]) => `<option value="${id}" ${id === value ? "selected" : ""}>${name}</option>`).join("")}</select></div>`; }
-  function updateProviderField(input) { const provider = currentSettingsProvider(); if (!provider) return; const key = input.dataset.providerField; const value = input.type === "checkbox" ? input.checked : input.type === "number" ? Number(input.value) : input.value; if (key === "kind" && value !== provider.kind) { Object.assign(provider, providerDefaults(value)); provider.kind = value; state.selectedSettingsModelId = ""; renderProviderEditor(); renderModelEditor(); return; } provider[key] = value; if (key === "id") { state.selectedSettingsProviderId = input.value; const activeRow = els.settingsProviderList.querySelector(".provider-row.is-active"); if (activeRow) { activeRow.dataset.settingsProvider = input.value; if (!provider.name) activeRow.querySelector("strong").textContent = input.value; } } refreshSettingsDefaultModels(); }
+  function updateProviderField(input) { const provider = currentSettingsProvider(); if (!provider) return; const key = input.dataset.providerField; const value = input.type === "checkbox" ? input.checked : input.type === "number" ? Number(input.value) : input.value; if (key === "kind" && value !== provider.kind) { Object.assign(provider, providerDefaults(value)); provider.kind = value; state.selectedSettingsModelId = ""; renderProviderEditor(); renderModelEditor(); return; } provider[key] = value; if (key === "id") { state.selectedSettingsProviderId = input.value; updateSettingsRowId(els.settingsProviderList, "provider", input.value); const activeRow = els.settingsProviderList.querySelector(".provider-row.is-active"); if (activeRow && !provider.name) activeRow.querySelector("strong").textContent = input.value; } refreshSettingsDefaultModels(); }
   async function discoverProviderModels(provider) { const button = $("discoverModelsButton"); if (button) { button.disabled = true; button.textContent = "获取中…"; } try { const payload = await apiPost("provider/models", { provider }); provider.discovered_models = payload.models || []; for (const model of provider.models || []) { const discovered = provider.discovered_models.find((item) => item.id === model.id); if (discovered && model.native_batch_size_source !== "manual") { model.native_batch_size = Number(discovered.native_batch_size) || 1; model.native_batch_size_source = discovered.native_batch_size_source || "default"; } } renderModelEditor(); updateSettingsDirty(); showNotice(`已获取 ${provider.discovered_models.length} 个模型，可在新增模型时选择。`, "success"); } catch (error) { showNotice(errorMessage(error, "获取模型失败"), "error"); } finally { if (button) { button.disabled = false; button.textContent = "获取模型"; } } }
   function renderNewModelChoices(provider = currentSettingsProvider()) { const builtin = builtinProviderModels(provider), models = builtin || provider?.discovered_models || []; els.newModelChoices.innerHTML = models.map((item) => `<option value="${escape(item.id)}">${escape(item.name || item.id)}${item.capability_source === "unknown" ? " · 能力未知" : ""}</option>`).join(""); els.newModelChoice.value = ""; els.newModelChoice.placeholder = provider?.kind === "novelai_official" ? "选择 NovelAI 官方模型" : builtin ? "选择 NAI 模型或手动输入 ID" : "选择或输入模型 ID"; }
 
@@ -2628,8 +2686,9 @@
     if (!provider) { els.settingsModelList.innerHTML = '<div class="provider-empty">请先选择服务商</div>'; els.modelForm.innerHTML = '<div class="provider-empty">选择服务商后配置模型能力。</div>'; return; }
     provider.models = Array.isArray(provider.models) ? provider.models : [];
     if (!provider.models.some((item) => item.id === state.selectedSettingsModelId)) state.selectedSettingsModelId = provider.models[0]?.id || "";
-    els.settingsModelList.innerHTML = provider.models.length ? provider.models.map((item) => `<button class="provider-row ${item.id === state.selectedSettingsModelId ? "is-active" : ""}" type="button" data-settings-model="${escape(item.id)}"><strong>${escape(item.name || item.id)}</strong><span>${referenceLimitForModel(item) > 0 ? "图生图" : item.supports_text2img ? "文生图" : "未开放"}</span></button>`).join("") : '<div class="provider-empty">该服务商尚未添加模型</div>';
+    els.settingsModelList.innerHTML = provider.models.length ? provider.models.map(item => settingsOrderRow(item, "model", item.id === state.selectedSettingsModelId, referenceLimitForModel(item) > 0 ? "图生图" : item.supports_text2img ? "文生图" : "未开放", provider.models.length > 1)).join("") : '<div class="provider-empty">该服务商尚未添加模型</div>';
     els.settingsModelList.querySelectorAll("[data-settings-model]").forEach((button) => button.addEventListener("click", () => { state.selectedSettingsModelId = button.dataset.settingsModel; renderModelEditor(); }));
+    bindSettingsOrder(els.settingsModelList, "model", provider);
     const model = currentSettingsModel();
     if (!model) { els.modelForm.innerHTML = '<div class="provider-empty">点击“新增模型”开始配置。</div>'; return; }
     ensureToolConfig(model, provider);
@@ -2643,8 +2702,7 @@
   function renderModelConfiguration(provider, model) {
     if (provider.kind === "comfyui") {
       const schedulingField = (key, label, value) => `<label class="field">${label}<input data-model-field="${key}" type="number" min="1" max="16" step="1" value="${escape(value)}" /></label>`;
-      const countBound = comfyuiControls.countBound({ ...model, provider_kind: "comfyui" });
-      return `<h3>${escape(model.name || model.id)}</h3>${modelField("id", "工作流 ID", model.id)}${modelField("name", "显示名称", model.name)}${comfyuiControls.configuration(model)}${schedulingField("max_concurrent_requests", "工作流最大并发请求数", model.max_concurrent_requests || 8)}${countBound ? schedulingField("native_batch_size", "工作流单次批次上限", model.native_batch_size || 1) : ""}<section class="schema-preview"><h4>参数默认值</h4>${effectiveModelParameters(model).map(([name, descriptor]) => renderSchemaDefault(name, descriptor)).join("")}</section><details class="schema-raw"><summary>高级：参数 Schema</summary><textarea id="modelParametersSchema" data-model-field="parameters" rows="12" spellcheck="false">${escape(JSON.stringify(model.parameters || {}, null, 2))}</textarea></details><div class="provider-editor-actions"><button class="danger-button" id="removeModelButton" type="button">删除工作流</button></div>`;
+      return `<h3>${escape(model.name || model.id)}</h3>${modelField("id", "工作流 ID", model.id)}${modelField("name", "显示名称", model.name)}${comfyuiControls.configuration(model)}${schedulingField("max_concurrent_requests", "工作流最大并发请求数", model.max_concurrent_requests || 8)}${schedulingField("native_batch_size", "工作流单次出图张数", model.native_batch_size || 1)}<p class="field-hint field-wide">按单次出图张数安排执行轮次，每轮仅保留计划张数。超出的结果截断，结果不足不会补跑。</p><section class="schema-preview"><h4>参数默认值</h4>${effectiveModelParameters(model).map(([name, descriptor]) => renderSchemaDefault(name, descriptor)).join("")}</section><details class="schema-raw"><summary>高级：参数 Schema</summary><textarea id="modelParametersSchema" data-model-field="parameters" rows="12" spellcheck="false">${escape(JSON.stringify(model.parameters || {}, null, 2))}</textarea></details><div class="provider-editor-actions"><button class="danger-button" id="removeModelButton" type="button">删除工作流</button></div>`;
     }
     const official = provider.kind === "novelai_official";
     const schemaText = JSON.stringify(model.parameters || modelPreset(provider.kind, model.id), null, 2);
@@ -2678,6 +2736,10 @@
   function toolParameterDescriptor(model, name) { return toolModelParameters(model).find(([key]) => key === name)?.[1] || {}; }
   function renderToolConfiguration(model) {
     const tool = model.tool;
+    const comfy = currentSettingsProvider()?.kind === "comfyui";
+    const profileChoices = ["natural_language", "nai_tags", "custom"];
+    if (comfy) profileChoices.unshift("");
+    const profileField = modelSelectField("tool_prompt_profile", "提示词类型", tool.prompt_profile || (comfy ? "" : "natural_language"), profileChoices, false, { "": "未指定" });
     const configuredLimit = configuredReferenceLimit(model.max_reference_images);
     const refLimit = model.supports_img2img ? `<div class="field"><label>LLM 最大参考图数量</label><input data-tool-field="max_reference_images" type="number" min="1" max="${configuredLimit}" step="1" value="${configuredReferenceLimit(tool.max_reference_images, configuredLimit)}" /><span class="field-hint">不能超过模型能力上限 ${configuredLimit}</span></div>` : "";
     const rows = toolModelParameters(model).map(([name, descriptor]) => {
@@ -2685,7 +2747,7 @@
       const label = schemaParameterLabel(name, { ...descriptor, description: policy.description || descriptor.description }, "strong");
       return `<div class="tool-parameter-row">${label}<span>${policy.exposed === false ? "未暴露" : "已暴露"}</span><button class="quiet-button" data-edit-tool-parameter="${escape(name)}" type="button">编辑</button></div>`;
     }).join("");
-    return `<h3>${escape(model.name || model.id)}</h3>${modelToggle("tool_enabled", "允许 LLM 调用此模型", tool.enabled !== false)}${modelTextAreaField("tool_selection_description", "什么时候使用", tool.selection_description || "")}${modelSelectField("tool_prompt_profile", "提示词类型", tool.prompt_profile || "natural_language", ["natural_language", "nai_tags", "custom"])}${modelTextAreaField("tool_prompt_instructions", "提示词编写要求", tool.prompt_instructions || "")}${refLimit}<div class="tool-parameter-list"><span class="field-hint">LLM 可用参数</span>${rows || '<span class="field-hint">当前模型没有可暴露参数。</span>'}</div>`;
+    return `<h3>${escape(model.name || model.id)}</h3>${modelToggle("tool_enabled", comfy ? "允许 LLM 调用此工作流" : "允许 LLM 调用此模型", tool.enabled !== false)}${modelTextAreaField("tool_selection_description", "什么时候使用", tool.selection_description || "")}${profileField}${modelTextAreaField("tool_prompt_instructions", "提示词编写要求", tool.prompt_instructions || "")}${refLimit}<div class="tool-parameter-list"><span class="field-hint">LLM 可用参数</span>${rows || '<span class="field-hint">当前模型没有可暴露参数。</span>'}</div>`;
   }
   function bindModelConfiguration(provider, model) {
     els.modelForm.querySelectorAll("[data-model-field]").forEach((input) => { input.addEventListener("input", () => updateModelField(input)); input.addEventListener("change", () => updateModelField(input, true)); });
@@ -2713,7 +2775,7 @@
   }
   function modelField(key, label, value, type = "text") { return `<div class="field"><label>${label}</label><input data-model-field="${key}" type="${type}" value="${escape(value)}" /></div>`; }
   function modelTextAreaField(key, label, value) { return `<div class="field field-wide"><label>${label}</label><textarea data-model-field="${key}" rows="4">${escape(value)}</textarea></div>`; }
-  function modelSelectField(key, label, value, choices, editable = false) { const values = choices.includes(value) ? choices : [value, ...choices]; return `<div class="field"><label>${label}</label><select data-model-field="${key}">${values.map((item) => `<option value="${escape(item)}" ${item === value ? "selected" : ""}>${escape(item)}</option>`).join("")}${editable ? '<option value="__manual__">手动输入…</option>' : ""}</select></div>`; }
+  function modelSelectField(key, label, value, choices, editable = false, labels = {}) { const values = choices.includes(value) ? choices : [value, ...choices]; return `<div class="field"><label>${label}</label><select data-model-field="${key}">${values.map((item) => `<option value="${escape(item)}" ${item === value ? "selected" : ""}>${escape(labels[item] ?? item)}</option>`).join("")}${editable ? '<option value="__manual__">手动输入…</option>' : ""}</select></div>`; }
   function modelToggle(key, label, value, disabled = false) { return `<div class="toggle-row"><label>${label}</label><label class="toggle-control"><input data-model-field="${key}" type="checkbox" ${value ? "checked" : ""}${disabled ? " disabled" : ""} /><span aria-hidden="true"></span></label></div>`; }
   function reconcileOfficialParameters(current, preset) {
     const keyOf = ([name, descriptor]) => descriptor.request_key || name;
@@ -2756,8 +2818,9 @@
         if (preset) { model.novelai_capabilities = structuredClone(preset.novelai_capabilities); model.max_reference_images = preset.max_reference_images; model.tool.max_reference_images = Math.min(model.tool.max_reference_images, model.max_reference_images); model.parameters = reconcileOfficialParameters(model.parameters, preset); }
       }
       state.selectedSettingsModelId = input.value;
+      updateSettingsRowId(els.settingsModelList, "model", input.value);
       const activeRow = els.settingsModelList.querySelector(".provider-row.is-active");
-      if (activeRow) { activeRow.dataset.settingsModel = input.value; if (!model.name) activeRow.querySelector("strong").textContent = input.value; }
+      if (activeRow && !model.name) activeRow.querySelector("strong").textContent = input.value;
       if (currentSettingsProvider()?.kind === "novelai_official" && commit) renderModelEditor();
     }
     refreshSettingsDefaultModels();
@@ -2800,6 +2863,7 @@
     if (nai) model.supports_img2img = false;
     const defaults = { enabled: true, selection_description: nai ? "仅在用户明确要求 NAI 或 NovelAI 风格标签生图时使用。" : "适合一般自然语言生图需求。", prompt_profile: nai ? "nai_tags" : "natural_language", prompt_instructions: nai ? "使用英文逗号分隔标签。必须完整描述主体数量、全身或半身范围、姿态、镜头距离、视角、背景、光照和画面边界，避免残图；不得改变用户明确指定的主体、数量、动作和服装。" : "使用清晰、连贯的自然语言描述，不要使用英文逗号分隔的 NAI tag 串。", negative_prompt_exposed: !!model.supports_negative_prompt, max_reference_images: model.max_reference_images, parameters: {} };
     if (official) Object.assign(defaults, { selection_description: "适合 NovelAI 插画生成，支持英文标签或自然语言提示词。", prompt_profile: "custom", prompt_instructions: "支持英文逗号分隔标签或清晰的自然语言描述，可结合两者表达。完整描述主体、构图、动作、环境与光照，保留用户明确指定的内容。" });
+    if (provider.kind === "comfyui") Object.assign(defaults, { selection_description: "", prompt_profile: "", prompt_instructions: "" });
     model.tool = { ...defaults, ...(model.tool || {}) }; if (!model.supports_negative_prompt) model.tool.negative_prompt_exposed = false; model.tool.parameters = model.tool.parameters || {};
     model.tool.max_reference_images = configuredReferenceLimit(model.tool.max_reference_images, model.max_reference_images);
     toolModelParameters(model).forEach(([name, descriptor]) => {
@@ -3176,7 +3240,12 @@
     document.querySelectorAll("[data-default-scope]").forEach((button) => button.addEventListener("click", () => { document.querySelectorAll("[data-default-scope]").forEach((item) => item.classList.toggle("is-active", item === button)); document.querySelectorAll("[data-default-panel]").forEach((panel) => panel.classList.toggle("is-hidden", panel.dataset.defaultPanel !== button.dataset.defaultScope)); }));
     els.agentImageReturnMode.addEventListener("change", syncAgentImageSettings);
     els.runMaintenanceButton.addEventListener("click", () => void runStorageMaintenance(false)); els.runDeepMaintenanceButton.addEventListener("click", () => void runStorageMaintenance(true));
-    els.modelChoice.addEventListener("change", () => applyGenerationSelection(state.mode, els.modelChoice.value));
+    els.modelChoice.addEventListener("change", () => {
+      const value = els.modelChoice.value;
+      if (value.startsWith("@comfy:")) applyGenerationSelection(state.mode, "", value.slice(7));
+      else applyGenerationSelection(state.mode, value);
+    });
+    els.comfyWorkflowChoice.addEventListener("change", () => applyGenerationSelection(state.mode, els.comfyWorkflowChoice.value, state.selectedProviderId));
     els.resetNegativePromptButton.addEventListener("click", () => { els.negativePrompt.value = selectedModel()?.negative_prompt_default || ""; els.negativePrompt.focus(); });
     $("referenceChooseButton").addEventListener("click", () => els.referenceUpload.click());
     els.referenceUpload.addEventListener("change", async () => { setError(els.generationError, ""); try { await uploadReferences(els.referenceUpload.files); } catch (error) { setError(els.generationError, errorMessage(error, "上传参考图失败")); } finally { els.referenceUpload.value = ""; } });

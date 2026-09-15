@@ -1899,6 +1899,8 @@ class GenerationStore:
             }
             for name in denied & {"size", "count", "negative_prompt"}:
                 parameters.pop(name, None)
+            if provider.kind == "comfyui":
+                parameters = compact_comfy_request(parameters)
             image_supplementals: dict[str, str] = {}
             for (image_id, _, asset_id), image in zip(image_rows, images):
                 if not image.effective_parameters:
@@ -1928,7 +1930,7 @@ class GenerationStore:
                 resolved = {
                     **parameters,
                     "parameters": {
-                        **parameters["parameters"],
+                        **parameters.get("parameters", {}),
                         **{
                             key: value
                             for key, value in effective.items()
@@ -1941,6 +1943,8 @@ class GenerationStore:
                         if key in effective
                     },
                 }
+                if provider.kind == "comfyui":
+                    resolved = compact_comfy_request(resolved)
                 image_supplementals[image_id] = json.dumps(
                     {
                         "effective_request": resolved,
@@ -5390,6 +5394,34 @@ def _search_projection(value: Any) -> str:
 
     collect(value)
     return " ".join(values)[:200000]
+
+
+def has_request_value(value: Any) -> bool:
+    """An empty field is different from a meaningful zero or false value."""
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (dict, list, tuple)):
+        return bool(value)
+    return True
+
+
+def compact_comfy_request(value: dict[str, Any]) -> dict[str, Any]:
+    """Project populated request fields without changing nested workflow values."""
+    result = {key: item for key, item in value.items() if has_request_value(item)}
+    parameters = value.get("parameters")
+    if isinstance(parameters, dict):
+        parameters = {
+            key: item
+            for key, item in parameters.items()
+            if key != "_comfy_job_id" and has_request_value(item)
+        }
+        if parameters:
+            result["parameters"] = parameters
+        else:
+            result.pop("parameters", None)
+    return result
 
 
 def _redact_sensitive(value: Any) -> Any:

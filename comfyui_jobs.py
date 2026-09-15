@@ -264,6 +264,7 @@ class ComfyJobStore:
         provider_id: str | None = None,
         limit: int = 100,
         include_children: bool = True,
+        queue_only: bool = False,
     ) -> list[dict[str, Any]]:
         return await asyncio.to_thread(
             self._list_jobs_sync,
@@ -271,12 +272,15 @@ class ComfyJobStore:
             max(1, min(int(limit), 1000)),
             False,
             include_children,
+            queue_only,
         )
 
     async def get_pending(self) -> list[dict[str, Any]]:
         return await asyncio.to_thread(self._list_jobs_sync, None, None, True)
 
-    def _list_jobs_sync(self, provider_id, limit, pending, include_children=True):
+    def _list_jobs_sync(
+        self, provider_id, limit, pending, include_children=True, queue_only=False
+    ):
         clauses, values = [], []
         if not include_children:
             clauses.append(
@@ -285,6 +289,15 @@ class ComfyJobStore:
         if provider_id is not None:
             clauses.append("provider_id=?")
             values.append(provider_id)
+        if queue_only:
+            # Filter before LIMIT so recent successful runs cannot displace old
+            # failures or active jobs from the recoverable WebUI queue.
+            clauses.extend(
+                (
+                    "status != 'succeeded'",
+                    "COALESCE(json_extract(result_json, '$.queue_dismissed'), 0) != 1",
+                )
+            )
         if pending:
             clauses.append(
                 "status NOT IN (" + ",".join("?" for _ in TERMINAL_STATUSES) + ")"
@@ -372,6 +385,34 @@ class ComfyJobStore:
                 ).fetchone()
             )
 
+    async def dismiss_job(self, job_id: str) -> dict[str, Any]:
+        """Hide a terminal task from the WebUI queue without deleting its data."""
+        return await asyncio.to_thread(self._dismiss_job_sync, job_id)
+
+    def _dismiss_job_sync(self, job_id: str) -> dict[str, Any]:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM comfy_jobs WHERE id=?", (job_id,)
+            ).fetchone()
+            if row is None:
+                raise ValueError("ComfyUI 任务不存在")
+            if row["status"] not in TERMINAL_STATUSES:
+                raise ValueError(
+                    "任务仍在进行中，不能从队列清除；请等待结束或先取消任务"
+                )
+            if json.loads(row["result_json"]).get("queue_dismissed") is True:
+                return self._decode(row)
+            connection.execute(
+                "UPDATE comfy_jobs SET result_json=json_set(result_json, '$.queue_dismissed', json('true')),updated_at=? WHERE id=?",
+                (time.time(), job_id),
+            )
+            return self._decode(
+                connection.execute(
+                    "SELECT * FROM comfy_jobs WHERE id=?", (job_id,)
+                ).fetchone()
+            )
+
     async def resume_job(self, job_id: str) -> dict[str, Any]:
         """Explicitly retry monitoring an existing remote task, never submit again."""
         return await asyncio.to_thread(self._resume_job_sync, job_id)
@@ -405,7 +446,8 @@ class ComfyJobStore:
                     return self._decode(row)
                 raise ValueError("ComfyUI 任务已经结束，不需要恢复")
             connection.execute(
-                "UPDATE comfy_jobs SET status='submitted',error='',finished_at=NULL,updated_at=? WHERE id=?",
+                "UPDATE comfy_jobs SET status='submitted',error='',finished_at=NULL,"
+                "result_json=json_remove(result_json, '$.queue_dismissed'),updated_at=? WHERE id=?",
                 (time.time(), job_id),
             )
             return self._decode(

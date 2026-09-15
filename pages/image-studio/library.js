@@ -220,6 +220,7 @@
           button.type = "button"; button.className = definition.danger ? "danger-button" : definition.primary ? "primary-button" : "quiet-button";
           button.textContent = definition.label;
           if (definition.id) button.id = definition.id;
+          button.disabled = typeof definition.disabled === "function" ? definition.disabled() : !!definition.disabled;
           button.addEventListener("click", async () => {
             if (modalClose !== close || pending || closing) return;
             pending = true; modal.setAttribute("aria-busy", "true");
@@ -228,7 +229,7 @@
             catch (error) { if (modalClose === close) $("studioModalError").textContent = errorMessage(error, "操作失败"); }
             finally {
               pending = false;
-              if (modalClose === close) { modal.removeAttribute("aria-busy"); $("studioModalFooter").querySelectorAll("button").forEach((item) => { item.disabled = false; }); }
+              if (modalClose === close) { modal.removeAttribute("aria-busy"); $("studioModalFooter").querySelectorAll("button").forEach((item, index) => { const disabled = actions[index]?.disabled; item.disabled = typeof disabled === "function" ? disabled() : !!disabled; }); }
             }
           });
           $("studioModalFooter").appendChild(button);
@@ -1246,6 +1247,12 @@
       const imported = { ...(supplemental.display_parameters || {}), ...(supplemental.overrides || {}), ...(supplemental.overrides?.parameters || {}), prompt: supplemental.prompt ?? detail.original_prompt, model: supplemental.model ?? detail.model, mode: supplemental.mode ?? detail.mode };
       delete imported.parameters;
       const requestRows = imageParameters ? imported : { prompt: request.prompt, negative_prompt: request.negative_prompt, model: request.model, mode: modeLabel(request.mode), size: request.size, count: request.count, ...(request.parameters || {}) };
+      // Hide empty legacy request fields only in this display snapshot. Nested
+      // workflow inputs and the stored/exported request keep their exact values.
+      for (const [key, value] of Object.entries(requestRows)) {
+        const empty = value == null || typeof value === "string" && !value.trim() || typeof value === "object" && !Object.keys(value).length;
+        if (empty || key === "_comfy_job_id") delete requestRows[key];
+      }
       const displayNormalized = { ...normalized }; delete displayNormalized.parameters;
       const metadataRows = { ...displayNormalized, ...(normalized.parameters || {}) };
       const summaryStatus = metadata.format === "comfyui" ? promptStatusMarkup(normalized.prompt_status, "正向：") + promptStatusMarkup(normalized.negative_prompt_status, "反向：") : "";

@@ -484,7 +484,9 @@ class ImageProvider:
     proxy: str = field(default="", repr=False)
 
     @classmethod
-    def from_mapping(cls, value: dict[str, Any]) -> ImageProvider:
+    def from_mapping(
+        cls, value: dict[str, Any], *, migrate_comfyui: bool = True
+    ) -> ImageProvider:
         """Create a bounded provider value from persisted configuration."""
 
         kind = _text(value.get("kind"), 32) or "openai_images"
@@ -546,7 +548,10 @@ class ImageProvider:
         models = (
             tuple(
                 _model_from_mapping(
-                    item, kind, discovered_by_id.get(str(item.get("id", "")))
+                    item,
+                    kind,
+                    discovered_by_id.get(str(item.get("id", ""))),
+                    migrate_comfyui=migrate_comfyui,
                 )
                 for item in raw_models[:32]
                 if isinstance(item, dict) and _text(item.get("id"), 160)
@@ -554,7 +559,17 @@ class ImageProvider:
             if isinstance(raw_models, list)
             else ()
         )
-        if not models and legacy_model_id:
+        # An explicitly supplied model list is authoritative, including an
+        # empty list after deleting its last entry. The scalar is migration
+        # input only for configurations that predate the list field entirely.
+        if "models" not in value and legacy_model_id:
+            if kind == "comfyui":
+                legacy_model = _model_from_mapping(
+                    {**value, "id": legacy_model_id, "name": legacy_model_id},
+                    kind,
+                    discovered_by_id.get(legacy_model_id),
+                    migrate_comfyui=migrate_comfyui,
+                )
             models = (legacy_model,)
         primary_model = models[0] if models else legacy_model
         return cls(
@@ -571,7 +586,7 @@ class ImageProvider:
             edit_path=_normalized_path(
                 value.get("edit_path"), transport_defaults["edit_path"]
             ),
-            model=primary_model.id,
+            model=primary_model.id if models else "",
             api_key=str(value.get("api_key") or ""),
             custom_headers=str(value.get("custom_headers") or ""),
             timeout_seconds=max(
@@ -955,16 +970,26 @@ def _normalize_parameters(value: Any) -> dict[str, dict[str, Any]]:
 
 
 def _model_from_mapping(
-    value: dict[str, Any], kind: str, discovered: dict[str, Any] | None = None
+    value: dict[str, Any],
+    kind: str,
+    discovered: dict[str, Any] | None = None,
+    *,
+    migrate_comfyui: bool = True,
 ) -> ImageModel:
     """Create a model descriptor from a provider-owned model mapping."""
 
     model_id = _text(value.get("id"), 160)
     comfy = {}
     if kind == "comfyui" and value.get("comfyui"):
-        from .comfyui import normalize_workflow
+        from .comfyui_workflows import migrate_fixed_outputs, normalize_workflow
 
         comfy = normalize_workflow(value["comfyui"])
+        if migrate_comfyui:
+            migrated = migrate_fixed_outputs(
+                comfy, value.get("parameters"), value.get("tool")
+            )
+            value = {**value, **migrated}
+            comfy = value["comfyui"]
     native_size, native_source = _native_batch_fields(value, kind, discovered)
     img2img = kind != "nai_direct" and _as_bool(
         value.get("supports_img2img"), kind == "novelai_official"
@@ -995,8 +1020,30 @@ def _model_from_mapping(
         supports_negative_prompt = any(
             item.get("source") == "negative_prompt" for item in bindings.values()
         )
-        if not any(item.get("source") == "count" for item in bindings.values()):
+        if (
+            not migrate_comfyui
+            and not comfy.get("execution_policy")
+            and not any(item.get("source") == "count" for item in bindings.values())
+        ):
             native_size = 1
+        elif migrate_comfyui or comfy.get("execution_policy"):
+            native_size = positive_batch_size(value.get("native_batch_size")) or 1
+            native_source = (
+                "manual"
+                if native_size != 1 or value.get("native_batch_size_source") == "manual"
+                else "default"
+            )
+    parameters = _model_parameters(value.get("parameters"), kind, model_id)
+    if kind == "comfyui" and (migrate_comfyui or comfy.get("execution_policy")):
+        from .comfyui_workflows import FIXED_OUTPUT_COUNT_DESCRIPTION
+
+        old_description = BATCH_PARAMETERS["count"]["description"]
+        for name, descriptor in parameters.items():
+            if descriptor.get("request_key", name) == "count":
+                description = str(descriptor.get("description") or "")
+                if not description or description.startswith(old_description):
+                    descriptor["description"] = FIXED_OUTPUT_COUNT_DESCRIPTION
+                descriptor["refill_from_history"] = False
     return ImageModel(
         id=model_id,
         name=_text(value.get("name"), 160) or model_id,
@@ -1007,7 +1054,7 @@ def _model_from_mapping(
         negative_prompt=supports_negative_prompt,
         max_reference_images=max_reference_images,
         negative_prompt_default=_model_negative_default(value, kind),
-        parameters=_model_parameters(value.get("parameters"), kind, model_id),
+        parameters=parameters,
         comfyui=comfy,
         tool=_normalize_tool(
             value.get("tool"),
@@ -1084,21 +1131,51 @@ def _normalize_tool(
     limit_default = max(1, min(8, max_reference_images))
     nai = kind == "nai_direct"
     official = kind == "novelai_official"
+    comfy = kind == "comfyui"
+    if comfy and (
+        _text(raw.get("selection_description"), 1200),
+        _text(raw.get("prompt_profile"), 48),
+        _text(raw.get("prompt_instructions"), 4000),
+    ) == (
+        "适合一般自然语言生图需求。",
+        "natural_language",
+        "使用清晰、连贯的自然语言描述，不要使用英文逗号分隔的 NAI tag 串。",
+    ):
+        # Only the complete former automatic default is migrated. A custom
+        # description or explicit format mixed with custom text stays intact.
+        raw = {
+            **raw,
+            "selection_description": "",
+            "prompt_profile": "",
+            "prompt_instructions": "",
+        }
     return {
         "enabled": _as_bool(raw.get("enabled", raw.get("available_to_llm")), True),
         "selection_description": _text(raw.get("selection_description"), 1200)
         or (
-            "仅在用户明确要求 NAI 或 NovelAI 风格标签生图时使用。"
+            ""
+            if comfy
+            else "仅在用户明确要求 NAI 或 NovelAI 风格标签生图时使用。"
             if nai
             else "使用 NovelAI 官方模型生成插画，支持标签或自然语言提示词。"
             if official
             else "适合一般自然语言生图需求。"
         ),
         "prompt_profile": _text(raw.get("prompt_profile"), 48)
-        or ("nai_tags" if nai else "custom" if official else "natural_language"),
+        or (
+            ""
+            if comfy
+            else "nai_tags"
+            if nai
+            else "custom"
+            if official
+            else "natural_language"
+        ),
         "prompt_instructions": _text(raw.get("prompt_instructions"), 4000)
         or (
-            NAI_TOOL_PROMPT_INSTRUCTIONS
+            ""
+            if comfy
+            else NAI_TOOL_PROMPT_INSTRUCTIONS
             if nai
             else "可使用标签或自然语言描述主体、构图、动作、背景与光照；保留用户明确要求的内容。"
             if official

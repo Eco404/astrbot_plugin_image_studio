@@ -30,6 +30,7 @@ class OfflineComfyTransport:
         self.submission_errors = {}
         self.cancel_error = False
         self.uploaded_images = []
+        self.unique_jobs = False
 
     def request(self, method, url, **kwargs):
         path = urlsplit(url).path
@@ -47,11 +48,16 @@ class OfflineComfyTransport:
                 {"name": f"uploaded-{len(self.uploaded_images)}.png", "subfolder": ""}
             )
         if path == "/prompt":
-            return Response(
-                {"prompt_id": "remote-job", "node_errors": self.submission_errors}
+            remote_id = (
+                "remote-" + kwargs["json"]["client_id"]
+                if self.unique_jobs
+                else "remote-job"
             )
-        if path == "/history/remote-job":
-            return Response({"remote-job": history("a.png", "b.png")})
+            return Response(
+                {"prompt_id": remote_id, "node_errors": self.submission_errors}
+            )
+        if path.startswith("/history/remote-"):
+            return Response({path.split("/")[-1]: history("a.png", "b.png")})
         if path == "/view":
             return Response(raw=png())
         if path == "/api/jobs/remote-job/cancel":
@@ -194,14 +200,68 @@ def test_api_job_submit_poll_gallery_result_and_no_implicit_prompt(tmp_path):
             assert job["status"] == "succeeded", job
             assert job["generation_id"]
             result = job["result"]
-            assert len(result["images"]) == 2
+            assert len(result["images"]) == 1
             assert result["generation_id"] == job["generation_id"]
             detail = (
                 await client.get(PREFIX + "gallery/detail/" + job["generation_id"])
             ).json()
             assert detail["provider_kind"] == "comfyui"
-            assert len(detail["images"]) == 2
+            assert len(detail["images"]) == 1
             assert len([call for call in transport.calls if call[1] == "/prompt"]) == 1
+            assert len([call for call in transport.calls if call[1] == "/view"]) == 1
+            refreshed = (await client.get(PREFIX + "comfy/jobs")).json()["jobs"]
+            assert job_id not in {item["id"] for item in refreshed}
+            # Queue filtering must leave direct result access and gallery data intact.
+            assert (
+                await client.get(PREFIX + "comfy/jobs", params={"id": job_id})
+            ).json()["job"]["generation_id"] == job["generation_id"]
+        finally:
+            await teardown(app, client)
+
+    asyncio.run(run())
+
+
+def test_api_unbound_workflow_count_plans_runs_and_caps_downloads(tmp_path):
+    async def run():
+        app, client, transport = await setup(tmp_path)
+        transport.unique_jobs = True
+        try:
+            webui = (await client.get(PREFIX + "settings/get")).json()["webui"]
+            model = next(item for item in webui["providers"] if item["id"] == "comfy")[
+                "models"
+            ][0]
+            model["native_batch_size"] = 2
+            model["native_batch_size_source"] = "manual"
+            response = await client.post(
+                PREFIX + "settings/save",
+                json={"settings_revision": webui["revision"], "webui": webui},
+            )
+            assert response.status_code == 200, response.text
+            response = await client.post(
+                PREFIX + "comfy/jobs",
+                json={
+                    "provider_id": "comfy",
+                    "model": "workflow",
+                    "mode": "text2img",
+                    "count": 5,
+                },
+            )
+            assert response.status_code == 200, response.text
+            job_id = response.json()["job"]["id"]
+            completed = await app.state.plugin._comfy.manager.wait(job_id)
+            assert completed["status"] == "succeeded", completed
+            assert completed["result"]["batch_plan"]["quotas"] == [2, 2, 1]
+            result = (
+                await client.get(PREFIX + "comfy/jobs", params={"id": job_id})
+            ).json()["job"]["result"]
+            assert len(result["images"]) == 5
+            submissions = [call for call in transport.calls if call[1] == "/prompt"]
+            assert len(submissions) == 3
+            assert all(
+                call[2]["json"]["prompt"]["3"]["inputs"]["batch_size"] == 2
+                for call in submissions
+            )
+            assert len([call for call in transport.calls if call[1] == "/view"]) == 5
         finally:
             await teardown(app, client)
 
@@ -275,7 +335,7 @@ def test_api_partial_node_validation_never_reports_full_success(tmp_path):
             ).json()["job"]
             assert result["status"] == "partial", result
             assert "77" in result["result"]["warning"]
-            assert len(result["result"]["images"]) == 2
+            assert len(result["result"]["images"]) == 1
         finally:
             await teardown(app, client)
 
@@ -435,6 +495,143 @@ def test_api_historical_reference_override_does_not_bypass_mode_or_count_limits(
             assert not transport.calls
             assert not await app.state.plugin._comfy_or_raise().store.list_jobs()
         finally:
+            await teardown(app, client)
+
+    asyncio.run(run())
+
+
+def test_api_failed_task_dismissal_persists_and_keeps_diagnostic_record(tmp_path):
+    async def run():
+        app, client, transport = await setup(tmp_path)
+        try:
+            broken = config()
+            broken["api_graph"]["99"] = {"class_type": "MissingNode", "inputs": {}}
+            response = await client.post(
+                PREFIX + "comfy/jobs",
+                json={"provider_id": "comfy", "model": "workflow", "comfyui": broken},
+            )
+            assert response.status_code == 200, response.text
+            identifier = response.json()["job"]["id"]
+            before = await app.state.plugin._comfy.manager.wait(identifier)
+            assert before["status"] == "failed"
+            assert identifier in {
+                item["id"]
+                for item in (await client.get(PREFIX + "comfy/jobs")).json()["jobs"]
+            }
+            dismissed = await client.post(
+                PREFIX + "comfy/jobs/dismiss", json={"id": identifier}
+            )
+            assert dismissed.status_code == 200, dismissed.text
+            assert dismissed.json()["job"]["status"] == "failed"
+            assert (await client.get(PREFIX + "comfy/jobs")).json()["jobs"] == []
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as reloaded_page:
+                assert (await reloaded_page.get(PREFIX + "comfy/jobs")).json()[
+                    "jobs"
+                ] == []
+                direct = await reloaded_page.get(
+                    PREFIX + "comfy/jobs", params={"id": identifier}
+                )
+                assert direct.status_code == 200
+                assert direct.json()["job"]["error"] == before["error"]
+            after = await app.state.plugin._comfy.store.get_job(identifier)
+            assert after["finished_at"] == before["finished_at"]
+            assert after["request"] == before["request"]
+            assert after["result"]["queue_dismissed"] is True
+            assert not [call for call in transport.calls if call[1] == "/prompt"]
+        finally:
+            await teardown(app, client)
+
+    asyncio.run(run())
+
+
+def test_api_queue_dismiss_rejects_active_missing_and_invalid_requests(tmp_path):
+    async def run():
+        app, client, transport = await setup(tmp_path)
+        try:
+            runtime = app.state.plugin._comfy_or_raise()
+            revision = await runtime.store.save_revision(config())
+            job = await runtime.store.create_job(
+                provider_id="comfy",
+                model_id="workflow",
+                revision_id=revision,
+                request={},
+            )
+            before = await runtime.store.update_job(job["id"], status="running")
+            response = await client.post(
+                PREFIX + "comfy/jobs/dismiss", json={"id": job["id"]}
+            )
+            assert response.status_code == 400
+            assert "仍在进行中" in response.json()["message"]
+            assert await runtime.store.get_job(job["id"]) == before
+            assert job["id"] in {
+                item["id"]
+                for item in (await client.get(PREFIX + "comfy/jobs")).json()["jobs"]
+            }
+            for payload in ({"id": "missing"}, [], "invalid"):
+                assert (
+                    await client.post(PREFIX + "comfy/jobs/dismiss", json=payload)
+                ).status_code == 400
+            assert not transport.calls
+        finally:
+            await teardown(app, client)
+
+    asyncio.run(run())
+
+
+def test_api_explicit_resume_reveals_dismissed_remote_task_without_resubmit(
+    tmp_path, monkeypatch
+):
+    async def run():
+        app, client, transport = await setup(tmp_path)
+        release = asyncio.Event()
+        try:
+            runtime = app.state.plugin._comfy_or_raise()
+            provider = app.state.plugin._settings.provider("comfy")
+            revision = await runtime.store.save_revision(config())
+            job = await runtime.store.create_job(
+                provider_id="comfy",
+                model_id="workflow",
+                revision_id=revision,
+                request={
+                    "connection": connection_fingerprint(provider),
+                    "model": provider.models[0].public_dict(),
+                    "values": {"mode": "text2img", "prompt": ""},
+                },
+            )
+            await runtime.store.update_job(
+                job["id"],
+                status="failed",
+                remote_id="remote-job",
+                error="previous connection timeout",
+            )
+            assert (
+                await client.post(PREFIX + "comfy/jobs/dismiss", json={"id": job["id"]})
+            ).status_code == 200
+            assert (await client.get(PREFIX + "comfy/jobs")).json()["jobs"] == []
+            original_run = runtime.manager.run
+
+            async def hold_resume(value):
+                await release.wait()
+                return await original_run(value)
+
+            monkeypatch.setattr(runtime.manager, "run", hold_resume)
+            response = await client.post(
+                PREFIX + "comfy/jobs/resume", json={"id": job["id"]}
+            )
+            assert response.status_code == 200, response.text
+            queued = (await client.get(PREFIX + "comfy/jobs")).json()["jobs"]
+            assert [item["id"] for item in queued] == [job["id"]]
+            assert queued[0]["status"] == "submitted"
+            resumed = await runtime.store.get_job(job["id"])
+            assert "queue_dismissed" not in resumed["result"]
+            release.set()
+            assert (await runtime.manager.wait(job["id"]))["status"] == "succeeded"
+            assert (await client.get(PREFIX + "comfy/jobs")).json()["jobs"] == []
+            assert not [call for call in transport.calls if call[1] == "/prompt"]
+        finally:
+            release.set()
             await teardown(app, client)
 
     asyncio.run(run())

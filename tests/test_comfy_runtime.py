@@ -150,11 +150,13 @@ class FakeComfyClient:
             raise self.wait_error
         return copy.deepcopy(self.history)
 
-    async def download_outputs(self, provider, history, outputs):
-        self.calls.append(("download", copy.deepcopy(history), list(outputs)))
+    async def download_outputs(self, provider, history, outputs, *, output_limit=None):
+        self.calls.append(
+            ("download", copy.deepcopy(history), list(outputs), output_limit)
+        )
         if self.download_error:
             raise self.download_error
-        return self.images
+        return self.images[:output_limit] if output_limit is not None else self.images
 
     async def cancel(self, provider, remote_id):
         self.calls.append(("cancel", remote_id))
@@ -163,10 +165,18 @@ class FakeComfyClient:
         return self.cancel_result
 
 
-async def runtime_fixture(tmp_path, monkeypatch, *, config=None, history=True):
+async def runtime_fixture(
+    tmp_path, monkeypatch, *, config=None, history=True, native=1, count_default=1
+):
     client = FakeComfyClient()
     monkeypatch.setattr(comfyui_runtime, "ComfyClient", lambda _: client)
     provider = configured_provider(config)
+    if native != 1 or count_default != 1:
+        raw = provider.public_dict()
+        raw["models"][0]["native_batch_size"] = native
+        raw["models"][0]["native_batch_size_source"] = "manual"
+        raw["models"][0]["parameters"]["count"]["default"] = count_default
+        provider = ImageProvider.from_mapping(raw)
     settings = RuntimeSettings(
         enable_llm_tool=True,
         providers=(provider,),
@@ -199,7 +209,7 @@ async def submit(runtime, provider, **changes):
 
 
 @pytest.mark.parametrize("source", ["webui", "command", "llm_tool"])
-def test_raw_workflow_keeps_all_outputs_and_needs_no_prompt(
+def test_default_workflow_trims_excess_outputs_and_needs_no_prompt(
     tmp_path, monkeypatch, source
 ):
     async def run():
@@ -212,7 +222,7 @@ def test_raw_workflow_keeps_all_outputs_and_needs_no_prompt(
                 prompt="",
                 source=source,
             )
-            assert len(result.images) == 3
+            assert len(result.images) == 1
             assert result.warning == ""
             jobs = await runtime.store.list_jobs()
             assert len(jobs) == 1 and jobs[0]["status"] == "succeeded"
@@ -223,7 +233,7 @@ def test_raw_workflow_keeps_all_outputs_and_needs_no_prompt(
                 )
                 assert (
                     conn.execute("SELECT COUNT(*) FROM generation_images").fetchone()[0]
-                    == 3
+                    == 1
                 )
                 assert (
                     conn.execute("SELECT source FROM generations").fetchone()[0]
@@ -236,9 +246,7 @@ def test_raw_workflow_keeps_all_outputs_and_needs_no_prompt(
     asyncio.run(run())
 
 
-def test_bound_prompt_and_unbound_quantity_fail_before_remote_submission(
-    tmp_path, monkeypatch
-):
+def test_bound_prompt_fails_before_remote_submission(tmp_path, monkeypatch):
     async def run():
         runtime, service, _, client = await runtime_fixture(
             tmp_path, monkeypatch, config=workflow(prompt_bound=True)
@@ -246,10 +254,6 @@ def test_bound_prompt_and_unbound_quantity_fail_before_remote_submission(
         try:
             with pytest.raises(ProviderError, match="提示词"):
                 await service.generate(mode="text2img", provider_id="comfy", prompt="")
-            with pytest.raises(ProviderError, match="未绑定数量"):
-                await service.generate(
-                    mode="text2img", provider_id="comfy", prompt="filled", count=2
-                )
             assert not [call for call in client.calls if call[0] == "submit"]
         finally:
             await runtime.close()
@@ -319,7 +323,7 @@ def test_completed_snapshot_and_gallery_are_independent_of_model_edits(
 ):
     async def run():
         runtime, service, provider, client = await runtime_fixture(
-            tmp_path, monkeypatch
+            tmp_path, monkeypatch, native=3, count_default=3
         )
         client.release_wait.clear()
         try:
@@ -366,7 +370,11 @@ def test_partial_output_retains_gallery_identity_and_exact_effective_parameters(
 ):
     async def run():
         runtime, service, _, client = await runtime_fixture(
-            tmp_path, monkeypatch, config=workflow(prompt_bound=True)
+            tmp_path,
+            monkeypatch,
+            config=workflow(prompt_bound=True),
+            native=3,
+            count_default=3,
         )
         try:
             if failure_phase == "wait":
@@ -444,7 +452,7 @@ def test_restart_resumes_remote_and_preserves_outputs_without_history(
 ):
     async def run():
         runtime, service, provider, client = await runtime_fixture(
-            tmp_path, monkeypatch, history=False
+            tmp_path, monkeypatch, history=False, native=3, count_default=3
         )
         client.release_wait.clear()
         job = await submit(runtime, provider)
@@ -666,6 +674,50 @@ def test_canonical_api_json_preserves_uint64_seed_through_snapshot_preflight_and
     asyncio.run(run())
 
 
+def test_imported_seed_fingerprints_stay_archived_but_never_reach_new_executions(
+    tmp_path, monkeypatch
+):
+    async def run():
+        config = workflow()
+        config["api_graph"]["91"] = {
+            "class_type": "Seed (rgthree)",
+            "inputs": {"seed": -1},
+            "is_changed": [862058598661582],
+        }
+        config["api_graph"]["3"]["inputs"]["seed"] = ["91", 0]
+        config["api_graph_json"] = json.dumps(config["api_graph"])
+        runtime, _, provider, client = await runtime_fixture(
+            tmp_path, monkeypatch, config=config
+        )
+        try:
+            for _ in range(2):
+                job = await submit(runtime, provider)
+                done = await runtime.manager.wait(job["id"])
+                assert done["status"] == "succeeded", done
+                revision = await runtime.store.get_revision(job["revision_id"])
+                assert revision["api_graph"]["91"]["is_changed"] == [862058598661582]
+                images = await runtime.store.load_outputs(job["id"])
+                actual = images[0].effective_parameters["_comfyui"]
+                assert "is_changed" not in actual["api_graph"]["91"]
+                assert "is_changed" not in json.loads(actual["api_graph_json"])["91"]
+            submitted = [call[1] for call in client.calls if call[0] == "submit"]
+            inspected = [
+                call[1]["api_graph"] for call in client.calls if call[0] == "inspect"
+            ]
+            assert len(submitted) == len(inspected) == 2
+            for graph in [*submitted, *inspected]:
+                assert "is_changed" not in graph["91"]
+                assert graph["91"]["inputs"]["seed"] == -1
+                assert graph["3"]["inputs"]["seed"] == ["91", 0]
+            assert provider.models[0].comfyui["api_graph"]["91"]["is_changed"] == [
+                862058598661582
+            ]
+        finally:
+            await runtime.close()
+
+    asyncio.run(run())
+
+
 def test_preflight_missing_dependencies_blocks_upload_and_submission(
     tmp_path, monkeypatch
 ):
@@ -693,14 +745,14 @@ def test_returned_request_uses_resolved_defaults_and_invocation_identity(
 ):
     async def run():
         runtime, service, _, client = await runtime_fixture(
-            tmp_path, monkeypatch, config=workflow(count_bound=True)
+            tmp_path, monkeypatch, config=workflow()
         )
         provider = configured_provider(
             models=[
                 {
                     "id": "workflow",
                     "name": "Batch workflow",
-                    "comfyui": workflow(count_bound=True),
+                    "comfyui": workflow(),
                     "native_batch_size": 3,
                     "native_batch_size_source": "manual",
                     "parameters": {
@@ -743,7 +795,11 @@ def test_expired_terminal_outputs_use_gallery_originals_with_exact_metadata(
 ):
     async def run():
         runtime, service, _, client = await runtime_fixture(
-            tmp_path, monkeypatch, config=workflow(reference_count=1)
+            tmp_path,
+            monkeypatch,
+            config=workflow(reference_count=1),
+            native=3,
+            count_default=3,
         )
         client.images = tuple(
             replace(item, response_index=index + 10)
@@ -802,7 +858,7 @@ def test_expired_output_fallback_does_not_restore_deleted_gallery_images(
 ):
     async def run():
         runtime, service, provider, client = await runtime_fixture(
-            tmp_path, monkeypatch
+            tmp_path, monkeypatch, native=3, count_default=3
         )
         client.images = tuple(
             replace(item, response_index=index + 10)

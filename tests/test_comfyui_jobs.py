@@ -384,3 +384,150 @@ def test_cleanup_only_removes_expired_terminal_staging_not_unknown_or_gallery(tm
         assert await store.cleanup_terminal_files(terminal_before=time.time() + 1) == 0
 
     asyncio.run(run())
+
+
+def test_queue_filter_runs_before_limit_and_does_not_hide_old_active_or_failed_jobs(
+    tmp_path,
+):
+    async def run():
+        store, revision = await store_and_revision(tmp_path)
+        active = await store.create_job(
+            provider_id="p", model_id="m", revision_id=revision, request={}
+        )
+        await store.update_job(active["id"], status="running")
+        failed = await store.create_job(
+            provider_id="p", model_id="m", revision_id=revision, request={}
+        )
+        await store.update_job(failed["id"], status="failed", error="retained failure")
+        for _ in range(105):
+            completed = await store.create_job(
+                provider_id="p", model_id="m", revision_id=revision, request={}
+            )
+            await store.update_job(completed["id"], status="succeeded")
+        child = await store.create_job(
+            provider_id="p",
+            model_id="m",
+            revision_id=revision,
+            request={"parent_job_id": active["id"]},
+        )
+        default = await store.list_jobs(limit=2, include_children=False)
+        assert all(job["status"] == "succeeded" for job in default)
+        queued = await store.list_jobs(limit=2, include_children=False, queue_only=True)
+        assert [job["id"] for job in queued] == [failed["id"], active["id"]]
+        assert child["id"] not in {job["id"] for job in queued}
+        assert await store.list_jobs(provider_id="different", queue_only=True) == []
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "status", ["succeeded", "partial", "failed", "cancelled", "unknown"]
+)
+def test_dismissing_terminal_task_persists_without_deleting_outputs_or_changing_expiry(
+    tmp_path, status
+):
+    async def run():
+        store, revision = await store_and_revision(tmp_path)
+        references = (ReferenceImage("a", "a.png", b"reference", "image/png"),)
+        outputs = (GeneratedImage(b"result", "image/png", {"seed": 12}, 2),)
+        job = await store.create_job(
+            provider_id="p",
+            model_id="m",
+            revision_id=revision,
+            request={"prompt": "unchanged"},
+            references=references,
+        )
+        await store.save_outputs(job["id"], outputs)
+        before = await store.update_job(
+            job["id"],
+            status=status,
+            result={"warning": "retained warning", "nested": {"keep": [1, 2]}},
+            error="retained diagnostic",
+            generation_id="gallery-id",
+        )
+        dismissed = await store.dismiss_job(job["id"])
+        for name in (
+            "request",
+            "references",
+            "outputs",
+            "status",
+            "error",
+            "generation_id",
+            "finished_at",
+            "created_at",
+        ):
+            assert dismissed[name] == before[name]
+        assert dismissed["result"] == {**before["result"], "queue_dismissed": True}
+        assert await store.dismiss_job(job["id"]) == dismissed
+        reopened = ComfyJobStore(store.db_path)
+        assert await reopened.list_jobs(queue_only=True) == []
+        assert (await reopened.list_jobs())[0]["id"] == job["id"]
+        assert await reopened.load_references(job["id"]) == references
+        assert await reopened.load_outputs(job["id"]) == outputs
+        assert await reopened.get_revision(revision) == WORKFLOW
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        "queued",
+        "preparing",
+        "submitting",
+        "submitted",
+        "running",
+        "downloading",
+        "finalizing",
+    ],
+)
+def test_dismiss_refuses_active_tasks_without_mutating_state(tmp_path, status):
+    async def run():
+        store, revision = await store_and_revision(tmp_path)
+        job = await store.create_job(
+            provider_id="p", model_id="m", revision_id=revision, request={}
+        )
+        before = await store.update_job(job["id"], status=status)
+        with pytest.raises(ValueError, match="仍在进行中"):
+            await store.dismiss_job(job["id"])
+        assert await store.get_job(job["id"]) == before
+        assert [item["id"] for item in await store.list_jobs(queue_only=True)] == [
+            job["id"]
+        ]
+
+    asyncio.run(run())
+
+
+def test_explicit_resume_reveals_dismissed_task_without_repeating_unknown_submission(
+    tmp_path,
+):
+    async def run():
+        store, revision = await store_and_revision(tmp_path)
+        confirmed = await store.create_job(
+            provider_id="p", model_id="m", revision_id=revision, request={}
+        )
+        await store.update_job(
+            confirmed["id"],
+            status="failed",
+            remote_id="existing",
+            result={"api_graph": WORKFLOW["api_graph"]},
+        )
+        await store.dismiss_job(confirmed["id"])
+        resumed = await store.resume_job(confirmed["id"])
+        assert resumed["status"] == "submitted"
+        assert resumed["remote_id"] == "existing"
+        assert "queue_dismissed" not in resumed["result"]
+        assert resumed["result"]["api_graph"] == WORKFLOW["api_graph"]
+        assert [item["id"] for item in await store.list_jobs(queue_only=True)] == [
+            confirmed["id"]
+        ]
+        unknown = await store.create_job(
+            provider_id="p", model_id="m", revision_id=revision, request={}
+        )
+        await store.update_job(unknown["id"], status="unknown")
+        hidden = await store.dismiss_job(unknown["id"])
+        with pytest.raises(ValueError, match="远端编号"):
+            await store.resume_job(unknown["id"])
+        assert await store.get_job(unknown["id"]) == hidden
+
+    asyncio.run(run())

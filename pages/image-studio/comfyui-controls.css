@@ -1,11 +1,24 @@
 .comfy-editor { display: grid; gap: 16px; min-width: 0; }
+.comfy-workflow-editing { display: grid; gap: inherit; min-width: 0; }
+.comfy-workflow-editing[hidden] { display: none; }
 .comfy-editor .field, .comfy-editor details { min-width: 0; }
 .comfy-editor details > summary { cursor: pointer; padding: 8px 0; overflow-wrap: anywhere; }
 .comfy-editor h3 { margin: 0; font-size: 15px; }
+.comfy-import-content { display: grid; gap: 16px; padding-top: 8px; }
+.comfy-import-content > button { justify-self: start; }
+.comfy-import-content > p { margin: 0; }
+#comfyImportStatus:empty { display: none; }
+.studio-modal.is-comfy-drop-target { outline: 2px dashed var(--accent); outline-offset: -6px; }
+.studio-modal.is-comfy-drop-target::after { content: "松开以读取图片或工作流"; position: absolute; z-index: 5; top: 50%; left: 50%; transform: translate(-50%, -50%); max-width: calc(100% - 40px); padding: 12px 18px; border: 1px solid var(--line); border-radius: 12px; background: var(--menu-glass); color: var(--text); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); text-align: center; pointer-events: none; }
 .comfy-editor .field-label-row { flex-wrap: wrap; }
+.comfy-editor .comfy-add-binding { width: max-content; max-width: 100%; flex: 0 0 auto; }
+.comfy-add-binding .studio-select-trigger { min-height: 36px; font-weight: 700; }
+.studio-select-menu[data-select-id="comfyAddBinding"] .studio-select-option { grid-template-columns: minmax(0, 1fr); gap: 0; padding: 8px 10px; }
+.studio-select-menu[data-select-id="comfyAddBinding"] .studio-select-mark { display: none; }
 .comfy-binding, .comfy-node { padding: 12px 0; border-bottom: 1px solid var(--line); }
 .comfy-binding-heading, .comfy-check-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .comfy-binding-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.comfy-node > .comfy-binding-fields > .field:only-child { grid-column: 1 / -1; }
 .comfy-targets { grid-column: 1 / -1; }
 .comfy-workflow-summary { display: grid; gap: 8px; }
 .comfy-workflow-summary p { margin: 0; }
@@ -15,6 +28,9 @@
 .comfy-issues li + li { margin-top: 8px; }
 .comfy-jobs { margin-bottom: 16px; padding: 8px 16px; }
 .comfy-jobs[hidden] { display: none; }
+.comfy-jobs > summary { cursor: pointer; padding: 8px 0; color: var(--text); }
+#comfyJobsSummary { margin-inline-start: 10px; color: var(--muted); font-size: 12px; }
+#comfyJobList { max-height: min(440px, 60dvh); overflow-y: auto; overscroll-behavior: contain; }
 .comfy-job { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--line); }
 .comfy-job > div:first-child { min-width: 0; display: grid; gap: 4px; overflow-wrap: anywhere; }
 .comfy-job span { color: var(--muted); font-size: 12px; }
