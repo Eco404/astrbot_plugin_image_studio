@@ -10,7 +10,7 @@
     return { precise_reference: !v5, vibe_transfer: !v5, inpainting: true, transparency: v5, max_characters: v5 ? 32 : 6, character_position_grid: v5 ? 0 : 5, inpainting_max_characters: model?.id === "nai-diffusion-5-curated" ? 6 : v5 ? 32 : 6, inpainting_character_position_grid: model?.id === "nai-diffusion-5-curated" ? 5 : v5 ? 0 : 5, reference_modes: v5 ? ["img2img", "inpaint"] : ["img2img", "precise", "vibe", "inpaint"] };
   }
 
-  window.ImageStudioNovelAI = function ({ state, model: selectedModel, escape, schemaParameterTitle, rerenderReferences, uploadFile, openModal, showNotice }) {
+  window.ImageStudioNovelAI = function ({ state, model: selectedModel, escape, schemaParameterTitle, schemaParameterLabel, rerenderReferences, uploadFile, openModal, showNotice }) {
     const active = () => selectedModel()?.provider_kind === "novelai_official";
     const schemaEntry = key => Object.entries(selectedModel()?.parameters || {}).find(([name, descriptor]) => (descriptor.request_key || name) === key);
     const value = (key, fallback) => { const entry = schemaEntry(key); return entry ? state.parameterValues[entry[0]] ?? entry[1].default ?? fallback : fallback; };
@@ -78,17 +78,17 @@
       if (!active()) return null;
       const key = descriptor.request_key || name;
       if (!["characters", "reference_settings", "reference_mode"].includes(key)) return null;
-      const title = escape(schemaParameterTitle(name, descriptor));
-      const description = escape(descriptor.description || descriptor.label || name);
+      const label = schemaParameterLabel(name, descriptor);
+      const accessibleLabel = escape(schemaParameterTitle(name, descriptor));
       if (key === "reference_mode") {
         const choices = capabilities(selectedModel()).reference_modes;
         const selected = current || "img2img";
         const fallbackHint = selectedModel().id === "nai-diffusion-5-curated" ? "V5 精选版的局部重绘使用 V4.5 精选版，最多 6 个角色，且不支持透明背景。" : "";
-        return `<div class="field field-wide"><label title="${description}">${title}</label><select data-model-parameter="${escape(name)}" data-parameter-type="select" data-request-key="reference_mode">${choices.includes(selected) ? "" : `<option value="${escape(selected)}" selected>当前模型不支持：${escape(selected)}</option>`}${choices.map(mode => `<option value="${mode}"${selected === mode ? " selected" : ""}>${modeNames[mode]}</option>`).join("")}</select><span class="field-hint">为新图片预选用途；也可在图片卡片中组合底图、蒙版与参考图。精确参考与 Vibe 不能同时使用。${fallbackHint}</span></div>`;
+        return `<div class="field field-wide">${label}<select aria-label="${accessibleLabel}" data-model-parameter="${escape(name)}" data-parameter-type="select" data-request-key="reference_mode">${choices.includes(selected) ? "" : `<option value="${escape(selected)}" selected>当前模型不支持：${escape(selected)}</option>`}${choices.map(mode => `<option value="${mode}"${selected === mode ? " selected" : ""}>${modeNames[mode]}</option>`).join("")}</select><span class="field-hint">为新图片预选用途；也可在图片卡片中组合底图、蒙版与参考图。精确参考与 Vibe 不能同时使用。${fallbackHint}</span></div>`;
       }
       const hidden = `<textarea hidden data-model-parameter="${escape(name)}" data-parameter-type="json" data-request-key="${key}">${escape(JSON.stringify(parse(current)))}</textarea>`;
       if (key === "reference_settings") return hidden;
-      return `<section class="field field-wide novelai-characters" data-novelai-characters>${hidden}<div class="field-label-row"><label title="${description}">${title}</label><button type="button" class="quiet-button" data-novelai-character-add>添加角色</button></div><span class="field-hint" data-novelai-character-hint></span><div data-novelai-character-list></div></section>`;
+      return `<section class="field field-wide novelai-characters" data-novelai-characters>${hidden}<div class="field-label-row">${label}<button type="button" class="quiet-button" data-novelai-character-add>添加角色</button></div><span class="field-hint" data-novelai-character-hint></span><div data-novelai-character-list></div></section>`;
     }
     function renderCharacters() {
       const host = document.querySelector("[data-novelai-character-list]"); if (!host) return;

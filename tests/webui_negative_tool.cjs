@@ -56,9 +56,9 @@ async function matrix(browser, width) {
     await reload();
     assert.equal(await frame.locator('[data-edit-tool-parameter="negative_prompt"]').count(), 1);
     assert.equal(await frame.locator('[data-model-field="tool_negative_prompt_exposed"]').count(), 0, "no separate exposure toggle");
-    assert.equal(await frame.locator(".tool-parameter-row").filter({ has: frame.locator('[data-edit-tool-parameter="negative_prompt"]') }).locator("span").innerText(), "未暴露");
+    assert.equal(await frame.locator(".tool-parameter-row").filter({ has: frame.locator('[data-edit-tool-parameter="negative_prompt"]') }).locator(":scope > span:not(.schema-parameter-label)").innerText(), "未暴露");
     await openNegative();
-    assert.equal(await frame.locator("#parameterDialogTitle").innerText(), "编辑工具参数：negative_prompt");
+    assert.equal(await frame.locator("#parameterDialogTitle").textContent(), "编辑工具参数：反向提示词");
     assert.equal(await frame.locator("#toolParameterExposed").isChecked(), false, "legacy opt-out survives normalization");
     assert.match(await frame.locator("#toolParameterDescription").inputValue(), /反向提示词/);
     assert.equal(await frame.locator("#toolParameterDefault").inputValue(), "");

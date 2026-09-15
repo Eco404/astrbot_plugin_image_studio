@@ -95,7 +95,7 @@ async function verify(browser, name, width) {
     await page.goto(base); const frame = page.frameLocator("#studio");
     await frame.locator("#runtimeStatus").filter({ hasText: "已加载" }).waitFor({ state: "attached" });
     await frame.locator('[data-view="import"]').click();
-    const card = (kind) => frame.locator(".import-card").filter({ has: frame.locator(`.import-card-header strong[title="${path.basename(files[kind])}"]`) });
+    const card = (kind) => frame.locator(".import-card").filter({ has: frame.locator(`.import-card-header strong[data-tooltip="${path.basename(files[kind])}"]`) });
     const field = (kind, target = "prompt") => card(kind).locator(`[data-import-field="${target}"]`);
     await frame.locator("#importFiles").setInputFiles(["source", "target", "conflict", "origins", "mismatch", "failure"].map((kind) => files[kind]));
     await ready(frame);

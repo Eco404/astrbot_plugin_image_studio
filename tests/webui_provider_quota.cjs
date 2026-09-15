@@ -186,7 +186,7 @@ async function matrix(browser, test) {
     await capture(page, frame, `${name}-zero-disabled`);
     assert.equal(await frame.locator("#generateButton").isEnabled(), true, "quota status must not disable the generation form");
     plan("nai", 0, { failure: true }); await fresh(frame); await frame.locator("#providerQuota").filter({ hasText: "额度暂不可用" }).waitFor();
-    assert.match(await frame.locator("#providerQuota").getAttribute("title"), /测试额度服务暂不可用/);
+    assert.match(await frame.locator("#providerQuota").getAttribute("data-tooltip"), /测试额度服务暂不可用/);
     assert.equal(await frame.locator("#generatorWorkspace").evaluate((fieldset) => fieldset.disabled), false);
     assert.equal(await frame.locator("#generationError").textContent(), "");
     assert.equal(await frame.locator("#appNotice").isVisible(), false, "quota failure must stay local to the status");

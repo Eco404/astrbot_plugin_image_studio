@@ -66,7 +66,7 @@ async function matrix(browser, width) {
       for (const [attribute, value] of Object.entries({ type: "number", min: "1", max: "16", step: "1" })) {
         assert.equal(await input.getAttribute(attribute), value, `${key}: ${attribute}`);
       }
-      assert.match(await input.locator("..").locator("label").getAttribute("title"), /取值范围.*1.*16/);
+      assert.match(await input.locator("..").locator("label").getAttribute("data-tooltip"), /取值范围.*1.*16/);
     }
     await frame.locator('[data-schema-default="count"]').fill("3");
     await frame.locator('[data-schema-default="count"]').blur();

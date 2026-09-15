@@ -151,7 +151,7 @@ async function verify(browser, name, width) {
     const polls = calls.filter(call => call.path.endsWith("/external/status")).length;
     await page.waitForTimeout(1800);
     assert.equal(calls.filter(call => call.path.endsWith("/external/status")).length, polls, "external polling must stop off settings view");
-    assert.equal(await frame.locator(".gallery-source-label.is-external").getAttribute("title"), "来自 NAI 插件图库");
+    assert.equal(await frame.locator(".gallery-source-label.is-external").getAttribute("data-tooltip"), "来自 NAI 插件图库");
     assert.equal(await frame.locator(".gallery-source-label.is-external").evaluate(element => getComputedStyle(element).outlineWidth), "1px");
 
     await frame.locator(`[data-gallery-id="${externalId}"] .gallery-info`).click();

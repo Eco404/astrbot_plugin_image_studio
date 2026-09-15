@@ -158,7 +158,7 @@
     function engineLabel(engine) { return engine === "nai" ? ENGINES.novelai : engine === "mixed" ? "混合来源" : ENGINES[engine] || engine || "未知来源"; }
     function engineOf(detail) { const engine = detail.generation_engine || (detail.provider_kind === "nai_direct" ? "novelai" : "unknown"); return engine === "nai" ? "novelai" : engine; }
     function options(values, selected) { return Object.entries(values).map(([value, label]) => `<option value="${escape(value)}" ${String(selected ?? "") === value ? "selected" : ""}>${escape(label)}</option>`).join(""); }
-    function setCommandLabel(id, label) { const button = $(id); const span = button.querySelector("span"); if (span) span.textContent = label; else button.textContent = label; button.setAttribute("aria-label", label); button.title = label; }
+    function setCommandLabel(id, label) { const button = $(id); const span = button.querySelector("span"); if (span) span.textContent = label; else button.textContent = label; button.setAttribute("aria-label", label); button.dataset.tooltip = label; button.dataset.tooltipOverflow = span ? ":scope > span:last-child" : ""; }
 
     async function copyText(content, success = "已复制到剪贴板。") {
       let copied = false;
@@ -241,7 +241,7 @@
     }
 
     function schemaPolicyButton(name) {
-      return `<button class="studio-icon-button parameter-copy" data-edit-schema-policy="${escape(name)}" type="button" aria-label="编辑 ${escape(name)} 的参数行为" title="编辑参数行为">${icon("Settings2")}</button>`;
+      return `<button class="studio-icon-button parameter-copy" data-edit-schema-policy="${escape(name)}" type="button" aria-label="编辑 ${escape(name)} 的参数行为" data-tooltip="编辑参数行为">${icon("Settings2")}</button>`;
     }
 
     function editParameterPolicy(name, descriptor) {
@@ -271,9 +271,9 @@
       const disabled = cardsBusy(context) || item.status === "reading";
       const saveOutputs = (item.parsed?.normalized?.outputs || []).filter((entry) => entry.kind === "save");
       const selectedOutput = saveOutputs.find((entry) => String(entry.node_id) === String(item.outputNodeId || ""));
-      const outputChoice = saveOutputs.length > 1 ? `<div class="field field-wide"><label for="${item.id}-output">最终保存输出</label><div class="import-output-choice"><select id="${item.id}-output" data-import-output aria-label="最终保存输出"><option value="">请选择保存输出</option>${saveOutputs.map((entry) => `<option value="${escape(entry.node_id)}" ${String(entry.node_id) === String(item.outputNodeId || "") ? "selected" : ""}>${escape(entry.type)} #${escape(entry.node_id)}</option>`).join("")}</select><button class="quiet-button import-batch-button" data-batch-import-output type="button" aria-label="批量应用保存输出到全部匹配图片" title="将保存输出选择应用到全部匹配图片（含当前图片）" ${batchChoiceDisabled(item, context) || !selectedOutput?.match_key ? "disabled" : ""}>${icon("CheckCheck")}</button></div></div>` : "";
+      const outputChoice = saveOutputs.length > 1 ? `<div class="field field-wide"><label for="${item.id}-output">最终保存输出</label><div class="import-output-choice"><select id="${item.id}-output" data-import-output aria-label="最终保存输出"><option value="">请选择保存输出</option>${saveOutputs.map((entry) => `<option value="${escape(entry.node_id)}" ${String(entry.node_id) === String(item.outputNodeId || "") ? "selected" : ""}>${escape(entry.type)} #${escape(entry.node_id)}</option>`).join("")}</select><button class="quiet-button import-batch-button" data-batch-import-output type="button" aria-label="批量应用保存输出到全部匹配图片" data-tooltip="将保存输出选择应用到全部匹配图片（含当前图片）" ${batchChoiceDisabled(item, context) || !selectedOutput?.match_key ? "disabled" : ""}>${icon("CheckCheck")}</button></div></div>` : "";
       return `<article class="import-card glass ${item.duplicateReason ? "is-duplicate" : ""}" data-import-id="${item.id}" data-import-sha256="${item.sha256}">
-        <div class="import-card-header"><button class="studio-icon-button import-sort-handle" data-sort-handle type="button" aria-label="调整第 ${index + 1} 张图片顺序：${escape(item.file.name)}" title="拖动排序，也可聚焦后使用方向键" ${sortEnabled(context) ? "" : "disabled"}>${icon("GripVertical")}</button><span class="import-order" aria-label="第 ${index + 1} 张">${index + 1}</span><strong title="${escape(item.file.name)}">${escape(item.file.name)}</strong>${context.editing ? "" : `<button class="studio-icon-button is-danger" data-remove-import="${item.id}" type="button" aria-label="移除 ${escape(item.file.name)}" title="移除图片" ${importing ? "disabled" : ""}>${icon("X")}</button>`}</div>
+        <div class="import-card-header"><button class="studio-icon-button import-sort-handle" data-sort-handle type="button" aria-label="调整第 ${index + 1} 张图片顺序：${escape(item.file.name)}" data-tooltip="拖动排序，也可聚焦后使用方向键" ${sortEnabled(context) ? "" : "disabled"}>${icon("GripVertical")}</button><span class="import-order" aria-label="第 ${index + 1} 张">${index + 1}</span><strong data-tooltip="${escape(item.file.name)}" data-tooltip-overflow>${escape(item.file.name)}</strong>${context.editing ? "" : `<button class="studio-icon-button is-danger" data-remove-import="${item.id}" type="button" aria-label="移除 ${escape(item.file.name)}" data-tooltip="移除图片" ${importing ? "disabled" : ""}>${icon("X")}</button>`}</div>
         <div class="import-card-preview" data-sort-surface><img src="${escape(item.url)}" draggable="false" alt="${escape(item.file.name)}" /></div><div class="import-file-meta">${formatBytes(item.file.size)}${item.width ? ` · ${item.width} × ${item.height}` : ""}</div>
         <fieldset class="import-card-fields" ${disabled ? "disabled" : ""}>
           ${outputChoice}
@@ -352,7 +352,7 @@
         const actions = ["prompt", "negative_prompt"].map((target) => {
           const action = candidateAction(item, candidate, target, context);
           const direction = target === "prompt" ? "正向" : "反向";
-          return `<div class="prompt-candidate-split"><button class="quiet-button" data-candidate-id="${escape(candidate.id)}" data-candidate-target="${target}" type="button" ${action.disabled ? "disabled" : ""}>${action.label}</button><button class="quiet-button import-batch-button" data-batch-candidate-id="${escape(candidate.id)}" data-batch-candidate-target="${target}" type="button" aria-label="批量应用${direction}候选到全部匹配图片" title="将此节点选择应用到全部匹配图片的${direction}提示词（含当前图片），使用各图片自己的文本" ${batchChoiceDisabled(item, context) || !candidate.match_key ? "disabled" : ""}>${icon("CheckCheck")}</button></div>`;
+          return `<div class="prompt-candidate-split"><button class="quiet-button" data-candidate-id="${escape(candidate.id)}" data-candidate-target="${target}" type="button" ${action.disabled ? "disabled" : ""}>${action.label}</button><button class="quiet-button import-batch-button" data-batch-candidate-id="${escape(candidate.id)}" data-batch-candidate-target="${target}" type="button" aria-label="批量应用${direction}候选到全部匹配图片" data-tooltip="将此节点选择应用到全部匹配图片的${direction}提示词（含当前图片），使用各图片自己的文本" ${batchChoiceDisabled(item, context) || !candidate.match_key ? "disabled" : ""}>${icon("CheckCheck")}</button></div>`;
         }).join("");
         return `<div class="prompt-candidate" data-prompt-candidate="${escape(candidate.id)}"><div class="prompt-candidate-title"><strong>${escape(candidate.node_type)} #${escape(candidate.node_id)}</strong><span>${escape(candidate.field)}</span></div><div class="prompt-candidate-meta">${role} · ${status}${candidate.stage_ids?.length ? ` · 阶段 ${candidate.stage_ids.map(escape).join("、")}` : ""}</div>${snapshotMarkup(candidate)}${covered.length ? `<div class="prompt-candidate-meta">已包含上游 ${covered.map(escape).join("、")}</div>` : ""}<details class="prompt-candidate-text"><summary>${escape(candidate.text)}</summary><pre>${escape(candidate.text)}</pre></details><div class="prompt-candidate-actions">${actions}</div></div>`;
       }).join("");
@@ -693,7 +693,7 @@
     }
 
     function importEditorPlaceholder(item, index, context) {
-      return `<article class="import-card import-card-placeholder glass" data-import-id="${item.id}" data-import-sha256="${item.sha256}"><div class="import-card-header"><button class="studio-icon-button import-sort-handle" data-sort-handle type="button" aria-label="调整第 ${index + 1} 张图片顺序：${escape(item.file.name)}" title="拖动排序，也可聚焦后使用方向键" ${sortEnabled(context) ? "" : "disabled"}>${icon("GripVertical")}</button><span class="import-order">${index + 1}</span><strong title="${escape(item.file.name)}">${escape(item.file.name)}</strong></div><div class="import-card-preview import-preview-placeholder" data-sort-surface>${icon("Image")}</div><div class="import-file-meta">${formatBytes(item.file.size)}${item.width ? ` · ${item.width} × ${item.height}` : ""}</div><div class="import-fields-placeholder" aria-hidden="true"><span></span><span></span><span></span></div><p class="import-card-status" role="status"></p><button class="quiet-button" data-import-load type="button">读取参数</button></article>`;
+      return `<article class="import-card import-card-placeholder glass" data-import-id="${item.id}" data-import-sha256="${item.sha256}"><div class="import-card-header"><button class="studio-icon-button import-sort-handle" data-sort-handle type="button" aria-label="调整第 ${index + 1} 张图片顺序：${escape(item.file.name)}" data-tooltip="拖动排序，也可聚焦后使用方向键" ${sortEnabled(context) ? "" : "disabled"}>${icon("GripVertical")}</button><span class="import-order">${index + 1}</span><strong data-tooltip="${escape(item.file.name)}" data-tooltip-overflow>${escape(item.file.name)}</strong></div><div class="import-card-preview import-preview-placeholder" data-sort-surface>${icon("Image")}</div><div class="import-file-meta">${formatBytes(item.file.size)}${item.width ? ` · ${item.width} × ${item.height}` : ""}</div><div class="import-fields-placeholder" aria-hidden="true"><span></span><span></span><span></span></div><p class="import-card-status" role="status"></p><button class="quiet-button" data-import-load type="button">读取参数</button></article>`;
     }
 
     function renderImportEditorCards(context) {
@@ -1060,7 +1060,7 @@
           if (active) { renderPage(); $("importMergeTargets").removeAttribute("aria-busy"); $("studioModalBody").scrollTop = 0; }
         }
       }
-      return openModal("选择已有图组", `<p>${escape(engineLabel(engine))} · 待合并 ${imports.length} 张图片</p><div class="merge-target-grid" id="importMergeTargets" role="radiogroup" aria-label="已有导入图组"></div><div class="merge-target-pagination"><button type="button" class="studio-icon-button" id="importMergePrev" aria-label="上一页" title="上一页">${icon("ChevronLeft")}</button><span id="importMergePage" aria-live="polite"></span><button type="button" class="studio-icon-button" id="importMergeNext" aria-label="下一页" title="下一页">${icon("ChevronRight")}</button></div><div class="merge-target-selection" id="importMergeSelection" role="status"></div>`, [
+      return openModal("选择已有图组", `<p>${escape(engineLabel(engine))} · 待合并 ${imports.length} 张图片</p><div class="merge-target-grid" id="importMergeTargets" role="radiogroup" aria-label="已有导入图组"></div><div class="merge-target-pagination"><button type="button" class="studio-icon-button" id="importMergePrev" aria-label="上一页" data-tooltip="上一页">${icon("ChevronLeft")}</button><span id="importMergePage" aria-live="polite"></span><button type="button" class="studio-icon-button" id="importMergeNext" aria-label="下一页" data-tooltip="下一页">${icon("ChevronRight")}</button></div><div class="merge-target-selection" id="importMergeSelection" role="status"></div>`, [
         { label: "取消", action: () => false },
         { label: "确认导入", primary: true, id: "importMergeConfirm", action: () => {
           if (loading) return undefined;
@@ -1201,7 +1201,7 @@
         const content = serial(value) ?? "null";
         const copyIndex = detailCopies.push(content) - 1;
         const label = prefix ? `${prefix}.${key}` : key;
-        return `<div class="detail-parameter-row"><div class="detail-parameter-label"><span>${escape(label)}</span><button class="studio-icon-button parameter-copy" data-copy-field="${copyIndex}" type="button" aria-label="复制 ${escape(label)}" title="复制 ${escape(label)}">${icon("Copy")}</button></div><pre>${escape(content)}</pre></div>`;
+        return `<div class="detail-parameter-row"><div class="detail-parameter-label"><span>${escape(label)}</span><button class="studio-icon-button parameter-copy" data-copy-field="${copyIndex}" type="button" aria-label="复制 ${escape(label)}" data-tooltip="复制 ${escape(label)}">${icon("Copy")}</button></div><pre>${escape(content)}</pre></div>`;
       }).join("");
     }
 
@@ -1312,8 +1312,8 @@
       $("detailWorkflowDownload").hidden = !formats.workflow && !formats.comfy_api;
       $("detailFavorite").classList.toggle("is-favorite", !!detail?.is_favorite);
       $("detailFavorite").setAttribute("aria-pressed", String(!!detail?.is_favorite));
-      $("detailFavorite").title = detail?.is_favorite ? "取消收藏" : "收藏生成记录";
-      $("detailFavorite").setAttribute("aria-label", $("detailFavorite").title);
+      $("detailFavorite").dataset.tooltip = detail?.is_favorite ? "取消收藏" : "收藏生成记录";
+      $("detailFavorite").setAttribute("aria-label", $("detailFavorite").dataset.tooltip);
       const allowed = Object.fromEntries(["favorite", "delete", "download", "reference"].map(action => [action, detail?.allowed_actions?.[action] !== false && image?.allowed_actions?.[action] !== false]));
       const normalized = image?.metadata?.normalized || {};
       const hasParameters = !detail?.is_external || !!(detail.prompt || detail.model || normalized.prompt || normalized.model || Object.keys(normalized.parameters || {}).length || Object.keys(detail.parameters || {}).length);
@@ -1324,8 +1324,8 @@
       $("detailDelete").disabled = !detail || !(detail.images || []).length || allowed.delete === false;
       for (const [id, action] of [["detailFavorite", "favorite"], ["detailUseReference", "reference"], ["detailDelete", "delete"]]) {
         const button = $(id);
-        if (allowed[action] === false) { if (!button.dataset.allowedTitle) button.dataset.allowedTitle = button.title; button.title = "此外部图库未允许此操作"; }
-        else if (button.dataset.allowedTitle) { button.title = button.dataset.allowedTitle; delete button.dataset.allowedTitle; }
+        if (allowed[action] === false) { if (!button.dataset.allowedTitle) button.dataset.allowedTitle = button.dataset.tooltip; button.dataset.tooltip = "此外部图库未允许此操作"; }
+        else if (button.dataset.allowedTitle) { button.dataset.tooltip = button.dataset.allowedTitle; delete button.dataset.allowedTitle; }
       }
       $("detailImportEdit").hidden = detail?.source !== "import" || !!detail?.is_external;
       $("detailImportEdit").disabled = importEditLoading || !detail || !(detail.images || []).length;
@@ -1478,7 +1478,7 @@
       const warnings = (result.warnings || []).filter((warning) => !references || warning !== "参数文本不包含原始参考图，请补充参考图后生成。");
       const unmapped = result.unmapped || {};
       const notice = $("parameterImportNotice");
-      notice.innerHTML = `<button class="studio-icon-button" data-dismiss-parameter-notice type="button" aria-label="关闭参数提示" title="关闭参数提示">${icon("X")}</button>${warnings.map((warning) => `<p>${escape(warning)}</p>`).join("")}${Object.keys(unmapped).length ? `<details><summary>未映射参数</summary><pre>${escape(serial(unmapped))}</pre></details>` : ""}`;
+      notice.innerHTML = `<button class="studio-icon-button" data-dismiss-parameter-notice type="button" aria-label="关闭参数提示" data-tooltip="关闭参数提示">${icon("X")}</button>${warnings.map((warning) => `<p>${escape(warning)}</p>`).join("")}${Object.keys(unmapped).length ? `<details><summary>未映射参数</summary><pre>${escape(serial(unmapped))}</pre></details>` : ""}`;
       notice.classList.toggle("is-hidden", !warnings.length && !Object.keys(unmapped).length);
       showNotice("参数已填入，尚未执行生成。", "success");
     }
@@ -1585,8 +1585,8 @@
       const selected = state.selectedIds.has(item.id);
       return `<article class="gallery-card ${item.is_favorite ? "is-favorite" : ""} ${warning ? "has-cleanup-warning" : ""} ${selected ? "is-selected" : ""}" data-gallery-id="${escape(item.id)}" tabindex="0" role="button" aria-label="查看 ${escape(item.model || item.provider_name || "图片")}">
         <div class="gallery-image-wrap">${item.thumbnail_data_url ? `<img src="${escape(item.thumbnail_data_url)}" alt="${escape(item.prompt_preview)}" loading="${index < Math.max(1, galleryColumns) * 2 ? "eager" : "lazy"}" decoding="async" />` : `<div class="gallery-missing-image">${icon("Image")}<span>图片不可用</span></div>`}
-          <label class="gallery-selection" title="选择生成记录"><input type="checkbox" data-select-id="${escape(item.id)}" aria-label="选择生成记录" ${selected ? "checked" : ""} /><span>${icon("Check")}</span></label>
-          <span class="gallery-source-label${item.is_external ? " is-external" : ""}"${item.is_external ? ` title="来自 ${escape(item.external_source?.name || "nai-image 插件图库")}" aria-label="${escape(engineLabel(item.generation_engine))}，来自 ${escape(item.external_source?.name || "nai-image 插件图库")}"` : ""}>${escape(engineLabel(item.generation_engine))}</span>${Number(item.image_count) > 1 ? `<span class="gallery-image-count" title="${Number(item.image_count)} 张图片">${icon("Image")}<span>${Number(item.image_count)}</span></span>` : ""}${item.is_favorite ? `<span class="gallery-favorite" title="已收藏" aria-label="已收藏">${icon("Star")}</span>` : ""}
+          <label class="gallery-selection"><input type="checkbox" data-select-id="${escape(item.id)}" aria-label="选择生成记录" ${selected ? "checked" : ""} /><span>${icon("Check")}</span></label>
+          <span class="gallery-source-label${item.is_external ? " is-external" : ""}"${item.is_external ? ` data-tooltip="来自 ${escape(item.external_source?.name || "nai-image 插件图库")}" aria-label="${escape(engineLabel(item.generation_engine))}，来自 ${escape(item.external_source?.name || "nai-image 插件图库")}"` : ""}>${escape(engineLabel(item.generation_engine))}</span>${Number(item.image_count) > 1 ? `<span class="gallery-image-count" aria-label="${Number(item.image_count)} 张图片">${icon("Image")}<span>${Number(item.image_count)}</span></span>` : ""}${item.is_favorite ? `<span class="gallery-favorite" data-tooltip="已收藏" aria-label="已收藏">${icon("Star")}</span>` : ""}
         </div><div class="gallery-info"><strong>${escape(item.model || item.provider_name || engineLabel(item.generation_engine))}</strong><p>${escape(item.prompt_preview || "无提示词")}</p><div class="gallery-meta"><span>${modeLabel(item.mode)}</span><span>${formatDate(item.sort_time || item.created_at)}</span></div>${warning ? '<span class="cleanup-warning-label">清理候选</span>' : ""}${item.file_state && item.file_state !== "available" ? '<span class="cleanup-warning-label">文件需检查</span>' : ""}</div></article>`;
     }
 
@@ -1657,7 +1657,7 @@
         const item = document.querySelector(`.nav-item[data-view="${view}"] .nav-icon`); item.className = "nav-icon"; item.innerHTML = icon(name);
       }
       for (const [id, name, label] of [["galleryPrev", "ChevronLeft", "上一页"], ["galleryNext", "ChevronRight", "下一页"], ["exportButton", "Download", "导出"], ["selectAllButton", "CheckCheck", "全选当前页"], ["cancelSelectionButton", "X", "取消选择"], ["deleteButton", "Trash2", "删除所选记录"], ["saveSettingsButton", "Check", "保存全部设置"], ["confirmImportButton", "Upload", "确认导入"], ["cancelImportButton", "X", "取消导入"]]) {
-        const button = $(id); button.innerHTML = `${icon(name)}<span>${label}</span>`; button.setAttribute("aria-label", label); button.title = label; button.classList.add("responsive-command");
+        const button = $(id); button.innerHTML = `${icon(name)}<span>${label}</span>`; button.setAttribute("aria-label", label); button.dataset.tooltip = label; button.dataset.tooltipOverflow = ":scope > span:last-child"; button.classList.add("responsive-command");
       }
       $("favoriteSelectionButton").innerHTML = `${icon("Star")}<span>收藏</span>`;
       $("favoriteSelectionButton").classList.add("responsive-command");
@@ -1666,7 +1666,7 @@
       $("gallerySearch").addEventListener("input", () => { $("galleryClearSearch").disabled = !$("gallerySearch").value; });
       $("galleryClearSearch").addEventListener("click", () => { $("gallerySearch").value = ""; $("galleryClearSearch").disabled = true; $("gallerySearch").focus(); void hooks.loadGallery(0); });
       $("parameterImportNotice").addEventListener("click", (event) => { if (event.target.closest("[data-dismiss-parameter-notice]")) $("parameterImportNotice").classList.add("is-hidden"); });
-      const formatWrapper = document.createElement("label"); formatWrapper.className = "copy-format-picker"; formatWrapper.title = "选择参数格式"; formatWrapper.innerHTML = icon("FileJson");
+      const formatWrapper = document.createElement("label"); formatWrapper.className = "copy-format-picker"; formatWrapper.innerHTML = icon("FileJson");
       const formatControl = $("detailCopyFormat").closest(".studio-select") || $("detailCopyFormat");
       formatControl.before(formatWrapper); formatWrapper.appendChild(formatControl);
       $("importFiles").addEventListener("change", (event) => { void addImportFiles(event.target.files); event.target.value = ""; });
@@ -1690,7 +1690,7 @@
       $("galleryFavorite").addEventListener("click", () => {
         const button = $("galleryFavorite"); const selected = button.value !== "true";
         button.value = selected ? "true" : ""; button.setAttribute("aria-pressed", String(selected)); button.classList.toggle("is-active", selected);
-        button.title = selected ? "取消收藏筛选" : "仅查看已收藏";
+        button.dataset.tooltip = selected ? "取消收藏筛选" : "仅查看已收藏";
         hooks.clearGallerySelection(); void hooks.loadGallery(0);
       });
       $("pasteParametersButton").addEventListener("click", () => void readClipboardParameters());

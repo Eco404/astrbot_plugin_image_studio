@@ -220,10 +220,11 @@
   function renderProviderStatus() {
     const model = selectedModel(), provider = selectedProvider(), active = quotaProvider();
     els.providerStatusName.textContent = model && provider ? `${model.name} · ${provider.name}` : "未选择模型";
-    els.providerStatusName.title = els.providerStatusName.textContent;
+    els.providerStatusName.dataset.tooltip = els.providerStatusName.textContent;
+    els.providerStatusName.dataset.tooltipOverflow = "";
     els.providerStatus.classList.toggle("has-provider-quota", !!active);
     els.providerQuota.hidden = !active;
-    if (!active) { els.providerQuota.textContent = ""; els.providerQuota.removeAttribute("title"); return; }
+    if (!active) { els.providerQuota.textContent = ""; delete els.providerQuota.dataset.tooltip; return; }
     const quota = providerQuotas.get(active.id);
     const failed = !!quota?.error;
     els.providerQuota.classList.toggle("is-unavailable", failed);
@@ -237,12 +238,12 @@
       const availability = usage?.is_negative === false ? "可用" : usage?.is_negative === true ? "已用尽" : "状态未知";
       const refill = usage?.time_until_next_percent === null || usage?.time_until_next_percent === undefined ? "" : `\n距离下一个百分比恢复约 ${usage.time_until_next_percent} 秒`;
       const usageDetail = showV5Usage ? `\nV5 免费额度：${allowance}（${availability}），与 Anlas 余额独立${refill}` : "";
-      els.providerQuota.title = failed ? quota.error : data ? `服务商：${active.name}\n订阅：${data.subscription_active ? "有效" : "未订阅"}\nAnlas：订阅 ${amount(data.subscription_anlas)}，购买 ${amount(data.purchased_anlas)}${usageDetail}${data.subscription_active ? "" : "\n未订阅不代表服务商已停用；Anlas 余额不代表免费试用剩余次数。"}\n更新于 ${formatDate(data.checked_at)}` : `正在查询 ${active.name} 的额度`;
+      els.providerQuota.dataset.tooltip = failed ? quota.error : data ? `服务商：${active.name}\n订阅：${data.subscription_active ? "有效" : "未订阅"}\nAnlas：订阅 ${amount(data.subscription_anlas)}，购买 ${amount(data.purchased_anlas)}${usageDetail}${data.subscription_active ? "" : "\n未订阅不代表服务商已停用；Anlas 余额不代表免费试用剩余次数。"}\n更新于 ${formatDate(data.checked_at)}` : `正在查询 ${active.name} 的额度`;
       return;
     }
     els.providerQuota.classList.toggle("is-warning", !!quota?.data && (!quota.data.enabled || quota.data.remaining === 0));
     els.providerQuota.textContent = failed ? "额度暂不可用" : quota?.data ? `剩余额度 ${quota.data.remaining.toLocaleString("zh-CN")}${quota.data.enabled ? "" : " · 已停用"}` : "额度查询中…";
-    els.providerQuota.title = failed ? quota.error : quota?.data ? `服务商：${active.name}\n更新于 ${formatDate(quota.data.checked_at)}` : `正在查询 ${active.name} 的额度`;
+    els.providerQuota.dataset.tooltip = failed ? quota.error : quota?.data ? `服务商：${active.name}\n更新于 ${formatDate(quota.data.checked_at)}` : `正在查询 ${active.name} 的额度`;
   }
 
   function refreshProviderQuota() {
@@ -352,34 +353,48 @@
   function schemaParameterTitle(name, descriptor) {
     const fieldName = String(name).trim();
     const label = String(descriptor.label || "").trim();
-    return label && label !== fieldName ? `${fieldName} ${label}` : fieldName;
+    return label || fieldName;
+  }
+
+  function schemaParameterTooltip(name, descriptor) {
+    const requestKey = String(descriptor.request_key || "").trim() || String(name).trim();
+    const description = String(descriptor.description || "").trim();
+    return description ? `${requestKey}\n${description}` : requestKey;
+  }
+
+  function schemaParameterLabel(name, descriptor, tag = "label") {
+    const label = escape(schemaParameterTitle(name, descriptor));
+    const tooltip = escape(schemaParameterTooltip(name, descriptor));
+    const textTag = tag === "strong" ? "strong" : "span";
+    if (tooltip === label) return `<span class="schema-parameter-label"><${tag}>${label}</${tag}></span>`;
+    return `<span class="schema-parameter-label"><button type="button" class="parameter-help-text" data-tooltip="${tooltip}" data-tooltip-toggle aria-label="查看${label}说明"><${textTag}>${label}</${textTag}></button></span>`;
   }
 
   function renderModelParameter(name, descriptor) {
     const type = String(descriptor.type || "text").toLowerCase();
-    const label = escape(schemaParameterTitle(name, descriptor));
-    const description = escape(descriptor.description || descriptor.label || name);
+    const label = schemaParameterLabel(name, descriptor);
+    const accessibleLabel = escape(schemaParameterTitle(name, descriptor));
     let value = Object.prototype.hasOwnProperty.call(state.parameterValues, name) ? state.parameterValues[name] : descriptor.default ?? "";
     const specialized = novelaiControls.parameter(name, descriptor, value);
     if (specialized !== null) return specialized;
     const requestKey = escape(descriptor.request_key || name);
     if (type === "preset" && Array.isArray(descriptor.choices)) {
       const options = descriptor.choices.map((choice) => `<option value="${escape(choice.value)}" ${String(choice.value) === String(value) ? "selected" : ""}>${escape(choice.label || choice.value)}</option>`).join("");
-      return `<div class="field"><label title="${description}">${label}</label><select data-model-parameter="${escape(name)}" data-parameter-type="preset" data-preset-target="${escape(descriptor.target || "")}" data-ui-only="true">${options}</select></div>`;
+      return `<div class="field">${label}<select aria-label="${accessibleLabel}" data-model-parameter="${escape(name)}" data-parameter-type="preset" data-preset-target="${escape(descriptor.target || "")}" data-ui-only="true">${options}</select></div>`;
     }
     if (type === "select" && Array.isArray(descriptor.choices)) {
       const selected = descriptor.choices.some((choice) => String(typeof choice === "object" ? choice.value : choice) === String(value));
       const options = `${selected ? "" : '<option value="" selected>未设置</option>'}${descriptor.choices.map((choice) => { const option = typeof choice === "object" ? choice : { value: choice, label: choice }; return `<option value="${escape(option.value)}" ${String(option.value) === String(value) ? "selected" : ""}>${escape(option.label)}</option>`; }).join("")}`;
-      return `<div class="field"><label title="${description}">${label}</label><select data-model-parameter="${escape(name)}" data-parameter-type="select" data-request-key="${requestKey}">${options}</select></div>`;
+      return `<div class="field">${label}<select aria-label="${accessibleLabel}" data-model-parameter="${escape(name)}" data-parameter-type="select" data-request-key="${requestKey}">${options}</select></div>`;
     }
-    if (type === "boolean" || type === "bool") return `<div class="toggle-row" title="${description}"><label>${label}</label><label class="toggle-control"><input data-model-parameter="${escape(name)}" data-request-key="${requestKey}" type="checkbox" ${value ? "checked" : ""} /><span aria-hidden="true"></span></label></div>`;
-    if (type === "json" || type === "object") return `<div class="field field-wide"><label title="${description}">${label}</label><textarea data-model-parameter="${escape(name)}" data-parameter-type="json" data-request-key="${requestKey}" rows="3" spellcheck="false">${escape(typeof value === "string" ? value : JSON.stringify(value || {}, null, 2))}</textarea></div>`;
-    if (type === "textarea") return `<div class="field field-wide"><label title="${description}">${label}</label><textarea data-model-parameter="${escape(name)}" data-parameter-type="text" data-request-key="${requestKey}" rows="4">${escape(value)}</textarea></div>`;
+    if (type === "boolean" || type === "bool") return `<div class="toggle-row">${label}<label class="toggle-control"><input aria-label="${accessibleLabel}" data-model-parameter="${escape(name)}" data-request-key="${requestKey}" type="checkbox" ${value ? "checked" : ""} /><span aria-hidden="true"></span></label></div>`;
+    if (type === "json" || type === "object") return `<div class="field field-wide">${label}<textarea aria-label="${accessibleLabel}" data-model-parameter="${escape(name)}" data-parameter-type="json" data-request-key="${requestKey}" rows="3" spellcheck="false">${escape(typeof value === "string" ? value : JSON.stringify(value || {}, null, 2))}</textarea></div>`;
+    if (type === "textarea") return `<div class="field field-wide">${label}<textarea aria-label="${accessibleLabel}" data-model-parameter="${escape(name)}" data-parameter-type="text" data-request-key="${requestKey}" rows="4">${escape(value)}</textarea></div>`;
     const inputType = ["number", "int", "integer", "float"].includes(type) ? "number" : "text";
     const min = descriptor.min !== undefined ? ` min="${escape(descriptor.min)}"` : "";
     const max = descriptor.max !== undefined ? ` max="${escape(descriptor.max)}"` : "";
     const step = descriptor.step !== undefined ? ` step="${escape(descriptor.step)}"` : inputType === "number" ? " step=\"any\"" : "";
-    return `<div class="field"><label title="${description}">${label}</label><input data-model-parameter="${escape(name)}" data-parameter-type="${inputType === "number" ? "number" : "text"}" data-request-key="${requestKey}" type="${inputType}" value="${escape(value)}"${min}${max}${step} /></div>`;
+    return `<div class="field">${label}<input aria-label="${accessibleLabel}" data-model-parameter="${escape(name)}" data-parameter-type="${inputType === "number" ? "number" : "text"}" data-request-key="${requestKey}" type="${inputType}" value="${escape(value)}"${min}${max}${step} /></div>`;
   }
 
   function renderModelChoices() {
@@ -549,6 +564,7 @@
 
   async function generate(event) {
     event.preventDefault(); setError(els.generationError, "");
+    if (!els.prompt.value.trim()) { setError(els.generationError, "请填写提示词。"); return; }
     if (referencesUploading) { setError(els.generationError, "请等待参考图上传完成。"); return; }
     let parameters = {};
     if (els.parameters.value.trim()) {
@@ -1274,7 +1290,7 @@
       strip.setAttribute("aria-label", "本组生成图片缩略图");
       strip.innerHTML = `<div class="detail-filmstrip-track">${images.map((item, index) => {
         const preview = item.thumbnail_data_url || (index === 0 ? state.detailFallbackThumbnail : "");
-        return `<button class="detail-filmstrip-thumb" data-detail-dot="${index}" type="button" aria-label="查看本次生成的第 ${index + 1} 张图片" title="第 ${index + 1} / ${images.length} 张"><span class="detail-filmstrip-preview"><span class="detail-filmstrip-placeholder" aria-hidden="true" ${preview ? "hidden" : ""}>${index + 1}</span>${preview ? `<img src="${escape(preview)}" alt="" draggable="false" loading="lazy" decoding="async" />` : ""}</span></button>`;
+        return `<button class="detail-filmstrip-thumb" data-detail-dot="${index}" type="button" aria-label="查看本次生成的第 ${index + 1} 张图片"><span class="detail-filmstrip-preview"><span class="detail-filmstrip-placeholder" aria-hidden="true" ${preview ? "hidden" : ""}>${index + 1}</span>${preview ? `<img src="${escape(preview)}" alt="" draggable="false" loading="lazy" decoding="async" />` : ""}</span></button>`;
       }).join("")}</div>`;
       strip.querySelectorAll("img").forEach((image) => image.addEventListener("error", () => { image.hidden = true; image.parentElement.querySelector(".detail-filmstrip-placeholder").hidden = false; }));
       const selectImage = (index, focus = false) => {
@@ -2066,7 +2082,7 @@
         updateMobileViewerFeedback(session);
       });
       pswp.on("uiRegister", () => {
-        pswp.ui.registerElement({ name: "image-studio-download", className: "pswp__button--image-studio-download", isButton: true, appendTo: "root", title: "下载图片", ariaLabel: "下载当前图片", html: '<svg class="image-studio-download-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>', onClick: () => void downloadMobileImage() });
+        pswp.ui.registerElement({ name: "image-studio-download", className: "pswp__button--image-studio-download", isButton: true, appendTo: "root", ariaLabel: "下载当前图片", html: '<svg class="image-studio-download-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>', onInit: (element) => { element.dataset.tooltip = "下载图片"; }, onClick: () => void downloadMobileImage() });
       });
       pswp.on("change", () => {
         if (!isCurrentMobileSession(session)) return;
@@ -2591,22 +2607,22 @@
     const negativeDefaultField = model.supports_negative_prompt ? modelTextAreaField("negative_prompt_default", "默认反向提示词", model.negative_prompt_default || "") : "";
     const testDisabled = !model.supports_text2img;
     const defaults = `<section class="schema-preview"><h4>参数默认值</h4>${effectiveModelParameters(model).map(([name, descriptor]) => renderSchemaDefault(name, descriptor)).join("") || '<span class="field-hint">当前 schema 没有参数。</span>'}</section>`;
-    const batchFields = `<div class="field"><label title="单次接口请求最多生成的图片张数；总张数超出时自动分批。">单次请求图片上限</label><input data-model-field="native_batch_size" type="number" min="1" step="1" value="${escape(model.native_batch_size)}"${provider.kind === "nai_direct" ? " disabled" : ""} />${official ? '<span class="field-hint">默认每次请求 1 张；提高此值使用官方多样本生成，额外样本可能消耗 Anlas。</span>' : ""}</div><div class="field"><label title="该模型在所有任务中共享的最大并发请求数，仍受服务商最大并发限制。取值范围：[1, 16]。">模型最大并发请求数</label><input data-model-field="max_concurrent_requests" type="number" min="1" max="16" step="1" value="${escape(model.max_concurrent_requests)}" />${official ? '<span class="field-hint">官方服务商当前串行处理，实际同时执行 1 个请求。</span>' : ""}</div>`;
+    const batchFields = `<div class="field">${schemaParameterLabel("native_batch_size", { label: "单次请求图片上限", description: "单次接口请求最多生成的图片张数；总张数超出时自动分批。" })}<input data-model-field="native_batch_size" aria-label="单次请求图片上限" type="number" min="1" step="1" value="${escape(model.native_batch_size)}"${provider.kind === "nai_direct" ? " disabled" : ""} />${official ? '<span class="field-hint">默认每次请求 1 张；提高此值使用官方多样本生成，额外样本可能消耗 Anlas。</span>' : ""}</div><div class="field">${schemaParameterLabel("max_concurrent_requests", { label: "模型最大并发请求数", description: "该模型在所有任务中共享的最大并发请求数，仍受服务商最大并发限制。取值范围：[1, 16]。" })}<input data-model-field="max_concurrent_requests" aria-label="模型最大并发请求数" type="number" min="1" max="16" step="1" value="${escape(model.max_concurrent_requests)}" />${official ? '<span class="field-hint">官方服务商当前串行处理，实际同时执行 1 个请求。</span>' : ""}</div>`;
     const raw = `<details class="schema-raw"><summary>高级：参数 Schema</summary><textarea id="modelParametersSchema" data-model-field="parameters" rows="14" spellcheck="false">${escape(schemaText)}</textarea><span class="field-hint">每个字段支持 type、label、description、default、request_key、min、max、step、choices、modes、webui_visible、record_in_history、refill_from_history。</span></details>`;
     const capabilityEditable = !official && ["unknown", "manual"].includes(model.capability_source);
     const capabilityHint = model.supports_img2img ? `<div class="field"><label>参考图能力上限</label><input data-model-field="max_reference_images" type="number" min="1" max="8" step="1" value="${configuredReferenceLimit(model.max_reference_images)}"${capabilityEditable ? "" : " disabled"} /><span class="field-hint">${official ? "底图与蒙版分别最多 1 张；V4.5 可组合参考图，总计最多 8 张，V5 最多使用底图与蒙版共 2 张。" : capabilityEditable ? "无法获取时可手动填写，取值范围：1–8 张。" : `来源：${escape(model.capability_source)}，已获取的能力不可在此覆盖。`}</span></div>` : "";
-    return `<h3>${escape(model.name || model.id)}</h3>${modelIdField}${modelField("name", "显示名称", model.name)}${batchFields}${modelToggle("supports_text2img", "支持文生图", model.supports_text2img)}${modelToggle("supports_img2img", "支持图生图", model.supports_img2img, provider.kind === "nai_direct")}${modelToggle("supports_negative_prompt", "支持专用反向提示词", model.supports_negative_prompt, provider.kind === "gemini")}${capabilityHint}${negativeDefaultField}${defaults}${raw}<div class="provider-editor-actions"><button class="danger-button" id="removeModelButton" type="button">删除模型</button><button class="quiet-button" id="testModelButton" type="button"${testDisabled ? ' disabled title="仅支持图生图的模型需要参考图，暂不能在此测试"' : ""}>测试模型</button></div>`;
+    return `<h3>${escape(model.name || model.id)}</h3>${modelIdField}${modelField("name", "显示名称", model.name)}${batchFields}${modelToggle("supports_text2img", "支持文生图", model.supports_text2img)}${modelToggle("supports_img2img", "支持图生图", model.supports_img2img, provider.kind === "nai_direct")}${modelToggle("supports_negative_prompt", "支持专用反向提示词", model.supports_negative_prompt, provider.kind === "gemini")}${capabilityHint}${negativeDefaultField}${defaults}${raw}<div class="provider-editor-actions"><button class="danger-button" id="removeModelButton" type="button">删除模型</button><button class="quiet-button" id="testModelButton" type="button"${testDisabled ? ' disabled data-tooltip="仅支持图生图的模型需要参考图，暂不能在此测试"' : ""}>测试模型</button></div>`;
   }
   function renderSchemaDefault(name, descriptor) {
     const type = String(descriptor.type || "text").toLowerCase();
-    const title = escape(descriptor.description || descriptor.label || name);
     const value = descriptor.default ?? "";
-    const label = `<div class="field-label-row"><label title="${title}">${escape(schemaParameterTitle(name, descriptor))}</label>${library.schemaPolicyButton(name)}</div>`;
-    if ((type === "select" || type === "preset") && Array.isArray(descriptor.choices)) return `<div class="field">${label}<select data-schema-default="${escape(name)}">${descriptor.choices.map((choice) => { const item = typeof choice === "object" ? choice : { value: choice, label: choice }; return `<option value="${escape(item.value)}" ${String(item.value) === String(value) ? "selected" : ""}>${escape(item.label || item.value)}</option>`; }).join("")}</select></div>`;
-    if (type === "boolean" || type === "bool") return `<div class="field">${label}<label class="toggle-control"><input data-schema-default="${escape(name)}" aria-label="${escape(schemaParameterTitle(name, descriptor))} 默认值" type="checkbox" ${value ? "checked" : ""} /><span aria-hidden="true"></span></label></div>`;
-    if (["json", "object"].includes(type)) return `<div class="field field-wide">${label}<textarea data-schema-default="${escape(name)}" data-schema-json="true" rows="2" spellcheck="false">${escape(typeof value === "string" ? value : JSON.stringify(value, null, 2))}</textarea></div>`;
+    const label = `<div class="field-label-row">${schemaParameterLabel(name, descriptor)}${library.schemaPolicyButton(name)}</div>`;
+    const accessibleLabel = escape(schemaParameterTitle(name, descriptor));
+    if ((type === "select" || type === "preset") && Array.isArray(descriptor.choices)) return `<div class="field">${label}<select aria-label="${accessibleLabel} 默认值" data-schema-default="${escape(name)}">${descriptor.choices.map((choice) => { const item = typeof choice === "object" ? choice : { value: choice, label: choice }; return `<option value="${escape(item.value)}" ${String(item.value) === String(value) ? "selected" : ""}>${escape(item.label || item.value)}</option>`; }).join("")}</select></div>`;
+    if (type === "boolean" || type === "bool") return `<div class="field">${label}<label class="toggle-control"><input data-schema-default="${escape(name)}" aria-label="${accessibleLabel} 默认值" type="checkbox" ${value ? "checked" : ""} /><span aria-hidden="true"></span></label></div>`;
+    if (["json", "object"].includes(type)) return `<div class="field field-wide">${label}<textarea aria-label="${accessibleLabel} 默认值" data-schema-default="${escape(name)}" data-schema-json="true" rows="2" spellcheck="false">${escape(typeof value === "string" ? value : JSON.stringify(value, null, 2))}</textarea></div>`;
     const inputType = ["number", "int", "integer", "float"].includes(type) ? "number" : "text";
-    return `<div class="field">${label}<input data-schema-default="${escape(name)}" type="${inputType}" value="${escape(value)}"${descriptor.min !== undefined ? ` min="${escape(descriptor.min)}"` : ""}${descriptor.max !== undefined ? ` max="${escape(descriptor.max)}"` : ""}${descriptor.step !== undefined ? ` step="${escape(descriptor.step)}"` : ""} /></div>`;
+    return `<div class="field">${label}<input aria-label="${accessibleLabel} 默认值" data-schema-default="${escape(name)}" type="${inputType}" value="${escape(value)}"${descriptor.min !== undefined ? ` min="${escape(descriptor.min)}"` : ""}${descriptor.max !== undefined ? ` max="${escape(descriptor.max)}"` : ""}${descriptor.step !== undefined ? ` step="${escape(descriptor.step)}"` : ""} /></div>`;
   }
   function toolModelParameters(model) {
     const entries = effectiveModelParameters(model).filter(([name, descriptor]) => name !== "negative_prompt" && (!descriptor.ui_only || String(descriptor.type).toLowerCase() === "preset"));
@@ -2614,7 +2630,17 @@
     return entries;
   }
   function toolParameterDescriptor(model, name) { return toolModelParameters(model).find(([key]) => key === name)?.[1] || {}; }
-  function renderToolConfiguration(model) { const tool = model.tool; const configuredLimit = configuredReferenceLimit(model.max_reference_images); const refLimit = model.supports_img2img ? `<div class="field"><label>LLM 最大参考图数量</label><input data-tool-field="max_reference_images" type="number" min="1" max="${configuredLimit}" step="1" value="${configuredReferenceLimit(tool.max_reference_images, configuredLimit)}" /><span class="field-hint">不能超过模型能力上限 ${configuredLimit}</span></div>` : ""; const rows = toolModelParameters(model).map(([name, descriptor]) => { const policy = tool.parameters?.[name] || {}; return `<div class="tool-parameter-row"><strong title="${escape(policy.description || descriptor.description || descriptor.label || name)}">${escape(schemaParameterTitle(name, descriptor))}</strong><span>${policy.exposed === false ? "未暴露" : "已暴露"}</span><button class="quiet-button" data-edit-tool-parameter="${escape(name)}" type="button">编辑</button></div>`; }).join(""); return `<h3>${escape(model.name || model.id)}</h3>${modelToggle("tool_enabled", "允许 LLM 调用此模型", tool.enabled !== false)}${modelTextAreaField("tool_selection_description", "什么时候使用", tool.selection_description || "")}${modelSelectField("tool_prompt_profile", "提示词类型", tool.prompt_profile || "natural_language", ["natural_language", "nai_tags", "custom"])}${modelTextAreaField("tool_prompt_instructions", "提示词编写要求", tool.prompt_instructions || "")}${refLimit}<div class="tool-parameter-list"><span class="field-hint">LLM 可用参数</span>${rows || '<span class="field-hint">当前模型没有可暴露参数。</span>'}</div>`; }
+  function renderToolConfiguration(model) {
+    const tool = model.tool;
+    const configuredLimit = configuredReferenceLimit(model.max_reference_images);
+    const refLimit = model.supports_img2img ? `<div class="field"><label>LLM 最大参考图数量</label><input data-tool-field="max_reference_images" type="number" min="1" max="${configuredLimit}" step="1" value="${configuredReferenceLimit(tool.max_reference_images, configuredLimit)}" /><span class="field-hint">不能超过模型能力上限 ${configuredLimit}</span></div>` : "";
+    const rows = toolModelParameters(model).map(([name, descriptor]) => {
+      const policy = tool.parameters?.[name] || {};
+      const label = schemaParameterLabel(name, { ...descriptor, description: policy.description || descriptor.description }, "strong");
+      return `<div class="tool-parameter-row">${label}<span>${policy.exposed === false ? "未暴露" : "已暴露"}</span><button class="quiet-button" data-edit-tool-parameter="${escape(name)}" type="button">编辑</button></div>`;
+    }).join("");
+    return `<h3>${escape(model.name || model.id)}</h3>${modelToggle("tool_enabled", "允许 LLM 调用此模型", tool.enabled !== false)}${modelTextAreaField("tool_selection_description", "什么时候使用", tool.selection_description || "")}${modelSelectField("tool_prompt_profile", "提示词类型", tool.prompt_profile || "natural_language", ["natural_language", "nai_tags", "custom"])}${modelTextAreaField("tool_prompt_instructions", "提示词编写要求", tool.prompt_instructions || "")}${refLimit}<div class="tool-parameter-list"><span class="field-hint">LLM 可用参数</span>${rows || '<span class="field-hint">当前模型没有可暴露参数。</span>'}</div>`;
+  }
   function bindModelConfiguration(provider, model) {
     els.modelForm.querySelectorAll("[data-model-field]").forEach((input) => { input.addEventListener("input", () => updateModelField(input)); input.addEventListener("change", () => updateModelField(input, true)); });
     els.modelForm.querySelectorAll("[data-schema-default]").forEach((input) => input.addEventListener("change", () => {
@@ -2747,7 +2773,7 @@
     const descriptor = toolParameterDescriptor(model, name); const policy = model.tool.parameters[name] || {};
     const choices = toolDefaultChoices(descriptor); const usesChoice = choices.length > 0;
     state.editingToolParameter = name; state.editingToolDefaultChoices = choices;
-    $("parameterDialogTitle").textContent = `编辑工具参数：${schemaParameterTitle(name, descriptor)}`;
+    $("parameterDialogTitle").innerHTML = `编辑工具参数：${schemaParameterLabel(name, { ...descriptor, description: policy.description || descriptor.description }, "span")}`;
     els.toolParameterExposed.checked = policy.exposed !== false; els.toolParameterDescription.value = policy.description || "";
     els.toolParameterDefault.classList.toggle("is-hidden", usesChoice); els.toolParameterDefaultChoice.classList.toggle("is-hidden", !usesChoice);
     $("toolParameterDefaultLabel").htmlFor = usesChoice ? "toolParameterDefaultChoice" : "toolParameterDefault";
@@ -3093,7 +3119,7 @@
 
   const externalSources = window.ImageStudioExternalSources({ state, apiGet, apiPost, escape, formatBytes, formatDate, showNotice, errorMessage, updateSettingsDirty, invalidateBrowseCache, openModal: (...args) => library.openModal(...args) });
   const library = window.ImageStudioLibrary({ state, escape, apiGet, apiPost, bridge, showNotice, errorMessage, formatDate, formatBytes, sourceLabel, getGallerySort: () => gallerySort, syncPageScrollLock, switchView, requestParameters, loadGallery, clearGallerySelection, openDetail, closeDetail, reproduce, applyDraft, useDataUrlAsReference, useGalleryImageAsReference, ensureDetailMetadata, ensureDetailPreview, getImageMedia, cacheImageMedia, loadImageMedia, checkGalleryAction });
-  const novelaiControls = window.ImageStudioNovelAI({ state, model: selectedModel, escape, schemaParameterTitle, rerenderReferences: renderReferences, uploadFile: async file => (await bridge()).upload("studio/reference/upload", file), openModal: (...args) => library.openModal(...args), showNotice });
+  const novelaiControls = window.ImageStudioNovelAI({ state, model: selectedModel, escape, schemaParameterTitle, schemaParameterLabel, rerenderReferences: renderReferences, uploadFile: async file => (await bridge()).upload("studio/reference/upload", file), openModal: (...args) => library.openModal(...args), showNotice });
 
   async function start() {
     try {

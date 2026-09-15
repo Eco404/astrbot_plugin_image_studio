@@ -47,6 +47,8 @@ REQUIRED_ARCHIVE_FILES = RUNTIME_FILES + (
     "pages/image-studio/app.css",
     "pages/image-studio/novelai-controls.js",
     "pages/image-studio/novelai-controls.css",
+    "pages/image-studio/tooltip.js",
+    "pages/image-studio/tooltip.css",
     "pages/image-studio/appearance.js",
     "pages/image-studio/appearance.css",
     "pages/image-studio/controls.css",

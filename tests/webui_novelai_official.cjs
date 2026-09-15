@@ -161,7 +161,7 @@ async function matrix(browser, width) {
     await choose(frame, "#modelChoice", `${officialId}:${modelIds[2]}`);
     await frame.locator("#providerQuota").filter({ hasText: "Anlas 1,234 · V5 0%" }).waitFor();
     assert.equal(await frame.locator("#providerQuota").evaluate(element => element.classList.contains("is-warning")), false, "0% is not exhaustion");
-    assert.match(await frame.locator("#providerQuota").getAttribute("title"), /0%（可用）/);
+    assert.match(await frame.locator("#providerQuota").getAttribute("data-tooltip"), /0%（可用）/);
     assert.equal(await frame.locator('[data-model-parameter="strength"]').count(), 0);
     assert.equal(await frame.locator('[data-model-parameter="noise"]').count(), 0);
     await frame.locator("#prompt").fill("mountain landscape, daylight");
@@ -184,8 +184,8 @@ async function matrix(browser, width) {
     await choose(frame, "#modelChoice", `${officialId}:${modelIds[0]}`);
     await refreshQuota({ subscription_active: false, tier: 0, remaining: 0, subscription_anlas: 0, purchased_anlas: 0, usage: null }, "Anlas 0 · 未订阅");
     assert.equal(await frame.locator("#providerQuota").textContent(), "Anlas 0 · 未订阅");
-    assert.doesNotMatch(await frame.locator("#providerQuota").getAttribute("title"), /V5/);
-    assert.match(await frame.locator("#providerQuota").getAttribute("title"), /Anlas 余额不代表免费试用剩余次数/);
+    assert.doesNotMatch(await frame.locator("#providerQuota").getAttribute("data-tooltip"), /V5/);
+    assert.match(await frame.locator("#providerQuota").getAttribute("data-tooltip"), /Anlas 余额不代表免费试用剩余次数/);
     assert.equal(await frame.locator("#providerQuota").evaluate(element => element.classList.contains("is-warning")), false, "no subscription is informative, not a disabled provider");
     assert.equal(await frame.locator("#generateButton").isEnabled(), true);
     await frame.evaluate(() => { window.__dismissImageStudioNotice(); window.scrollTo({ top: 0, behavior: "instant" }); });
@@ -201,7 +201,7 @@ async function matrix(browser, width) {
     await choose(frame, "#modelChoice", `${officialId}:${modelIds[2]}`);
     await refreshQuota({ subscription_active: true, tier: 3 }, "Anlas 0 · V5 未知");
     assert.doesNotMatch(await frame.locator("#providerQuota").textContent(), /未订阅/);
-    assert.match(await frame.locator("#providerQuota").getAttribute("title"), /订阅：有效/);
+    assert.match(await frame.locator("#providerQuota").getAttribute("data-tooltip"), /订阅：有效/);
     await refreshQuota({ tier: null, remaining: null, subscription_anlas: null, purchased_anlas: null, usage: null }, "Anlas 未知 · V5 未知");
     assert.equal(await frame.locator("#generateButton").isEnabled(), true);
     await refreshQuota({ remaining: 0, usage: { percent: 0, is_negative: false, time_until_next_percent: null } }, "Anlas 0 · V5 0%");
@@ -212,7 +212,7 @@ async function matrix(browser, width) {
     await choose(frame, "#modelChoice", `${officialId}:${modelIds[0]}`);
     assert.equal(await frame.locator("#providerQuota").textContent(), "Anlas 0");
     assert.equal(await frame.locator("#providerQuota").evaluate(element => element.classList.contains("is-warning")), false, "V5 exhaustion does not apply to V4.5");
-    assert.doesNotMatch(await frame.locator("#providerQuota").getAttribute("title"), /V5|下一个百分比/);
+    assert.doesNotMatch(await frame.locator("#providerQuota").getAttribute("data-tooltip"), /V5|下一个百分比/);
     await choose(frame, "#modelChoice", `${officialId}:${modelIds[2]}`);
     assert.equal(await frame.locator("#providerQuota").evaluate(element => element.classList.contains("is-warning")), true);
     await refreshQuota({ remaining: -1 }, "额度暂不可用");
