@@ -1815,7 +1815,18 @@ class GenerationStore:
         preview_quality: int,
         batch_failures: tuple[tuple[int, str], ...] = (),
     ) -> str:
-        generation_id = uuid.uuid4().hex
+        job_id = request.local_parameters.get("_comfy_job_id", "")
+        generation_id = (
+            job_id
+            if provider.kind == "comfyui" and _SAFE_ID_RE.fullmatch(job_id)
+            else uuid.uuid4().hex
+        )
+        if job_id:
+            with self._connect() as conn:
+                if conn.execute(
+                    "SELECT 1 FROM generations WHERE id = ?", (generation_id,)
+                ).fetchone():
+                    return generation_id
         created_at = time.time()
         assets: dict[str, dict[str, Any]] = {}
         thumbnails: dict[str, dict[str, Any]] = {}
@@ -1934,6 +1945,12 @@ class GenerationStore:
                     {
                         "effective_request": resolved,
                         "response_index": image.response_index,
+                        **(
+                            {"comfyui": image.effective_parameters["_comfyui"]}
+                            if provider.kind == "comfyui"
+                            and "_comfyui" in image.effective_parameters
+                            else {}
+                        ),
                     },
                     ensure_ascii=False,
                     separators=(",", ":"),

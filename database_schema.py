@@ -1,4 +1,4 @@
-"""The published gallery schema and transaction boundary for release upgrades."""
+"""Published gallery baselines and the current development migration boundary."""
 
 from __future__ import annotations
 
@@ -11,7 +11,9 @@ from pathlib import Path
 from typing import Any
 
 RELEASE_VERSION = 2
-DATABASE_VERSION = "2"
+DEVELOPMENT_TARGET = 3
+DEVELOPMENT_REVISION = 1
+DATABASE_VERSION = "3-dev.1"
 
 # Published v1 is immutable; future releases retain this upgrade starting point.
 V1_SCHEMA_STATEMENTS = (
@@ -159,8 +161,41 @@ V2_MIGRATION_STATEMENTS = (
     )""",
     "CREATE INDEX idx_external_records_asset ON external_records(asset_id)",
 )
-SCHEMA_STATEMENTS = (*V1_SCHEMA_STATEMENTS, *V2_MIGRATION_STATEMENTS)
-_TABLES = (*_V1_TABLES, "external_sources", "external_records")
+V2_SCHEMA_STATEMENTS = (*V1_SCHEMA_STATEMENTS, *V2_MIGRATION_STATEMENTS)
+_V2_TABLES = (*_V1_TABLES, "external_sources", "external_records")
+# Development changes for the next published baseline are consolidated here.
+# Never append transient development ALTER chains to published v1/v2 migrations.
+V3_DEVELOPMENT_STATEMENTS = (
+    """CREATE TABLE comfy_workflow_revisions (
+        id TEXT PRIMARY KEY,
+        fingerprint TEXT NOT NULL UNIQUE,
+        config_json TEXT NOT NULL,
+        created_at REAL NOT NULL
+    )""",
+    """CREATE TABLE comfy_jobs (
+        id TEXT PRIMARY KEY,
+        remote_id TEXT NOT NULL DEFAULT '',
+        provider_id TEXT NOT NULL,
+        model_id TEXT NOT NULL,
+        revision_id TEXT NOT NULL REFERENCES comfy_workflow_revisions(id),
+        status TEXT NOT NULL,
+        request_json TEXT NOT NULL,
+        input_refs_json TEXT NOT NULL DEFAULT '[]',
+        output_refs_json TEXT NOT NULL DEFAULT '[]',
+        result_json TEXT NOT NULL DEFAULT '{}',
+        error TEXT NOT NULL DEFAULT '',
+        generation_id TEXT NOT NULL DEFAULT '',
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        finished_at REAL
+    )""",
+    "CREATE INDEX idx_comfy_jobs_status ON comfy_jobs(status, created_at)",
+    "CREATE INDEX idx_comfy_jobs_provider ON comfy_jobs(provider_id, created_at)",
+    "CREATE UNIQUE INDEX idx_comfy_jobs_remote ON comfy_jobs(provider_id, remote_id) WHERE remote_id != ''",
+)
+SCHEMA_STATEMENTS = (*V2_SCHEMA_STATEMENTS, *V3_DEVELOPMENT_STATEMENTS)
+_COMFY_TABLES = ("comfy_workflow_revisions", "comfy_jobs")
+_TABLES = (*_V2_TABLES, *_COMFY_TABLES)
 _DEVELOPMENT_META_STATEMENT = """CREATE TABLE schema_meta (
     id INTEGER PRIMARY KEY CHECK(id = 1),
     target_version INTEGER NOT NULL,
@@ -205,8 +240,8 @@ def _table_shape(conn: sqlite3.Connection, table: str) -> tuple[Any, ...]:
 @lru_cache(maxsize=2)
 def _release_shapes(version: int = RELEASE_VERSION) -> dict[str, tuple[Any, ...]]:
     with closing(sqlite3.connect(":memory:")) as conn:
-        statements = V1_SCHEMA_STATEMENTS if version == 1 else SCHEMA_STATEMENTS
-        tables = _V1_TABLES if version == 1 else _TABLES
+        statements = V1_SCHEMA_STATEMENTS if version == 1 else V2_SCHEMA_STATEMENTS
+        tables = _V1_TABLES if version == 1 else _V2_TABLES
         for statement in statements:
             conn.execute(statement)
         return {table: _table_shape(conn, table) for table in tables}
@@ -223,6 +258,29 @@ def _validate_release_layout(
         for table in ("external_sources", "external_records")
     ):
         raise RuntimeError("图库数据库存在未登记的外部图库结构；未执行升级")
+
+
+@lru_cache(maxsize=1)
+def _development_shapes() -> dict[str, tuple[Any, ...]]:
+    with closing(sqlite3.connect(":memory:")) as conn:
+        for statement in SCHEMA_STATEMENTS:
+            conn.execute(statement)
+        return {table: _table_shape(conn, table) for table in _COMFY_TABLES}
+
+
+def _validate_development_layout(conn: sqlite3.Connection) -> None:
+    _validate_release_layout(conn)
+    for table, expected in _development_shapes().items():
+        if _table_shape(conn, table) != expected:
+            raise RuntimeError(f"图库数据库结构与开发基线不符：{table}；未执行升级")
+
+
+def _reject_unregistered_comfy_tables(conn: sqlite3.Connection) -> None:
+    if any(
+        conn.execute("SELECT 1 FROM sqlite_master WHERE name=?", (table,)).fetchone()
+        for table in _COMFY_TABLES
+    ):
+        raise RuntimeError("图库数据库存在未登记的 ComfyUI 结构；未执行升级")
 
 
 @lru_cache(maxsize=1)
@@ -257,6 +315,14 @@ def _database_kind(conn: sqlite3.Connection) -> str:
     ).fetchone()
     if has_marker:
         marker = _development_marker(conn)
+        if release == RELEASE_VERSION and marker == (
+            1,
+            DEVELOPMENT_TARGET,
+            DEVELOPMENT_REVISION,
+        ):
+            _validate_development_layout(conn)
+            return "development"
+        _reject_unregistered_comfy_tables(conn)
         if release == 0 and marker == (1, 1, 3):
             _validate_release_layout(conn, 1)
             return "promotion_v1"
@@ -268,6 +334,7 @@ def _database_kind(conn: sqlite3.Connection) -> str:
             "2-dev 系列请先升级到 1.1.0-dev.2 的最终数据库 2-dev.2 后再转换"
         )
     if release in {1, RELEASE_VERSION}:
+        _reject_unregistered_comfy_tables(conn)
         _validate_release_layout(conn, release)
         return "release" if release == RELEASE_VERSION else "upgrade_v1"
     if not conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone():
@@ -279,7 +346,7 @@ def _backup_database(conn: sqlite3.Connection, backup_dir: Path) -> Path:
     backup_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     with tempfile.NamedTemporaryFile(
-        prefix=f"history-pre-v{RELEASE_VERSION}-{timestamp}-",
+        prefix=f"history-pre-v{DATABASE_VERSION}-{timestamp}-",
         suffix=".sqlite3",
         dir=backup_dir,
         delete=False,
@@ -298,6 +365,15 @@ def _backup_database(conn: sqlite3.Connection, backup_dir: Path) -> Path:
 
 def _stamp_release(conn: sqlite3.Connection) -> None:
     conn.execute(f"PRAGMA user_version = {RELEASE_VERSION}")
+
+
+def _stamp_development(conn: sqlite3.Connection) -> None:
+    _stamp_release(conn)
+    conn.execute(_DEVELOPMENT_META_STATEMENT)
+    conn.execute(
+        "INSERT INTO schema_meta VALUES (1, ?, ?)",
+        (DEVELOPMENT_TARGET, DEVELOPMENT_REVISION),
+    )
 
 
 def _change_token(conn: sqlite3.Connection) -> tuple[int, int, int]:
@@ -320,17 +396,17 @@ def _create_search_index(conn: sqlite3.Connection) -> None:
 
 
 def ensure_release_schema(conn: sqlite3.Connection, *, backup_dir: Path) -> Path | None:
-    """Create v2, upgrade published v1 once, or promote a supported final dev layout.
+    """Create/upgrade to 3-dev.1 while retaining published user_version = 2.
 
     Backups precede every existing-database upgrade. Version/structure and commit
     tokens are checked again under the write lock, keeping backup and migration
-    tied to the same state. Published v2 startup only validates the schema.
+    tied to the same state. Current development startup only validates the schema.
     """
     if conn.in_transaction:
         raise RuntimeError("图库数据库升级必须在独立事务中执行")
     initial_token = _change_token(conn)
     kind = _database_kind(conn)
-    if kind == "release":
+    if kind == "development":
         return None
     backup = _backup_database(conn, backup_dir) if kind != "empty" else None
     try:
@@ -347,8 +423,10 @@ def ensure_release_schema(conn: sqlite3.Connection, *, backup_dir: Path) -> Path
             if kind in {"promotion_v1", "upgrade_v1"}:
                 for statement in V2_MIGRATION_STATEMENTS:
                     conn.execute(statement)
-        _validate_release_layout(conn)
-        _stamp_release(conn)
+            for statement in V3_DEVELOPMENT_STATEMENTS:
+                conn.execute(statement)
+        _validate_development_layout(conn)
+        _stamp_development(conn)
         conn.commit()
     except Exception:
         conn.rollback()

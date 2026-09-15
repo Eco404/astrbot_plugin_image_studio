@@ -276,12 +276,9 @@ def test_database_release_version_is_explicit_and_future_versions_are_rejected(
         ] == DATABASE_VERSION
         with sqlite3.connect(store.db_path) as conn:
             assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
-            assert (
-                conn.execute(
-                    "SELECT 1 FROM sqlite_master WHERE name='schema_meta'"
-                ).fetchone()
-                is None
-            )
+            assert conn.execute(
+                "SELECT target_version,dev_revision FROM schema_meta"
+            ).fetchone() == (3, 1)
             conn.execute("PRAGMA user_version = 3")
         with pytest.raises(RuntimeError, match="正式版本"):
             await GenerationStore(tmp_path).initialize()

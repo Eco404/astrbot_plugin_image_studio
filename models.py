@@ -18,6 +18,19 @@ from .novelai_catalog import (
 GenerationMode = Literal["text2img", "img2img"]
 
 
+def browser_safe_integers(value: Any) -> Any:
+    """Keep uint64 seeds lossless when JSON passes through a browser."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and abs(value) > 2**53 - 1:
+        return str(value)
+    if isinstance(value, dict):
+        return {key: browser_safe_integers(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [browser_safe_integers(item) for item in value]
+    return value
+
+
 COMMON_MODEL_PARAMETERS: dict[str, dict[str, Any]] = {
     "size": {
         "type": "text",
@@ -218,6 +231,12 @@ def _model_parameters(
 
 
 PROVIDER_TRANSPORT_DEFAULTS: dict[str, dict[str, str]] = {
+    "comfyui": {
+        "base_url": "http://127.0.0.1:8188",
+        "generate_path": "/prompt",
+        "edit_path": "/prompt",
+        "edit_request_format": "json_data_url",
+    },
     "openai_images": {
         "base_url": "https://api.openai.com/v1",
         "generate_path": "/images/generations",
@@ -269,6 +288,25 @@ class ImageModel:
     max_concurrent_requests: int = 8
     native_batch_size_source: str = "default"
     novelai_capabilities: dict[str, Any] = field(default_factory=dict)
+    comfyui: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def comfyui_capabilities(self) -> dict[str, Any]:
+        bindings = self.comfyui.get("bindings", {})
+        sources = {item.get("source", "parameter") for item in bindings.values()}
+        references = [
+            int(item.get("reference_index", 0))
+            for item in bindings.values()
+            if item.get("source") == "reference"
+        ]
+        return {
+            "prompt_required": "prompt" in sources,
+            "count_bound": "count" in sources,
+            "supports_text2img": self.text2img,
+            "supports_img2img": self.img2img,
+            "supports_negative_prompt": self.negative_prompt,
+            "max_reference_images": max(references, default=-1) + 1,
+        }
 
     @property
     def active_parameters(self) -> dict[str, dict[str, Any]]:
@@ -297,12 +335,22 @@ class ImageModel:
             "supports_negative_prompt": self.negative_prompt,
             "negative_prompt_default": self.negative_prompt_default,
             "max_reference_images": self.max_reference_images,
-            "parameters": self.parameters,
-            "tool": self.tool,
+            "parameters": browser_safe_integers(self.parameters)
+            if self.comfyui
+            else self.parameters,
+            "tool": browser_safe_integers(self.tool) if self.comfyui else self.tool,
             "capability_source": self.capability_source,
             "native_batch_size": self.native_batch_size,
             "max_concurrent_requests": self.max_concurrent_requests,
             "native_batch_size_source": self.native_batch_size_source,
+            **(
+                {
+                    "comfyui": browser_safe_integers(self.comfyui),
+                    "comfyui_capabilities": self.comfyui_capabilities,
+                }
+                if self.comfyui
+                else {}
+            ),
             **(
                 {"novelai_capabilities": self.novelai_capabilities}
                 if self.novelai_capabilities
@@ -527,7 +575,13 @@ class ImageProvider:
             api_key=str(value.get("api_key") or ""),
             custom_headers=str(value.get("custom_headers") or ""),
             timeout_seconds=max(
-                15, min(600, _as_int(value.get("timeout_seconds"), 180))
+                15,
+                min(
+                    7200 if kind == "comfyui" else 600,
+                    _as_int(
+                        value.get("timeout_seconds"), 1800 if kind == "comfyui" else 180
+                    ),
+                ),
             ),
             capabilities=ProviderCapabilities(
                 text2img=any(item.text2img for item in models),
@@ -906,6 +960,11 @@ def _model_from_mapping(
     """Create a model descriptor from a provider-owned model mapping."""
 
     model_id = _text(value.get("id"), 160)
+    comfy = {}
+    if kind == "comfyui" and value.get("comfyui"):
+        from .comfyui import normalize_workflow
+
+        comfy = normalize_workflow(value["comfyui"])
     native_size, native_source = _native_batch_fields(value, kind, discovered)
     img2img = kind != "nai_direct" and _as_bool(
         value.get("supports_img2img"), kind == "novelai_official"
@@ -924,15 +983,32 @@ def _model_from_mapping(
             kind in {"nai_direct", "novelai_official"},
         )
     )
+    if kind == "comfyui":
+        bindings = comfy.get("bindings", {})
+        references = [
+            int(item.get("reference_index", 0))
+            for item in bindings.values()
+            if item.get("source") == "reference"
+        ]
+        img2img = bool(references)
+        max_reference_images = max(references, default=0) + 1
+        supports_negative_prompt = any(
+            item.get("source") == "negative_prompt" for item in bindings.values()
+        )
+        if not any(item.get("source") == "count" for item in bindings.values()):
+            native_size = 1
     return ImageModel(
         id=model_id,
         name=_text(value.get("name"), 160) or model_id,
-        text2img=_as_bool(value.get("supports_text2img"), True),
+        text2img=not img2img
+        if kind == "comfyui"
+        else _as_bool(value.get("supports_text2img"), True),
         img2img=img2img,
         negative_prompt=supports_negative_prompt,
         max_reference_images=max_reference_images,
         negative_prompt_default=_model_negative_default(value, kind),
         parameters=_model_parameters(value.get("parameters"), kind, model_id),
+        comfyui=comfy,
         tool=_normalize_tool(
             value.get("tool"),
             img2img,

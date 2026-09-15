@@ -104,7 +104,7 @@ async def populated_store(directory):
     return store
 
 
-def test_new_release_creates_complete_schema_once_without_development_metadata(
+def test_new_development_creates_complete_schema_once_with_development_metadata(
     tmp_path,
 ):
     with closing(sqlite3.connect(tmp_path / "history.sqlite3")) as conn:
@@ -112,14 +112,9 @@ def test_new_release_creates_complete_schema_once_without_development_metadata(
             schema.ensure_release_schema(conn, backup_dir=tmp_path / "backups") is None
         )
         assert schema.RELEASE_VERSION == 2
-        assert schema.DATABASE_VERSION == "2"
+        assert schema.DATABASE_VERSION == "3-dev.1"
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
-        assert (
-            conn.execute(
-                "SELECT name FROM sqlite_master WHERE name='schema_meta'"
-            ).fetchone()
-            is None
-        )
+        assert conn.execute("SELECT * FROM schema_meta").fetchall() == [(1, 3, 1)]
         assert "supplemental_json" in {
             row[1] for row in conn.execute("PRAGMA table_info(generation_images)")
         }
@@ -202,7 +197,13 @@ def test_v1_upgrade_preserves_all_business_rows_files_and_restore_backup(
             if path.is_file()
         }
         with store._connect() as conn:
-            for table in ("external_records", "external_sources"):
+            for table in (
+                "comfy_jobs",
+                "comfy_workflow_revisions",
+                "schema_meta",
+                "external_records",
+                "external_sources",
+            ):
                 conn.execute(f"DROP TABLE {table}")
             if promotion:
                 mark_development(conn)
@@ -215,15 +216,14 @@ def test_v1_upgrade_preserves_all_business_rows_files_and_restore_backup(
         await promoted.initialize()
         with promoted._connect() as conn:
             assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
-            assert (
-                conn.execute(
-                    "SELECT 1 FROM sqlite_master WHERE name='schema_meta'"
-                ).fetchone()
-                is None
+            assert tuple(conn.execute("SELECT * FROM schema_meta").fetchone()) == (
+                1,
+                3,
+                1,
             )
             assert business_rows(conn) == before
             assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
-        backups = list((tmp_path / "backups").glob("history-pre-v2-*.sqlite3"))
+        backups = list((tmp_path / "backups").glob("history-pre-v3-dev.1-*.sqlite3"))
         assert len(backups) == 1
         with closing(sqlite3.connect(backups[0])) as backup:
             assert snapshot(backup) == old_snapshot

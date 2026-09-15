@@ -460,7 +460,14 @@ def export_parameters(
             "generation_engine": detail.get("generation_engine", "unknown"),
             "data": request,
             "metadata": metadata if metadata_record else {},
-            "supplemental": detail.get("supplemental", {}),
+            "supplemental": {
+                **detail.get("supplemental", {}),
+                **(
+                    {"comfyui": image["supplemental"]["comfyui"]}
+                    if image.get("supplemental", {}).get("comfyui")
+                    else {}
+                ),
+            },
             "has_request_snapshot": not metadata_record,
         }
     elif format_name == "nai":
@@ -501,8 +508,11 @@ def export_parameters(
         if not content or metadata.get("format") != "novelai":
             raise ValueError("当前图片没有 NovelAI 原始元数据")
     elif format_name in {"workflow", "comfy_api"}:
-        content = raw.get("workflow" if format_name == "workflow" else "prompt")
-        if metadata.get("format") != "comfyui" or not content:
+        snapshot = image.get("supplemental", {}).get("comfyui") or {}
+        content = snapshot.get(
+            "workflow" if format_name == "workflow" else "api_graph"
+        ) or raw.get("workflow" if format_name == "workflow" else "prompt")
+        if not content:
             raise ValueError("图片中没有该格式的 ComfyUI 工作流")
     elif format_name == "a1111":
         if metadata.get("format") != "a1111":
@@ -675,6 +685,23 @@ def resolve_parameters(
     if reference_mode in {"precise", "vibe", "inpaint"}:
         explicit_mode = "img2img"
     mode = explicit_mode or "text2img"
+    comfy_snapshot = (
+        envelope.get("supplemental", {}).get("comfyui")
+        if isinstance(envelope, dict)
+        else None
+    )
+    if source_format == "comfyui" and comfy_snapshot:
+        from .comfyui_workflows import normalize_workflow
+
+        comfy_snapshot = normalize_workflow(comfy_snapshot)
+        mode = (
+            "img2img"
+            if any(
+                item["source"] == "reference"
+                for item in comfy_snapshot["bindings"].values()
+            )
+            else "text2img"
+        )
     requested_model = str(source.get("model") or normalized.get("model") or "")
     requested_ref = str(source.get("model_ref") or "")
     if not requested_ref and source.get("provider_id") and requested_model:
@@ -1139,13 +1166,18 @@ def resolve_parameters(
             is_official and key == "characters" and "characters" in supplied
         ):
             unmapped.setdefault(key, normalized[key])
-    if source_format in {"comfyui", "a1111"}:
+    if (
+        source_format in {"comfyui", "a1111"}
+        and selected.get("provider_kind") != "comfyui"
+    ):
         warnings.append(
             "当前插件不执行 ComfyUI 或 Stable Diffusion 工作流；这里只填写目标模型可接受的字段。"
         )
     if is_nai and source_format not in {"nai", "novelai", "image_studio"}:
         warnings.append("目标为 NAI 标签模型，请核对提示词语法和参数含义。")
     draft["parameters"] = values
+    if comfy_snapshot and selected.get("provider_kind") == "comfyui":
+        draft["comfyui"] = comfy_snapshot
     for name, value in values.items():
         key = descriptors.get(name, {}).get("request_key", name)
         if key in {"size", "count", "n"}:

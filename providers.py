@@ -47,7 +47,7 @@ class ProviderPartialResponseError(ProviderError):
         self.failures = failures
         details = "；".join(f"第 {index} 项：{reason}" for index, reason in failures)
         super().__init__(
-            f"NovelAI 响应中有 {len(failures)} 项无效，已保留 {len(images)} 张图片。"
+            f"生图响应中有 {len(failures)} 项无效，已保留 {len(images)} 张图片。"
             f"{details}。请求可能已消耗额度，请勿自动重试。"
         )
 
@@ -225,6 +225,17 @@ class ProviderExecutor:
             return await self._novelai_official(provider, request)
         if provider.kind == "custom_json":
             return await self._custom_json(provider, request)
+        if provider.kind == "comfyui":
+            from .comfyui import ComfyClient, ComfyExecutionError
+
+            try:
+                return await ComfyClient(self.session).execute(provider, request)
+            except ComfyExecutionError as exc:
+                if exc.images:
+                    raise ProviderPartialResponseError(
+                        exc.images, exc.failures or ((1, str(exc)),)
+                    ) from exc
+                raise ProviderError(str(exc)) from exc
         raise ProviderError(f"不支持的 Provider 类型: {provider.kind}")
 
     async def _novelai_official(

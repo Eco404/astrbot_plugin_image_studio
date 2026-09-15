@@ -189,7 +189,12 @@
   function configuredReferenceLimit(value, maximum = 8) { const number = Number(value); return Math.max(1, Math.min(maximum, Number.isFinite(number) ? Math.trunc(number) : 1)); }
   function referenceLimitForModel(model) { return model?.supports_img2img ? configuredReferenceLimit(model.max_reference_images) : 0; }
   function modelsForMode() { return state.models.filter((item) => state.mode === "text2img" ? item.supports_text2img : referenceLimitForModel(item) > 0); }
-  function selectedModel() { return state.models.find((item) => item.model_ref === state.selectedModelRef) || null; }
+  function selectedModel() {
+    const model = state.models.find(item => item.model_ref === state.selectedModelRef) || null;
+    const snapshot = state.comfyuiModelOverride;
+    if (model && snapshot?.model_ref === model.model_ref) return { ...model, ...snapshot.model, model_ref: model.model_ref, provider_id: model.provider_id, provider_name: model.provider_name, provider_kind: model.provider_kind };
+    return model;
+  }
   function selectedProvider() { const model = selectedModel(); return state.providers.find((item) => item.id === (model?.provider_id || state.selectedProviderId)) || null; }
   function text(value) { return value === null || value === undefined ? "" : String(value); }
   function escape(value) { const div = document.createElement("div"); div.textContent = text(value); return div.innerHTML.replaceAll('"', "&quot;").replaceAll("'", "&#39;"); }
@@ -343,8 +348,9 @@
       const key = input.dataset.modelParameter;
       if (input.dataset.nullValue === "true") values[key] = null;
       else if (input.type === "checkbox") values[key] = input.checked;
-      else if (input.dataset.parameterType === "number") values[key] = input.value === "" ? "" : Number(input.value);
+      else if (input.dataset.parameterType === "number") values[key] = input.value === "" ? "" : comfyuiControls.active(selectedModel()) ? comfyuiControls.numericValue(input.value) : Number(input.value);
       else if (input.dataset.parameterType === "json") { try { values[key] = input.value.trim() ? JSON.parse(input.value) : {}; } catch { values[key] = input.value; } }
+      else if (input.dataset.parameterType === "select" && comfyuiControls.active(selectedModel())) { const choices = selectedModel()?.parameters?.[key]?.choices || []; const matched = choices.find(choice => String(typeof choice === "object" ? choice.value : choice) === input.value); values[key] = matched === undefined ? input.value : typeof matched === "object" ? matched.value : matched; }
       else values[key] = input.value;
     });
     return values;
@@ -433,7 +439,10 @@
       return;
     }
     els.modelProvider.textContent = model.provider_name || "";
-    els.modelParameters.innerHTML = effectiveModelParameters(model).filter(([, descriptor]) => descriptor.webui_visible !== false && parameterAppliesToMode(descriptor)).map(([name, descriptor]) => renderModelParameter(name, descriptor)).join("") || '<div class="workspace-placeholder">该模型没有额外参数。</div>';
+    els.prompt.closest(".field").classList.toggle("is-hidden", !comfyuiControls.promptRequired(model));
+    els.prompt.setAttribute("aria-required", String(comfyuiControls.promptRequired(model)));
+    document.querySelector('.model-select-row > label').textContent = comfyuiControls.active(model) ? "工作流" : "模型";
+    els.modelParameters.innerHTML = effectiveModelParameters(model).filter(([name, descriptor]) => descriptor.webui_visible !== false && parameterAppliesToMode(descriptor) && (comfyuiControls.countBound(model) || !modelParameterMatches(name, descriptor, ["count", "n"]))).map(([name, descriptor]) => renderModelParameter(name, descriptor)).join("") || '<div class="workspace-placeholder">该模型没有额外参数。</div>';
     els.modelParameters.querySelectorAll("[data-model-parameter]").forEach((input) => {
       if (!Object.prototype.hasOwnProperty.call(state.parameterValues, input.dataset.modelParameter)) input.dataset.unsetValue = "true";
       const update = () => {
@@ -503,6 +512,8 @@
   }
 
   function applyGenerationSelection(mode, modelRef) {
+    state.comfyuiSnapshot = null;
+    state.comfyuiModelOverride = null;
     const previousModel = selectedModel(); if (previousModel?.supports_negative_prompt) { state.negativePromptCarry = els.negativePrompt.value; state.hasNegativePromptCarry = true; }
     const carried = carriedParameterValues(); state.parameterCarry = carried; state.mode = mode; state.selectedModelRef = modelRef || "";
     state.parameterValues = parameterValuesForModel(selectedModel(), carried);
@@ -525,6 +536,7 @@
 
   async function bootstrap() {
     const payload = await apiGet("studio/bootstrap");
+    state.comfyuiSnapshot = null; state.comfyuiModelOverride = null;
     if (Array.isArray(payload.novelai_models)) novelaiModels = payload.novelai_models;
     providerQuotas.clear();
     state.providers = Array.isArray(payload.providers) ? payload.providers : [];
@@ -564,7 +576,7 @@
 
   async function generate(event) {
     event.preventDefault(); setError(els.generationError, "");
-    if (!els.prompt.value.trim()) { setError(els.generationError, "请填写提示词。"); return; }
+    if (comfyuiControls.promptRequired(selectedModel()) && !els.prompt.value.trim()) { setError(els.generationError, "请填写提示词。"); return; }
     if (referencesUploading) { setError(els.generationError, "请等待参考图上传完成。"); return; }
     let parameters = {};
     if (els.parameters.value.trim()) {
@@ -592,20 +604,34 @@
     for (const [name, descriptor] of Object.entries(schema)) if (modelParameterMatches(name, descriptor, MODEL_SCHEDULING_FIELDS)) { delete parameters[name]; delete parameters[descriptor.request_key]; }
     els.generateButton.disabled = true; els.generateButton.textContent = "生成中";
     try {
-      const result = await apiPost("studio/generate", { mode: state.mode, provider_id: provider.id, model_ref: model.model_ref, prompt: els.prompt.value, negative_prompt: els.negativePrompt.value, model: model.id, size, count: Number(count), parameters: { ...parameters, ...mappedParameters }, reference_ids: state.references.map((item) => item.id) });
+      const request = { mode: state.mode, provider_id: provider.id, model_ref: model.model_ref, prompt: els.prompt.value, negative_prompt: els.negativePrompt.value, model: model.id, size, count: Number(count), parameters: { ...parameters, ...mappedParameters }, reference_ids: state.references.map((item) => item.id), ...(provider.kind === "comfyui" && state.comfyuiSnapshot ? { comfyui: state.comfyuiSnapshot } : {}) };
+      if (provider.kind === "comfyui") { await comfyuiControls.submit(request); showNotice("工作流任务已提交，可在结果区查看进度。", "success"); return; }
+      const result = await apiPost("studio/generate", request);
       state.resultImages = result.images || []; state.references = [];
       for (const [name, descriptor] of effectiveModelParameters(model)) if ((descriptor.request_key || name) === "reference_settings") state.parameterValues[name] = [];
       renderReferences();
-      els.resultEmpty.classList.toggle("is-hidden", state.resultImages.length > 0); els.resultGrid.innerHTML = state.resultImages.map((image, index) => `<div class="result-card"><div class="result-frame"><img class="result-image-backdrop" src="${image.data_url}" alt="" aria-hidden="true" /><img class="result-image" src="${image.data_url}" alt="生成结果" data-result-preview="${index}" /></div><div class="result-card-actions"><button class="quiet-button" data-result-reference="${index}" type="button">用作参考图</button></div></div>`).join("");
-      els.resultGrid.querySelectorAll("[data-result-reference]").forEach((button) => button.addEventListener("click", () => void useDataUrlAsReference(state.resultImages[Number(button.dataset.resultReference)].data_url, "generated-reference.png")));
-      els.resultGrid.querySelectorAll("[data-result-preview]").forEach((image) => image.addEventListener("click", () => { const index = Number(image.dataset.resultPreview); openImagePreview(image.src, `生成结果-${index + 1}`, state.resultImages[index]?.download_filename, state.resultImages, index); }));
-      els.resultMeta.textContent = `${result.provider_name} · ${result.model} · ${(result.elapsed_ms / 1000).toFixed(1)} 秒${result.generation_id ? " · 已保存到画廊" : " · 历史未保留"}`;
-      if (result.warning) { setError(els.generationError, result.warning); showNotice(result.warning); }
+      renderGenerationResult(result);
     } catch (error) { setError(els.generationError, errorMessage(error, "生成失败")); }
     finally {
       els.generateButton.disabled = false; els.generateButton.textContent = "生成图片";
       if (["nai_direct", "novelai_official"].includes(provider.kind)) { providerQuotas.delete(provider.id); refreshProviderQuota(); }
     }
+  }
+
+  function renderGenerationResult(result) {
+    state.resultImages = result.images || [];
+    els.resultEmpty.classList.toggle("is-hidden", state.resultImages.length > 0);
+    els.resultGrid.innerHTML = state.resultImages.map((image, index) => `<div class="result-card"><div class="result-frame"><img class="result-image-backdrop" src="${escape(image.data_url)}" alt="" aria-hidden="true" /><img class="result-image" src="${escape(image.data_url)}" alt="生成结果" data-result-preview="${index}" /></div><div class="result-card-actions"><button class="quiet-button" data-result-reference="${index}" type="button">用作参考图</button></div></div>`).join("");
+    els.resultGrid.querySelectorAll("[data-result-reference]").forEach(button => button.addEventListener("click", () => void useDataUrlAsReference(state.resultImages[Number(button.dataset.resultReference)].data_url, "generated-reference.png")));
+    els.resultGrid.querySelectorAll("[data-result-preview]").forEach(image => image.addEventListener("click", () => { const index = Number(image.dataset.resultPreview); openImagePreview(image.src, `生成结果-${index + 1}`, state.resultImages[index]?.download_filename, state.resultImages, index); }));
+    els.resultMeta.textContent = `${result.provider_name || "ComfyUI"} · ${result.model || "工作流"} · ${(Number(result.elapsed_ms || 0) / 1000).toFixed(1)} 秒${result.generation_id ? " · 已保存到画廊" : " · 历史未保留"}`;
+    if (result.warning) { setError(els.generationError, result.warning); showNotice(result.warning); }
+  }
+
+  function viewComfyResult(result) {
+    renderGenerationResult(result);
+    const first = state.resultImages[0];
+    if (first?.data_url) openImagePreview(first.data_url, "生成结果-1", first.download_filename, state.resultImages, 0);
   }
 
   async function loadGallery(page = state.galleryPage) {
@@ -2326,6 +2352,10 @@
   async function reproduce(id) {
     try {
       await bootstrap();
+      const currentImage = state.detailData?.images?.[state.detailImageIndex];
+      if (currentImage?.metadata?.format === "comfyui" && state.detailData?.provider_kind !== "comfyui") {
+        await comfyuiControls.fromGallery(state.detailData, currentImage); return;
+      }
       if (state.detailData?.source === "import") {
         const payload = await apiGet(`gallery/parameters/${id}`, { image_id: state.detailData.images?.[state.detailImageIndex]?.id, format: "studio" });
         await library.resolveParameters(typeof payload.content === "string" ? payload.content : JSON.stringify(payload.content), undefined, { forReproduction: true });
@@ -2340,8 +2370,10 @@
   }
 
   function applyDraft(draft, { forReproduction = false } = {}) {
+    state.comfyuiSnapshot = draft.comfyui || null;
     state.mode = draft.mode === "img2img" ? "img2img" : "text2img"; state.selectedProviderId = draft.provider_id || ""; state.references = draft.references || [];
     state.selectedModelRef = draft.model_ref || (draft.provider_id && draft.model ? `${draft.provider_id}:${draft.model}` : "");
+    state.comfyuiModelOverride = draft.comfyui_model ? { model_ref: state.selectedModelRef, model: draft.comfyui_model } : null;
     const rawParameterValues = { ...(draft.parameters || {}) };
     if (Object.prototype.hasOwnProperty.call(draft, "size")) rawParameterValues.size = draft.size;
     if (Object.prototype.hasOwnProperty.call(draft, "count")) rawParameterValues.count = draft.count;
@@ -2467,7 +2499,7 @@
     return loaded;
   }
 
-  const PROVIDER_KINDS = [["openai_images", "OpenAI Images"], ["gemini", "Gemini 图片输出"], ["novelai_official", "NovelAI 官方"], ["nai_direct", "NAI 第三方 GET（nai.sta1n.cn）"], ["custom_json", "自定义 JSON"]];
+  const PROVIDER_KINDS = [["openai_images", "OpenAI Images"], ["gemini", "Gemini 图片输出"], ["novelai_official", "NovelAI 官方"], ["nai_direct", "NAI 第三方 GET（nai.sta1n.cn）"], ["comfyui", "ComfyUI 工作流"], ["custom_json", "自定义 JSON"]];
   const NAI_MODELS = [
     { id: "nai-diffusion-4-5-full", name: "NAI V4.5 完整版" },
     { id: "nai-diffusion-5-full", name: "NAI V5 完整版" },
@@ -2480,6 +2512,7 @@
   ];
   function builtinProviderModels(provider) { return provider?.kind === "novelai_official" ? novelaiModels.length ? novelaiModels : NOVELAI_OFFICIAL_MODELS : provider?.kind === "nai_direct" ? NAI_MODELS : null; }
   const PROVIDER_DEFAULTS = {
+    comfyui: { base_url: "http://127.0.0.1:8188", generate_path: "/prompt", edit_path: "/prompt", models_path: "/object_info", request_template: "", response_image_path: "", max_concurrent_generations: 1, timeout_seconds: 600 },
     openai_images: { base_url: "https://api.openai.com/v1", generate_path: "/images/generations", edit_path: "/images/edits", models_path: "/models", edit_request_format: "multipart", request_template: "", response_image_path: "", max_concurrent_generations: 2 },
     gemini: { base_url: "https://generativelanguage.googleapis.com", generate_path: "/v1beta/models/{model}:generateContent", edit_path: "/v1beta/models/{model}:generateContent", models_path: "/v1beta/models", edit_request_format: "json_data_url", request_template: "", response_image_path: "", max_concurrent_generations: 2 },
     nai_direct: { base_url: "https://nai.sta1n.cn", generate_path: "/generate", edit_path: "", models_path: "/models", edit_request_format: "json_data_url", request_template: "", response_image_path: "", max_concurrent_generations: 2 },
@@ -2526,6 +2559,7 @@
   };
   function providerDefaults(kind) { return { ...(PROVIDER_DEFAULTS[kind] || PROVIDER_DEFAULTS.custom_json) }; }
   function modelPreset(kind, modelId) {
+    if (kind === "comfyui") return {};
     // Official defaults and supported fields come from the same catalog as
     // request validation, including the different V4.5 / V5 capabilities.
     if (kind === "novelai_official") return structuredClone(novelaiModels.find(model => model.id === modelId)?.parameters || novelaiModels[0]?.parameters || {});
@@ -2544,7 +2578,7 @@
     model.native_batch_size_source = nai ? "fixed" : model.native_batch_size_source || "default";
     model.max_concurrent_requests = Number(model.max_concurrent_requests ?? 8);
     model.parameters = model.parameters || {};
-    if (!Object.entries(model.parameters).some(([name, descriptor]) => modelParameterMatches(name, descriptor, ["count", "n"]))) model.parameters.count = JSON.parse(JSON.stringify(BATCH_PRESET.count));
+    if (provider.kind !== "comfyui" && !Object.entries(model.parameters).some(([name, descriptor]) => modelParameterMatches(name, descriptor, ["count", "n"]))) model.parameters.count = JSON.parse(JSON.stringify(BATCH_PRESET.count));
   }
   function currentSettingsProvider() { return state.settings?.webui.providers.find((item) => item.id === state.selectedSettingsProviderId) || null; }
   function renderSettingsProviders() {
@@ -2565,9 +2599,10 @@
     const common = `${field("id", "ID", provider.id)}${field("name", "名称", provider.name)}${selectField("kind", "供应类型", kind, PROVIDER_KINDS)}${field("base_url", "接口地址（Base URL）", provider.base_url)}${credentialField}${field("timeout_seconds", "超时秒数", provider.timeout_seconds, "number")}${field("max_concurrent_generations", "Provider 最大并发", provider.max_concurrent_generations ?? 2, "number", official)}${official ? '<div class="field"><span class="field-hint">官方服务商当前固定串行生成，同时最多处理 1 个请求。</span></div>' : ""}${proxyField}${headersField}`;
     const typeFields = kind === "openai_images" ? `${field("generate_path", "文生图路径", provider.generate_path)}${field("edit_path", "图生图路径", provider.edit_path)}${field("models_path", "模型列表路径", provider.models_path || "/models")}${selectField("edit_request_format", "图生图请求格式", provider.edit_request_format, [["multipart", "multipart"], ["json_data_url", "JSON data URL"]])}` : kind === "gemini" ? `${field("generate_path", "generateContent 路径（支持 {model}）", provider.generate_path)}${field("models_path", "模型列表路径", provider.models_path || "/v1beta/models")}` : kind === "nai_direct" ? `${field("generate_path", "生成路径", provider.generate_path)}<div class="field field-wide"><span class="field-hint">第三方服务协议：GET /generate；Token 作为 token 查询参数发送。该类型不是 NovelAI 官方 API，且仅支持文生图。</span></div>` : `${field("generate_path", "文生图路径", provider.generate_path)}${field("edit_path", "图生图路径", provider.edit_path)}${field("models_path", "模型列表路径", provider.models_path || "/models")}${selectField("edit_request_format", "图生图请求格式", provider.edit_request_format, [["multipart", "multipart"], ["json_data_url", "JSON data URL"]])}${textAreaField("request_template", "请求 JSON 模板（可选）", provider.request_template)}${field("response_image_path", "响应图片路径（可选）", provider.response_image_path)}<div class="field field-wide"><span class="field-hint">模板可使用 {{prompt}}、{{model}}、{{size}}、{{count}} 和参数字段。</span></div>`;
     const officialFields = `${field("generate_path", "文生图路径", provider.generate_path)}${field("edit_path", "图生图路径", provider.edit_path)}<div class="field field-wide"><span class="field-hint">V4.5 支持单底图、精确角色 / 风格参考、Vibe、多角色与局部重绘；V5 支持单底图、多角色、透明背景与局部重绘。V5 精选版局部重绘使用 V4.5 精选版。</span></div>`;
-    const discoveryButton = builtinProviderModels(provider) ? "" : '<button class="quiet-button" id="discoverModelsButton" type="button">获取模型</button>';
+    const discoveryButton = builtinProviderModels(provider) || kind === "comfyui" ? "" : '<button class="quiet-button" id="discoverModelsButton" type="button">获取模型</button>';
     const heading = `<div class="provider-editor-heading"><h3>${escape(provider.name || "生图服务商")}</h3><label class="toggle-control"><input data-provider-field="enabled" type="checkbox" aria-label="启用生图服务商" ${provider.enabled ? "checked" : ""} /><span aria-hidden="true"></span></label></div>`;
-    els.providerForm.innerHTML = `${heading}${common}${official ? officialFields : typeFields}<div class="provider-editor-actions"><button class="danger-button" id="removeProviderButton" type="button">删除服务商</button>${discoveryButton}</div>`;
+    const comfyFields = '<div class="field field-wide"><span class="field-hint">连接自建 ComfyUI 原生服务。API Key 可留空；受保护的服务可填写请求头。下方每个工作流独立配置输入绑定及结果节点。</span></div>';
+    els.providerForm.innerHTML = `${heading}${common}${kind === "comfyui" ? comfyFields : official ? officialFields : typeFields}<div class="provider-editor-actions"><button class="danger-button" id="removeProviderButton" type="button">删除服务商</button>${discoveryButton}</div>`;
     els.providerForm.querySelectorAll("[data-provider-field]").forEach((input) => input.addEventListener("input", () => updateProviderField(input))); els.providerForm.querySelectorAll("[data-provider-field]").forEach((input) => input.addEventListener("change", () => updateProviderField(input)));
     $("removeProviderButton")?.addEventListener("click", async () => { if (!await confirmAction("删除此生图服务商？历史记录不会删除。")) return; state.settings.webui.providers = state.settings.webui.providers.filter((item) => item.id !== provider.id); state.selectedSettingsProviderId = state.settings.webui.providers[0]?.id || ""; renderSettingsProviders(); showNotice("已从设置草稿中删除，保存全部设置后生效。", "success"); });
     $("discoverModelsButton")?.addEventListener("click", () => void discoverProviderModels(provider));
@@ -2583,8 +2618,13 @@
   function currentSettingsModel() { const provider = currentSettingsProvider(); return provider?.models?.find((item) => item.id === state.selectedSettingsModelId) || null; }
   function renderModelEditor() {
     const provider = currentSettingsProvider();
+    const comfy = provider?.kind === "comfyui";
+    els.addModelButton.textContent = comfy ? "新增工作流" : "新增模型";
+    document.querySelector(".model-settings .section-heading h2").textContent = comfy ? "工作流配置" : "模型配置";
+    document.querySelector(".model-settings .section-heading p").textContent = comfy ? "每份工作流独立保存执行图、可调整输入和结果节点。" : "同一服务商可以配置多个模型，每个模型独立声明模式、参考图和参数。";
     refreshSettingsDefaultModels();
     renderNewModelChoices(provider);
+    if (comfy) els.newModelChoice.placeholder = "工作流 ID（可自动生成）";
     if (!provider) { els.settingsModelList.innerHTML = '<div class="provider-empty">请先选择服务商</div>'; els.modelForm.innerHTML = '<div class="provider-empty">选择服务商后配置模型能力。</div>'; return; }
     provider.models = Array.isArray(provider.models) ? provider.models : [];
     if (!provider.models.some((item) => item.id === state.selectedSettingsModelId)) state.selectedSettingsModelId = provider.models[0]?.id || "";
@@ -2593,13 +2633,19 @@
     const model = currentSettingsModel();
     if (!model) { els.modelForm.innerHTML = '<div class="provider-empty">点击“新增模型”开始配置。</div>'; return; }
     ensureToolConfig(model, provider);
-    const tabs = `<div class="model-tabs"><button class="model-tab ${state.modelEditorTab === "model" ? "is-active" : ""}" data-model-tab="model" type="button">模型配置</button><button class="model-tab ${state.modelEditorTab === "tool" ? "is-active" : ""}" data-model-tab="tool" type="button">工具配置</button></div>`;
+    const tabs = `<div class="model-tabs"><button class="model-tab ${state.modelEditorTab === "model" ? "is-active" : ""}" data-model-tab="model" type="button">${comfy ? "工作流配置" : "模型配置"}</button><button class="model-tab ${state.modelEditorTab === "tool" ? "is-active" : ""}" data-model-tab="tool" type="button">工具配置</button></div>`;
     els.modelForm.innerHTML = state.modelEditorTab === "tool" ? `${tabs}${renderToolConfiguration(model)}` : `${tabs}${renderModelConfiguration(provider, model)}`;
     els.modelForm.querySelectorAll("[data-model-tab]").forEach((button) => button.addEventListener("click", () => { state.modelEditorTab = button.dataset.modelTab; renderModelEditor(); }));
     bindModelConfiguration(provider, model);
+    if (comfy) comfyuiControls.bindConfiguration(provider, model);
     window.ImageStudioSelect?.refresh(els.modelForm);
   }
   function renderModelConfiguration(provider, model) {
+    if (provider.kind === "comfyui") {
+      const schedulingField = (key, label, value) => `<label class="field">${label}<input data-model-field="${key}" type="number" min="1" max="16" step="1" value="${escape(value)}" /></label>`;
+      const countBound = comfyuiControls.countBound({ ...model, provider_kind: "comfyui" });
+      return `<h3>${escape(model.name || model.id)}</h3>${modelField("id", "工作流 ID", model.id)}${modelField("name", "显示名称", model.name)}${comfyuiControls.configuration(model)}${schedulingField("max_concurrent_requests", "工作流最大并发请求数", model.max_concurrent_requests || 8)}${countBound ? schedulingField("native_batch_size", "工作流单次批次上限", model.native_batch_size || 1) : ""}<section class="schema-preview"><h4>参数默认值</h4>${effectiveModelParameters(model).map(([name, descriptor]) => renderSchemaDefault(name, descriptor)).join("")}</section><details class="schema-raw"><summary>高级：参数 Schema</summary><textarea id="modelParametersSchema" data-model-field="parameters" rows="12" spellcheck="false">${escape(JSON.stringify(model.parameters || {}, null, 2))}</textarea></details><div class="provider-editor-actions"><button class="danger-button" id="removeModelButton" type="button">删除工作流</button></div>`;
+    }
     const official = provider.kind === "novelai_official";
     const schemaText = JSON.stringify(model.parameters || modelPreset(provider.kind, model.id), null, 2);
     const discoveredIds = (provider.discovered_models || []).map((item) => item.id); const modelChoices = builtinProviderModels(provider)?.map(item => item.id) || discoveredIds;
@@ -2646,7 +2692,7 @@
     els.modelForm.querySelectorAll("[data-schema-default]").forEach((input) => input.addEventListener("change", () => {
       const descriptor = model.parameters[input.dataset.schemaDefault];
       if (input.dataset.schemaJson) { try { descriptor.default = JSON.parse(input.value); input.setCustomValidity(""); } catch { input.setCustomValidity("默认值必须是合法 JSON"); return; } }
-      else descriptor.default = input.type === "checkbox" ? input.checked : input.type === "number" ? Number(input.value) : input.value;
+      else descriptor.default = input.type === "checkbox" ? input.checked : input.type === "number" ? provider.kind === "comfyui" ? comfyuiControls.numericValue(input.value) : Number(input.value) : input.value;
       const raw = $("modelParametersSchema"); if (raw) raw.value = JSON.stringify(model.parameters, null, 2);
     }));
     els.modelForm.querySelectorAll("[data-tool-field]").forEach((input) => {
@@ -2810,7 +2856,7 @@
         if (selected) policy.default_override = selected.value;
       }
     } else if (els.toolParameterDefault.value !== "") {
-      policy.default_override = ["number", "int", "integer", "float"].includes(String(descriptor.type).toLowerCase()) ? Number(els.toolParameterDefault.value) : els.toolParameterDefault.value;
+      policy.default_override = ["number", "int", "integer", "float"].includes(String(descriptor.type).toLowerCase()) ? currentSettingsProvider()?.kind === "comfyui" ? comfyuiControls.numericValue(els.toolParameterDefault.value) : Number(els.toolParameterDefault.value) : els.toolParameterDefault.value;
     }
     model.tool.parameters[name] = policy;
     if (name === "negative_prompt") model.tool.negative_prompt_exposed = policy.exposed;
@@ -2838,6 +2884,14 @@
     const provider = currentSettingsProvider();
     if (!provider) { showNotice("请先选择一个服务商，再新增模型。", "error"); return; }
     provider.models = Array.isArray(provider.models) ? provider.models : [];
+    if (provider.kind === "comfyui") {
+      const requestedId = els.newModelChoice.value.trim() || `workflow_${Date.now().toString(36)}`;
+      if (provider.models.some(item => item.id === requestedId)) { showNotice("该服务商中已经存在相同工作流 ID。", "error"); return; }
+      const result = await comfyuiControls.edit(provider, { id: requestedId, name: requestedId });
+      if (!result) return;
+      provider.models.push(result.model); state.selectedSettingsModelId = requestedId;
+      renderModelEditor(); updateSettingsDirty(); showNotice("工作流已加入草稿，请保存全部设置。", "success"); return;
+    }
     const requestedId = els.newModelChoice.value.trim();
     if (!requestedId) { showNotice("请选择或输入模型 ID。", "error"); els.newModelChoice.focus(); return; }
     if (provider.models.some((item) => item.id === requestedId)) { showNotice("该服务商中已经存在相同模型 ID。", "error"); return; }
@@ -2947,6 +3001,21 @@
 
   function normalizeSettingsModelDefaults(payload) {
     (payload.webui?.providers || []).forEach((provider) => (provider.models || []).forEach((model) => ensureToolConfig(model, provider)));
+  }
+
+  function adoptSavedComfyWorkflow(result) {
+    if (!state.settings) return;
+    const add = webui => {
+      const provider = webui?.providers?.find(item => item.id === result.provider.id);
+      if (!provider || provider.models.some(item => item.id === result.model.id)) return;
+      const model = structuredClone(result.model); ensureToolConfig(model, provider); provider.models.push(model);
+      if (result.settings_revision != null) { webui.revision = result.settings_revision; webui.ui = { ...(webui.ui || {}), settings_revision: result.settings_revision }; }
+    };
+    // A gallery import saves exactly one new workflow. Add that same record to
+    // both baselines, keeping unrelated unsaved settings as an actual draft.
+    add(state.settings.webui); add(savedSettingsPayload?.webui);
+    if (settingsBaseline) { const baseline = JSON.parse(settingsBaseline); add(baseline.studio); settingsBaseline = settingsFingerprint(baseline); }
+    renderSettingsProviders(); updateSettingsDirty();
   }
 
   function settingsFingerprint(value) {
@@ -3120,6 +3189,7 @@
   const externalSources = window.ImageStudioExternalSources({ state, apiGet, apiPost, escape, formatBytes, formatDate, showNotice, errorMessage, updateSettingsDirty, invalidateBrowseCache, openModal: (...args) => library.openModal(...args) });
   const library = window.ImageStudioLibrary({ state, escape, apiGet, apiPost, bridge, showNotice, errorMessage, formatDate, formatBytes, sourceLabel, getGallerySort: () => gallerySort, syncPageScrollLock, switchView, requestParameters, loadGallery, clearGallerySelection, openDetail, closeDetail, reproduce, applyDraft, useDataUrlAsReference, useGalleryImageAsReference, ensureDetailMetadata, ensureDetailPreview, getImageMedia, cacheImageMedia, loadImageMedia, checkGalleryAction });
   const novelaiControls = window.ImageStudioNovelAI({ state, model: selectedModel, escape, schemaParameterTitle, schemaParameterLabel, rerenderReferences: renderReferences, uploadFile: async file => (await bridge()).upload("studio/reference/upload", file), openModal: (...args) => library.openModal(...args), showNotice });
+  const comfyuiControls = window.ImageStudioComfyUI({ state, escape, apiGet, apiPost, bridge, showNotice, errorMessage, currentSettingsModel, renderModelEditor, updateSettingsDirty, bootstrap, applyDraft, adoptSavedWorkflow: adoptSavedComfyWorkflow, invalidateBrowseCache, renderResult: renderGenerationResult, viewResult: viewComfyResult, openModal: (...args) => library.openModal(...args) });
 
   async function start() {
     try {
@@ -3128,7 +3198,7 @@
       gallerySortDraft = gallerySort;
     } catch { showNotice("未能读取此浏览器的画廊偏好，暂用默认显示。", "error"); }
     bindEvents();
-    try { await bootstrap(); }
+    try { await bootstrap(); void comfyuiControls.restore(); }
     catch (error) { const message = errorMessage(error, "页面初始化失败"); els.runtimeStatus.textContent = "页面初始化失败"; showNotice(message, "error"); }
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", () => void start(), { once: true });

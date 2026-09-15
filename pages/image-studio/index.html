@@ -38,6 +38,7 @@
   <link rel="stylesheet" href="./appearance.css?v=1.3.0-dev.2" />
   <link rel="stylesheet" href="./controls.css?v=1.3.0-dev.2" />
   <link rel="stylesheet" href="./novelai-controls.css?v=1.3.0-dev.2" />
+  <link rel="stylesheet" href="./comfyui-controls.css?v=1.3.0-dev.2" />
   <link rel="stylesheet" href="./tooltip.css?v=1.3.0-dev.2" />
 </head>
 <body>
@@ -71,6 +72,7 @@
         </div><button class="studio-icon-button" id="pasteParametersButton" type="button" aria-label="从剪贴板读取参数" data-tooltip="从剪贴板读取参数" data-studio-icon="ClipboardPaste"></button></div>
         <div class="model-select-row"><label for="modelChoice">模型</label><select id="modelChoice" aria-label="选择生图模型" disabled><option value="">请先选择模式</option></select><span class="model-provider" id="modelProvider"></span></div>
         <div class="parameter-import-notice is-hidden" id="parameterImportNotice" role="status"></div>
+        <section class="comfy-jobs glass" id="comfyJobs" aria-label="ComfyUI 任务" hidden></section>
         <div class="workspace-empty glass" id="workspaceEmpty">请选择模型</div>
         <fieldset id="generatorWorkspace" class="generator-workspace is-hidden" disabled>
         <div class="generator-layout">
@@ -286,6 +288,7 @@
   <script src="./viewer-backdrop.js?v=1.3.0-dev.2" onerror="window.__reportImageStudioPageError(true)"></script>
   <script src="./external-sources.js?v=1.3.0-dev.2" onerror="window.__reportImageStudioPageError(true)"></script>
   <script src="./novelai-controls.js?v=1.3.0-dev.2" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./comfyui-controls.js?v=1.3.0-dev.2" onerror="window.__reportImageStudioPageError(true)"></script>
   <script src="./app.js?v=1.3.0-dev.2" onerror="window.__reportImageStudioPageError(true)"></script>
 </body>
 </html>

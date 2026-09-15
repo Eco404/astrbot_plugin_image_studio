@@ -1284,13 +1284,14 @@
         if (detailActionsReady) return;
       }
       const providerKind = String(detail?.provider_kind || "").trim().toLowerCase();
-      const providerEngine = ["nai_direct", "novelai_official", "openai_images", "gemini", "custom_json"].includes(providerKind) ? providerKind : "";
+      const providerEngine = ["nai_direct", "novelai_official", "openai_images", "gemini", "custom_json", "comfyui"].includes(providerKind) ? providerKind : "";
       const engineHint = [image?.supplemental?.generation_engine, detail?.generation_engine, providerEngine, image?.metadata?.format].map(value => String(value || "").trim().toLowerCase()).find(value => value && !["unknown", "mixed"].includes(value));
       const engine = ["nai", "nai_direct", "novelai_official"].includes(engineHint) ? "novelai" : engineHint;
       // A transferable prompt does not mean this plugin can reproduce its
       // source workflow. Keep native exports separate from workflow exports.
-      const supportsReproduction = metadataReady && ["novelai", "openai_images", "gemini", "custom_json"].includes(engine);
-      const formats = supportsReproduction ? { studio: "Image Studio 参数" } : {};
+      const comfyReproduction = engine === "comfyui" && (providerKind === "comfyui" || !!image?.metadata?.raw?.prompt);
+      const supportsReproduction = metadataReady && (["novelai", "openai_images", "gemini", "custom_json"].includes(engine) || comfyReproduction);
+      const formats = supportsReproduction && (engine !== "comfyui" || providerKind === "comfyui") ? { studio: "Image Studio 参数" } : {};
       if (["nai", "novelai"].includes(engine) || image?.metadata?.format === "novelai") {
         if (providerKind !== "novelai_official") formats.nai = "NAI 请求参数";
         if (providerKind !== "novelai_official" || image?.metadata?.raw?.Comment || image?.metadata?.raw?.comment) formats.novelai = "NovelAI 图片参数";
@@ -1320,7 +1321,8 @@
       $("detailFavorite").disabled = favoritePending || !detail || allowed.favorite === false;
       $("detailUseReference").disabled = !image?.id || !!image.file_state && image.file_state !== "available" || allowed.reference === false;
       $("detailReproduce").hidden = !supportsReproduction;
-      $("detailReproduce").disabled = !supportsReproduction || !hasParameters;
+      $("detailReproduce").disabled = !supportsReproduction || (!hasParameters && !comfyReproduction);
+      setCommandLabel("detailReproduce", comfyReproduction ? "运行工作流" : "复现参数");
       $("detailDelete").disabled = !detail || !(detail.images || []).length || allowed.delete === false;
       for (const [id, action] of [["detailFavorite", "favorite"], ["detailUseReference", "reference"], ["detailDelete", "delete"]]) {
         const button = $(id);

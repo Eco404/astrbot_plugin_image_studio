@@ -2,11 +2,13 @@
 
 面向维护者。使用说明见 [README](../README.md)，正式版本变化见 [CHANGELOG](../CHANGELOG.md)。
 
-当前开发线为插件 `1.3.0-dev.2`，基于正式插件 `1.2.0` 和数据库 v2。当前没有数据库结构变化，继续使用正式 `user_version=2`，无需新的迁移标记。已实现独立的 `novelai_official` 服务商、JSON／ZIP 图片接收、订阅查询和单底图图生图；目前为离线验证状态，待真实账号核实。
+当前开发线为插件 `1.3.0-dev.2`，基于正式插件 `1.2.0`。ComfyUI 工作流修订与可恢复任务引入数据库 `3-dev.1`，保留正式 `user_version=2`，使用 `schema_meta(target_version=3, dev_revision=1)` 标记开发结构。旧库升级前备份，失败回滚；发布时压缩为一次正式升级。ComfyUI 已完成基础真实生图测试，覆盖范围见下方接入说明；NovelAI 官方仍需可用账户联调。
 
 官方协议构造与解析集中在 `novelai.py`，不依赖完整第三方 SDK。`GeneratedImage.effective_parameters` 通过 `generation_images.supplemental_json.effective_request` 保存经过记录策略过滤的实际参数；原始请求仍保留在生成记录上。隐写元数据解析器版本为 9，既有缓存更新沿用现有回填流程。
 
 官方资料、与 NAI2API 的差异和待验证项见 [NovelAI 官方接口核对](NOVELAI_API_REVIEW.md)。
+
+ComfyUI 架构、工作流绑定、任务恢复与范围见 [ComfyUI 接入](COMFYUI_IMPLEMENTATION.md)。`comfyui.py` 负责原生协议，`comfyui_workflows.py` 负责执行图和绑定，`comfyui_jobs.py` 保存修订/任务/临时文件，`comfyui_runtime.py` 接入现有生成与图库流程。运行中任务不受浏览器连接生命周期影响。
 
 ## 1.2.0 正式基线
 

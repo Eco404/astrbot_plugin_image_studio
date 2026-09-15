@@ -455,9 +455,15 @@ def test_older_development_layout_is_rejected_without_rewriting_imports(tmp_path
         )
         await store.set_favorite(imported["generation_id"], True)
         with store._connect() as conn:
-            for table in ("external_records", "external_sources"):
+            for table in (
+                "comfy_jobs",
+                "comfy_workflow_revisions",
+                "external_records",
+                "external_sources",
+            ):
                 conn.execute(f"DROP TABLE {table}")
             conn.execute("ALTER TABLE generation_images DROP COLUMN supplemental_json")
+            conn.execute("DROP TABLE schema_meta")
             conn.execute(
                 "CREATE TABLE schema_meta (id INTEGER PRIMARY KEY CHECK(id = 1), target_version INTEGER NOT NULL, dev_revision INTEGER NOT NULL)"
             )

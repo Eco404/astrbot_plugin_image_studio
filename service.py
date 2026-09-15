@@ -79,6 +79,7 @@ class ImageGenerationService:
         self._limiters: dict[str, _ProviderLimiter] = {}
         self._model_limiters: dict[tuple[str, str], _ProviderLimiter] = {}
         self._account_limiters: dict[str, _ProviderLimiter] = {}
+        self.comfy_runtime = None
         self.update_settings(settings)
 
     def update_settings(self, settings: RuntimeSettings) -> None:
@@ -112,6 +113,9 @@ class ImageGenerationService:
         references: tuple[ReferenceImage, ...] = (),
         source: str = "webui",
         invocation_source: InvocationSource | None = None,
+        comfyui: dict[str, Any] | None = None,
+        _comfy_job_id: str = "",
+        _comfy_child_count: int | None = None,
     ) -> GenerationResult:
         """Generate images through a validated provider request.
 
@@ -167,8 +171,26 @@ class ImageGenerationService:
         )
         if source == "llm_tool" and not selected_model.llm_enabled:
             raise ValueError("所选模型未向 LLM 工具开放")
+        if provider.kind == "comfyui" and self.comfy_runtime is not None:
+            return await self.comfy_runtime.generate(
+                provider=provider,
+                model=selected_model,
+                mode=normalized_mode,
+                prompt=prompt,
+                negative_prompt=negative_prompt,
+                size=size,
+                count=count,
+                parameters=parameters,
+                references=references,
+                source=source,
+                invocation_source=invocation_source,
+                comfyui=comfyui,
+            )
         normalized_prompt = str(prompt or "").strip()[:6000]
-        if not normalized_prompt:
+        if not normalized_prompt and (
+            provider.kind != "comfyui"
+            or selected_model.comfyui_capabilities["prompt_required"]
+        ):
             raise ValueError("提示词不能为空")
         reference_limit = 0
         if normalized_mode == "img2img":
@@ -188,7 +210,7 @@ class ImageGenerationService:
                 )
         normalized_refs = references[:reference_limit]
         if (
-            provider.kind == "novelai_official"
+            provider.kind in {"novelai_official", "comfyui"}
             and normalized_mode == "img2img"
             and len(references) > reference_limit
         ):
@@ -225,6 +247,19 @@ class ImageGenerationService:
             normalized_count, advanced_parameters = _command_count(
                 supplied_count, batch_parameters, selected_model
             )
+        if _comfy_child_count is not None:
+            # Only the durable runner supplies this for a persisted child job.
+            # Its size was already authorized by the parent request; applying a
+            # hidden LLM count default again would recursively split forever.
+            if (
+                provider.kind != "comfyui"
+                or not _comfy_job_id
+                or isinstance(_comfy_child_count, bool)
+                or not isinstance(_comfy_child_count, int)
+                or not 1 <= _comfy_child_count <= selected_model.native_batch_size
+            ):
+                raise ValueError("ComfyUI 内部子任务数量无效")
+            normalized_count = _comfy_child_count
         parameter_values = _resolved_model_values(
             advanced_parameters, selected_model, source=source
         )
@@ -264,9 +299,12 @@ class ImageGenerationService:
             native_batch_size=selected_model.native_batch_size,
             max_concurrent_requests=selected_model.max_concurrent_requests,
             local_parameters={
-                name: value
-                for name, value in parameter_values.items()
-                if selected_model.parameters.get(name, {}).get("ui_only")
+                **({"_comfy_job_id": _comfy_job_id} if _comfy_job_id else {}),
+                **{
+                    name: value
+                    for name, value in parameter_values.items()
+                    if selected_model.parameters.get(name, {}).get("ui_only")
+                },
             },
         )
         started = time.perf_counter()
@@ -280,7 +318,20 @@ class ImageGenerationService:
             images = exc.images
             batch_failures = exc.failures
             warning = str(exc)
-        if len(images) != request.count and not batch_failures:
+        except ProviderPartialResponseError as exc:
+            if not exc.images:
+                raise
+            images = exc.images
+            batch_failures = exc.failures
+            warning = str(exc)
+        if (
+            len(images) != request.count
+            and not batch_failures
+            and not (
+                provider.kind == "comfyui"
+                and not selected_model.comfyui_capabilities["count_bound"]
+            )
+        ):
             warning = (
                 f"本次目标 {request.count} 张，上游实际返回 {len(images)} 张；"
                 "已保留全部返回图片，未自动追加请求。"
@@ -342,6 +393,29 @@ class ImageGenerationService:
         limiter: _ProviderLimiter,
         model_limiter: _ProviderLimiter,
     ) -> tuple[GeneratedImage, ...]:
+        if provider.kind == "comfyui":
+            # A workflow execution may contain several output nodes and batches.
+            # Keep its outputs intact unless an explicit count input is mapped.
+            if not model.comfyui_capabilities["count_bound"] and request.count != 1:
+                raise ValueError(
+                    "此工作流未绑定数量参数；一次运行保留工作流原有的全部输出"
+                )
+            if (
+                model.comfyui_capabilities["count_bound"]
+                and request.count > model.native_batch_size
+            ):
+                managed_batch = getattr(self.executor, "generate_batch", None)
+                if (
+                    not request.local_parameters.get("_comfy_job_id")
+                    or managed_batch is None
+                ):
+                    raise ValueError("超出原生批次的 ComfyUI 请求需要持久化任务管理器")
+                # Only child executions acquire slots. Holding a parent slot
+                # while waiting for children would deadlock a single-slot model.
+                return await managed_batch(provider, request)
+            async with model_limiter.slot():
+                async with limiter.slot():
+                    return await self.executor.generate(provider, request)
         count = _batch_integer(request.count, "count")
         native_size = _batch_integer(model.native_batch_size, "native_batch_size")
         request_sizes = tuple(
@@ -443,7 +517,10 @@ class ImageGenerationService:
                 normalized_mode,
                 self.settings.default_model_ref(normalized_mode, "webui"),
             )
-            if provider.kind == "novelai_official" and normalized_mode == "img2img":
+            if (
+                provider.kind in {"novelai_official", "comfyui"}
+                and normalized_mode == "img2img"
+            ):
                 load_options = {
                     "max_images": selected_model.max_reference_images,
                     "reject_excess": True,
@@ -568,13 +645,65 @@ class ImageGenerationService:
         ):
             raise ValueError("这张外部图片没有可恢复的生成参数，可直接用作参考图")
         copied = export_parameters(detail, image_id)
+        reproduction_settings = self.settings
+        snapshot_model = None
+        if detail.get("provider_kind") == "comfyui":
+            images = detail.get("images") or []
+            chosen = next(
+                (item for item in images if item.get("id") == image_id),
+                images[0] if images else {},
+            )
+            config = chosen.get("supplemental", {}).get("comfyui")
+            provider = self.settings.provider(detail.get("provider_id", ""))
+            if config and provider and provider.kind == "comfyui":
+                model = next(
+                    (
+                        item
+                        for item in provider.models
+                        if item.id == detail.get("model")
+                    ),
+                    None,
+                )
+                if model:
+                    raw = model.public_dict()
+                    schema = config.get("parameters_schema") or raw["parameters"]
+                    # Current display/record/refill policy still governs controls
+                    # with the same public key, while their workflow wiring is historical.
+                    schema = {
+                        key: {
+                            **descriptor,
+                            **{
+                                flag: raw["parameters"].get(key, {})[flag]
+                                for flag in (
+                                    "webui_visible",
+                                    "record_in_history",
+                                    "refill_from_history",
+                                )
+                                if flag in raw["parameters"].get(key, {})
+                            },
+                        }
+                        for key, descriptor in schema.items()
+                    }
+                    raw.update(comfyui=config, parameters=schema)
+                    saved_provider = ImageProvider.from_mapping(
+                        {**provider.public_dict(), "models": [raw]}
+                    )
+                    snapshot_model = saved_provider.models[0].public_dict()
+                    reproduction_settings = replace(
+                        self.settings,
+                        providers=tuple(
+                            saved_provider if item.id == provider.id else item
+                            for item in self.settings.providers
+                        ),
+                    )
         resolved = resolve_parameters(
-            copied["content"], self.settings, for_reproduction=True
+            copied["content"], reproduction_settings, for_reproduction=True
         )
         imported = detail.get("source") in {"import", "external"}
         staged = (
             await self.store.stage_generation_references(
-                generation_id, strict=detail.get("provider_kind") == "novelai_official"
+                generation_id,
+                strict=detail.get("provider_kind") in {"novelai_official", "comfyui"},
             )
             if not imported
             else []
@@ -596,6 +725,7 @@ class ImageGenerationService:
             ]
         draft = {
             **resolved["draft"],
+            **({"comfyui_model": snapshot_model} if snapshot_model else {}),
             "references": staged,
             "provider_available": not resolved["requires_model_selection"],
             "reference_available": bool(staged),
