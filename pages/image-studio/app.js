@@ -1760,7 +1760,7 @@
   function closeDetail() { library.clearDetailParameterLayout(); stopDetailNavigation(); window.ImageStudioBackdrop.dispose(els.drawerBody.querySelector(".detail-image-backdrop:not(.detail-backdrop-previous)")); detailImagePaintRevision++; mobileDetailSyncRevision++; decodedDisplayImages.clear(); detailBackdropSource = ""; detailRequestRevision += 1; if (mobileImageViewer) { suppressMobileDetailSync = true; mobileImageViewer.close(); } state.detailId = ""; state.detailData = null; state.detailFallbackThumbnail = ""; state.detailAssetsLoaded = false; state.detailNavigating = false; state.detailImageIndex = 0; state.detailRequestedImageIndex = 0; closeImagePreview(); els.detailDrawer.classList.remove("is-open"); els.detailDrawer.setAttribute("aria-hidden", "true"); syncPageScrollLock(); }
 
   function isMobileDetailPreview(context) {
-    return context?.type === "detail" && window.matchMedia("(max-width: 540px)").matches && typeof window.PhotoSwipe === "function";
+    return context?.type === "detail" && window.ImageStudioDetailSwipe.usesTouchInteraction() && typeof window.PhotoSwipe === "function";
   }
 
   function mobileSourceForSequenceItem(sequenceItem, fallbackDataUrl, context, knownImages, galleryById) {
@@ -2118,7 +2118,151 @@
   }
 
   function toggleMobileImageControls() {
-    mobileImageViewer?.element?.classList.toggle("image-studio-controls-visible");
+    const session = mobileViewerSession;
+    if (!isCurrentMobileSession(session)) return;
+    const visible = session.viewer.element.classList.toggle("image-studio-controls-visible");
+    session.filmstrip?.setVisible(visible);
+  }
+
+  function createMobileFilmstrip(session) {
+    const viewer = session.viewer;
+    const strip = document.createElement("div");
+    strip.className = "detail-filmstrip image-studio-viewer-filmstrip";
+    strip.setAttribute("role", "group"); strip.setAttribute("aria-label", "本组生成图片缩略图");
+    strip.setAttribute("aria-hidden", "true"); strip.inert = true; strip.hidden = true;
+    viewer.element.appendChild(strip);
+    const groups = new Map();
+    session.items.forEach((item, index) => {
+      const id = String(item.generation_id);
+      if (!groups.has(id)) groups.set(id, []);
+      groups.get(id).push(index);
+    });
+    let visible = false, generation = "", revision = 0, frame = 0, active = 0;
+    let observer = null, queue = [];
+    const currentGroup = () => String(session.items[viewer.currIndex]?.generation_id || "");
+    const current = token => visible && token === revision && isCurrentMobileSession(session) && generation === currentGroup();
+
+    function paint(button, source, token) {
+      if (!source || !current(token) || !button.isConnected) return;
+      const mount = button.querySelector(".detail-filmstrip-preview");
+      if (mount.querySelector("img")?.getAttribute("src") === source) return;
+      const image = document.createElement("img");
+      image.alt = ""; image.draggable = false; image.decoding = "async";
+      image.onload = () => { if (current(token) && image.parentNode === mount) mount.querySelector(".detail-filmstrip-placeholder").hidden = true; };
+      image.onerror = () => {
+        if (!current(token) || image.parentNode !== mount) return;
+        discardImageMediaSource(source); image.remove(); mount.querySelector(".detail-filmstrip-placeholder").hidden = false;
+      };
+      image.src = source; mount.querySelector("img")?.remove(); mount.append(image);
+      if (image.complete && image.naturalWidth > 0) mount.querySelector(".detail-filmstrip-placeholder").hidden = true;
+    }
+
+    function pump() {
+      if (!visible || !isCurrentMobileSession(session)) return;
+      while (active < 2 && queue.length) {
+        const { button, index, token } = queue.shift();
+        if (!current(token) || !button.isConnected) continue;
+        active++;
+        // Filmstrip reads populate the shared preview cache only. They must not
+        // promote a far-away PhotoSwipe slide or touch the main blur compositor.
+        void loadImageMedia(session.items[index], "preview").then(source => paint(button, source, token))
+          .catch(() => { if (current(token) && button.isConnected) delete button.dataset.previewQueued; })
+          .finally(() => { active--; pump(); });
+      }
+    }
+
+    function load(button) {
+      const index = Number(button.dataset.viewerIndex), item = session.items[index];
+      if (!item || !current(revision)) return;
+      const source = item.previewSrc || getImageMedia(item, "preview");
+      if (source) { paint(button, source, revision); return; }
+      if (button.dataset.previewQueued) return;
+      button.dataset.previewQueued = "true";
+      queue.push({ button, index, token: revision }); pump();
+    }
+
+    function render() {
+      if (!visible || !isCurrentMobileSession(session)) return;
+      const id = currentGroup(), indices = groups.get(id) || [];
+      strip.hidden = indices.length <= 1;
+      if (strip.hidden) return;
+      if (generation !== id) {
+        observer?.disconnect(); queue = []; revision++; generation = id;
+        strip.dataset.generationId = id;
+        strip.innerHTML = `<div class="detail-filmstrip-track">${indices.map(index => `<button class="detail-filmstrip-thumb" data-viewer-index="${index}" type="button" aria-label="查看本组第 ${Number(session.items[index].image_index) + 1} 张图片"><span class="detail-filmstrip-preview"><span class="detail-filmstrip-placeholder" aria-hidden="true">${Number(session.items[index].image_index) + 1}</span></span></button>`).join("")}</div>`;
+      }
+      delete strip.dataset.groupPending;
+      strip.inert = false; strip.setAttribute("aria-busy", "false");
+      const buttons = [...strip.querySelectorAll("[data-viewer-index]")];
+      buttons.forEach(button => {
+        const selected = Number(button.dataset.viewerIndex) === viewer.currIndex;
+        button.classList.toggle("is-active", selected); button.setAttribute("aria-current", String(selected)); button.tabIndex = selected ? 0 : -1;
+      });
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        if (!visible || generation !== currentGroup() || !isCurrentMobileSession(session)) return;
+        const selected = strip.querySelector('[aria-current="true"]');
+        if (selected) strip.scrollLeft = selected.offsetLeft + selected.offsetWidth / 2 - strip.clientWidth / 2;
+        observer?.disconnect();
+        if (typeof IntersectionObserver === "function") {
+          observer = new IntersectionObserver(entries => { for (const entry of entries) if (entry.isIntersecting) load(entry.target); }, { root: strip, rootMargin: "0px 120px" });
+          buttons.forEach(button => observer.observe(button));
+        } else buttons.filter(button => Math.abs(Number(button.dataset.viewerIndex) - viewer.currIndex) <= 2).forEach(load);
+      });
+    }
+
+    function sync() {
+      const indices = groups.get(currentGroup()) || [];
+      const hasFilmstrip = indices.length > 1;
+      const pending = hasFilmstrip && generation !== currentGroup();
+      viewer.element.classList.toggle("has-viewer-filmstrip", hasFilmstrip);
+      // Keep the glass surface mounted and visible between multi-image groups.
+      // Only the old thumbnail content waits for the gesture's idle handoff.
+      strip.hidden = !hasFilmstrip;
+      strip.toggleAttribute("data-group-pending", pending);
+      strip.inert = !visible || pending || !hasFilmstrip;
+      strip.setAttribute("aria-busy", String(visible && pending));
+      if (generation !== currentGroup() || indices.length <= 1) {
+        observer?.disconnect(); queue = []; revision++;
+        strip.querySelectorAll("[data-preview-queued]").forEach(button => delete button.dataset.previewQueued);
+      }
+      // Defer DOM rebuilding and centering until the main image finishes moving.
+      if (visible) void queueMobileWork(session, "filmstrip", render);
+    }
+
+    strip.addEventListener("click", event => {
+      event.stopPropagation();
+      const button = event.target.closest("[data-viewer-index]");
+      if (button && visible && generation === currentGroup()) viewer.goTo(Number(button.dataset.viewerIndex));
+    });
+    strip.addEventListener("keydown", event => {
+      if (!visible || generation !== currentGroup() || strip.inert) return;
+      const button = event.target.closest("[data-viewer-index]");
+      if (!button) return;
+      const indices = groups.get(generation) || [], offset = indices.indexOf(Number(button.dataset.viewerIndex));
+      const target = ({ ArrowLeft: Math.max(0, offset - 1), ArrowRight: Math.min(indices.length - 1, offset + 1), Home: 0, End: indices.length - 1 })[event.key];
+      if (target === undefined) return;
+      event.preventDefault(); event.stopPropagation();
+      viewer.goTo(indices[target]); strip.querySelector(`[data-viewer-index="${indices[target]}"]`)?.focus({ preventScroll: true });
+    });
+    strip.addEventListener("wheel", event => {
+      event.stopPropagation();
+      if (event.ctrlKey || event.metaKey || strip.scrollWidth <= strip.clientWidth || Math.abs(event.deltaX) >= Math.abs(event.deltaY)) return;
+      event.preventDefault(); strip.scrollLeft += event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? strip.clientWidth : 1);
+    }, { passive: false });
+    // The strip is a sibling of PhotoSwipe's scrollWrap. Leave native touch
+    // scrolling intact and prevent its clicks from becoming main-image taps.
+    sync();
+    return {
+      sync,
+      setVisible(value) {
+        if (!value && strip.contains(document.activeElement)) viewer.element.focus({ preventScroll: true });
+        visible = value; strip.inert = !value; strip.setAttribute("aria-hidden", String(!value));
+        if (value) sync();
+        else { observer?.disconnect(); queue = []; revision++; strip.querySelectorAll("[data-preview-queued]").forEach(button => delete button.dataset.previewQueued); }
+      },
+      destroy() { visible = false; revision++; cancelAnimationFrame(frame); observer?.disconnect(); queue = []; strip.remove(); },
+    };
   }
 
   async function prepareMobileViewerBackdrop(item) {
@@ -2188,6 +2332,7 @@
       // PhotoSwipe blocks input during its opening animation; the visual fade is independent.
       const pswp = new window.PhotoSwipe({ dataSource: mobileImageDataSource, index: initialIndex, loop: false, closeOnVerticalDrag: true, pinchToClose: false, tapAction: toggleMobileImageControls, imageClickAction: toggleMobileImageControls, bgClickAction: toggleMobileImageControls, doubleTapAction: "zoom", initialZoomLevel: "fit", secondaryZoomLevel: 2.5, maxZoomLevel: 4, preload: [1, 1], arrowPrev: false, arrowNext: false, close: false, zoom: false, counter: false, bgOpacity: 1, showHideAnimationType: "fade", showAnimationDuration: 0, hideAnimationDuration: 220, zoomAnimationDuration: 220, errorMsg: "图片暂时无法加载，请重试。", mainClass: "image-studio-pswp" });
       session.viewer = pswp;
+      pswp.addFilter("preventPointerEvent", (prevent, event) => event.target instanceof Element && event.target.closest(".image-studio-viewer-filmstrip") ? false : prevent);
       const placeholders = new Map(), destroyedSlides = new WeakSet();
       function syncPlaceholder(slide) {
         if (!session.active || pswp.isDestroying || !slide?.holderElement || destroyedSlides.has(slide)) return;
@@ -2272,6 +2417,7 @@
       });
       pswp.on("change", () => {
         if (!isCurrentMobileSession(session)) return;
+        session.filmstrip?.sync();
         // Do not carry the previous slide's error through the next gesture
         // while the idle work queue catches up with its new selection.
         if (session.status) session.status.hidden = true;
@@ -2285,7 +2431,7 @@
       pswp.on("moveMainScroll", (event) => {
         if (event.dragging && pswp.gestures.dragAxis === "x") restoreMobileViewerBackground(session);
       });
-      pswp.on("resize", () => { if (isCurrentMobileSession(session)) window.ImageStudioViewerBackdrop.resize(session.backdrop); });
+      pswp.on("resize", () => { if (isCurrentMobileSession(session)) { window.ImageStudioViewerBackdrop.resize(session.backdrop); session.filmstrip?.sync(); } });
       pswp.on("pointerDown", (event) => trackMobilePointer(session, event, true));
       pswp.on("pointerUp", (event) => trackMobilePointer(session, event, false));
       pswp.on("verticalDrag", () => { void prepareMobileDetail(session); });
@@ -2296,6 +2442,7 @@
       });
       pswp.on("afterInit", () => {
         bindMobileGestureInterruption(session);
+        session.filmstrip = createMobileFilmstrip(session);
         const download = pswp.element?.querySelector(".pswp__button--image-studio-download");
         if (download) download.hidden = session.items[pswp.currIndex]?.allowed_actions?.download === false;
         const backgroundLayer = document.createElement("div"); backgroundLayer.className = "image-studio-viewer-background"; backgroundLayer.setAttribute("aria-hidden", "true");
@@ -2314,11 +2461,12 @@
         if (!window.matchMedia("(prefers-reduced-motion: reduce)").matches) session.entryAnimation = pswp.element.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, easing: "ease-out" });
         syncPageScrollLock();
       });
-      pswp.on("openingAnimationEnd", () => pswp.element?.classList.remove("image-studio-controls-visible"));
+      pswp.on("openingAnimationEnd", () => { pswp.element?.classList.remove("image-studio-controls-visible"); session.filmstrip?.setVisible(false); });
       pswp.on("destroy", () => {
         const item = session.sequence[pswp.currIndex];
         const shouldSyncDetail = !suppressMobileDetailSync;
         session.active = false;
+        session.filmstrip?.destroy();
         cancelMobileWork(session);
         session.themeObserver?.disconnect();
         window.ImageStudioViewerBackdrop.dispose(session.backdrop);

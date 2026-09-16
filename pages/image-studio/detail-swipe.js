@@ -2,7 +2,9 @@
   "use strict";
 
   const bindings = new WeakMap();
-  const mobile = window.matchMedia("(max-width: 540px)");
+  // A tablet can be wider than the desktop breakpoint, including with a
+  // trackpad attached. Use touch capability as well as the compact layout.
+  const touchInteraction = window.matchMedia("(max-width: 540px), (any-pointer: coarse)");
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
   const velocityWindow = 100;
   const flickVelocity = 0.4;
@@ -263,7 +265,7 @@
       if (disposed || gesture !== active || !frame.isConnected) return;
       commit = commit && !!adjacent;
       let animation = animateTo(commit ? -direction * active.width : 0, commit ? 220 : 180);
-      if (commit && mobile.matches) {
+      if (commit && touchInteraction.matches) {
         // Commit the cursor when the swipe is accepted, while the visual track
         // settles independently. The next touch can then grab the new image.
         try { active.committed = await hooks?.navigate?.(direction, adjacent) !== false; }
@@ -279,7 +281,7 @@
       if (commit && !active.committed) { stopAnimation(); animation = animateTo(0, 180); }
       await animation;
       if (disposed || gesture !== active || !frame.isConnected) return;
-      if (!active.committed || !mobile.matches) { finish(); return; }
+      if (!active.committed || !touchInteraction.matches) { finish(); return; }
       setPhase("handoff");
       // Rasterize the new main image beneath the landed pane before exposing its layer.
       frame.classList.add("is-detail-handoff");
@@ -301,7 +303,7 @@
     }
 
     function touchStart(event) {
-      if (disposed || !mobile.matches || !frame.isConnected) return;
+      if (disposed || !touchInteraction.matches || !frame.isConnected) return;
       if (event.touches.length !== 1) { cancel(); return; }
       if (event.target instanceof Element && event.target.closest("button, a, input, select, textarea, .detail-filmstrip, [data-detail-dot]")) return;
       if (phase === "tracking" || phase === "dragging") return;
@@ -325,7 +327,7 @@
     function touchMove(event) {
       const active = queuedGesture || gesture;
       if (!active || (!queuedGesture && phase !== "tracking" && phase !== "dragging")) return;
-      if (event.touches.length !== 1 || !mobile.matches) { cancel(); return; }
+      if (event.touches.length !== 1 || !touchInteraction.matches) { cancel(); return; }
       const touch = Array.from(event.touches).find((item) => item.identifier === active.id);
       if (!touch) { cancel(); return; }
       active.dx = touch.clientX - active.x;
@@ -401,7 +403,7 @@
     }
 
     function resized() {
-      if (gesture && (Math.abs(frame.clientWidth - gesture.width) > 1 || Math.abs(frame.clientHeight - gesture.height) > 1 || !mobile.matches)) cancel(true);
+      if (gesture && (Math.abs(frame.clientWidth - gesture.width) > 1 || Math.abs(frame.clientHeight - gesture.height) > 1 || !touchInteraction.matches)) cancel(true);
     }
 
     const touchCancel = () => cancel();
@@ -422,6 +424,7 @@
       frame.removeEventListener("touchcancel", touchCancel);
       frame.removeEventListener("click", suppressCapturedClick, true);
       window.removeEventListener("resize", resized);
+      touchInteraction.removeEventListener("change", resized);
       document.removeEventListener("visibilitychange", hidden);
       if (bindings.get(frame) === cleanup) bindings.delete(frame);
     }
@@ -432,6 +435,7 @@
     frame.addEventListener("touchcancel", touchCancel, { passive: true });
     frame.addEventListener("click", suppressCapturedClick, true);
     window.addEventListener("resize", resized, { passive: true });
+    touchInteraction.addEventListener("change", resized);
     document.addEventListener("visibilitychange", hidden);
     observer.observe(document.documentElement, { childList: true, subtree: true });
     resizeObserver?.observe(frame);
@@ -439,5 +443,5 @@
     return cleanup;
   }
 
-  window.ImageStudioDetailSwipe = { bind };
+  window.ImageStudioDetailSwipe = { bind, usesTouchInteraction: () => touchInteraction.matches };
 })();

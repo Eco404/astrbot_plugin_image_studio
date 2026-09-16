@@ -1,4 +1,4 @@
-@media (max-width: 540px) {
+@media (max-width: 540px), (any-pointer: coarse) {
   .detail-image-frame.is-detail-swiping > .detail-image,
   .detail-image-frame.is-detail-swiping > .detail-image-pending {
     visibility: hidden;

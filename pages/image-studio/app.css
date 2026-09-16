@@ -209,6 +209,7 @@ html.modal-open { overflow: hidden; overscroll-behavior: none; }
 .image-studio-pswp .pswp__button--arrow--next { display: none; }
 .image-studio-pswp.pswp .pswp__button--image-studio-download {
   position: absolute;
+  z-index: 31;
   right: max(18px, env(safe-area-inset-right));
   bottom: max(18px, env(safe-area-inset-bottom));
   display: grid;
@@ -239,6 +240,22 @@ html.modal-open { overflow: hidden; overscroll-behavior: none; }
 }
 .image-studio-pswp.pswp .pswp__button--image-studio-download:active { background: rgba(42, 51, 48, .9); transform: scale(.96); }
 .image-studio-download-icon { display: block; width: 24px; height: 24px; pointer-events: none; }
+.image-studio-pswp.has-viewer-filmstrip .pswp__button--image-studio-download { bottom: calc(max(18px, env(safe-area-inset-bottom)) + 84px); right: max(24px, env(safe-area-inset-right), calc((100% - 960px) / 2)); }
+.image-studio-viewer-filmstrip {
+  position: absolute; z-index: 31; left: 50%; bottom: max(18px, env(safe-area-inset-bottom));
+  width: calc(100% - max(24px, env(safe-area-inset-left)) - max(24px, env(safe-area-inset-right))); max-width: 960px;
+  height: 72px; margin: 0; border: 1px solid var(--line); border-radius: 12px;
+  -webkit-mask-image: none; mask-image: none;
+  background: var(--topbar-glass); box-shadow: var(--shadow);
+  backdrop-filter: blur(14px) saturate(115%); -webkit-backdrop-filter: blur(14px) saturate(115%);
+  opacity: 0; visibility: hidden; pointer-events: none; transform: translate(-50%, 8px);
+  touch-action: pan-x; overscroll-behavior: contain;
+  transition: opacity var(--motion-fast) ease, transform var(--motion-base) var(--motion-ease);
+}
+.image-studio-controls-visible .image-studio-viewer-filmstrip { opacity: 1; visibility: visible; pointer-events: auto; transform: translate(-50%, 0); }
+.image-studio-viewer-filmstrip[data-group-pending] > .detail-filmstrip-track { visibility: hidden; }
+.image-studio-viewer-filmstrip .detail-filmstrip-thumb { touch-action: pan-x; }
+@media (prefers-reduced-motion: reduce) { .image-studio-viewer-filmstrip { transition: none; } }
 
 /* Quiet, short motion for navigation, controls, dynamic content, and overlays. */
 :root {
