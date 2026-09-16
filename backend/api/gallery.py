@@ -178,8 +178,14 @@ class GalleryAPI:
         return filters
 
     async def _api_gallery_list(self) -> Any:
+        filters = self._gallery_request_filters()
+        filters["light"] = str(web_request.query.get("light", "")).lower() in {
+            "1",
+            "true",
+            "yes",
+        }
         try:
-            payload = await self.store.list_generations(self._gallery_request_filters())
+            payload = await self.store.list_generations(filters)
         except ValueError as exc:
             return error_response(str(exc), status_code=400)
         retention = await self.store.gallery_retention_status(

@@ -214,6 +214,7 @@ class GalleryQueries:
 
     def list_generations(self, filters: dict[str, Any]) -> dict[str, Any]:
         revision = self.services.gallery_revision()
+        light = filters.get("light") is True
         limit = max(1, min(60, _as_int(filters.get("limit"), 24)))
         offset = max(0, _as_int(filters.get("offset"), 0))
         clause, args = self.gallery_filters(filters)
@@ -241,8 +242,11 @@ class GalleryQueries:
                 [*args, limit, offset],
             ).fetchall()
             facets = self.gallery_facets(conn)
-        items = [self.gallery_item(dict(row)) for row in rows]
+        items = [
+            self.gallery_item(dict(row), include_thumbnail=not light) for row in rows
+        ]
         return {
+            **({"lightweight": True} if light else {}),
             "items": items,
             "revision": revision,
             "total": total,
@@ -715,7 +719,9 @@ class GalleryQueries:
         ]
         return result
 
-    def gallery_item(self, row: dict[str, Any]) -> dict[str, Any]:
+    def gallery_item(
+        self, row: dict[str, Any], *, include_thumbnail: bool = True
+    ) -> dict[str, Any]:
         invocation_source = {
             key: str(row.get(key) or "")
             for key in (
@@ -728,7 +734,7 @@ class GalleryQueries:
                 "user_name",
             )
         }
-        return {
+        item = {
             **self.services.external_display(row["id"], row["source"]),
             "id": row["id"],
             "created_at": row["created_at"],
@@ -752,8 +758,12 @@ class GalleryQueries:
             "mime_type": row["mime_type"],
             "size_bytes": row["size_bytes"],
             "invocation_source": invocation_source,
-            "thumbnail_data_url": self.services.gallery_thumbnail(row, str(row["id"])),
         }
+        if include_thumbnail:
+            item["thumbnail_data_url"] = self.services.gallery_thumbnail(
+                row, str(row["id"])
+            )
+        return item
 
     def asset_item(
         self, row: dict[str, Any], *, preview_full: bool, include_preview: bool = True

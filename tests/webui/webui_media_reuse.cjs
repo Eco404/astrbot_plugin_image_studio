@@ -216,6 +216,13 @@ async function run(engine) {
     });
     await inner.locator('[data-view="gallery"]').click();
     await inner.locator("#gallerySearch").fill(marker); await inner.locator("#gallerySearch").press("Tab");
+    await inner.waitForFunction(id => {
+      const image = document.querySelector(`[data-gallery-id="${id}"] .gallery-image-wrap img`);
+      return image?.complete && image.naturalWidth > 0;
+    }, groupId);
+    // Gallery previews are separate requests now; detail must reuse the image
+    // that has arrived, without adding any preview request of its own.
+    requests.length = 0;
     await inner.locator(`[data-gallery-id="${groupId}"] .gallery-info`).click();
     await selected(inner, 0, marker); await originalStarted.promise; await frames(inner, 12);
     assert.equal(count("preview", ids[0]), 0, "the gallery cover must seed the shared thumbnail cache");

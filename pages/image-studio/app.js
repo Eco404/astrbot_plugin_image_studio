@@ -14,6 +14,11 @@
   const PROVIDER_QUOTA_TTL = 30_000;
   let providerQuotaTimer = 0;
   let galleryRequestRevision = 0;
+  let galleryQueryKey = "";
+  let galleryDisplayedPageKey = "";
+  let galleryPreviewSession = null;
+  let galleryPreviewActive = 0;
+  const GALLERY_PREVIEW_CONCURRENCY = 4;
   const galleryFilterFields = [["galleryProvider", "provider_ids"], ["galleryMode", "modes"], ["gallerySource", "sources"], ["galleryEngine", "generation_engines"]];
   const galleryFilterSelections = new Map();
   let gallerySort = "created";
@@ -296,6 +301,7 @@
   function showView(view) {
     window.ImageStudioSelect?.close();
     state.view = view;
+    if (view !== "gallery") stopGalleryPreviews();
     document.querySelectorAll(".nav-item").forEach((button) => button.classList.toggle("is-active", button.dataset.view === view));
     document.querySelectorAll(".view").forEach((item) => item.classList.toggle("is-active", item.id === `${view}View`));
     const labels = { generate: ["生图", "选择模式和模型后开始创作"], gallery: ["画廊", "搜索、筛选、复现或导出历史生成记录"], import: ["导入", "图片与生成参数"], settings: ["设置", "管理运行策略、历史、生图服务商和模型"], };
@@ -633,9 +639,28 @@
     library.closeGalleryPagePicker();
     if (state.view === "gallery") state.galleryLimit = library.galleryPageSize();
     const requestedPage = Math.max(0, Number.isFinite(Number(page)) ? Math.floor(Number(page)) : 0);
+    const filters = galleryFilters();
+    const queryKey = JSON.stringify({ ...filters, limit: state.galleryLimit });
+    const pageKey = `${queryKey}:${requestedPage}`;
     const revision = ++galleryRequestRevision;
+    const preserveCards = pageKey === galleryDisplayedPageKey;
+    if (!preserveCards) stopGalleryPreviews();
+    if (queryKey !== galleryQueryKey) state.galleryTotal = 0;
+    galleryQueryKey = queryKey;
+    state.galleryPage = requestedPage;
+    if (!preserveCards) {
+      state.galleryItems = [];
+      galleryDisplayedPageKey = "";
+      const remaining = state.galleryTotal - requestedPage * state.galleryLimit;
+      const count = Math.max(1, Math.min(state.galleryLimit, remaining > 0 ? remaining : state.galleryLimit));
+      els.galleryGrid.innerHTML = Array.from({ length: count }, () => library.renderGalleryPlaceholder()).join("");
+      els.galleryGrid.querySelectorAll(".gallery-image-pending").forEach(mount => mount.append(window.ImageStudioImagePlaceholder.create()));
+      els.galleryEmpty.classList.add("is-hidden");
+    }
+    setGalleryLoading(true);
+    updateGalleryPagination();
     try {
-      const payload = await apiGet("gallery/list", { ...galleryFilters(), limit: state.galleryLimit, offset: requestedPage * state.galleryLimit });
+      const payload = await apiGet("gallery/list", { ...filters, light: 1, limit: state.galleryLimit, offset: requestedPage * state.galleryLimit });
       if (revision !== galleryRequestRevision) return false;
       const total = Math.max(0, Number(payload.total || 0));
       const limit = Math.max(1, Number(payload.limit || state.galleryLimit));
@@ -645,13 +670,152 @@
       const dataChanged = payload.revision ? observeGalleryRevision(payload.revision) : true;
       if (!payload.revision) invalidateBrowseCache();
       state.galleryItems = payload.items || []; renderGallery(payload);
+      galleryDisplayedPageKey = `${queryKey}:${state.galleryPage}`;
+      setGalleryLoading(false);
+      startGalleryPreviews();
       if (detailNavigationSession?.active && browseFilterKey(detailNavigationSession.filters) !== browseFilterKey(galleryFilters())) refreshDetailSequence(detailNavigationSession);
       else if (dataChanged && detailNavigationSession?.active) void warmDetailNeighbors(detailNavigationSession);
       return true;
     } catch (error) {
-      showNotice(errorMessage(error, "画廊加载失败"), "error");
+      if (revision !== galleryRequestRevision) return false;
+      setGalleryLoading(false, preserveCards ? "刷新失败，仍显示上次的内容。" : "画廊加载失败，请重试。");
+      if (!preserveCards) els.galleryGrid.replaceChildren();
+      else startGalleryPreviews();
+      if (state.view === "gallery") showNotice(errorMessage(error, "画廊加载失败"), "error");
       return false;
     }
+  }
+
+  function setGalleryLoading(loading, error = "") {
+    els.galleryGrid.setAttribute("aria-busy", String(loading));
+    $("galleryLoadingStatus").textContent = error;
+    $("galleryLoadState").hidden = !error;
+    $("galleryRetry").hidden = !error;
+    $("selectAllButton").disabled = loading;
+  }
+
+  function updateGalleryPagination() {
+    const totalPages = Math.max(1, Math.ceil(state.galleryTotal / Math.max(1, state.galleryLimit)));
+    els.galleryPagination.classList.toggle("is-hidden", totalPages <= 1 && state.galleryPage === 0);
+    els.galleryPageLabel.textContent = `第 ${state.galleryPage + 1} / ${totalPages} 页 · 共 ${state.galleryTotal} 条`;
+    els.galleryPrev.disabled = state.galleryPage <= 0;
+    els.galleryNext.disabled = state.galleryPage >= totalPages - 1;
+    library.syncFloatingBars();
+  }
+
+  function stopGalleryPreviews() {
+    if (!galleryPreviewSession) return;
+    galleryPreviewSession.active = false;
+    galleryPreviewSession.observer?.disconnect();
+    galleryPreviewSession.queue.length = 0;
+    galleryPreviewSession = null;
+  }
+
+  function currentGalleryPreview(session, card, item) {
+    return session.active && galleryPreviewSession === session && state.view === "gallery"
+      && card.isConnected && card.galleryMediaKey === imageMediaKey(item, "preview");
+  }
+
+  function galleryPreviewFailed(session, card, item, source = "") {
+    if (!currentGalleryPreview(session, card, item)) return;
+    if (source) { discardImageMediaSource(source); delete item.thumbnail_data_url; }
+    card.galleryThumbnail = "";
+    card.dataset.previewStatus = "error";
+    const wrap = card.querySelector(".gallery-image-wrap");
+    wrap.setAttribute("aria-busy", "false");
+    wrap.querySelector("img")?.remove();
+    wrap.querySelector(".gallery-image-pending")?.remove();
+    if (wrap.querySelector(".gallery-preview-retry")) return;
+    const retry = document.createElement("button");
+    retry.type = "button"; retry.className = "quiet-button gallery-preview-retry";
+    retry.textContent = "重试预览"; retry.setAttribute("aria-label", "预览加载失败，重新加载此图片");
+    retry.addEventListener("click", event => {
+      event.stopPropagation(); retry.remove();
+      const pending = document.createElement("div"); pending.className = "gallery-image-pending";
+      pending.append(window.ImageStudioImagePlaceholder.create()); wrap.prepend(pending);
+      card.dataset.previewStatus = "pending"; wrap.setAttribute("aria-busy", "true");
+      session.queue.unshift({ card, item }); pumpGalleryPreviews();
+    });
+    wrap.append(retry);
+  }
+
+  function paintGalleryPreview(session, card, item, source) {
+    if (!currentGalleryPreview(session, card, item)) return;
+    const wrap = card.querySelector(".gallery-image-wrap");
+    let image = wrap.querySelector("img");
+    if (!image) {
+      image = document.createElement("img"); image.alt = item.prompt_preview || "";
+      image.decoding = "async"; wrap.prepend(image);
+    }
+    const ready = () => {
+      if (!currentGalleryPreview(session, card, item) || image.getAttribute("src") !== source) return;
+      card.dataset.previewStatus = "ready"; card.galleryThumbnail = source;
+      item.thumbnail_data_url = source;
+      wrap.setAttribute("aria-busy", "false");
+      wrap.querySelector(".gallery-image-pending")?.remove();
+    };
+    image.onload = ready;
+    image.onerror = () => galleryPreviewFailed(session, card, item, source);
+    if (image.getAttribute("src") !== source) image.src = source;
+    if (image.complete && image.naturalWidth > 0) ready();
+  }
+
+  function pumpGalleryPreviews() {
+    const session = galleryPreviewSession;
+    if (!session?.active || state.view !== "gallery") return;
+    // Old in-flight bridge calls cannot be aborted; discard their queued work
+    // and keep a global bound so rapid paging cannot flood the connection.
+    while (galleryPreviewActive < GALLERY_PREVIEW_CONCURRENCY && session.queue.length) {
+      const { card, item } = session.queue.shift();
+      if (!currentGalleryPreview(session, card, item)) continue;
+      galleryPreviewActive++;
+      void loadImageMedia(item, "preview").then(source => paintGalleryPreview(session, card, item, source))
+        .catch(() => galleryPreviewFailed(session, card, item))
+        .finally(() => { galleryPreviewActive--; pumpGalleryPreviews(); });
+    }
+  }
+
+  function startGalleryPreviews() {
+    stopGalleryPreviews();
+    if (state.view !== "gallery") return;
+    const session = { active: true, queue: [], observer: null };
+    galleryPreviewSession = session;
+    const items = new Map(state.galleryItems.map(item => [item.id, item]));
+    const enqueue = card => {
+      if (!session.active || card.dataset.previewStatus !== "pending") return;
+      const item = items.get(card.dataset.galleryId);
+      if (!item) return;
+      card.dataset.previewStatus = "queued";
+      session.observer?.unobserve(card);
+      session.queue.push({ card, item });
+    };
+    if (typeof IntersectionObserver !== "undefined") session.observer = new IntersectionObserver(entries => {
+      for (const entry of entries) if (entry.isIntersecting) enqueue(entry.target);
+      // Visible cards take priority over the near-viewport buffer.
+      session.queue.sort((a, b) => {
+        const distance = card => { const rect = card.getBoundingClientRect(); return Math.max(0, rect.top - innerHeight, -rect.bottom); };
+        return distance(a.card) - distance(b.card);
+      });
+      pumpGalleryPreviews();
+    }, { rootMargin: "240px" });
+    els.galleryGrid.querySelectorAll("[data-gallery-id]").forEach(card => {
+      const item = items.get(card.dataset.galleryId);
+      card.galleryMediaKey = imageMediaKey(item, "preview");
+      const source = item.thumbnail_data_url || getImageMedia(item, "preview");
+      card.querySelector(".gallery-preview-retry")?.remove();
+      if (source) { paintGalleryPreview(session, card, item, source); return; }
+      const wrap = card.querySelector(".gallery-image-wrap");
+      if (!wrap.querySelector(".gallery-image-pending")) {
+        const pending = document.createElement("div"); pending.className = "gallery-image-pending";
+        wrap.prepend(pending);
+      }
+      const pending = wrap.querySelector(".gallery-image-pending");
+      if (!pending.firstChild) pending.append(window.ImageStudioImagePlaceholder.create());
+      card.dataset.previewStatus = "pending"; wrap.setAttribute("aria-busy", "true");
+      if (session.observer) session.observer.observe(card);
+      else enqueue(card);
+    });
+    pumpGalleryPreviews();
   }
 
   function galleryFilters() {
@@ -678,6 +842,7 @@
   }
 
   function renderGallery(payload) {
+    els.galleryGrid.querySelectorAll(".gallery-card.is-placeholder").forEach(card => card.remove());
     updateGalleryFilterOptions(els.galleryProvider, (payload.filters?.providers || []).map((item) => [item.id, item.name || item.id || "未指定服务商"]));
     updateGalleryFilterOptions(els.galleryMode, (payload.filters?.modes || []).map(value => [value, library.modeLabel(value)]));
     updateGalleryFilterOptions(els.gallerySource, (payload.filters?.sources || []).map(value => [value, sourceLabel(value)]));
@@ -690,6 +855,7 @@
     for (const [id, card] of existing) if (!wanted.has(id)) card.remove();
     // Unchanged records keep their decoded images, focus and hover state across refreshes.
     state.galleryItems.forEach((item, index) => {
+      item.thumbnail_data_url ||= getImageMedia(item, "preview");
       cacheImageMedia(item, "preview", item.thumbnail_data_url);
       const { thumbnail_data_url: thumbnail, ...fields } = item;
       const signature = JSON.stringify(fields);
@@ -710,8 +876,7 @@
       card.querySelector("[data-select-id]").checked = state.selectedIds.has(item.id);
       if (els.galleryGrid.children[index] !== card) els.galleryGrid.insertBefore(card, els.galleryGrid.children[index] || null);
     });
-    const limit = Math.max(1, Number(payload.limit || state.galleryLimit)); const total = Math.max(0, Number(payload.total || state.galleryTotal)); const totalPages = Math.max(1, Math.ceil(total / limit));
-    els.galleryPagination.classList.toggle("is-hidden", totalPages <= 1); els.galleryPageLabel.textContent = `第 ${state.galleryPage + 1} / ${totalPages} 页 · 共 ${total} 条`; els.galleryPrev.disabled = state.galleryPage <= 0; els.galleryNext.disabled = state.galleryPage >= totalPages - 1;
+    updateGalleryPagination();
     updateSelection();
     library.galleryRendered(payload);
     window.ImageStudioSelect?.refresh();
@@ -2518,7 +2683,7 @@
     els.resetNegativePromptButton.addEventListener("click", () => { els.negativePrompt.value = selectedModel()?.negative_prompt_default || ""; els.negativePrompt.focus(); });
     $("referenceChooseButton").addEventListener("click", () => els.referenceUpload.click());
     els.referenceUpload.addEventListener("change", async () => { setError(els.generationError, ""); try { await uploadReferences(els.referenceUpload.files); } catch (error) { setError(els.generationError, errorMessage(error, "上传参考图失败")); } finally { els.referenceUpload.value = ""; } });
-    els.generationForm.addEventListener("submit", generate); $("galleryRefresh").addEventListener("click", () => void loadGallery()); els.galleryPrev.addEventListener("click", () => void loadGallery(state.galleryPage - 1)); els.galleryNext.addEventListener("click", () => void loadGallery(state.galleryPage + 1)); els.gallerySearch.addEventListener("change", () => void loadGallery(0)); els.galleryProvider.addEventListener("change", () => void loadGallery(0)); els.galleryMode.addEventListener("change", () => void loadGallery(0)); els.gallerySource.addEventListener("change", () => void loadGallery(0));
+    els.generationForm.addEventListener("submit", generate); $("galleryRefresh").addEventListener("click", () => void loadGallery()); $("galleryRetry").addEventListener("click", () => void loadGallery()); els.galleryPrev.addEventListener("click", () => void loadGallery(state.galleryPage - 1)); els.galleryNext.addEventListener("click", () => void loadGallery(state.galleryPage + 1)); els.gallerySearch.addEventListener("change", () => void loadGallery(0)); els.galleryProvider.addEventListener("change", () => void loadGallery(0)); els.galleryMode.addEventListener("change", () => void loadGallery(0)); els.gallerySource.addEventListener("change", () => void loadGallery(0));
     $("cancelSelectionButton").addEventListener("click", clearGallerySelection); $("selectAllButton").addEventListener("click", () => { state.galleryItems.forEach((item) => state.selectedIds.add(item.id)); els.galleryGrid.querySelectorAll("[data-select-id]").forEach((input) => { input.checked = true; }); updateSelection(); }); $("exportButton").addEventListener("click", () => void exportSelected()); $("deleteButton").addEventListener("click", () => void deleteSelected());
     $("closeDrawer").addEventListener("click", closeDetail); $("closeImagePreview").addEventListener("click", closeImagePreview); els.imagePreviewPrev.addEventListener("click", () => void navigateImagePreview(-1)); els.imagePreviewNext.addEventListener("click", () => void navigateImagePreview(1)); bindImagePreviewGestures(); els.imagePreview.querySelector("[data-close-image-preview]").addEventListener("click", closeImagePreview); els.previewImage.addEventListener("click", () => { if (Date.now() - state.imagePreviewSwipeAt < 500) return; closeImagePreview(); }); els.scrim.addEventListener("click", () => { if (!els.parameterDialog.classList.contains("is-hidden")) return; if (activeConfirmation) activeConfirmation(false); else closeDetail(); });
     document.addEventListener("keydown", (event) => { if (mobileImageViewer || library.modalOpen()) return; if (event.key === "Escape") { if (!els.parameterDialog.classList.contains("is-hidden")) closeToolParameterDialog(); else if (!els.imagePreview.classList.contains("is-hidden")) closeImagePreview(); else if (els.detailDrawer.classList.contains("is-open") && !activeConfirmation) closeDetail(); return; } if (event.target.closest('input,textarea,select,[role="combobox"],[contenteditable=true]')) return; if (!els.imagePreview.classList.contains("is-hidden")) { if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); void navigateImagePreview(event.key === "ArrowLeft" ? -1 : 1); } return; } if (!els.detailDrawer.classList.contains("is-open") || activeConfirmation) return; if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); void navigateDetail(event.key === "ArrowLeft" ? -1 : 1); } });

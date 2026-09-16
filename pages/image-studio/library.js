@@ -507,11 +507,15 @@
       }, { passive: true });
     }
 
+    function renderGalleryPlaceholder() {
+      return '<div class="gallery-card is-placeholder" aria-hidden="true"><div class="gallery-image-wrap"><div class="gallery-image-pending"></div></div><div class="gallery-info"><span class="gallery-skeleton-line"></span><span class="gallery-skeleton-line is-short"></span></div></div>';
+    }
+
     function renderGalleryCard(item, index = 0) {
       const warning = !!item.cleanup_warning;
       const selected = state.selectedIds.has(item.id);
       return `<article class="gallery-card ${item.is_favorite ? "is-favorite" : ""} ${warning ? "has-cleanup-warning" : ""} ${selected ? "is-selected" : ""}" data-gallery-id="${escape(item.id)}" tabindex="0" role="button" aria-label="查看 ${escape(item.model || item.provider_name || "图片")}">
-        <div class="gallery-image-wrap">${item.thumbnail_data_url ? `<img src="${escape(item.thumbnail_data_url)}" alt="${escape(item.prompt_preview)}" loading="${index < Math.max(1, galleryColumns) * 2 ? "eager" : "lazy"}" decoding="async" />` : `<div class="gallery-missing-image">${icon("Image")}<span>图片不可用</span></div>`}
+        <div class="gallery-image-wrap">${item.thumbnail_data_url ? `<img src="${escape(item.thumbnail_data_url)}" alt="${escape(item.prompt_preview)}" loading="${index < Math.max(1, galleryColumns) * 2 ? "eager" : "lazy"}" decoding="async" />` : '<div class="gallery-image-pending"></div>'}
           <label class="gallery-selection"><input type="checkbox" data-select-id="${escape(item.id)}" aria-label="选择生成记录" ${selected ? "checked" : ""} /><span>${icon("Check")}</span></label>
           <span class="gallery-source-label${item.is_external ? " is-external" : ""}"${item.is_external ? ` data-tooltip="来自 ${escape(item.external_source?.name || "nai-image 插件图库")}" aria-label="${escape(engineLabel(item.generation_engine))}，来自 ${escape(item.external_source?.name || "nai-image 插件图库")}"` : ""}>${escape(engineLabel(item.generation_engine))}</span>${Number(item.image_count) > 1 ? `<span class="gallery-image-count" aria-label="${Number(item.image_count)} 张图片">${icon("Image")}<span>${Number(item.image_count)}</span></span>` : ""}${item.is_favorite ? `<span class="gallery-favorite" data-tooltip="已收藏" aria-label="已收藏">${icon("Star")}</span>` : ""}
         </div><div class="gallery-info"><strong>${escape(item.model || item.provider_name || engineLabel(item.generation_engine))}</strong><p>${escape(item.prompt_preview || "无提示词")}</p><div class="gallery-meta"><span>${modeLabel(item.mode)}</span><span>${formatDate(item.sort_time || item.created_at)}</span></div>${warning ? '<span class="cleanup-warning-label">清理候选</span>' : ""}${item.file_state && item.file_state !== "available" ? '<span class="cleanup-warning-label">文件需检查</span>' : ""}</div></article>`;
@@ -642,6 +646,6 @@
       });
     }
 
-    return { bind, modeLabel, engineLabel, galleryPageSize, closeGalleryPagePicker, renderGalleryCard, galleryRendered, selectionChanged, syncFloatingBars, detailMetadataMarkup, detailWarningsMarkup, layoutDetailParameters, layoutSettingsPanels, clearDetailParameterLayout, updateDetailActions, copyText, resolveParameters, schemaPolicyButton, editParameterPolicy, setCommandLabel, openModal, modalOpen: modal.isOpen };
+    return { bind, modeLabel, engineLabel, galleryPageSize, closeGalleryPagePicker, renderGalleryPlaceholder, renderGalleryCard, galleryRendered, selectionChanged, syncFloatingBars, detailMetadataMarkup, detailWarningsMarkup, layoutDetailParameters, layoutSettingsPanels, clearDetailParameterLayout, updateDetailActions, copyText, resolveParameters, schemaPolicyButton, editParameterPolicy, setCommandLabel, openModal, modalOpen: modal.isOpen };
   };
 })();

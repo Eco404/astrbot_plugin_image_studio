@@ -113,6 +113,13 @@ async function run(browserName, width) {
     await inner.locator("#modelChoice:not(:disabled)").waitFor();
     await inner.locator('[data-view="gallery"]').click();
     await inner.locator("#gallerySearch").fill(marker); await inner.locator("#gallerySearch").press("Tab");
+    // Covers now arrive independently of the lightweight list. Establish the
+    // cached-cover precondition, then count only requests caused by detail use.
+    await inner.waitForFunction(ids => ids.every(id => {
+      const image = document.querySelector(`[data-gallery-id="${id}"] .gallery-image-wrap img`);
+      return image?.complete && image.naturalWidth > 0;
+    }), [A, B, C, D]);
+    requests.length = 0;
     await inner.locator(`[data-gallery-id="${B}"] .gallery-info`).click(); await selected(inner, B, 0);
     await inner.locator("#detailCopy:not(:disabled)").waitFor();
     if (!count("preview", aLast)) await page.waitForRequest(request => request.url().includes(`/gallery/image/${aLast}?`));

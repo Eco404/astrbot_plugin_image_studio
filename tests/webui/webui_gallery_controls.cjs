@@ -51,7 +51,7 @@ async function checkMenu(frame, expectedSelected = 1) {
       await page.goto(base);
       const frame = page.frames().find(item => item.url().includes("/ui/"));
       await frame.locator("#runtimeStatus").filter({ hasText: "已加载" }).waitFor({ state: "attached" });
-      await frame.evaluate(async theme => { await window.ImageStudioAppearance?.ready; window.ImageStudioAppearance.set({ preference: theme }); }, test.theme);
+      await frame.evaluate(async theme => { await window.ImageStudioAppearance?.ready; window.ImageStudioAppearance.set({ preference: theme }); await window.ImageStudioAppearance.save(); }, test.theme);
 
       await choose(frame, "#modelChoice", "natural:studio-image");
       await choose(frame, '[data-model-parameter="size"]', "1024x1536");

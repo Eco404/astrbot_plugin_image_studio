@@ -4,7 +4,7 @@
 
 代码分区和依赖边界见 [目录结构](ARCHITECTURE.md)，统一检查及隔离浏览器验证见 [测试入口](TESTING.md)。后端实现位于 `backend/`，插件注册仍在根目录 `main.py`；移动内部 Python 模块不改变配置、数据库或 Web API 格式。
 
-当前正式基线为插件 `1.3.0`、数据库 **v3**。ComfyUI 工作流修订与可恢复任务的开发期结构已压缩为一次 `v2 → v3` 发布迁移，正式库不保留开发标记。ComfyUI 已完成基础真实生图测试，覆盖范围见下方接入说明；NovelAI 官方仍需可用账户完成成功生图验证。
+当前正式基线为插件 `1.3.1`、数据库 **v3**。1.3.1 调整画廊加载，不增加数据库迁移；沿用 1.3.0 发布的 `v2 → v3` 升级路径，正式库不保留开发标记。ComfyUI 已完成基础真实生图测试，覆盖范围见下方接入说明；NovelAI 官方仍需可用账户完成成功生图验证。
 
 官方协议构造与解析集中在 `backend/providers/novelai/protocol.py`，不依赖完整第三方 SDK。`GeneratedImage.effective_parameters` 通过 `generation_images.supplemental_json.effective_request` 保存经过记录策略过滤的实际参数；原始请求仍保留在生成记录上。隐写元数据解析器版本为 9，既有缓存更新沿用现有回填流程。
 
@@ -12,11 +12,11 @@
 
 ComfyUI 架构、工作流绑定、任务恢复与范围见 [ComfyUI 接入](COMFYUI_IMPLEMENTATION.md)。`backend/providers/comfyui/client.py` 负责原生协议，`backend/providers/comfyui/workflows.py` 负责执行图和绑定，`backend/providers/comfyui/jobs.py` 保存修订/任务/临时文件，`backend/providers/comfyui/runtime.py` 接入现有生成与图库流程。运行中任务不受浏览器连接生命周期影响。
 
-## 1.3.0 正式基线
+## 1.3.1 正式基线
 
 | 标识 | 当前值 | 含义 |
 | --- | --- | --- |
-| 插件版本 | `1.3.0` | `metadata.yaml` 与 `main.py` 注册版本相同 |
+| 插件版本 | `1.3.1` | `metadata.yaml` 与 `main.py` 注册版本相同 |
 | 数据库正式版本 | `3` | SQLite `PRAGMA user_version`，由 `backend/database/schema.py` 管理 |
 | 配置格式版本 | `2` | `studio_config.json` 的 `schema_version`，与数据库版本独立 |
 | 图片解析器版本 | `9` | 控制派生元数据回填，与数据库结构版本独立 |
@@ -29,7 +29,7 @@ ComfyUI 架构、工作流绑定、任务恢复与范围见 [ComfyUI 接入](COM
 
 ## 升级与开发库转换
 
-| 当前数据库 | 1.3.0 的处理 |
+| 当前数据库 | 1.3.1 的处理 |
 | --- | --- |
 | 空库 | 直接创建正式 v3，不备份空库 |
 | 正式 v1（1.0.0） | 核验、备份，在一个事务中执行 `v1 → v2 → v3` |
@@ -72,7 +72,7 @@ data/plugin_data/astrbot_plugin_image_studio/backups/
 
 ## 后续开发版本
 
-1. 从 `1.3.0` 和数据库正式 v3 基线继续开发，不修改已发布结构的版本含义。
+1. 从 `1.3.1` 和数据库正式 v3 基线继续开发，不修改已发布结构的版本含义。
 2. 普通 UI、指令或 Provider 修改可继续使用数据库 v3。只有结构变化时才启用下一个数据库目标版本。
 3. 若下一次结构目标为 v4，开发库保留 `user_version=3`，另以 `schema_meta(target_version=4, dev_revision=1,2,...)` 标识 `4-dev.1` 等修订；结构和开发标记在同一事务内提交。本次正式版不预先创建这些标记。
 4. 后续插件开发版本使用 `下一版本-dev.N` 名称，与数据库版本独立。开发测试使用临时目录或独立数据副本，不与正式部署共用数据目录。
@@ -90,7 +90,7 @@ python scripts/verify.py --webui comfy_workspace comfy_gallery_run --browser chr
 python scripts/verify.py --webui comfy_gallery_run --browser webkit
 ```
 
-当前正式版构建默认输出 `dist/astrbot_plugin_image_studio-v1.3.0.zip`，实际文件名跟随元数据版本；支持 `--root` 和 `--output`。构建读取当前工作区，不要求先提交，不执行数据库转换。
+当前正式版构建默认输出 `dist/astrbot_plugin_image_studio-v1.3.1.zip`，实际文件名跟随元数据版本；支持 `--root` 和 `--output`。构建读取当前工作区，不要求先提交，不执行数据库转换。
 
 安装包只包含运行模块、WebUI、使用说明和指定的演示截图，不包含真实数据、日志、开发数据库、测试或维护文档。新增运行模块或 README 图片时，同步更新构建白名单和测试；第三方静态资源的许可证随包保留。
 
