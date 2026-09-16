@@ -43,6 +43,7 @@ from .config import (
     runtime_settings,
     save_studio_settings,
 )
+from .capability_catalog import search_catalog, select_capability_models
 from .external_gallery import ExternalGalleryManager
 from .gallery_preferences import (
     GALLERY_PREFERENCES_COOKIE,
@@ -65,7 +66,6 @@ from .comfyui import ComfyExecutionError
 from .comfyui_workflows import FIXED_OUTPUT_POLICY
 from .service import ImageGenerationService
 from .storage import (
-    WORKFLOW_ASSET_RETENTION_SECONDS,
     ExternalDeleteError,
     ExternalPermissionError,
     GenerationStore,
@@ -84,6 +84,8 @@ AGENT_WORKFLOW_PROMPT_MARKER = "<!-- image_studio_agent_workflow_v1 -->"
 AGENT_WORKFLOW_PROMPT = (
     "使用 image_studio 系列工具时遵循以下流程和规范："
     "先调用 image_studio_get_capabilities 获取模型参数，再调用 image_studio_generate 进行图像生成或处理，"
+    "用户指定模型或工作流名称时可用 search 查找，或用 providers 查找服务商；"
+    "搜索摘要不包含完整参数，选定后使用 model 和 model_refs 查询。"
     "仅在需要查看指定资产或检查原图细节时调用 image_studio_view_asset。"
     "严格使用查询工具返回的模型参数，不得编造参数；严格遵守模型的提示词输入方式(自然语言/NAI tag)；"
     "插件内继续处理图片时只使用 asset_id；发送到当前会话或交给外部工具处理时，"
@@ -2478,252 +2480,233 @@ class ImageStudioPlugin(Star):
         event: AstrMessageEvent,
         query_type: str = "default",
         mode: str = "",
-        model_ref: str = "",
+        model_refs: list[str] | None = None,
+        query: str = "",
+        provider_id: str = "",
+        provider_kind: str = "",
+        limit: int = 10,
+        offset: int = 0,
     ) -> mcp.types.CallToolResult:
         """使用 image_studio_generate 工具前必须先调用本工具查询模型能力。
 
+        search/providers 只返回候选摘要；选定后使用 model 和 model_refs 获取完整参数。
+        default/all/model 返回完整能力，可按成功结果直接生成。
+
         Args:
-            query_type(string): default(查询默认模型参数)/all(查询全部模型参数)/model(搭配model_ref参数查询指定模型参数); 默认 default
-            mode(string): text2img/img2img; query_type=default 时可省略
-            model_ref(string): provider_id:model_id; 仅在 query_type=model 时使用
+            query_type(string): default(查询默认模型参数)/all(查询全部模型参数)/model(使用model_refs查询指定模型参数)/providers(查询服务商)/search(搜索模型或工作流); 默认 default
+            mode(string): 按 text2img/img2img 筛选；省略时查询两种模式
+            model_refs(array[string]): provider_id:model_id 字符串数组；query_type=model 时必填，各项独立返回成功结果或错误说明
+            query(string): 模型或工作流名称、ID、使用说明，或服务商名称、ID；仅 search/providers 使用，留空列出全部候选
+            provider_id(string): 限定服务商 ID；仅 search/providers 使用
+            provider_kind(string): 限定服务商类型，例如 comfyui；仅 search/providers 使用
+            limit(number): search/providers 每页数量，整数 1 至 50，默认 10
+            offset(number): search/providers 起始位置，非负整数，默认 0
         """
 
         if not self._settings.enable_llm_tool:
-            return mcp.types.CallToolResult(
-                content=[
-                    mcp.types.TextContent(
-                        type="text", text="Image Studio 的 LLM 生图工具已关闭。"
-                    )
-                ],
-                isError=True,
-            )
-        normalized_mode = str(mode or "").strip().lower()
+            return _tool_error("Image Studio 的 LLM 生图工具已关闭。")
+        if not isinstance(mode, str):
+            return _tool_error("mode 仅支持 text2img 或 img2img。")
+        normalized_mode = mode.strip().lower()
         if normalized_mode not in {"", "text2img", "img2img"}:
-            return mcp.types.CallToolResult(
-                content=[
-                    mcp.types.TextContent(
-                        type="text", text="mode 仅支持 text2img 或 img2img。"
-                    )
-                ],
-                isError=True,
-            )
-        normalized_query_type = str(query_type or "default").strip().lower()
-        requested_ref = str(model_ref or "").strip()
-        if normalized_query_type != "model" and requested_ref:
-            normalized_query_type = "model"
-        if normalized_query_type not in {"all", "default", "model"}:
-            return _tool_error("query_type 仅支持 all、default 或 model。")
-        requested_refs: set[str] = set()
-        default_modes_by_ref: dict[str, list[str]] = {}
-        if normalized_query_type == "default":
-            target_modes = (
-                (normalized_mode,) if normalized_mode else ("text2img", "img2img")
-            )
-            for target_mode in target_modes:
-                default_ref = self._settings.default_model_ref(target_mode, "llm_tool")
-                if not default_ref:
-                    continue
-                requested_refs.add(default_ref)
-                default_modes_by_ref.setdefault(default_ref, []).append(target_mode)
-            if not requested_refs:
-                return _tool_error(
-                    "当前模式尚未设置默认 LLM 生图模型。"
-                    if normalized_mode
-                    else "尚未设置可用的文生图或图生图默认 LLM 模型。"
-                )
-        elif normalized_query_type == "model" and not requested_ref:
-            return _tool_error("查询指定模型时必须传入 model_ref。")
-        elif normalized_query_type == "model":
-            requested_refs.add(requested_ref)
-        entries: list[dict[str, Any]] = []
-        for provider in self._settings.providers:
-            if not provider.enabled:
-                continue
-            for model in provider.models:
-                if not model.llm_enabled:
-                    continue
-                ref = f"{provider.id}:{model.id}"
-                matched_requested_ref = next(
-                    (
-                        candidate
-                        for candidate in requested_refs
-                        if candidate in {ref, model.id}
-                    ),
-                    "",
-                )
-                if requested_refs and not matched_requested_ref:
-                    continue
-                modes = [
-                    candidate
-                    for candidate, supported in (
-                        ("text2img", model.supports("text2img")),
-                        ("img2img", model.supports("img2img")),
-                    )
-                    if supported
-                ]
-                if normalized_mode and normalized_mode not in modes:
-                    continue
-                default_for_modes = [
-                    candidate
-                    for candidate in default_modes_by_ref.get(
-                        matched_requested_ref or ref, ()
-                    )
-                    if candidate in modes
-                ]
-                if normalized_query_type == "default" and not default_for_modes:
-                    continue
-                query_modes = (
-                    default_for_modes
-                    if normalized_query_type == "default"
-                    else [normalized_mode]
-                    if normalized_mode
-                    else modes
-                )
-                tool = model.tool
-                exposed_parameters: dict[str, Any] = {}
-                configured_parameters = tool.get("parameters")
-                exposed_parameter_names = model.llm_exposed_parameter_names
-                for name, descriptor in model.parameters.items():
-                    # This dedicated field uses tool policy, not model schema.
-                    if name == "negative_prompt":
-                        continue
-                    if name not in exposed_parameter_names:
-                        continue
-                    request_key = str(descriptor.get("request_key") or name)
-                    if (
-                        provider.kind == "comfyui"
-                        and request_key in {"count", "n", "size"}
-                        and (
-                            request_key == "size"
-                            or model.comfyui.get("execution_policy")
-                            != FIXED_OUTPUT_POLICY
-                        )
-                    ):
-                        source = (
-                            "count"
-                            if str(descriptor.get("request_key") or name)
-                            in {"count", "n"}
-                            else "width"
-                        )
-                        if not any(
-                            item["source"] == source
-                            for item in model.comfyui.get("bindings", {}).values()
-                        ):
-                            continue
-                    policy = (
-                        configured_parameters.get(name)
-                        if isinstance(configured_parameters, dict)
-                        else None
-                    )
-                    policy = policy if isinstance(policy, dict) else {}
-                    visible = _llm_parameter_descriptor(descriptor, policy)
-                    if "default_override" in policy:
-                        visible["default"] = policy["default_override"]
-                    exposed_parameters[name] = visible
-                if model.llm_negative_prompt_enabled:
-                    exposed_parameters["negative_prompt"] = _llm_parameter_descriptor(
-                        {
-                            "type": "string",
-                            "description": (
-                                "专用反向提示词，只填写不希望出现在画面中的内容；"
-                                "省略时使用此处的默认值。"
-                            ),
-                            "default": model.llm_negative_prompt_default,
-                        },
-                        model.llm_negative_prompt_policy,
-                    )
-                prompt_profile = tool.get("prompt_profile", "natural_language")
-                prompt_instructions = tool.get("prompt_instructions", "")
-                entry = {
-                    "model_ref": ref,
-                    "provider_name": provider.name,
-                    "model_name": model.name,
-                    "modes": modes,
-                    "query_modes": query_modes,
-                    "max_reference_images": model.llm_max_reference_images,
-                    "selection_description": tool.get("selection_description", ""),
-                    "prompt_contract": {
-                        "format": prompt_profile,
-                        "instruction": prompt_instructions,
-                        "negative_prompt": (
-                            "仅在 parameters 返回该字段时使用。"
-                            if model.llm_negative_prompt_enabled
-                            else "不要传入 negative_prompt。"
-                        ),
-                    },
-                    "parameters": exposed_parameters,
-                    **(
-                        {"novelai_capabilities": model.novelai_capabilities}
-                        if model.novelai_capabilities
-                        else {}
-                    ),
-                }
-                if default_for_modes:
-                    entry["default_for_modes"] = default_for_modes
-                if provider.kind == "comfyui":
-                    entry["comfyui_capabilities"] = model.comfyui_capabilities
-                    entry["prompt_contract"]["required"] = model.comfyui_capabilities[
-                        "prompt_required"
-                    ]
-                    if not model.comfyui_capabilities["prompt_required"]:
-                        entry["prompt_contract"]["instruction"] = (
-                            "此工作流没有主提示词入口，可省略 prompt；仅通过已开放 parameters 调整工作流输入。"
-                        )
-                entries.append(entry)
-        for candidate in requested_refs:
-            if ":" in candidate:
-                continue
-            matching_entries = [
-                entry
-                for entry in entries
-                if str(entry.get("model_ref") or "").endswith(f":{candidate}")
-            ]
-            if len(matching_entries) > 1:
-                return _tool_error("模型 ID 不唯一，请使用 provider_id:model_id 查询。")
-        if not entries:
+            return _tool_error("mode 仅支持 text2img 或 img2img。")
+        if not isinstance(query_type, str):
             return _tool_error(
-                "没有符合条件的模型；模型可能不存在、已停用、不支持该模式或未向 LLM 工具开放。"
+                "query_type 仅支持 all、default、model、providers 或 search。"
             )
-        _remember_capability_query(event, self._settings.revision, entries)
-        _activate_image_workflow(event)
+        normalized_query_type = query_type.strip().lower() or "default"
+        if normalized_query_type not in {
+            "all",
+            "default",
+            "model",
+            "providers",
+            "search",
+        }:
+            return _tool_error(
+                "query_type 仅支持 all、default、model、providers 或 search。"
+            )
+        if model_refs is not None:
+            if normalized_query_type == "default":
+                normalized_query_type = "model"
+            elif normalized_query_type != "model":
+                return _tool_error("model_refs 仅用于 query_type=model 查询。")
+        try:
+            if normalized_query_type in {"providers", "search"}:
+                payload = search_catalog(
+                    self._settings,
+                    query_type=normalized_query_type,
+                    mode=normalized_mode,
+                    query=query,
+                    provider_id=provider_id,
+                    provider_kind=provider_kind,
+                    limit=limit,
+                    offset=offset,
+                )
+                return _tool_json(payload)
+            if query != "" or limit != 10 or offset != 0:
+                raise ValueError(
+                    "query、limit 和 offset 仅用于 search/providers 查询。"
+                )
+            selected, capability_errors = select_capability_models(
+                self._settings,
+                query_type=normalized_query_type,
+                mode=normalized_mode,
+                model_refs=model_refs,
+                provider_id=provider_id,
+                provider_kind=provider_kind,
+            )
+        except ValueError as exc:
+            return _tool_error(str(exc))
+
+        entries: list[dict[str, Any]] = []
+        for (
+            provider,
+            model,
+            query_modes,
+            default_for_modes,
+            input_index,
+            requested_ref,
+        ) in selected:
+            ref = f"{provider.id}:{model.id}"
+            modes = [
+                candidate
+                for candidate in ("text2img", "img2img")
+                if model.supports(candidate)
+            ]
+            tool = model.tool
+            exposed_parameters: dict[str, Any] = {}
+            configured_parameters = tool.get("parameters")
+            exposed_parameter_names = model.llm_exposed_parameter_names
+            for name, descriptor in model.parameters.items():
+                # This dedicated field uses tool policy, not model schema.
+                if name == "negative_prompt":
+                    continue
+                if name not in exposed_parameter_names:
+                    continue
+                request_key = str(descriptor.get("request_key") or name)
+                if (
+                    provider.kind == "comfyui"
+                    and request_key in {"count", "n", "size"}
+                    and (
+                        request_key == "size"
+                        or model.comfyui.get("execution_policy") != FIXED_OUTPUT_POLICY
+                    )
+                ):
+                    source = (
+                        "count"
+                        if str(descriptor.get("request_key") or name) in {"count", "n"}
+                        else "width"
+                    )
+                    if not any(
+                        item["source"] == source
+                        for item in model.comfyui.get("bindings", {}).values()
+                    ):
+                        continue
+                policy = (
+                    configured_parameters.get(name)
+                    if isinstance(configured_parameters, dict)
+                    else None
+                )
+                policy = policy if isinstance(policy, dict) else {}
+                visible = _llm_parameter_descriptor(descriptor, policy)
+                if "default_override" in policy:
+                    visible["default"] = policy["default_override"]
+                exposed_parameters[name] = visible
+            if model.llm_negative_prompt_enabled:
+                exposed_parameters["negative_prompt"] = _llm_parameter_descriptor(
+                    {
+                        "type": "string",
+                        "description": (
+                            "专用反向提示词，只填写不希望出现在画面中的内容；"
+                            "省略时使用此处的默认值。"
+                        ),
+                        "default": model.llm_negative_prompt_default,
+                    },
+                    model.llm_negative_prompt_policy,
+                )
+            prompt_profile = tool.get("prompt_profile", "natural_language")
+            prompt_instructions = tool.get("prompt_instructions", "")
+            entry = {
+                "model_ref": ref,
+                "provider_name": provider.name,
+                "model_name": model.name,
+                "modes": modes,
+                "query_modes": query_modes,
+                "max_reference_images": model.llm_max_reference_images,
+                "selection_description": tool.get("selection_description", ""),
+                "prompt_contract": {
+                    "format": prompt_profile,
+                    "instruction": prompt_instructions,
+                    "negative_prompt": (
+                        "仅在 parameters 返回该字段时使用。"
+                        if model.llm_negative_prompt_enabled
+                        else "不要传入 negative_prompt。"
+                    ),
+                },
+                "parameters": exposed_parameters,
+                **(
+                    {"novelai_capabilities": model.novelai_capabilities}
+                    if model.novelai_capabilities
+                    else {}
+                ),
+            }
+            if default_for_modes:
+                entry["default_for_modes"] = default_for_modes
+            if provider.kind == "comfyui":
+                entry["comfyui_capabilities"] = model.comfyui_capabilities
+                entry["prompt_contract"]["required"] = model.comfyui_capabilities[
+                    "prompt_required"
+                ]
+                if not model.comfyui_capabilities["prompt_required"]:
+                    entry["prompt_contract"]["instruction"] = (
+                        "此工作流没有主提示词入口，可省略 prompt；仅通过已开放 parameters 调整工作流输入。"
+                    )
+            if normalized_query_type == "model":
+                entry.update(input_index=input_index, requested_ref=requested_ref)
+            entries.append(entry)
+        if entries:
+            _remember_capability_query(event, self._settings.revision, entries)
+            _activate_image_workflow(event)
         if normalized_query_type == "default":
             next_action = (
                 "按请求模式选择 default_for_modes；普通画面描述不是能力缺口。满足明确能力则直接生成，"
-                "否则查询相同 mode 的 all。"
+                "否则使用相同 mode 的 search 查找模型，再用 model_refs 查询完整参数。"
                 if not normalized_mode
-                else "普通画面描述不是能力缺口；满足明确能力则直接生成，否则查询相同 mode 的 all。"
+                else "普通画面描述不是能力缺口；满足明确能力则直接生成，否则 search 查找模型，再用 model_refs 查询完整参数。"
             )
         elif normalized_query_type == "all":
             next_action = "选择满足要求的模型直接生成，无需再次 model 查询。"
+        elif not entries:
+            next_action = "没有成功查询的模型；根据 errors 修正 model_refs，或使用 search 查找可用模型后重新查询。"
+        elif capability_errors:
+            next_action = "仅 models 中的成功项已查询完整能力，可按 prompt_contract 和 parameters 生成；errors 中的项需修正 model_refs 后重新查询。"
         else:
             next_action = "按 prompt_contract 和 parameters 直接生成。"
-        payload = {
-            "query_type": normalized_query_type,
-            "next_action": next_action,
-            "asset_policy": {
-                "return_mode": self._settings.llm_image_return_mode,
-                "preview_max_edge": self._settings.asset_preview_max_edge,
-                "temporary_retention_hours": WORKFLOW_ASSET_RETENTION_SECONDS // 3600,
-                "temporary_retention_policy": "生成或成功读取后临时保护 1 小时；到期仅允许清理无其他保留关系的图片，不撤销会话访问权限",
-                "access_policy": "当前会话已授权的 asset_id，只要原图仍在即可继续使用；其他会话不能据此访问",
-                "private_asset_handle": "asset_id",
-                "view_tool": "image_studio_view_asset",
-                "delivery_tool": "image_studio_send_output",
-                "temporary_preview_path": "data/temp/tool_images 仅供框架内部视觉预览，不得作为资产路径使用",
-            },
-            "default_model_refs": {
-                "text2img": self._settings.default_model_ref("text2img", "llm_tool"),
-                "img2img": self._settings.default_model_ref("img2img", "llm_tool"),
-            },
-            "models": entries,
-        }
-        return mcp.types.CallToolResult(
-            content=[
-                mcp.types.TextContent(
-                    type="text",
-                    text=json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
-                )
-            ]
+        return _tool_json(
+            {
+                "query_type": normalized_query_type,
+                "next_action": next_action,
+                "asset_policy": {
+                    "return_mode": self._settings.llm_image_return_mode,
+                    "preview_max_edge": self._settings.asset_preview_max_edge,
+                    "private_asset_handle": "asset_id",
+                    "reuse": "仅使用工具返回的 asset_id；原图仍存在时可以继续复用",
+                    "view_tool": "image_studio_view_asset",
+                    "delivery_tool": "image_studio_send_output",
+                },
+                "default_model_refs": {
+                    "text2img": self._settings.default_model_ref(
+                        "text2img", "llm_tool"
+                    ),
+                    "img2img": self._settings.default_model_ref("img2img", "llm_tool"),
+                },
+                "models": entries,
+                **(
+                    {"errors": capability_errors}
+                    if normalized_query_type == "model"
+                    else {}
+                ),
+            }
         )
 
     @filter.llm_tool(name="image_studio_generate")
@@ -2762,6 +2745,7 @@ class ImageStudioPlugin(Star):
                 ]
             )
         try:
+            model_ref = _generation_model_ref(model_ref)
             if references is None:
                 explicit_references: list[Any] = []
             elif isinstance(references, (list, tuple)):
@@ -3221,6 +3205,24 @@ class ImageStudioPlugin(Star):
                 except OSError:
                     pass
         return len(components)
+
+
+def _generation_model_ref(value: Any) -> str:
+    """Normalize accidental singleton arguments without changing the tool schema."""
+
+    if isinstance(value, list):
+        if len(value) != 1 or not isinstance(value[0], str) or not value[0].strip():
+            raise ValueError("model_ref 必须是字符串，例如 provider_id:model_id。")
+        value = value[0]
+    if not isinstance(value, str):
+        raise ValueError("model_ref 必须是字符串，例如 provider_id:model_id。")
+    return value.strip()
+
+
+def _tool_json(payload: dict[str, Any]) -> mcp.types.CallToolResult:
+    return _tool_text_result(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    )
 
 
 def _tool_error(message: str) -> mcp.types.CallToolResult:

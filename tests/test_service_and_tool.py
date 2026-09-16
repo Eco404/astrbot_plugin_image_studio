@@ -599,8 +599,10 @@ def test_capability_query_activates_scoped_sender_and_hides_native_sender() -> N
 
     assert not result.isError
     policy = json.loads(result.content[0].text)["asset_policy"]
-    assert policy["temporary_retention_hours"] == 1
-    assert "retention_hours" not in policy
+    assert "temporary_retention_hours" not in policy
+    assert "temporary_retention_policy" not in policy
+    assert "access_policy" not in policy
+    assert "temporary_preview_path" not in policy
     assert "send_message_to_user" not in tool_set.names
     assert "pc_send_current_media" in tool_set.names
     assert "image_studio_send_output" in tool_set.names
@@ -914,7 +916,7 @@ def test_capability_query_supports_all_default_and_model() -> None:
     )
     model_result = asyncio.run(
         plugin.image_studio_get_capabilities(
-            event, query_type="model", model_ref="provider:edit-model"
+            event, query_type="model", model_refs=["provider:edit-model"]
         )
     )
 
@@ -1022,7 +1024,7 @@ def test_negative_prompt_requires_model_tool_exposure() -> None:
     event = ToolEvent()
     capability_result = asyncio.run(
         plugin.image_studio_get_capabilities(
-            event, query_type="model", model_ref="provider:hidden-negative"
+            event, query_type="model", model_refs=["provider:hidden-negative"]
         )
     )
     capability = json.loads(capability_result.content[0].text)["models"][0]
@@ -1030,7 +1032,7 @@ def test_negative_prompt_requires_model_tool_exposure() -> None:
     success = asyncio.run(plugin.image_studio_generate(event, prompt="one tree"))
     asyncio.run(
         plugin.image_studio_get_capabilities(
-            event, query_type="model", model_ref="provider:hidden-negative"
+            event, query_type="model", model_refs=["provider:hidden-negative"]
         )
     )
     ignored = asyncio.run(
@@ -1207,8 +1209,11 @@ def test_capabilities_only_lists_llm_enabled_models() -> None:
     }
     assert payload["asset_policy"]["return_mode"] == "preview"
     assert payload["asset_policy"]["private_asset_handle"] == "asset_id"
+    assert "原图仍存在时可以继续复用" in payload["asset_policy"]["reuse"]
     assert payload["asset_policy"]["delivery_tool"] == "image_studio_send_output"
-    assert "tool_images" in payload["asset_policy"]["temporary_preview_path"]
+    assert "temporary_retention_policy" not in payload["asset_policy"]
+    assert "access_policy" not in payload["asset_policy"]
+    assert "temporary_preview_path" not in payload["asset_policy"]
 
 
 def test_capabilities_uses_img2img_support_not_zero_reference_limit() -> None:
@@ -1274,11 +1279,19 @@ def test_registered_image_tool_descriptions_contain_routing_contract() -> None:
     assert send_output is not None
     assert "必须先调用本工具" in capabilities.description
     assert "query_type" in capabilities.parameters["properties"]
+    capability_parameters = capabilities.parameters["properties"]
+    assert "model_ref" not in capability_parameters
+    assert capability_parameters["model_refs"]["type"] == "array"
+    assert capability_parameters["model_refs"]["items"]["type"] == "string"
+    assert {"query", "provider_id", "provider_kind", "limit", "offset"}.issubset(
+        capability_parameters
+    )
     assert (
         "default(查询默认模型参数)"
         in capabilities.parameters["properties"]["query_type"]["description"]
     )
     assert "生成图片" in generate.description
+    assert generate.parameters["properties"]["model_ref"]["type"] == "string"
     reference_description = generate.parameters["properties"]["references"][
         "description"
     ]

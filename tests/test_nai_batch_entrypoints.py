@@ -54,7 +54,7 @@ def test_partial_batch_reaches_caller_with_images_and_warning(tmp_path, source):
             plugin._event_references = no_references
             event = ToolEvent()
             capabilities = await plugin.image_studio_get_capabilities(
-                event, query_type="model", mode="text2img", model_ref=MODEL_REF
+                event, query_type="model", mode="text2img", model_refs=[MODEL_REF]
             )
             assert not capabilities.isError
             result = await plugin.image_studio_generate(

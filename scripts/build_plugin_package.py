@@ -18,6 +18,7 @@ RUNTIME_FILES = (
     "__init__.py",
     "main.py",
     "appearance.py",
+    "capability_catalog.py",
     "config.py",
     "comfyui.py",
     "comfyui_workflows.py",
