@@ -562,6 +562,165 @@ class ImageStudioPlugin(Star):
             raise ValueError("请选择 ComfyUI 服务商")
         return provider
 
+    def _saved_comfy_provider(self, body):
+        provider_id = str(
+            body.get("provider_id") or str(body.get("model_ref") or "").split(":")[0]
+        )
+        provider = self._settings.provider(provider_id)
+        if provider is None or provider.kind != "comfyui" or not provider.base_url:
+            raise ValueError("请选择已保存并启用的 ComfyUI 服务商")
+        return provider
+
+    def _temporary_comfy_model(self, provider, value):
+        if not isinstance(value, dict):
+            raise ValueError("临时工作流配置必须是对象")
+        raw = copy.deepcopy(value)
+        model_id = str(raw.get("id") or "")
+        if not re.fullmatch(r"temporary_[0-9a-f]{32}", model_id) or any(
+            item.id == model_id for item in provider.models
+        ):
+            model_id = "temporary_" + uuid.uuid4().hex
+        raw.update(id=model_id, name=str(raw.get("name") or "临时工作流"))
+        if not raw.get("comfyui"):
+            raise ValueError("临时工作流缺少可执行的 API 图")
+        temporary_provider = ImageProvider.from_mapping(
+            {**provider.public_dict(), "models": [raw], "discovered_models": []}
+        )
+        model = temporary_provider.models[0]
+        if not model.comfyui.get("outputs"):
+            raise ValueError("请为临时工作流选择至少一个结果节点")
+        return model
+
+    async def _gallery_comfy_import(self, body):
+        from .comfyui_workflows import normalize_workflow
+        from .comfyui_support import import_result
+
+        providers = [
+            item
+            for item in self._settings.providers
+            if item.enabled and item.kind == "comfyui" and item.base_url
+        ]
+        if not providers:
+            raise ValueError(
+                "没有已保存并启用的 ComfyUI 服务商，请先在设置中添加或启用服务商"
+            )
+        generation_id = str(body.get("generation_id") or "")
+        image_id = str(body.get("image_id") or "")
+        if generation_id:
+            context = await self.store.generation_image_context(generation_id, image_id)
+            if not context or not context.get("images"):
+                raise ValueError("图库记录或所选图片不存在")
+            image = context["images"][0]
+        else:
+            info = await self.store.gallery_image_info(image_id, include_preview=False)
+            if not info:
+                raise ValueError("图库图片不存在")
+            image, context = info["image"], info["detail_fields"]
+            generation_id = image["generation_id"]
+        if image.get("allowed_actions", {}).get("reference") is False:
+            raise ValueError("此外部图库未允许复用图片中的工作流")
+        snapshot = (image.get("supplemental") or {}).get("comfyui")
+        metadata = image.get("metadata") or {}
+        config, historical, errors = None, False, []
+        for candidate, is_snapshot in ((snapshot, True), (metadata.get("raw"), False)):
+            if not candidate:
+                continue
+            try:
+                config = normalize_workflow(candidate)
+                historical = is_snapshot
+                break
+            except ValueError as exc:
+                errors.append(str(exc))
+        if config is None:
+            try:
+                raw = await self.store.read_workflow_image(image["id"])
+            except (ValueError, OSError) as exc:
+                if any("界面" in message for message in errors):
+                    raise ValueError(
+                        "图片仅包含界面工作流，缺少可执行的 ComfyUI API 图；请在 ComfyUI 中导出 API 格式"
+                    ) from exc
+                raise ValueError(
+                    "没有可用的工作流快照，且原图无法读取：" + str(exc)
+                ) from exc
+            try:
+                config = await asyncio.to_thread(import_result, raw)
+            except ValueError as exc:
+                raise ValueError("图片中的工作流无法用于执行：" + str(exc)) from exc
+        matched_provider = (
+            next(
+                (item for item in providers if item.id == context.get("provider_id")),
+                None,
+            )
+            if context.get("provider_kind") == "comfyui"
+            else None
+        )
+        matched = (
+            next(
+                (
+                    item
+                    for item in matched_provider.models
+                    if item.id == context.get("model") and item.comfyui.get("api_graph")
+                ),
+                None,
+            )
+            if matched_provider
+            else None
+        )
+        reference_inputs = [
+            item
+            for item in config.get("bindings", {}).values()
+            if item.get("source") == "reference"
+        ]
+        references, warnings = [], []
+        if historical and reference_inputs and not matched:
+            references = await self.store.stage_generation_references(
+                generation_id, strict=True
+            )
+            required_count = (
+                max(int(item.get("reference_index", 0)) for item in reference_inputs)
+                + 1
+            )
+            if len(references) != required_count:
+                references = []
+                warnings.append(
+                    "历史参考图或蒙版未完整保留，请按工作流输入顺序重新补充。"
+                )
+        raw_model = (
+            matched.public_dict()
+            if matched
+            else {
+                "id": "gallery_workflow",
+                "name": str(
+                    (
+                        snapshot.get("workflow_name")
+                        if isinstance(snapshot, dict)
+                        else None
+                    )
+                    or "图库工作流"
+                ),
+                "native_batch_size": 1,
+                "max_concurrent_requests": 8,
+            }
+        )
+        raw_model.update(
+            comfyui=config,
+            parameters=config.get("parameters_schema")
+            or raw_model.get("parameters")
+            or {},
+        )
+        return config, {
+            "model": raw_model,
+            "historical_snapshot": historical,
+            "matched_model_ref": f"{matched_provider.id}:{matched.id}"
+            if matched
+            else "",
+            "providers": [
+                {"id": item.id, "name": item.name or item.id} for item in providers
+            ],
+            "references": references,
+            "warnings": warnings,
+        }
+
     async def _api_comfy_import(self):
         from .comfyui import normalize_workflow
         from .comfyui_support import import_result
@@ -570,6 +729,7 @@ class ImageStudioPlugin(Star):
         try:
             parameters = tool = None
             historical = False
+            extra = {}
             files = await web_request.files()
             if files:
                 upload = files.get("file") or next(iter(files.values()))
@@ -581,35 +741,28 @@ class ImageStudioPlugin(Star):
                 body = await web_request.json(default={})
                 if not isinstance(body, dict):
                     raise ValueError("请求体必须是对象")
-                if body.get("image_id"):
-                    historical = True
-                    info = await self.store.gallery_image_info(
-                        str(body["image_id"]), include_preview=False
+                if "temporary_model" in body:
+                    provider = self._saved_comfy_provider(body)
+                    model = self._temporary_comfy_model(
+                        provider, body["temporary_model"]
                     )
-                    if not info:
-                        raise ValueError("图库图片不存在")
-                    if info.get("allowed_actions", {}).get("reference") is False:
-                        raise ValueError("此外部图库未允许复用图片")
-                    config = info.get("supplemental", {}).get("comfyui") or info.get(
-                        "metadata", {}
-                    ).get("raw", {})
-                elif body.get("generation_id"):
-                    historical = True
-                    detail = await self.store.generation_detail(
-                        str(body["generation_id"]), include_assets=False
+                    config, parameters, tool = (
+                        model.comfyui,
+                        model.parameters,
+                        model.tool,
                     )
-                    if not detail or not detail.get("images"):
-                        raise ValueError("图库记录不存在")
-                    info = await self.store.gallery_image_info(
-                        detail["images"][0]["id"], include_preview=False
+                    extra = {
+                        "model": model.public_dict(),
+                        "model_ref": f"{provider.id}:{model.id}",
+                        "temporary": True,
+                    }
+                elif body.get("image_id") or body.get("generation_id"):
+                    config, extra = await self._gallery_comfy_import(body)
+                    historical = extra["historical_snapshot"]
+                    parameters, tool = (
+                        extra["model"].get("parameters"),
+                        extra["model"].get("tool"),
                     )
-                    if not info:
-                        raise ValueError("图库图片不存在")
-                    if info.get("allowed_actions", {}).get("reference") is False:
-                        raise ValueError("此外部图库未允许复用图片")
-                    config = info.get("supplemental", {}).get("comfyui") or info.get(
-                        "metadata", {}
-                    ).get("raw", {})
                 else:
                     config = body.get("content", body.get("comfyui", body))
                     parameters, tool = body.get("parameters"), body.get("tool")
@@ -617,7 +770,18 @@ class ImageStudioPlugin(Star):
             migrated = migrate_fixed_outputs(
                 config, parameters, tool, prefer_graph_values=historical
             )
-            result = import_result(migrated["comfyui"])
+            result = import_result(
+                migrated["comfyui"], parameters=migrated["parameters"]
+            )
+            if extra.get("model"):
+                extra["model"].update(
+                    comfyui=migrated["comfyui"],
+                    parameters=browser_safe_integers(migrated["parameters"]),
+                    tool=browser_safe_integers(migrated["tool"]),
+                )
+                if not extra.get("temporary"):
+                    extra["model"].update(result["capabilities"])
+            result.update(extra)
             result.update(
                 parameters=browser_safe_integers(migrated["parameters"]),
                 tool=browser_safe_integers(migrated["tool"]),
@@ -702,16 +866,23 @@ class ImageStudioPlugin(Star):
             body = await web_request.json(default={})
             if not isinstance(body, dict):
                 raise ValueError("请求体必须是对象")
-            provider = self._comfy_provider(body)
-            model_id = str(
-                body.get("model_ref") or body.get("model") or provider.model
-            ).split(":")[-1]
-            model = next(
-                (item for item in provider.models if item.id == model_id), None
-            )
-            if model is None:
-                raise ValueError("ComfyUI 工作流不存在")
-            config = normalize_workflow(body.get("comfyui") or model.comfyui)
+            provider = self._saved_comfy_provider(body)
+            temporary = "temporary_model" in body
+            if temporary:
+                model = self._temporary_comfy_model(provider, body["temporary_model"])
+                config = model.comfyui
+            else:
+                model_id = str(
+                    body.get("model_ref") or body.get("model") or provider.model
+                ).split(":")[-1]
+                model = next(
+                    (item for item in provider.models if item.id == model_id), None
+                )
+                if model is None:
+                    raise ValueError(
+                        "ComfyUI 工作流不存在，可从图库选择临时使用或添加工作流"
+                    )
+                config = normalize_workflow(body.get("comfyui") or model.comfyui)
             # Historical bindings define the required input slots even if the
             # current template has changed mode or reference count since then.
             effective_model = ImageProvider.from_mapping(
@@ -740,6 +911,7 @@ class ImageStudioPlugin(Star):
             job = await self._comfy_or_raise().submit(
                 provider=provider,
                 model=model,
+                temporary=temporary,
                 references=references,
                 comfyui=config,
                 mode=mode,

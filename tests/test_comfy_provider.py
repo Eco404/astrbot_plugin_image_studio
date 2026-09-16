@@ -408,6 +408,30 @@ def test_preflight_required_range_links_and_cycles():
     } <= codes
 
 
+@pytest.mark.parametrize("source", ["seed", "parameter", None])
+def test_template_seed_sentinel_is_valid_only_for_explicit_random_binding(source):
+    value = config()
+    value["api_graph"]["4"]["inputs"]["seed"] = -1
+    if source:
+        value["bindings"]["rng"] = binding(
+            "4", "seed", source=source, kind="number", min=0, max=100
+        )
+    object_info = definitions()
+    object_info["KSampler"]["input"]["required"]["seed"] = [
+        "INT",
+        {"min": 0, "max": 100},
+    ]
+    report = asyncio.run(
+        ComfyClient(Session([Response(object_info)])).inspect(provider(), value)
+    )
+    seed_errors = [
+        item
+        for item in report["issues"]
+        if item.get("node_id") == "4" and item.get("input_name") == "seed"
+    ]
+    assert bool(seed_errors) is (source != "seed")
+
+
 def test_unknown_custom_literals_warn_instead_of_guessing_function():
     value = config()
     value["api_graph"]["2"]["inputs"]["dynamic_extra"] = "text"

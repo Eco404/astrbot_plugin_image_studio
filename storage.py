@@ -913,9 +913,17 @@ class GenerationStore:
                 filename=filename, content=content, mime_type=mime
             )
 
-    def _read_gallery_file_sync(self, image_id: str, path: Path) -> bytes:
+    def _read_gallery_file_sync(
+        self, image_id: str, path: Path, max_bytes: int | None = None
+    ) -> bytes:
         try:
-            return path.read_bytes()
+            with path.open("rb") as stream:
+                content = (
+                    stream.read() if max_bytes is None else stream.read(max_bytes + 1)
+                )
+            if max_bytes is not None and len(content) > max_bytes:
+                raise ValueError("工作流图片不得超过 30 MiB")
+            return content
         except FileNotFoundError as exc:
             # An external cleaner can remove the file after path resolution.
             with self._connect() as conn:
@@ -3740,6 +3748,20 @@ class GenerationStore:
         if not _SAFE_ID_RE.fullmatch(image_id):
             return None
         return await asyncio.to_thread(self._gallery_image_file_sync, image_id)
+
+    async def read_workflow_image(self, image_id: str) -> bytes:
+        """Read fallback workflow metadata under the gallery reuse permission."""
+        if not _SAFE_ID_RE.fullmatch(str(image_id or "")):
+            raise ValueError("图片 ID 无效")
+        async with self._lock:
+            resolved = await asyncio.to_thread(
+                self._gallery_image_file_sync, image_id, "reference"
+            )
+            if resolved is None:
+                raise ValueError("原图已不可读取，无法重新解析工作流")
+            return await asyncio.to_thread(
+                self._read_gallery_file_sync, image_id, resolved[0], 30 * 1024 * 1024
+            )
 
     def _gallery_image_file_sync(
         self, image_id: str, action: str = "download"

@@ -42,7 +42,16 @@ class ComfyRuntime:
     async def close(self):
         await self.manager.close()
 
-    async def submit(self, *, provider, model, references=(), comfyui=None, **values):
+    async def submit(
+        self,
+        *,
+        provider,
+        model,
+        references=(),
+        comfyui=None,
+        temporary: bool = False,
+        **values,
+    ):
         config = normalize_workflow(comfyui or model.comfyui)
         snapshot = copy.deepcopy(model.public_dict())
         snapshot["comfyui"] = config
@@ -69,6 +78,7 @@ class ComfyRuntime:
             "model": snapshot,
             "provider_name": provider.name,
             "connection": connection_fingerprint(provider),
+            "temporary": bool(temporary),
         }
         return await self.manager.submit(
             provider_id=provider.id,
@@ -206,7 +216,22 @@ class ComfyRuntime:
                     ]
                     if issues:
                         raise ProviderError(
-                            "；".join(item.get("message", str(item)) for item in issues)
+                            "；".join(
+                                " ".join(
+                                    filter(
+                                        None,
+                                        (
+                                            f"节点 #{item['node_id']}"
+                                            if item.get("node_id")
+                                            else "",
+                                            str(item.get("class_type") or ""),
+                                            str(item.get("input_name") or ""),
+                                            item.get("message", str(item)),
+                                        ),
+                                    )
+                                )
+                                for item in issues
+                            )
                         )
                     uploaded = await client.upload_references(
                         selected_provider, request.references, config=config
@@ -313,6 +338,16 @@ class ComfyRuntime:
                     "api_graph_json": json.dumps(actual_graph, ensure_ascii=False),
                     "parameters_schema": copy.deepcopy(
                         selected_provider.get_model(request.model).parameters
+                    ),
+                    **(
+                        {
+                            "temporary": True,
+                            "workflow_name": selected_provider.get_model(
+                                request.model
+                            ).name,
+                        }
+                        if job["request"].get("temporary")
+                        else {}
                     ),
                 }
                 if (await runtime.store.get_job(job["id"]))["status"] == "cancelled":
@@ -823,6 +858,7 @@ class ComfyRuntime:
                 "generation_id",
             )
         } | {
+            "temporary": bool(job.get("request", {}).get("temporary")),
             "progress": (job.get("result") or {}).get("progress"),
             "can_resume": job.get("status") in {"failed", "unknown"}
             and bool(

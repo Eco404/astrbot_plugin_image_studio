@@ -292,6 +292,12 @@ class ComfyClient:
             if binding["source"] == "reference"
             for target in binding["targets"]
         }
+        random_seed_targets = {
+            (target["node_id"], target["input_name"])
+            for binding in config["bindings"].values()
+            if binding["source"] == "seed"
+            for target in binding["targets"]
+        }
 
         def issue(
             code: str,
@@ -457,6 +463,11 @@ class ComfyClient:
                             "invalid_input_type", node_id, name, f"输入需要 {expected}"
                         )
                     elif expected in {"INT", "FLOAT"}:
+                        if value == -1 and (node_id, name) in random_seed_targets:
+                            # The editor checks the template. Explicit plugin
+                            # seed inputs resolve -1 before the execution graph
+                            # is checked again and submitted to ComfyUI.
+                            continue
                         for limit, comparison in (
                             ("min", lambda a, b: a < b),
                             ("max", lambda a, b: a > b),

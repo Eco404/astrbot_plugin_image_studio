@@ -588,6 +588,160 @@ def inspect_workflow(config: Any) -> dict[str, Any]:
     }
 
 
+def seed_warnings(config: Any, parameters: Any = None) -> list[dict[str, Any]]:
+    """Describe fixed seed inputs on selected output pipelines without edits.
+
+    This is deliberately narrower than candidate discovery: an unselected
+    workflow with no recognizable output has no sufficiently known main path.
+    UI canvas nodes and off-pipeline debugging branches are never scanned.
+    """
+    config = normalize_workflow(config)
+    graph = config["api_graph"]
+    outputs = (
+        config["outputs"]
+        or [
+            node_id
+            for node_id, node in graph.items()
+            if node["class_type"] in {"SaveImage", "SaveAnimatedWEBP"}
+        ]
+        or [
+            node_id
+            for node_id, node in graph.items()
+            if node["class_type"] == "PreviewImage"
+        ]
+    )
+    active, pending = set(), list(outputs)
+    while pending:
+        node_id = pending.pop()
+        if node_id in active or node_id not in graph:
+            continue
+        active.add(node_id)
+        pending.extend(
+            str(value[0])
+            for value in graph[node_id]["inputs"].values()
+            if is_link(value, graph)
+        )
+    if parameters is None:
+        parameters = config.get("parameters_schema", {})
+    if isinstance(parameters, str):
+        parameters = _object(parameters) if parameters.strip() else {}
+    schema = parameters if isinstance(parameters, dict) else {}
+    bound_targets = {
+        (target["node_id"], target["input_name"]): (key, binding)
+        for key, binding in config["bindings"].items()
+        for target in binding["targets"]
+    }
+    known_fields = {"seed", "noise_seed", "random_seed"}
+    native_nonnegative = {"KSampler", "KSamplerAdvanced", "RandomNoise"}
+    warnings = []
+
+    def integer(value):
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and re.fullmatch(r"[+-]?\d+", value.strip()):
+            try:
+                return int(value.strip())
+            except ValueError:
+                return None
+        if isinstance(value, float) and math.isfinite(value) and value.is_integer():
+            return int(value)
+        return None
+
+    for node_id, node in graph.items():
+        if node_id not in active:
+            continue
+        kind = node["class_type"]
+        rgthree = kind.casefold() == "seed (rgthree)"
+        for name, literal in node["inputs"].items():
+            if is_link(literal, graph):
+                continue
+            key, binding = bound_targets.get((node_id, name), ("", {}))
+            if name not in known_fields and binding.get("source") != "seed":
+                continue
+            effective, parameter_name, label = literal, key, key
+            if binding:
+                candidates = [
+                    (public, descriptor)
+                    for public, descriptor in schema.items()
+                    if isinstance(descriptor, dict)
+                    and str(descriptor.get("request_key") or public) == key
+                ]
+                if not candidates and isinstance(schema.get(key), dict):
+                    candidates = [(key, schema[key])]
+                if not candidates and binding.get("source") == "seed":
+                    candidates = [
+                        (public, descriptor)
+                        for public, descriptor in schema.items()
+                        if isinstance(descriptor, dict)
+                        and str(descriptor.get("request_key") or public) == "seed"
+                    ]
+                descriptor = candidates[0][1] if candidates else {}
+                parameter_name = candidates[0][0] if candidates else key
+                label = str(
+                    descriptor.get("label") or binding.get("label") or parameter_name
+                )[:160]
+                effective = (
+                    descriptor["default"]
+                    if "default" in descriptor
+                    else binding.get("default", literal)
+                )
+            numeric = integer(effective)
+            if numeric is None:
+                continue
+            seed_bound = binding.get("source") == "seed"
+            if seed_bound and numeric == -1:
+                continue
+            # rgthree owns all three negative sentinels. They mean random,
+            # increment and decrement, not locked nonnegative seed values.
+            if rgthree and numeric in {-1, -2, -3}:
+                continue
+            if numeric < 0:
+                if numeric != -1 or seed_bound or kind not in native_nonnegative:
+                    continue
+                code = "seed_requires_binding"
+                action = "bind_seed_source"
+                message = (
+                    f"节点 #{node_id} 的 {name} 是标准非负种子字段，不能直接填 -1；"
+                    "如需恢复随机，请将此输入绑定为“种子”来源，并把参数默认值设为 -1。"
+                )
+            else:
+                code = "fixed_seed"
+                if seed_bound:
+                    action = "set_parameter_random"
+                    guidance = f"如需恢复随机，请将参数“{label}”的默认值改为 -1。"
+                elif rgthree:
+                    action = "set_parameter_random" if binding else "set_fixed_random"
+                    guidance = (
+                        f"如需恢复随机，可将参数“{label}”的默认值改为 -1。"
+                        if binding
+                        else "如需恢复随机，可将此固定值改为 -1。"
+                    )
+                else:
+                    action = "bind_seed_source"
+                    guidance = "如需恢复随机，请将此输入绑定为“种子”来源，并把参数默认值设为 -1。"
+                    if kind in native_nonnegative:
+                        guidance += f"{kind} 的原始 {name} 字段不接受 -1。"
+                message = f"检测到随机种子已锁定：节点 #{node_id} · {name} = {numeric}。{guidance}"
+            warnings.append(
+                {
+                    "code": code,
+                    "node_id": node_id,
+                    "input_name": name,
+                    "class_type": kind,
+                    "value": str(numeric)
+                    if abs(numeric) > 9007199254740991
+                    else numeric,
+                    "parameter_name": parameter_name,
+                    "source": binding.get("source", "fixed"),
+                    "action": action,
+                    "message": message,
+                }
+            )
+    return warnings
+
+
 def _parameter_value(
     key: str, binding: dict, request: Any, references: list[str]
 ) -> tuple[bool, Any]:
@@ -616,9 +770,46 @@ def _parameter_value(
             return False, None
         value = parameters.get(key, parameters.get("seed"))
         if value in (-1, "-1"):
-            value = secrets.randbits(63)
+            value = _random_seed(key, binding)
         return True, value
     return False, None
+
+
+def _random_seed(key: str, binding: dict) -> int:
+    """Generate a plugin seed inside the intersection of known target bounds."""
+
+    def bound(value, *, lower):
+        if isinstance(value, bool):
+            raise ValueError(f"参数 {key} 的种子范围无效")
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and re.fullmatch(r"[+-]?\d+", value.strip()):
+            return int(value.strip())
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(f"参数 {key} 的种子范围无效") from exc
+        if not math.isfinite(numeric):
+            raise ValueError(f"参数 {key} 的种子范围无效")
+        return math.ceil(numeric) if lower else math.floor(numeric)
+
+    lower = max(
+        0, bound(binding["min"], lower=True) if binding.get("min") is not None else 0
+    )
+    upper = (
+        bound(binding["max"], lower=False)
+        if binding.get("max") is not None
+        else (1 << 63) - 1
+    )
+    for target in binding.get("targets", []):
+        kind = str(target.get("class_type", ""))
+        if kind.casefold() == "seed (rgthree)":
+            upper = min(upper, 1 << 50)
+        elif kind in {"KSampler", "KSamplerAdvanced", "RandomNoise"}:
+            upper = min(upper, (1 << 64) - 1)
+    if lower > upper:
+        raise ValueError(f"参数 {key} 没有可用的非负随机种子范围")
+    return secrets.randbelow(upper - lower + 1) + lower
 
 
 def _typed_value(key: str, binding: dict, value: Any) -> Any:
@@ -709,6 +900,8 @@ def prepare_graph(
             if "default" not in binding:
                 continue
             value = binding["default"]
+            if binding["source"] == "seed" and value in (-1, "-1"):
+                value = _random_seed(key, binding)
         if binding["source"] == "reference" and present:
             used_reference_indices.add(binding["reference_index"])
         value = _typed_value(key, binding, value)

@@ -4,27 +4,33 @@ from __future__ import annotations
 
 import json
 
-from .comfyui_workflows import inspect_workflow, normalize_workflow
+from .comfyui_workflows import inspect_workflow, normalize_workflow, seed_warnings
 from .image_metadata import parse_image_metadata
 from .models import browser_safe_integers
 
 
-def import_result(value):
+def import_result(value, *, parameters=None):
     if isinstance(value, bytes):
         try:
             value = json.loads(value.decode("utf-8-sig"))
         except (ValueError, UnicodeError):
             value = parse_image_metadata(value).get("raw", {})
-        return normalize_workflow(value)
+        parsed = normalize_workflow(value)
+        return {**parsed, "seed_warnings": seed_warnings(parsed, parameters)}
+    if parameters is None and isinstance(value, dict) and "comfyui" in value:
+        parameters = value.get("parameters")
     config = normalize_workflow(value)
     inspection = inspect_workflow(config)
-    parameters = {}
+    supplied_schema = (
+        parameters if parameters is not None else config.get("parameters_schema")
+    )
+    rendered_parameters = {}
     for key, binding in config["bindings"].items():
         if binding["source"] in {"reference", "prompt", "negative_prompt"}:
             continue
         target = binding["targets"][0]
         default = config["api_graph"][target["node_id"]]["inputs"][target["input_name"]]
-        parameters[key] = {
+        rendered_parameters[key] = {
             "label": binding.get("label", key),
             "type": binding["type"],
             "request_key": binding["source"] if binding["source"] == "count" else key,
@@ -45,7 +51,8 @@ def import_result(value):
     return browser_safe_integers(
         {
             "comfyui": config,
-            "parameters": parameters,
+            "parameters": rendered_parameters,
+            "seed_warnings": seed_warnings(config, supplied_schema),
             "suggestions": inspection["suggested_bindings"],
             "nodes": inspection["nodes"],
             "outputs": inspection["outputs"],

@@ -1,4 +1,16 @@
 .comfy-editor { display: grid; gap: 16px; min-width: 0; }
+.comfy-gallery-choice, .comfy-page-draft { display: grid; gap: 16px; min-width: 0; }
+.comfy-page-draft { margin-bottom: 20px; }
+.comfy-page-draft[hidden], #comfySeedWarnings:empty { display: none; }
+.comfy-draft-heading { display: flex; align-items: center; gap: 16px; justify-content: space-between; }
+.comfy-draft-heading > p, .comfy-gallery-choice > p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.comfy-draft-heading > button { flex-shrink: 0; }
+.comfy-seed-notice { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); color: var(--muted); font-size: 13px; line-height: 1.6; }
+.comfy-seed-notice > div { min-width: 0; overflow-wrap: anywhere; }
+.comfy-seed-notice strong { color: var(--text); }
+.comfy-seed-notice ul { margin: 6px 0 0; padding-left: 18px; }
+.comfy-seed-notice li + li { margin-top: 8px; }
+.comfy-seed-notice > button { flex: 0 0 auto; width: 28px; height: 28px; min-height: 28px; padding: 4px; }
 .comfy-workflow-editing { display: grid; gap: inherit; min-width: 0; }
 .comfy-workflow-editing[hidden] { display: none; }
 .comfy-editor .field, .comfy-editor details { min-width: 0; }
@@ -36,6 +48,7 @@
 .comfy-job span { color: var(--muted); font-size: 12px; }
 .comfy-job-actions { display: flex; flex-wrap: wrap; gap: 8px; flex-shrink: 0; }
 @media (max-width: 600px) {
+  .comfy-draft-heading { align-items: flex-start; flex-wrap: wrap; }
   .comfy-binding-fields { grid-template-columns: minmax(0, 1fr); }
   .comfy-job { align-items: flex-start; flex-wrap: wrap; }
   .comfy-job-actions { margin-left: auto; }

@@ -1034,6 +1034,24 @@ def _model_from_mapping(
                 else "default"
             )
     parameters = _model_parameters(value.get("parameters"), kind, model_id)
+    if kind == "comfyui":
+        seed_keys = {
+            key
+            for key, binding in comfy.get("bindings", {}).items()
+            if binding.get("source") == "seed"
+        }
+        for name, descriptor in parameters.items():
+            if str(descriptor.get("request_key") or name) not in seed_keys:
+                continue
+            minimum = descriptor.get("min")
+            try:
+                allows_random = minimum is not None and float(minimum) <= -1
+            except (TypeError, ValueError, OverflowError):
+                allows_random = False
+            if not allows_random:
+                # -1 is a plugin-level random sentinel. The binding still
+                # retains the node's original nonnegative execution bounds.
+                descriptor["min"] = -1
     if kind == "comfyui" and (migrate_comfyui or comfy.get("execution_policy")):
         from .comfyui_workflows import FIXED_OUTPUT_COUNT_DESCRIPTION
 

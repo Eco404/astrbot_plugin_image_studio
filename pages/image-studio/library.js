@@ -1296,7 +1296,9 @@
       const engine = ["nai", "nai_direct", "novelai_official"].includes(engineHint) ? "novelai" : engineHint;
       // A transferable prompt does not mean this plugin can reproduce its
       // source workflow. Keep native exports separate from workflow exports.
-      const comfyReproduction = engine === "comfyui" && (providerKind === "comfyui" || !!image?.metadata?.raw?.prompt);
+      // Preparation validates snapshots and can re-read original image bytes
+      // when the cached metadata has no API graph. Report precise failures there.
+      const comfyReproduction = engine === "comfyui";
       const supportsReproduction = metadataReady && (["novelai", "openai_images", "gemini", "custom_json"].includes(engine) || comfyReproduction);
       const formats = supportsReproduction && (engine !== "comfyui" || providerKind === "comfyui") ? { studio: "Image Studio 参数" } : {};
       if (["nai", "novelai"].includes(engine) || image?.metadata?.format === "novelai") {

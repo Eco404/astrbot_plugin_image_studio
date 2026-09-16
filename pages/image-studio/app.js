@@ -4,7 +4,7 @@
   window.__imageStudioAppLoaded = true;
 
   const state = {
-    view: "generate", mode: "text2img", providers: [], models: [], selectedProviderId: "", selectedModelRef: "", defaultModelRefs: { text2img: "", img2img: "" }, parameterValues: {}, parameterCarry: {}, negativePromptCarry: "", hasNegativePromptCarry: false, references: [],
+    view: "generate", mode: "text2img", providers: [], models: [], comfyuiTemporaryModel: null, selectedProviderId: "", selectedModelRef: "", defaultModelRefs: { text2img: "", img2img: "" }, parameterValues: {}, parameterCarry: {}, negativePromptCarry: "", hasNegativePromptCarry: false, references: [],
     resultImages: [], galleryItems: [], galleryPage: 0, galleryLimit: 24, galleryTotal: 0, selectedIds: new Set(), settings: null, selectedSettingsProviderId: "", selectedSettingsModelId: "", modelEditorTab: "model", editingToolParameter: "", editingToolDefaultChoices: [], detailId: "", detailData: null, detailFallbackThumbnail: "", detailImageIndex: 0, detailRequestedImageIndex: 0, detailAssetsLoaded: false, detailNavigating: false, imagePreviewItems: [], imagePreviewIndex: 0, imagePreviewTitle: "图片预览", imagePreviewDownloadFilename: "", imagePreviewContext: null, imagePreviewNavigating: false, imagePreviewSwipeAt: 0,
   };
   let activeConfirmation = null;
@@ -188,9 +188,13 @@
 
   function configuredReferenceLimit(value, maximum = 8) { const number = Number(value); return Math.max(1, Math.min(maximum, Number.isFinite(number) ? Math.trunc(number) : 1)); }
   function referenceLimitForModel(model) { return model?.supports_img2img ? configuredReferenceLimit(model.max_reference_images) : 0; }
-  function modelsForMode() { const current = selectedModel(); return state.models.map(item => item.model_ref === current?.model_ref ? current : item).filter((item) => state.mode === "text2img" ? item.supports_text2img : referenceLimitForModel(item) > 0); }
+  function generationModels() {
+    const temporary = state.comfyuiTemporaryModel;
+    return temporary && state.providers.some(provider => provider.id === temporary.provider_id && provider.kind === "comfyui" && provider.enabled !== false) ? [...state.models, temporary] : state.models;
+  }
+  function modelsForMode() { const current = selectedModel(); return generationModels().map(item => item.model_ref === current?.model_ref ? current : item).filter((item) => state.mode === "text2img" ? item.supports_text2img : referenceLimitForModel(item) > 0); }
   function selectedModel() {
-    const model = state.models.find(item => item.model_ref === state.selectedModelRef) || null;
+    const model = generationModels().find(item => item.model_ref === state.selectedModelRef) || null;
     const snapshot = state.comfyuiModelOverride;
     if (model && snapshot?.model_ref === model.model_ref) return { ...model, ...snapshot.model, model_ref: model.model_ref, provider_id: model.provider_id, provider_name: model.provider_name, provider_kind: model.provider_kind };
     return model;
@@ -406,7 +410,7 @@
   function renderModelChoices() {
     const available = modelsForMode();
     if (!available.some((item) => item.model_ref === state.selectedModelRef)) state.selectedModelRef = "";
-    const comfyProviders = new Map(available.filter(item => item.provider_kind === "comfyui").map(item => [item.provider_id, item.provider_name]));
+    const comfyProviders = new Map(state.providers.filter(item => item.kind === "comfyui" && item.enabled !== false).map(item => [item.id, item.name]));
     const model = selectedModel();
     if (model) state.selectedProviderId = model.provider_id;
     else if (!comfyProviders.has(state.selectedProviderId)) state.selectedProviderId = "";
@@ -416,9 +420,9 @@
       if (listed.has(item.provider_id)) return "";
       listed.add(item.provider_id);
       return `<option value="${escape(`@comfy:${item.provider_id}`)}">${escape(item.provider_name)} · ComfyUI</option>`;
-    }).join("");
-    els.modelChoice.innerHTML = available.length ? `<option value="">请选择模型或 ComfyUI</option>${options}` : '<option value="">当前模式没有可用模型</option>';
-    els.modelChoice.disabled = available.length === 0;
+    }).join("") + Array.from(comfyProviders).filter(([id]) => !listed.has(id)).map(([id, name]) => `<option value="${escape(`@comfy:${id}`)}">${escape(name || id)} · ComfyUI</option>`).join("");
+    els.modelChoice.innerHTML = options ? `<option value="">请选择模型或 ComfyUI</option>${options}` : '<option value="">当前模式没有可用模型</option>';
+    els.modelChoice.disabled = !options;
     const comfy = comfyProviders.has(state.selectedProviderId);
     els.modelChoice.value = comfy ? `@comfy:${state.selectedProviderId}` : state.selectedModelRef;
     document.querySelector('.model-select-row > label').textContent = comfy ? "服务商" : "模型";
@@ -426,7 +430,7 @@
     $("generationSelectors").classList.toggle("has-workflow", comfy);
     els.comfyWorkflowWorkspace.classList.toggle("is-hidden", !comfy);
     els.comfyWorkflowChoice.disabled = !workflows.length;
-    els.comfyWorkflowChoice.innerHTML = '<option value="">请选择工作流</option>' + workflows.map(item => `<option value="${escape(item.model_ref)}">${escape(item.name || item.id)}</option>`).join("");
+    els.comfyWorkflowChoice.innerHTML = '<option value="">请选择工作流</option>' + workflows.map(item => `<option value="${escape(item.model_ref)}">${escape(item.name || item.id)}${item.temporary ? " · 临时" : ""}</option>`).join("");
     els.comfyWorkflowChoice.value = comfy ? state.selectedModelRef : "";
     els.workspaceEmpty.textContent = comfy ? "请选择工作流" : "请选择模型";
     els.modelProvider.textContent = comfy ? `${workflows.length} 个工作流` : model?.provider_name || "";
@@ -450,6 +454,7 @@
 
   function renderModelWorkspace() {
     const model = selectedModel();
+    comfyuiControls.renderWorkspace(model);
     els.generatorWorkspace.disabled = !model;
     els.workspaceEmpty.classList.toggle("is-hidden", !!model);
     els.generatorWorkspace.classList.toggle("is-hidden", !model);
@@ -625,7 +630,10 @@
     els.generateButton.disabled = true; els.generateButton.textContent = "生成中";
     try {
       const request = { mode: state.mode, provider_id: provider.id, model_ref: model.model_ref, prompt: els.prompt.value, negative_prompt: els.negativePrompt.value, model: model.id, size, count: Number(count), parameters: { ...parameters, ...mappedParameters }, reference_ids: state.references.map((item) => item.id), ...(provider.kind === "comfyui" && state.comfyuiSnapshot ? { comfyui: state.comfyuiSnapshot } : {}) };
-      if (provider.kind === "comfyui") { await comfyuiControls.submit(request); showNotice("工作流任务已提交，可展开任务队列查看进度。", "success"); return; }
+      if (provider.kind === "comfyui") {
+        if (model.temporary) request.temporary_model = comfyuiControls.temporaryModel(model);
+        await comfyuiControls.submit(request); showNotice("工作流任务已提交，可展开任务队列查看进度。", "success"); return;
+      }
       const result = await apiPost("studio/generate", request);
       state.resultImages = result.images || []; state.references = [];
       for (const [name, descriptor] of effectiveModelParameters(model)) if ((descriptor.request_key || name) === "reference_settings") state.parameterValues[name] = [];
@@ -2373,8 +2381,8 @@
     try {
       await bootstrap();
       const currentImage = state.detailData?.images?.[state.detailImageIndex];
-      if (currentImage?.metadata?.format === "comfyui" && state.detailData?.provider_kind !== "comfyui") {
-        await comfyuiControls.fromGallery(state.detailData, currentImage); return;
+      if ([currentImage?.supplemental?.generation_engine, state.detailData?.generation_engine, currentImage?.metadata?.format, state.detailData?.provider_kind].some(value => String(value || "").toLowerCase() === "comfyui")) {
+        if (await comfyuiControls.fromGallery(state.detailData, currentImage)) return;
       }
       if (state.detailData?.source === "import") {
         const payload = await apiGet(`gallery/parameters/${id}`, { image_id: state.detailData.images?.[state.detailImageIndex]?.id, format: "studio" });
@@ -2390,6 +2398,12 @@
   }
 
   function applyDraft(draft, { forReproduction = false } = {}) {
+    if (draft.temporary_model) {
+      const provider = state.providers.find(item => item.id === draft.provider_id && item.kind === "comfyui" && item.enabled !== false);
+      if (!provider) throw new Error("目标 ComfyUI 服务商已停用或删除，请重新选择。");
+      const model = structuredClone(draft.temporary_model);
+      state.comfyuiTemporaryModel = { ...model, model_ref: draft.model_ref || `${provider.id}:${model.id}`, provider_id: provider.id, provider_name: provider.name, provider_kind: "comfyui", temporary: true, seed_warnings: draft.seed_warnings || [] };
+    }
     state.comfyuiSnapshot = draft.comfyui || null;
     state.mode = draft.mode === "img2img" ? "img2img" : "text2img"; state.selectedProviderId = draft.provider_id || ""; state.references = draft.references || [];
     state.selectedModelRef = draft.model_ref || (draft.provider_id && draft.model ? `${draft.provider_id}:${draft.model}` : "");
@@ -3067,19 +3081,24 @@
     (payload.webui?.providers || []).forEach((provider) => (provider.models || []).forEach((model) => ensureToolConfig(model, provider)));
   }
 
-  function adoptSavedComfyWorkflow(result) {
-    if (!state.settings) return;
-    const add = webui => {
-      const provider = webui?.providers?.find(item => item.id === result.provider.id);
-      if (!provider || provider.models.some(item => item.id === result.model.id)) return;
-      const model = structuredClone(result.model); ensureToolConfig(model, provider); provider.models.push(model);
-      if (result.settings_revision != null) { webui.revision = result.settings_revision; webui.ui = { ...(webui.ui || {}), settings_revision: result.settings_revision }; }
-    };
-    // A gallery import saves exactly one new workflow. Add that same record to
-    // both baselines, keeping unrelated unsaved settings as an actual draft.
-    add(state.settings.webui); add(savedSettingsPayload?.webui);
-    if (settingsBaseline) { const baseline = JSON.parse(settingsBaseline); add(baseline.studio); settingsBaseline = settingsFingerprint(baseline); }
+  async function prepareComfyWorkflowSettings(providerId) {
+    if (!await loadSettings()) throw new Error("设置读取失败，尚未添加工作流，请重试。");
+    const provider = state.settings.webui.providers.find(item => item.id === providerId && item.kind === "comfyui");
+    if (!provider) throw new Error("设置草稿中已没有此 ComfyUI 服务商，请重新选择。");
+    state.selectedSettingsProviderId = providerId; state.selectedSettingsModelId = ""; state.modelEditorTab = "model";
+    closeDetail(); switchView("settings"); renderSettingsProviders();
+    return provider;
+  }
+
+  function addComfyWorkflowDraft(result) {
+    const provider = state.settings?.webui?.providers?.find(item => item.id === result.provider.id && item.kind === "comfyui");
+    if (!provider) throw new Error("目标 ComfyUI 服务商已从设置草稿中删除，请重试。");
+    provider.models = Array.isArray(provider.models) ? provider.models : [];
+    if (provider.models.some(item => item.id === result.model.id)) throw new Error("工作流 ID 已存在，请使用其他 ID。");
+    const model = structuredClone(result.model); ensureToolConfig(model, provider); provider.models.push(model);
+    state.selectedSettingsProviderId = provider.id; state.selectedSettingsModelId = model.id; state.modelEditorTab = "model";
     renderSettingsProviders(); updateSettingsDirty();
+    showNotice("工作流已加入设置草稿，点击保存全部设置后生效。", "success");
   }
 
   function settingsFingerprint(value) {
@@ -3258,7 +3277,7 @@
   const externalSources = window.ImageStudioExternalSources({ state, apiGet, apiPost, escape, formatBytes, formatDate, showNotice, errorMessage, updateSettingsDirty, invalidateBrowseCache, openModal: (...args) => library.openModal(...args) });
   const library = window.ImageStudioLibrary({ state, escape, apiGet, apiPost, bridge, showNotice, errorMessage, formatDate, formatBytes, sourceLabel, getGallerySort: () => gallerySort, syncPageScrollLock, switchView, requestParameters, loadGallery, clearGallerySelection, openDetail, closeDetail, reproduce, applyDraft, useDataUrlAsReference, useGalleryImageAsReference, ensureDetailMetadata, ensureDetailPreview, getImageMedia, cacheImageMedia, loadImageMedia, checkGalleryAction });
   const novelaiControls = window.ImageStudioNovelAI({ state, model: selectedModel, escape, schemaParameterTitle, schemaParameterLabel, rerenderReferences: renderReferences, uploadFile: async file => (await bridge()).upload("studio/reference/upload", file), openModal: (...args) => library.openModal(...args), showNotice });
-  const comfyuiControls = window.ImageStudioComfyUI({ state, escape, apiGet, apiPost, bridge, showNotice, errorMessage, currentSettingsModel, renderModelEditor, updateSettingsDirty, bootstrap, applyDraft, adoptSavedWorkflow: adoptSavedComfyWorkflow, invalidateBrowseCache, renderResult: renderGenerationResult, viewResult: viewComfyResult, openModal: (...args) => library.openModal(...args) });
+  const comfyuiControls = window.ImageStudioComfyUI({ state, escape, apiGet, apiPost, bridge, showNotice, errorMessage, currentSettingsModel, renderModelEditor, updateSettingsDirty, applyDraft, prepareWorkflowSettings: prepareComfyWorkflowSettings, addWorkflowDraft: addComfyWorkflowDraft, invalidateBrowseCache, renderResult: renderGenerationResult, viewResult: viewComfyResult, openModal: (...args) => library.openModal(...args) });
 
   async function start() {
     try {
