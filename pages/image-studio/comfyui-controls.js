@@ -23,12 +23,38 @@
     const nodeTitle = (id, node) => `#${id} · ${node?._meta?.title || node?.class_type || "节点"}`;
     const errorText = error => hooks.errorMessage(error, "工作流操作失败");
     const compatible = report => !!report && report.compatible !== false && report.valid !== false && !(report.issues || []).some(item => item.severity === "error");
-    function seedNoticeMarkup(warnings) {
+    const seedFields = new Set(["seed", "noise_seed", "random_seed"]);
+    const seedTargetKey = (node, input) => JSON.stringify([String(node), input]);
+    function pendingSeedWarnings(warnings, definition, bindings = bindingList(definition)) {
+      // This is an editor reminder for untouched fixed seeds. Derive it from
+      // the current draft, so incomplete fields or late API replies cannot
+      // restore an already handled row. Execution checks remain on the server.
+      const graph = definition?.api_graph || {}, active = new Set(), pending = [...(definition?.outputs || [])];
+      while (pending.length) {
+        const id = String(pending.pop());
+        if (active.has(id) || !graph[id]) continue;
+        active.add(id);
+        for (const value of Object.values(graph[id].inputs || {})) {
+          if (Array.isArray(value) && value.length === 2 && Number.isInteger(value[1]) && graph[String(value[0])]) pending.push(String(value[0]));
+        }
+      }
+      const bound = new Set(bindings.flatMap(row => (row.targets || []).map(target => seedTargetKey(target.node_id, target.input_name))));
+      const detected = new Map((warnings || []).map(item => [seedTargetKey(item.node_id, item.input_name), item]));
+      return Object.entries(graph).flatMap(([node_id, node]) => !active.has(node_id) ? [] : Object.entries(node.inputs || {}).flatMap(([input_name, value]) => {
+        const key = seedTargetKey(node_id, input_name), warning = detected.get(key);
+        if (bound.has(key) || !seedFields.has(input_name) && !warning) return [];
+        if (!["string", "number"].includes(typeof value) || !/^[+]?\d+$/.test(String(value).trim())) return [];
+        return [{ ...warning, node_id, input_name, value, code: "fixed_seed", action: String(node.class_type).toLowerCase() === "seed (rgthree)" ? "set_fixed_random" : "bind_seed_source" }];
+      }));
+    }
+    function seedNoticeMarkup(warnings, definition, bindings) {
+      warnings = pendingSeedWarnings(warnings, definition, bindings);
       if (!warnings?.length) return "";
-      return `<div class="comfy-seed-notice" role="status"><div><strong>种子设置提示</strong><ul>${warnings.map(item => `<li>${escape(`节点 #${item.node_id} · ${item.input_name} = ${item.value}`)}<br>${escape(item.message || "如需随机种子，请将对应输入来源设为“种子”，再将其默认值改为 -1。")}</li>`).join("")}</ul></div><button type="button" class="studio-icon-button" data-dismiss-seed-warning aria-label="关闭种子提示"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg></button></div>`;
+      const needsBinding = warnings.some(item => item.action === "bind_seed_source");
+      return `<div class="comfy-seed-notice" role="status"><strong>种子设置提示</strong><ul>${warnings.map(item => `<li><span>${escape(`节点 #${item.node_id} · ${item.input_name} = ${item.value}`)}</span><span class="comfy-seed-status">种子已锁定</span></li>`).join("")}</ul><p class="comfy-seed-guidance">如需恢复随机，可将种子的固定值改为 -1。${needsBinding ? " 若节点不直接支持 -1，请将对应输入绑定为“种子”来源，并将参数默认值设为 -1。" : ""}</p></div>`;
     }
     function temporaryModel(model) {
-      const { provider_id, provider_name, provider_kind, model_ref, temporary, seed_warnings, seed_warning_dismissed, ...config } = model;
+      const { provider_id, provider_name, provider_kind, model_ref, temporary, seed_warnings, ...config } = model;
       return structuredClone(config);
     }
     function applyTemporary(result, references = [], warnings = []) {
@@ -45,9 +71,7 @@
       if (!host) { host = document.createElement("section"); host.id = "comfyTemporaryInfo"; host.className = "comfy-page-draft"; $("modelParameters").before(host); }
       host.hidden = !model?.temporary;
       if (!model?.temporary) { host.replaceChildren(); return; }
-      const signature = JSON.stringify(model.seed_warnings || []);
-      host.innerHTML = `<div class="comfy-draft-heading"><p>临时工作流仅在当前页面保留。切换后可重新选择，刷新页面后清除；已提交的任务仍可在队列中查看。</p><button type="button" class="quiet-button" id="comfyEditTemporary">编辑工作流</button></div>${model.seed_warning_dismissed === signature ? "" : seedNoticeMarkup(model.seed_warnings)}`;
-      host.querySelector("[data-dismiss-seed-warning]")?.addEventListener("click", event => { if (state.comfyuiTemporaryModel?.model_ref === model.model_ref) state.comfyuiTemporaryModel.seed_warning_dismissed = signature; event.currentTarget.closest(".comfy-seed-notice").remove(); });
+      host.innerHTML = `<div class="comfy-draft-heading"><p>临时工作流仅在当前页面保留。切换后可重新选择，刷新页面后清除；已提交的任务仍可在队列中查看。</p><button type="button" class="quiet-button" id="comfyEditTemporary">编辑工作流</button></div>${seedNoticeMarkup(model.seed_warnings, displayDefinition(model.comfyui))}`;
       $("comfyEditTemporary").addEventListener("click", async event => {
         const button = event.currentTarget; button.disabled = true;
         try {
@@ -122,7 +146,7 @@
       let definition = displayDefinition(imported?.comfyui || original.comfyui || { api_graph: {}, bindings: {}, outputs: [], execution_policy: executionPolicy });
       let parameters = totalParameters(structuredClone(imported?.parameters || original.parameters || {}));
       let info = {}, report = null, busy = false, revision = 0, alive = true, dragEvents = null;
-      let seedWarnings = imported?.seed_warnings || [], dismissedSeedSignature = "", seedTimer = 0, seedRevision = 0;
+      let seedWarnings = imported?.seed_warnings || [], seedTimer = 0, seedRevision = 0;
       const hasWorkflow = () => Object.keys(definition.api_graph || {}).length > 0;
       const syncEditorState = () => {
         $("comfyWorkflowEditing").hidden = !hasWorkflow();
@@ -207,6 +231,29 @@
         delete result.parameters_schema;
         return result;
       };
+      const normalizeEmptySeedsForSave = () => {
+        preserveRows();
+        for (const [node_id, node] of Object.entries(definition.api_graph || {})) {
+          for (const [input_name, value] of Object.entries(node.inputs || {})) {
+            if (!seedFields.has(input_name) || value !== "") continue;
+            node.inputs[input_name] = -1;
+            definition.input_overrides = [
+              ...(definition.input_overrides || []).filter(
+                item => item.node_id !== node_id || item.input_name !== input_name
+              ),
+              { node_id, input_name, value: -1 },
+            ];
+            for (const row of rows) {
+              if (!row.targets?.some(target => String(target.node_id) === node_id && target.input_name === input_name)) continue;
+              row.default = -1;
+              if (parameters[row.key]) parameters[row.key].default = -1;
+            }
+            $("comfyFixedInputs")?.querySelectorAll("[data-fixed-input]").forEach(input => {
+              if (input.dataset.fixedNode === node_id && input.dataset.fixedInput === input_name) input.value = "-1";
+            });
+          }
+        }
+      };
       const parameterSchema = comfyui => {
         // Retain unrelated historical schema entries and each surviving
         // binding's policies, while dropping parameters whose binding was removed.
@@ -221,11 +268,10 @@
       };
       const renderSeedWarnings = () => {
         const host = $("comfySeedWarnings"); if (!host) return;
-        const signature = JSON.stringify(seedWarnings);
-        host.innerHTML = signature === dismissedSeedSignature ? "" : seedNoticeMarkup(seedWarnings);
-        host.querySelector("[data-dismiss-seed-warning]")?.addEventListener("click", () => { dismissedSeedSignature = signature; host.replaceChildren(); });
+        host.innerHTML = seedNoticeMarkup(seedWarnings, definition, rows);
       };
       const scheduleSeedWarnings = () => {
+        renderSeedWarnings();
         clearTimeout(seedTimer); const current = ++seedRevision;
         seedTimer = setTimeout(async () => {
           if (!alive || !hasWorkflow()) return;
@@ -265,24 +311,36 @@
             return `<label class="field">${escape(item.name)}${input}</label>`;
           }).join("")}</div></details>`;
         }).join("");
-        $("comfyFixedInputs").querySelectorAll("[data-fixed-input]").forEach(input => input.addEventListener("change", () => {
-          preserveRows();
-          const node_id = input.dataset.fixedNode, input_name = input.dataset.fixedInput;
-          const value = input.dataset.fixedOptions ? JSON.parse(input.dataset.fixedOptions).find(value => String(value) === input.value) : input.type === "number" ? numericValue(input.value) : input.dataset.fixedType === "boolean" ? input.value === "true" : input.value;
-          const binding = rows.find(row => row.targets?.some(target => target.node_id === node_id && target.input_name === input_name));
-          if (binding) {
-            binding.default = value;
-            if (parameters[binding.key]) parameters[binding.key].default = value;
+        $("comfyFixedInputs").querySelectorAll("[data-fixed-input]").forEach(input => {
+          const update = () => {
+            preserveRows();
+            const node_id = input.dataset.fixedNode, input_name = input.dataset.fixedInput;
+            const value = input.dataset.fixedOptions ? JSON.parse(input.dataset.fixedOptions).find(value => String(value) === input.value) : input.type === "number" ? (input.value === "" ? "" : numericValue(input.value)) : input.dataset.fixedType === "boolean" ? input.value === "true" : input.value;
+            const binding = rows.find(row => row.targets?.some(target => target.node_id === node_id && target.input_name === input_name));
+            if (binding) {
+              binding.default = value;
+              if (parameters[binding.key]) parameters[binding.key].default = value;
+            }
+            // One exposed parameter may feed several nodes. Keep its default
+            // and every bound literal aligned when replacing a model or value.
+            for (const target of binding?.targets || [{ node_id, input_name }]) {
+              definition.api_graph[target.node_id].inputs[target.input_name] = value;
+              definition.input_overrides = [...(definition.input_overrides || []).filter(item => item.node_id !== target.node_id || item.input_name !== target.input_name), { ...target, value }];
+              $("comfyFixedInputs").querySelectorAll("[data-fixed-input]").forEach(element => { if (element !== input && element.dataset.fixedNode === target.node_id && element.dataset.fixedInput === target.input_name) element.value = String(value); });
+            }
+            clearReport();
+          };
+          input.addEventListener("change", update);
+          const isSeedInput = seedFields.has(input.dataset.fixedInput) || seedWarnings.some(item => String(item.node_id) === input.dataset.fixedNode && item.input_name === input.dataset.fixedInput) || rows.some(row => row.source === "seed" && row.targets?.some(target => String(target.node_id) === input.dataset.fixedNode && target.input_name === input.dataset.fixedInput));
+          if (isSeedInput) {
+            input.addEventListener("input", update);
+            input.addEventListener("blur", () => {
+              if (input.value !== "") return;
+              input.value = "-1";
+              update();
+            });
           }
-          // One exposed parameter may feed several nodes. Keep its default
-          // and every bound literal aligned when replacing a model or value.
-          for (const target of binding?.targets || [{ node_id, input_name }]) {
-            definition.api_graph[target.node_id].inputs[target.input_name] = value;
-            definition.input_overrides = [...(definition.input_overrides || []).filter(item => item.node_id !== target.node_id || item.input_name !== target.input_name), { ...target, value }];
-            $("comfyFixedInputs").querySelectorAll("[data-fixed-input]").forEach(element => { if (element.dataset.fixedNode === target.node_id && element.dataset.fixedInput === target.input_name) element.value = String(value); });
-          }
-          clearReport();
-        }));
+        });
         $("comfyCompatibility").innerHTML = report ? issuesMarkup(report) : `<p class="field-hint">${options.temporary ? "应用到生图页面前必须通过兼容性检查。参考图可在生图页面补充。" : "可先保存工作流，执行前必须通过依赖检查。"}</p>`;
         renderSeedWarnings();
         $("comfyEditor").querySelectorAll("[data-studio-icon]").forEach(element => {
@@ -312,13 +370,15 @@
         } catch (error) { if (alive) $("comfyImportStatus").textContent = errorText(error); }
         finally { busy = false; if (alive) syncEditorState(); }
       };
-      const body = `<div id="comfyEditor" class="comfy-editor"><p class="field-hint">目标 ComfyUI：${escape(provider.name || provider.id)}</p><label class="field">工作流名称<input id="comfyWorkflowName" value="${escape(model.name || "新工作流")}" /></label><div class="comfy-binding-fields"><label class="field">工作流单次出图张数<input id="comfyNativeBatch" type="number" min="1" max="16" step="1" value="${escape(original.native_batch_size || 1)}" /></label><label class="field">工作流最大并发请求数<input id="comfyConcurrency" type="number" min="1" max="16" step="1" value="${escape(original.max_concurrent_requests || 8)}" /></label></div><p class="field-hint">按单次出图张数安排轮次。超出计划的图片截断，数量不足不补跑。</p><details class="comfy-import"${Object.keys(definition.api_graph || {}).length ? "" : " open"}><summary>导入 API 工作流或原始图片</summary><div class="comfy-import-content"><p class="field-hint">可将图片或 JSON 文件拖入浮窗任意位置。图片需包含 prompt 执行图；仅有界面 workflow 时请先在 ComfyUI 导出 API 格式。</p><button type="button" class="quiet-button" id="comfyChooseFile">选择 JSON / 图片</button><input type="file" id="comfyImportFile" accept=".json,image/png,image/webp,image/jpeg" hidden /><label class="field">或粘贴 API JSON<textarea id="comfyImportJSON" rows="5" spellcheck="false"></textarea></label><button type="button" class="quiet-button" id="comfyReadJSON">读取 JSON</button><p id="comfyImportStatus" class="field-hint" role="status"></p></div></details><div id="comfySeedWarnings"></div><div class="field-label-row"><h3>可调整输入</h3><span id="comfyNodeCount" class="field-hint"></span><button id="comfyAddBinding" type="button" class="quiet-button">添加输入</button></div><div id="comfyBindings"></div><label class="field">收集结果的节点<select id="comfyOutputs" multiple aria-label="收集结果的节点"></select></label><p class="field-hint">只收集选定节点的图片；保留完整工作流执行。请选择保存或预览图片的节点。</p><details><summary>工作流固定输入与模型替换</summary><p class="field-hint">检查兼容性后可选择服务器已有模型。修改固定输入会改变本次保存的工作流。</p><div id="comfyFixedInputs"></div></details><button type="button" class="quiet-button" id="comfyInspect">检查目标 ComfyUI</button><div id="comfyCompatibility" role="status"></div></div>`;
+      const nameField = options.temporary ? "" : `<label class="field">工作流名称<input id="comfyWorkflowName" value="${escape(model.name || "新工作流")}" /></label>`;
+      const body = `<div id="comfyEditor" class="comfy-editor"><p class="field-hint">目标 ComfyUI：${escape(provider.name || provider.id)}</p>${nameField}<div class="comfy-binding-fields"><label class="field">工作流单次出图张数<input id="comfyNativeBatch" type="number" min="1" max="16" step="1" value="${escape(original.native_batch_size || 1)}" /></label><label class="field">工作流最大并发请求数<input id="comfyConcurrency" type="number" min="1" max="16" step="1" value="${escape(original.max_concurrent_requests || 8)}" /></label></div><p class="field-hint">按单次出图张数安排轮次。超出计划的图片截断，数量不足不补跑。</p><details class="comfy-import"${Object.keys(definition.api_graph || {}).length ? "" : " open"}><summary>导入 API 工作流或原始图片</summary><div class="comfy-import-content"><p class="field-hint">可将图片或 JSON 文件拖入浮窗任意位置。图片需包含 prompt 执行图；仅有界面 workflow 时请先在 ComfyUI 导出 API 格式。</p><button type="button" class="quiet-button" id="comfyChooseFile">选择 JSON / 图片</button><input type="file" id="comfyImportFile" accept=".json,image/png,image/webp,image/jpeg" hidden /><label class="field">或粘贴 API JSON<textarea id="comfyImportJSON" rows="5" spellcheck="false"></textarea></label><button type="button" class="quiet-button" id="comfyReadJSON">读取 JSON</button><p id="comfyImportStatus" class="field-hint" role="status"></p></div></details><div id="comfySeedWarnings"></div><div class="field-label-row"><h3>可调整输入</h3><span id="comfyNodeCount" class="field-hint"></span><button id="comfyAddBinding" type="button" class="quiet-button">添加输入</button></div><div id="comfyBindings"></div><label class="field">收集结果的节点<select id="comfyOutputs" multiple aria-label="收集结果的节点"></select></label><p class="field-hint">只收集选定节点的图片；保留完整工作流执行。请选择保存或预览图片的节点。</p><details><summary>工作流固定输入与模型替换</summary><p class="field-hint">检查兼容性后可选择服务器已有模型。修改固定输入会改变本次保存的工作流。</p><div id="comfyFixedInputs"></div></details><button type="button" class="quiet-button" id="comfyInspect">检查目标 ComfyUI</button><div id="comfyCompatibility" role="status"></div></div>`;
       return hooks.openModal(options.temporary ? "准备临时工作流" : "配置 ComfyUI 工作流", body, [{ label: "取消", action: () => false }, { label: options.temporary ? "检查并用于本次生图" : "应用工作流", id: "comfyApplyWorkflow", disabled: () => !hasWorkflow() || busy, primary: true, action: async () => {
         if (busy) throw new Error("请等待工作流读取或检查完成。");
+        normalizeEmptySeedsForSave();
         const comfyui = snapshot();
         if (!Object.keys(comfyui.api_graph || {}).length) throw new Error("请先导入 API 工作流。");
         if (!comfyui.outputs.length) throw new Error("请选择至少一个结果节点。");
-        const name = $("comfyWorkflowName").value.trim(); if (!name) throw new Error("请填写工作流名称。");
+        const name = options.temporary ? "临时工作流" : $("comfyWorkflowName").value.trim(); if (!name) throw new Error("请填写工作流名称。");
         for (const [id, label] of [["comfyNativeBatch", "工作流单次出图张数"], ["comfyConcurrency", "工作流最大并发请求数"]]) if (!$(id).value || !$(id).checkValidity()) throw new Error(`请填写有效的${label}。`);
         const resultParameters = parameterSchema(comfyui);
         const references = rows.filter(row => row.source === "reference");
