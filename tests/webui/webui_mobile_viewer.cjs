@@ -9,6 +9,7 @@ if (!base) throw new Error("Set STUDIO_TEST_URL to an isolated WebUI harness.");
 const output = fs.mkdtempSync(path.join(os.tmpdir(), "image-studio-mobile-viewer-"));
 
 async function select(frame, inner, id, value) {
+  await inner.waitForFunction(({ id, value }) => Array.from(document.getElementById(id)?.options || []).some(option => option.value === value), { id, value });
   const optionIndex = await inner.locator(`#${id}`).evaluate((element, target) => Array.from(element.options).findIndex((option) => option.value === target), value);
   assert.ok(optionIndex >= 0);
   await frame.locator(`.studio-select-trigger[data-select-id="${id}"]`).click();
@@ -20,15 +21,22 @@ async function select(frame, inner, id, value) {
 async function current(inner) {
   return await inner.evaluate(() => {
     const viewer = window.__testViewer; const slide = viewer.currSlide;
-    return { index: viewer.currIndex, imageId: slide.data.image_id, original: !!slide.data.originalSrc, preview: !!slide.data.previewSrc, state: slide.content.state, tag: slide.content.element?.tagName, width: slide.content.element?.naturalWidth || 0, zoom: slide.currZoomLevel, x: slide.pan.x, y: slide.pan.y };
+    return { index: viewer.currIndex, imageId: slide.data.image_id, original: !!slide.data.originalSrc, display: !!slide.data.displaySrc, preview: !!slide.data.previewSrc, state: slide.content.state, tag: slide.content.element?.tagName, width: slide.content.element?.naturalWidth || 0, zoom: slide.currZoomLevel, x: slide.pan.x, y: slide.pan.y };
   });
 }
 
-async function waitLoaded(inner, index, original = true) {
-  await inner.waitForFunction(({ position, full }) => {
+async function waitLoaded(inner, index, quality = "display") {
+  await inner.waitForFunction(({ position, quality }) => {
     const viewer = window.__testViewer; const slide = viewer?.currSlide;
-    return viewer?.currIndex === position && slide?.content.state === "loaded" && slide.content.element?.tagName === "IMG" && slide.content.element.naturalWidth > 1 && (!full || !!slide.data.originalSrc);
-  }, { position: index, full: original });
+    const source = quality === "original" ? slide?.data.originalSrc : slide?.data.displaySrc;
+    return viewer?.currIndex === position && slide?.content.state === "loaded" && slide.content.element?.tagName === "IMG"
+      && slide.content.element.naturalWidth > 1 && !!source && slide.content.element.src === source;
+  }, { position: index, quality });
+}
+
+async function toggleZoom(inner) {
+  await inner.evaluate(() => window.__testViewer.toggleZoom());
+  await inner.waitForFunction(() => !window.__testViewer.animations.activeAnimations.length);
 }
 
 async function openViewer(frame, inner) {
@@ -71,8 +79,9 @@ async function swipe(page, inner, direction) {
       }, test.theme);
       await frame.locator('[data-view="gallery"]').click(); await frame.locator(".gallery-card").first().waitFor();
       const natural = page.waitForResponse((response) => response.url().includes("/gallery/list") && new URL(response.url()).searchParams.get("provider_ids") === '["natural"]');
-      await select(frame, inner, "galleryProvider", "natural"); await natural;
+      await Promise.all([natural, select(frame, inner, "galleryProvider", "natural")]);
       await frame.locator(".gallery-card .gallery-info").first().click(); await openViewer(frame, inner); await waitLoaded(inner, 0);
+      assert.equal((await current(inner)).original, false, "ordinary browsing must use a display image instead of loading the original");
       assert.equal(await frame.locator(".image-studio-controls-visible").count(), 0, "download button should start hidden");
       await inner.waitForFunction(() => document.querySelector("canvas.image-studio-viewer-backdrop")?.width > 1);
       const backdrop = await inner.locator("canvas.image-studio-viewer-backdrop").evaluate((image) => ({ width: image.width, height: image.height, source: image.dataset.previewSource, preview: window.__testViewer.currSlide.data.previewSrc, filter: getComputedStyle(image).filter, holderOpacity: getComputedStyle(image.parentElement).opacity, holderFilter: getComputedStyle(image.parentElement).filter, holderClass: image.parentElement.className }));
@@ -114,12 +123,13 @@ async function swipe(page, inner, direction) {
       const zoomImageId = await inner.evaluate(() => window.__testViewer.options.dataSource[6].image_id);
       const zoomRoute = async (route) => { const url = new URL(route.request().url()); if (url.pathname.endsWith(`/${zoomImageId}`) && url.searchParams.get("detail") === "original") await zoomGate; await route.continue(); };
       await page.route("**/gallery/image/*", zoomRoute);
-      await inner.evaluate(() => window.__testViewer.goTo(6)); await waitLoaded(inner, 6, false);
-      await inner.evaluate(() => { const viewer = window.__testViewer; viewer.zoomTo(viewer.currSlide.zoomLevels.initial * 2, { x: innerWidth / 2, y: innerHeight / 2 }, 0); });
-      const zoomed = await current(inner); releaseZoom(); await waitLoaded(inner, 6);
+      await inner.evaluate(() => window.__testViewer.goTo(6)); await waitLoaded(inner, 6);
+      assert.equal((await current(inner)).original, false);
+      await toggleZoom(inner);
+      const zoomed = await current(inner); releaseZoom(); await waitLoaded(inner, 6, "original");
       const upgraded = await current(inner); assert.ok(Math.abs(upgraded.zoom - zoomed.zoom) < .001); assert.ok(Math.abs(upgraded.x - zoomed.x) < 1 && Math.abs(upgraded.y - zoomed.y) < 1);
       await page.unroute("**/gallery/image/*", zoomRoute);
-      await inner.evaluate(() => window.__testViewer.zoomTo(window.__testViewer.currSlide.zoomLevels.initial, undefined, 0));
+      await toggleZoom(inner); await waitLoaded(inner, 6);
 
       let allowOriginal = false; let originalFailures = 0;
       const retryImageId = await inner.evaluate(() => window.__testViewer.options.dataSource[10].image_id);
@@ -129,11 +139,13 @@ async function swipe(page, inner, direction) {
         else await route.continue();
       };
       await page.route("**/gallery/image/*", failing);
-      await inner.evaluate(() => window.__testViewer.goTo(10)); await waitLoaded(inner, 10, false);
-      await frame.locator(".image-studio-image-status:not([hidden])").waitFor();
-      assert.equal((await current(inner)).original, false); assert.equal((await current(inner)).preview, true);
+      await inner.evaluate(() => window.__testViewer.goTo(10)); await waitLoaded(inner, 10);
+      await toggleZoom(inner);
+      const retryButton = frame.locator('.image-studio-image-status[data-state="error"] button:not([hidden]):not(:disabled)');
+      await retryButton.waitFor();
+      assert.equal((await current(inner)).original, false); assert.equal((await current(inner)).display, true); assert.equal((await current(inner)).preview, true);
       await screenshot(page, inner, `${test.width}-${test.theme}-original-retry`);
-      allowOriginal = true; await frame.locator(".image-studio-image-status button:not(:disabled)").click(); await waitLoaded(inner, 10);
+      allowOriginal = true; await retryButton.click(); await waitLoaded(inner, 10, "original");
       await frame.locator(".image-studio-image-status").waitFor({ state: "hidden" }); assert.ok(originalFailures >= 1);
       await page.unroute("**/gallery/image/*", failing);
 
@@ -147,7 +159,7 @@ async function swipe(page, inner, direction) {
       };
       await page.route("**/gallery/image/*", latePreview);
       await inner.evaluate(() => window.__testViewer.goTo(15)); await waitLoaded(inner, 15); await page.waitForTimeout(300);
-      assert.equal(await frame.locator(".image-studio-image-status").isVisible(), false, "a late preview failure must not hide a successful original");
+      assert.equal(await frame.locator(".image-studio-image-status").isVisible(), false, "a late preview failure must not hide a successful display image");
       await page.unroute("**/gallery/image/*", latePreview);
 
       let releaseOld; const oldGate = new Promise((resolve) => { releaseOld = resolve; });
@@ -155,13 +167,14 @@ async function swipe(page, inner, direction) {
       const oldRequest = page.waitForRequest((request) => { const url = new URL(request.url()); return url.pathname.endsWith(`/${oldImageId}`) && url.searchParams.get("detail") === "original"; });
       const stale = async (route) => { const url = new URL(route.request().url()); if (url.pathname.endsWith(`/${oldImageId}`) && url.searchParams.get("detail") === "original") await oldGate; await route.continue(); };
       await page.route("**/gallery/image/*", stale); await inner.evaluate(() => window.__testViewer.goTo(1));
+      await waitLoaded(inner, 1); await toggleZoom(inner);
       await oldRequest;
       await inner.evaluate(() => window.__testViewer.close()); await frame.locator(".pswp--open").waitFor({ state: "detached" }); await frame.locator("#closeDrawer").click();
       await inner.evaluate(() => window.scrollTo(0, 0));
       // The blocked second natural record is a command image; choose a disjoint
-      // source so the new viewer's first original does not wait on that same gate.
+      // source so the new viewer's image identity differs from the pending original.
       const filtered = page.waitForResponse((response) => response.url().includes("/gallery/list") && new URL(response.url()).searchParams.get("sources") === '["llm_tool"]');
-      await select(frame, inner, "gallerySource", "llm_tool"); await filtered;
+      await Promise.all([filtered, select(frame, inner, "gallerySource", "llm_tool")]);
       await frame.locator(".gallery-card .gallery-info").first().click(); await openViewer(frame, inner); await waitLoaded(inner, 0);
       await inner.waitForFunction(() => !!window.__testViewer.options.dataSource[1].previewSrc);
       const fresh = await inner.evaluate(() => ({ id: window.__testViewer.options.dataSource[1].image_id, src: window.__testViewer.options.dataSource[1].src }));

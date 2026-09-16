@@ -40,6 +40,7 @@
   let galleryDataRevision = "";
   let browseEpoch = 0;
   const decodedDisplayImages = new Map();
+  let decodedDisplayBytes = 0;
   let mobileImageViewer = null;
   let mobileImageSequence = [];
   let mobileImageDataSource = [];
@@ -86,7 +87,7 @@
   function imageMediaKey(image, detail) {
     const identity = image?.sha256 || image?.image_id || image?.imageId || image?.id;
     if (!identity) return "";
-    return `${identity}:${detail}:${detail === "preview" ? image.thumbnail_revision || "legacy" : "original"}`;
+    return `${identity}:${detail}:${detail === "preview" || detail.startsWith("display:") ? image.thumbnail_revision || "legacy" : "original"}`;
   }
 
   function getImageMedia(image, detail) {
@@ -119,10 +120,12 @@
     const groups = new Set([state.detailData, ...(detailNavigationSession?.summaries.values() || [])]);
     for (const group of groups) for (const image of group?.images || []) {
       if (image.data_url === source) { delete image.data_url; image._originalLoaded = false; }
+      if (image._displayDataUrl === source) { delete image._displayDataUrl; delete image._displayEdge; }
       if (image.thumbnail_data_url === source) delete image.thumbnail_data_url;
     }
     for (const item of mobileViewerSession?.items || []) {
       if (item.originalSrc === source) item.originalSrc = "";
+      if (item.displaySrc === source) item.displaySrc = "";
       if (item.previewSrc === source) item.previewSrc = "";
     }
   }
@@ -135,7 +138,8 @@
     const id = image?.image_id || image?.imageId || image?.id;
     if (!key || !id) throw new Error("缺少图片标识，无法读取图片。");
     if (!imageMediaLoads.has(key)) {
-      const promise = apiGet(`gallery/image/${id}`, { detail }).then(payload => {
+      const params = detail.startsWith("display:") ? { detail: "display", max_edge: Number(detail.split(":")[1]) } : { detail };
+      const promise = apiGet(`gallery/image/${id}`, params).then(payload => {
         if (!payload?.data_url) throw new Error("图片接口没有返回可用内容。");
         // Store under the requested revision only: a late request must never
         // overwrite a newer preview after thumbnail settings were changed.
@@ -146,9 +150,28 @@
     return imageMediaLoads.get(key);
   }
 
+  function touchImageDisplay() { return window.ImageStudioDetailSwipe.usesTouchInteraction(); }
+
+  function displayImageEdge(image, area = null) {
+    const width = Math.max(1, Number(image?.width) || 1), height = Math.max(1, Number(image?.height) || 1);
+    const fit = Math.min((area?.width || window.innerWidth) / width, (area?.height || window.innerHeight) / height, 1);
+    const needed = Math.min(Math.max(width, height), Math.ceil(Math.max(width, height) * fit * Math.min(3, window.devicePixelRatio || 1)));
+    return [768, 1024, 1536, 2048].find(edge => edge >= needed) || 2048;
+  }
+
+  function detailDisplayReady(image) {
+    return touchImageDisplay() ? !!image?._displayDataUrl && image._displayEdge >= displayImageEdge(image) : !!image?._originalLoaded;
+  }
+
   function reuseImageMedia(detail) {
     for (const image of detail?.images || []) {
       image.thumbnail_data_url ||= getImageMedia(image, "preview");
+      if (touchImageDisplay()) {
+        const edge = displayImageEdge(image);
+        const display = getImageMedia(image, `display:${edge}`);
+        if (display) { image._displayDataUrl = display; image._displayEdge = edge; }
+        continue;
+      }
       const original = getImageMedia(image, "original");
       if (original) { image.data_url = original; image._originalLoaded = true; }
     }
@@ -895,7 +918,7 @@
     if (!images.length) return fallbackThumbnail ? [{ data_url: fallbackThumbnail, mime_type: "image/webp", size_bytes: 0 }] : [];
     return images.map((item, index) => ({
       ...item,
-      data_url: item?.data_url || item?.thumbnail_data_url || (index === 0 ? fallbackThumbnail : ""),
+      data_url: (touchImageDisplay() ? item?._displayDataUrl : item?.data_url) || item?.thumbnail_data_url || (index === 0 ? fallbackThumbnail : ""),
     }));
   }
 
@@ -1014,7 +1037,7 @@
       if (!detail?.lightweight) continue;
       detail.images.forEach((image, index) => {
         const nearby = detail === state.detailData && Math.abs(index - state.detailImageIndex) <= 1;
-        if (!nearby) { delete image.data_url; image._originalLoaded = false; }
+        if (!nearby) { delete image.data_url; image._originalLoaded = false; delete image._displayDataUrl; delete image._displayEdge; }
         if (image._metadataLoaded) metadata.push({ detail, image, nearby });
       });
     }
@@ -1054,6 +1077,31 @@
     const source = await queueDetailRead(session, `original:${image.id}`, () => loadImageMedia(image, "original"), () => isCurrentDetailImage(detail, image, session), true);
     if (!source || !currentDetailSession(session) || session.epoch !== epoch || !isCurrentDetailImage(detail, image, session)) return null;
     image.data_url = source; image._originalLoaded = !!source;
+    pruneDetailImages(session);
+    return image;
+  }
+
+  async function waitDetailDisplayIdle(frame, current) {
+    while (current() && frame?.isConnected && (document.hidden || frame.dataset.detailSwipeState)) {
+      await new Promise(resolve => setTimeout(resolve, 40));
+    }
+    return current();
+  }
+
+  async function loadDetailDisplay(detail, image, session = detailNavigationSession) {
+    const frame = els.drawerBody.querySelector(".detail-image-frame");
+    const edge = displayImageEdge(image);
+    const current = () => isCurrentDetailImage(detail, image, session) && !mobileViewerSession?.active;
+    const cached = getImageMedia(image, `display:${edge}`);
+    if (cached) { image._displayDataUrl = cached; image._displayEdge = edge; return image; }
+    if (image._displayDataUrl && image._displayEdge >= edge) return image;
+    const epoch = session?.epoch;
+    const source = await queueDetailRead(session, `display:${edge}:${image.id}`, async () => {
+      if (!await waitDetailDisplayIdle(frame, current)) return "";
+      return loadImageMedia(image, `display:${edge}`);
+    }, current, true);
+    if (!source || !current() || session.epoch !== epoch) return null;
+    image._displayDataUrl = source; image._displayEdge = edge;
     pruneDetailImages(session);
     return image;
   }
@@ -1338,20 +1386,39 @@
 
   function decodeDisplayImage(source) {
     if (!decodedDisplayImages.has(source)) {
-      const image = new Image(); image.className = "detail-image"; image.src = source;
-      const entry = { ready: false, promise: null };
+      const image = new Image(); image.className = "detail-image"; image.decoding = "async"; image.src = source;
+      const entry = { ready: false, promise: null, bytes: 0 };
       entry.promise = image.decode().then(() => {
         if (!image.naturalWidth || !image.naturalHeight) throw new Error("图片内容无法解码。");
-        entry.ready = true; return image;
+        entry.ready = true;
+        if (decodedDisplayImages.get(source) === entry) {
+          entry.bytes = image.naturalWidth * image.naturalHeight * 4;
+          decodedDisplayBytes += entry.bytes;
+          while (decodedDisplayBytes > 32 * 1024 * 1024 || decodedDisplayImages.size > 8) {
+            const first = decodedDisplayImages.keys().next().value;
+            decodedDisplayBytes -= decodedDisplayImages.get(first).bytes;
+            decodedDisplayImages.delete(first);
+          }
+        }
+        return image;
       }).catch((error) => {
         if (decodedDisplayImages.get(source) === entry) decodedDisplayImages.delete(source);
         discardImageMediaSource(source);
         throw error;
       });
       decodedDisplayImages.set(source, entry);
-      while (decodedDisplayImages.size > 8) decodedDisplayImages.delete(decodedDisplayImages.keys().next().value);
+      while (decodedDisplayImages.size > 8) {
+        const first = decodedDisplayImages.keys().next().value;
+        decodedDisplayBytes -= decodedDisplayImages.get(first).bytes;
+        decodedDisplayImages.delete(first);
+      }
     }
     return decodedDisplayImages.get(source).promise;
+  }
+
+  function forgetDecodedImage(source) {
+    const entry = decodedDisplayImages.get(source);
+    if (entry) { decodedDisplayBytes -= entry.bytes; decodedDisplayImages.delete(source); }
   }
 
   function showDetailImagePending(frame, reset = false) {
@@ -1389,6 +1456,9 @@
     const publish = async (source) => {
       if (!current()) return false;
       const previousSource = image.getAttribute("src");
+      if (previousSource && previousSource !== source && touchImageDisplay() && !mobileViewerSession?.preparingDetail) {
+        if (!await waitDetailDisplayIdle(frame, current)) return false;
+      }
       if (previousSource !== source) image.src = source;
       // A decoded candidate does not guarantee Safari has selected it on the mounted image.
       try { await image.decode(); }
@@ -1408,7 +1478,10 @@
     try {
       if (!decodedDisplayImages.get(preview)?.ready) await decodeDisplayImage(preview);
       if (!await publish(preview)) return false;
-      if (target !== preview) void decodeDisplayImage(target).then(() => publish(target)).catch(() => {});
+      if (target !== preview) void (async () => {
+        if (touchImageDisplay() && !await waitDetailDisplayIdle(frame, current)) return;
+        await decodeDisplayImage(target); await publish(target);
+      })().catch(() => {});
       return true;
     } catch (error) {
       if (target !== preview) {
@@ -1433,7 +1506,7 @@
 
   function createDetailImageFrame(generationId) {
     const frame = document.createElement("div"); frame.className = "detail-image-frame"; frame.dataset.generationId = generationId;
-    frame.innerHTML = `<div class="detail-image-background" aria-hidden="true"><img class="detail-image-backdrop" ${detailBackdropSource ? `src="${escape(detailBackdropSource)}"` : ""} alt="" /></div><img class="detail-image" alt="生成结果" data-detail-image="0" /><button class="detail-carousel-nav is-previous" data-detail-nav="-1" type="button" aria-label="查看上一张图片"><span aria-hidden="true">‹</span></button><button class="detail-carousel-nav is-next" data-detail-nav="1" type="button" aria-label="查看下一张图片"><span aria-hidden="true">›</span></button>`;
+    frame.innerHTML = `<div class="detail-image-background" aria-hidden="true"><img class="detail-image-backdrop" ${detailBackdropSource ? `src="${escape(detailBackdropSource)}"` : ""} alt="" /></div><img class="detail-image" decoding="async" alt="生成结果" data-detail-image="0" /><button class="detail-carousel-nav is-previous" data-detail-nav="-1" type="button" aria-label="查看上一张图片"><span aria-hidden="true">‹</span></button><button class="detail-carousel-nav is-next" data-detail-nav="1" type="button" aria-label="查看下一张图片"><span aria-hidden="true">›</span></button>`;
     showDetailImagePending(frame);
     const current = () => frame.isConnected && frame.dataset.generationId === String(state.detailId);
     window.ImageStudioDetailSwipe.bind(frame, {
@@ -1527,7 +1600,7 @@
     const currentImage = displayImages[imageIndex] || null;
     const currentImageUrl = currentImage?.data_url || "";
     state.detailImageIndex = imageIndex; state.detailData = detail;
-    if (detail.lightweight) state.detailAssetsLoaded = !!detail.images[imageIndex]?._originalLoaded;
+    if (detail.lightweight) state.detailAssetsLoaded = detailDisplayReady(detail.images[imageIndex]);
     if (state.detailAssetsLoaded) state.detailRequestedImageIndex = imageIndex;
     const refs = Array.isArray(detail.references) ? detail.references : [];
     const totalBytes = images.reduce((sum, item) => sum + Number(item.size_bytes || 0), 0);
@@ -1613,11 +1686,12 @@
         delete image[key];
         // A gallery mutation can supersede a pending read. Resume the selected
         // image once, using the new epoch, instead of leaving its shell loading.
-        if (current() && session.epoch !== loadEpoch) void loadDetailAssets(id, summary, fallbackThumbnail);
+        if (current() && (session.epoch !== loadEpoch
+          || key === "_displayTask" && !image._displayError && !detailDisplayReady(image))) void loadDetailAssets(id, summary, fallbackThumbnail);
       };
       const paint = () => {
         if (!current()) return;
-        state.detailAssetsLoaded = !!image._originalLoaded;
+        state.detailAssetsLoaded = detailDisplayReady(image);
         library.updateDetailActions(summary);
         void paintDetailImage(els.drawerBody.querySelector(".detail-image-frame"), detailDisplayImages(summary, fallbackThumbnail)[state.detailImageIndex], state.detailImageIndex);
         if (state.imagePreviewContext?.type === "detail" && state.imagePreviewContext.generationId === id && state.imagePreviewContext.imageIndex === state.detailImageIndex && !els.imagePreview.classList.contains("is-hidden")) {
@@ -1628,11 +1702,14 @@
       if (!image.thumbnail_data_url && !image._previewTask) image._previewTask = loadDetailPreview(summary, image, session, current).then(paint).catch(() => {
         if (current() && session.epoch === loadEpoch) detailImageLoadFailed();
       }).finally(() => settled("_previewTask"));
-      if (!image._originalLoaded && !image._originalError && !image._originalTask) image._originalTask = loadDetailOriginal(summary, image, session).then(paint).catch(error => {
+      const mobileDisplay = touchImageDisplay();
+      const mediaTask = mobileDisplay ? "_displayTask" : "_originalTask";
+      const mediaError = mobileDisplay ? "_displayError" : "_originalError";
+      if (!detailDisplayReady(image) && !image[mediaError] && !image[mediaTask]) image[mediaTask] = (mobileDisplay ? loadDetailDisplay : loadDetailOriginal)(summary, image, session).then(paint).catch(error => {
         if (!current() || session.epoch !== loadEpoch) return;
         detailImageLoadFailed();
-        image._originalError = errorMessage(error, "原图加载失败"); showNotice(image._originalError, "error");
-      }).finally(() => settled("_originalTask"));
+        image[mediaError] = errorMessage(error, mobileDisplay ? "图片显示加载失败" : "原图加载失败"); showNotice(image[mediaError], "error");
+      }).finally(() => settled(mediaTask));
       if (!image._metadataLoaded && !image._metadataError && !image._metadataTask) image._metadataTask = loadDetailMetadata(summary, image, session).then(result => {
         if (result && current()) void renderDetail(summary, fallbackThumbnail);
       }).catch(error => {
@@ -1757,7 +1834,7 @@
     } finally { if (currentDetailSession(session)) state.detailNavigating = false; }
   }
 
-  function closeDetail() { library.clearDetailParameterLayout(); stopDetailNavigation(); window.ImageStudioBackdrop.dispose(els.drawerBody.querySelector(".detail-image-backdrop:not(.detail-backdrop-previous)")); detailImagePaintRevision++; mobileDetailSyncRevision++; decodedDisplayImages.clear(); detailBackdropSource = ""; detailRequestRevision += 1; if (mobileImageViewer) { suppressMobileDetailSync = true; mobileImageViewer.close(); } state.detailId = ""; state.detailData = null; state.detailFallbackThumbnail = ""; state.detailAssetsLoaded = false; state.detailNavigating = false; state.detailImageIndex = 0; state.detailRequestedImageIndex = 0; closeImagePreview(); els.detailDrawer.classList.remove("is-open"); els.detailDrawer.setAttribute("aria-hidden", "true"); syncPageScrollLock(); }
+  function closeDetail() { library.clearDetailParameterLayout(); stopDetailNavigation(); window.ImageStudioBackdrop.dispose(els.drawerBody.querySelector(".detail-image-backdrop:not(.detail-backdrop-previous)")); detailImagePaintRevision++; mobileDetailSyncRevision++; decodedDisplayImages.clear(); decodedDisplayBytes = 0; detailBackdropSource = ""; detailRequestRevision += 1; if (mobileImageViewer) { suppressMobileDetailSync = true; mobileImageViewer.close(); } state.detailId = ""; state.detailData = null; state.detailFallbackThumbnail = ""; state.detailAssetsLoaded = false; state.detailNavigating = false; state.detailImageIndex = 0; state.detailRequestedImageIndex = 0; closeImagePreview(); els.detailDrawer.classList.remove("is-open"); els.detailDrawer.setAttribute("aria-hidden", "true"); syncPageScrollLock(); }
 
   function isMobileDetailPreview(context) {
     return context?.type === "detail" && window.ImageStudioDetailSwipe.usesTouchInteraction() && typeof window.PhotoSwipe === "function";
@@ -1769,8 +1846,8 @@
     const sameRecord = String(state.detailId) === String(sequenceItem.generation_id);
     const known = sameRecord ? knownImages.get(String(sequenceItem.image_id)) || knownImages.get(`index:${sequenceItem.image_index}`) : null;
     if (known?.thumbnail_data_url) return { src: known.thumbnail_data_url, detail: "preview" };
-    if (known?.data_url) return { src: known.data_url, detail: known._originalLoaded || (!state.detailData?.lightweight && state.detailAssetsLoaded) ? "original" : "preview" };
-    if (String(sequenceItem.generation_id) === String(context.generationId) && sequenceItem.image_index === context.imageIndex && fallbackDataUrl) return { src: fallbackDataUrl, detail: state.detailAssetsLoaded ? "original" : "preview" };
+    if (known?._displayDataUrl) return { src: known._displayDataUrl, detail: "display" };
+    if (String(sequenceItem.generation_id) === String(context.generationId) && sequenceItem.image_index === context.imageIndex && fallbackDataUrl) return { src: fallbackDataUrl, detail: "display" };
     const card = sequenceItem.image_index === 0 ? galleryById.get(String(sequenceItem.generation_id)) : null;
     if (card?.thumbnail_data_url) return { src: card.thumbnail_data_url, detail: "preview" };
     return { src: EMPTY_MOBILE_IMAGE, detail: "" };
@@ -1793,9 +1870,13 @@
       session.workTimer = 0;
       if (!isCurrentMobileSession(session)) return;
       if (mobileViewerBusy(session)) { scheduleMobileWork(session); return; }
-      const jobs = Array.from(session.workQueue.values()); session.workQueue.clear();
-      jobs.forEach((job) => { Promise.resolve().then(job.run).then(job.resolve, job.reject); });
-    }, 80);
+      // Start only one stage per turn. The next touch gets a chance to pause
+      // the remaining work instead of inheriting a burst of promise callbacks.
+      const [key, job] = session.workQueue.entries().next().value;
+      session.workQueue.delete(key);
+      Promise.resolve().then(job.run).then(job.resolve, job.reject);
+      scheduleMobileWork(session);
+    }, 32);
   }
 
   function queueMobileWork(session, key, run) {
@@ -1896,17 +1977,29 @@
     });
   }
 
+  function mobileWantsOriginal(session, index = session.viewer.currIndex) {
+    const slide = session.viewer.currSlide;
+    return index === session.viewer.currIndex && slide?.currZoomLevel > slide?.zoomLevels.initial * 1.01;
+  }
+
+  function mobileDisplaySource(item, session, index) {
+    return mobileWantsOriginal(session, index) && item.originalSrc || item.displaySrc || item.previewSrc || EMPTY_MOBILE_IMAGE;
+  }
+
   function updateMobileImageSource(index, payload, detail, session = mobileViewerSession) {
     const item = session?.items[index];
     if (!isCurrentMobileSession(session, index, item) || !item || !payload?.data_url) return;
     if (payload.id && String(payload.id) !== String(item.image_id)) return;
     if (detail === "original" && session.viewer.currIndex !== index) return;
     if (detail === "original") { item.originalSrc = payload.data_url; session.originalIndices.add(index); }
+    else if (detail === "display") { item.displaySrc = payload.data_url; item.displayEdge = payload.max_edge; session.displayIndices.add(index); }
     else item.previewSrc = payload.data_url;
     if (detail === "original") { item.originalError = ""; item.previewError = ""; item.originalRetryCount = 0; }
+    else if (detail === "display") item.displayError = "";
     else item.previewError = "";
-    const source = item.originalSrc || item.previewSrc || payload.data_url;
-    item.src = source; item.msrc = item.previewSrc || source; item.loadedDetail = item.originalSrc ? "original" : "preview";
+    const source = mobileDisplaySource(item, session, index);
+    item.src = source; item.msrc = item.previewSrc || item.displaySrc || source;
+    item.loadedDetail = source === item.originalSrc ? "original" : source === item.displaySrc ? "display" : "preview";
     const contents = new Set();
     const cached = session.viewer.contentLoader?.getContentByIndex(index);
     if (cached) contents.add(cached);
@@ -1920,6 +2013,7 @@
     contents.forEach((content) => {
       if (content.data.image_id && String(content.data.image_id) !== String(item.image_id)) return;
       content.data.src = source; content.data.msrc = item.msrc;
+      if (content.element?.tagName === "IMG") content.element.decoding = "async";
       if (content.isError() || content.element?.tagName !== "IMG") {
         // Error content is a DIV; reload through PhotoSwipe instead of changing DOM src.
         content.remove(); content.load(false, true);
@@ -1935,35 +2029,60 @@
     const item = session?.items[index];
     if (!item || !isCurrentMobileSession(session, index, item)) return;
     const key = `${item.image_id}:${detail}`;
+    const edge = detail === "display" ? displayImageEdge(item) : 0;
     const loads = session.loads;
     if (!loads.has(key)) {
       const relevant = () => isCurrentMobileSession(session, index, item)
-        && Math.abs(session.viewer.currIndex - index) <= (detail === "original" ? 0 : 1);
-      const errorKey = detail === "original" ? "originalError" : "previewError";
+        && Math.abs(session.viewer.currIndex - index) <= (detail === "preview" ? 1 : 0)
+        && (detail !== "original" || mobileWantsOriginal(session, index));
+      const errorKey = `${detail}Error`;
       item[errorKey] = "";
+      let preparedOriginal = "";
+      let encodedOriginal = "";
       const pending = queueMobileWork(session, `load:${key}`, async () => {
         if (!relevant()) return;
-        const available = detail === "original" ? item.originalSrc : item.previewSrc;
+        const available = detail === "original" ? item.originalSrc : detail === "display" ? (item.displayEdge >= edge ? item.displaySrc : "") : item.previewSrc;
         const known = detail === "original" && String(state.detailId) === String(item.generation_id)
           ? state.detailData?.images?.find((image) => String(image.id) === String(item.image_id)) : null;
         const knownOriginal = known?._originalLoaded || (!state.detailData?.lightweight && state.detailAssetsLoaded) ? known?.data_url : "";
-        const source = available || knownOriginal || await loadImageMedia(item, detail);
-        const payload = { id: item.image_id, data_url: source };
-        if (source) cacheImageMedia(item, detail, source);
+        const mediaDetail = detail === "display" ? `display:${edge}` : detail;
+        const source = available || knownOriginal || await loadImageMedia(item, mediaDetail);
+        if (detail === "original" && source?.startsWith("data:")) encodedOriginal = source;
+        const payload = { id: item.image_id, data_url: source, max_edge: edge };
+        if (source?.startsWith("data:")) cacheImageMedia(item, mediaDetail, source);
         if (!relevant()) return;
         if (!payload?.data_url) throw new Error("图片接口没有返回可用内容。");
+        // Original bytes cross the host's authenticated JSON bridge only on
+        // zoom. Convert off-thread so DOM and decode-cache keys stay small.
+        if (detail === "original" && !payload.data_url.startsWith("blob:")) {
+          payload.data_url = await queueMobileWork(session, `object:${key}`, () => relevant() ? session.mediaObjects.source(key, source) : "");
+          preparedOriginal = payload.data_url;
+          if (!relevant()) { session.mediaObjects.drop(key); return; }
+          if (!payload.data_url) throw new Error("原图显示准备失败，请重试。");
+        }
         // A response or decode may finish during a later gesture; gate both stages separately.
         const decoded = await queueMobileWork(session, `decode:${key}`, () => relevant() ? decodeDisplayImage(payload.data_url) : undefined);
         if (!decoded || !relevant()) return;
         await queueMobileWork(session, `paint:${key}`, () => { if (relevant()) updateMobileImageSource(index, payload, detail, session); });
         return payload;
       }).catch(error => {
+        // A failed Blob decode invalidates the encoded source too; retaining
+        // its data URL would make retry reuse the same broken HTTP 200 body.
+        if (encodedOriginal) discardImageMediaSource(encodedOriginal);
         if (!relevant()) return;
         item[errorKey] = errorMessage(error, detail === "original" ? "原图加载失败" : "预览加载失败");
         throw error;
       }).finally(() => {
+        if (preparedOriginal && item.originalSrc !== preparedOriginal && loads.get(key) === pending) {
+          forgetDecodedImage(preparedOriginal);
+          session.mediaObjects.drop(key);
+        }
         if (loads.get(key) === pending) loads.delete(key);
         updateMobileViewerFeedback(session);
+        if (relevant() && !item[errorKey] && detail !== "preview") {
+          const missing = detail === "original" ? !item.originalSrc : !item.displaySrc || item.displayEdge < displayImageEdge(item);
+          if (missing) syncMobileResolution(session);
+        }
       });
       loads.set(key, pending);
       updateMobileViewerFeedback(session);
@@ -1977,10 +2096,25 @@
       if (Math.abs(index - currentIndex) <= 1) return;
       session.originalIndices.delete(index);
       const item = session.items[index];
+      forgetDecodedImage(item.originalSrc);
+      session.mediaObjects.drop(`${item.image_id}:original`);
       item.originalSrc = "";
+      item.src = item.displaySrc || item.previewSrc || EMPTY_MOBILE_IMAGE;
+      item.msrc = item.previewSrc || item.src;
+      item.loadedDetail = item.displaySrc ? "display" : item.previewSrc ? "preview" : "";
+      const cached = session.viewer.contentLoader?.getContentByIndex(index);
+      if (cached && !cached.hasSlide && !cached.isAttached) { session.viewer.contentLoader.removeByIndex(index); cached.destroy(); }
+    });
+    // Session cursors must not turn into an unbounded second display cache.
+    // Keep current neighbors attached; farther images return to their small
+    // previews and can reuse the byte-budgeted shared cache on the next visit.
+    session.displayIndices.forEach(index => {
+      if (Math.abs(index - currentIndex) <= 1) return;
+      session.displayIndices.delete(index);
+      const item = session.items[index];
+      item.displaySrc = ""; item.displayEdge = 0;
       item.src = item.previewSrc || EMPTY_MOBILE_IMAGE;
-      item.msrc = item.src;
-      item.loadedDetail = item.previewSrc ? "preview" : "";
+      item.msrc = item.src; item.loadedDetail = item.previewSrc ? "preview" : "";
       const cached = session.viewer.contentLoader?.getContentByIndex(index);
       if (cached && !cached.hasSlide && !cached.isAttached) { session.viewer.contentLoader.removeByIndex(index); cached.destroy(); }
     });
@@ -2012,18 +2146,19 @@
     if (session.backdrop) void window.ImageStudioViewerBackdrop.transition(session.backdrop, src);
     const content = session.viewer.currSlide?.content;
     const loading = item && (item.retrying || item.retryTimer
-      || session.loads.has(`${item.image_id}:preview`) || session.loads.has(`${item.image_id}:original`)
+      || session.loads.has(`${item.image_id}:preview`) || session.loads.has(`${item.image_id}:original`) || session.loads.has(`${item.image_id}:display`)
       || content?.isLoading());
-    const hasImage = !!(item?.previewSrc || item?.originalSrc) && !content?.isError();
+    const hasImage = !!(item?.previewSrc || item?.displaySrc || item?.originalSrc) && !content?.isError();
     // A failed placeholder or preview is not a terminal failure while another
     // source, decode, paint or scheduled retry can still supply this image.
     const error = !loading && (content?.isError() && item?.displayError
-      || !item?.originalSrc && (item?.originalError || item?.previewError));
+      || (mobileWantsOriginal(session) && !item?.originalSrc ? item?.originalError : !item?.displaySrc && item?.displayError)
+      || !hasImage && item?.previewError);
     if (session.status) {
       session.status.hidden = hasImage && !error;
       session.status.dataset.state = error ? "error" : "loading";
       session.status.querySelector("span").textContent = error
-        ? hasImage ? "原图加载失败，当前显示预览。" : "图片暂时无法加载。"
+        ? hasImage ? "高清图片加载失败，当前显示预览。" : "图片暂时无法加载。"
         : "正在读取图片…";
       session.status.querySelector("button").hidden = !error;
       session.status.querySelector("button").disabled = !!item?.retrying;
@@ -2038,11 +2173,11 @@
     updateMobileViewerFeedback(session);
     const content = session.viewer.contentLoader?.getContentByIndex(index);
     if (content?.isError() || content?.element?.tagName === "DIV") {
-      item.originalSrc = ""; item.previewSrc = ""; item.src = EMPTY_MOBILE_IMAGE;
+      item.originalSrc = ""; item.displaySrc = ""; item.previewSrc = ""; item.src = EMPTY_MOBILE_IMAGE;
     }
     try {
       // Neither source should delay starting the other during recovery.
-      await Promise.allSettled([loadMobileImage(index, "preview", session), loadMobileImage(index, "original", session)]);
+      await Promise.allSettled([loadMobileImage(index, "preview", session), loadMobileImage(index, mobileWantsOriginal(session, index) ? "original" : "display", session)]);
     } finally { item.retrying = false; updateMobileViewerFeedback(session); }
   }
 
@@ -2053,7 +2188,10 @@
     for (const neighbor of [index - 1, index, index + 1]) {
       if (neighbor >= 0 && neighbor < session.items.length) void loadMobileImage(neighbor, "preview", session).catch(() => {});
     }
-    void loadMobileImage(index, "original", session).catch(() => {
+    const quality = mobileWantsOriginal(session, index) ? "original" : "display";
+    const selected = session.items[index];
+    if (quality === "original" ? selected?.originalSrc : selected?.displaySrc && selected.displayEdge >= displayImageEdge(selected)) return;
+    void loadMobileImage(index, quality, session).catch(() => {
       if (!isCurrentMobileSession(session) || session.viewer.currIndex !== index) return;
       const item = session.items[index];
       if (!item.originalRetryCount) {
@@ -2066,6 +2204,20 @@
         session.retryTimers.add(timer);
       }
       updateMobileViewerFeedback(session);
+    });
+  }
+
+  function syncMobileResolution(session) {
+    if (!isCurrentMobileSession(session)) return;
+    void queueMobileWork(session, "resolution", () => {
+      const index = session.viewer.currIndex, item = session.items[index];
+      if (!item) return;
+      const source = mobileDisplaySource(item, session, index);
+      if (source !== EMPTY_MOBILE_IMAGE && source !== item.src) {
+        const detail = source === item.originalSrc ? "original" : source === item.displaySrc ? "display" : "preview";
+        updateMobileImageSource(index, { id: item.image_id, data_url: source, max_edge: item.displayEdge }, detail, session);
+      }
+      warmMobileImages(index, session);
     });
   }
 
@@ -2314,9 +2466,10 @@
       const galleryById = new Map(state.galleryItems.map((item) => [String(item.id), item]));
       mobileImageDataSource = sequence.map((item) => {
         const known = mobileSourceForSequenceItem(item, dataUrl, context, knownImages, galleryById);
-        const preview = known.detail === "preview" ? known.src : "";
-        const original = known.detail === "original" ? known.src : getImageMedia(item, "original");
-        return { ...item, src: original || known.src, msrc: preview || original || known.src, width: Math.max(1, Number(item.width || 1)), height: Math.max(1, Number(item.height || 1)), previewSrc: preview, originalSrc: original, loadedDetail: original ? "original" : known.detail, alt: "生成结果" };
+        const preview = known.detail === "preview" ? known.src : getImageMedia(item, "preview");
+        const edge = displayImageEdge(item);
+        const display = getImageMedia(item, `display:${edge}`) || (known.detail === "display" ? known.src : "");
+        return { ...item, src: display || preview || EMPTY_MOBILE_IMAGE, msrc: preview || display || EMPTY_MOBILE_IMAGE, width: Math.max(1, Number(item.width || 1)), height: Math.max(1, Number(item.height || 1)), previewSrc: preview, displaySrc: display, displayEdge: display ? edge : 0, originalSrc: "", loadedDetail: display ? "display" : preview ? "preview" : "", alt: "生成结果" };
       });
       const initialItem = mobileImageDataSource[initialIndex];
       const initialBackdropImage = await prepareMobileViewerBackdrop(initialItem);
@@ -2324,14 +2477,22 @@
       const initialBackdrop = window.ImageStudioViewerBackdrop.create(initialBackdropImage);
       if (!initialBackdrop) { showNotice("图片预览暂时无法加载，请稍后重试。", "error"); return true; }
       if (initialItem.previewSrc) {
-        initialItem.src = initialItem.originalSrc || initialItem.previewSrc; initialItem.msrc = initialItem.previewSrc;
-        initialItem.loadedDetail = initialItem.originalSrc ? "original" : "preview";
+        initialItem.src = initialItem.displaySrc || initialItem.previewSrc; initialItem.msrc = initialItem.previewSrc;
+        initialItem.loadedDetail = initialItem.displaySrc ? "display" : "preview";
       }
       const session = { active: true, sequence, items: mobileImageDataSource, loads: mobileImageLoads, retryTimers: new Set(), viewer: null, backdrop: null, status: null, workQueue: new Map(), workTimer: 0, pointerIds: new Set(), touchCount: 0, inputSuspended: false, resettingGesture: false, originalIndices: new Set(mobileImageDataSource.flatMap((item, index) => item.originalSrc ? [index] : [])), preparingDetail: false, detailSyncIndex: -1, detailSyncPromise: null, entryAnimation: null };
       session.sequenceRevision = detailNavigationSession?.sequenceRevision || galleryDataRevision;
+      session.displayIndices = new Set(mobileImageDataSource.flatMap((item, index) => item.displaySrc ? [index] : []));
+      session.mediaObjects = window.ImageStudioMediaObjects.createScope();
       // PhotoSwipe blocks input during its opening animation; the visual fade is independent.
-      const pswp = new window.PhotoSwipe({ dataSource: mobileImageDataSource, index: initialIndex, loop: false, closeOnVerticalDrag: true, pinchToClose: false, tapAction: toggleMobileImageControls, imageClickAction: toggleMobileImageControls, bgClickAction: toggleMobileImageControls, doubleTapAction: "zoom", initialZoomLevel: "fit", secondaryZoomLevel: 2.5, maxZoomLevel: 4, preload: [1, 1], arrowPrev: false, arrowNext: false, close: false, zoom: false, counter: false, bgOpacity: 1, showHideAnimationType: "fade", showAnimationDuration: 0, hideAnimationDuration: 220, zoomAnimationDuration: 220, errorMsg: "图片暂时无法加载，请重试。", mainClass: "image-studio-pswp" });
+      const pswp = new window.PhotoSwipe({ dataSource: mobileImageDataSource, index: initialIndex, loop: false, closeOnVerticalDrag: true, pinchToClose: false, tapAction: toggleMobileImageControls, imageClickAction: toggleMobileImageControls, bgClickAction: toggleMobileImageControls, doubleTapAction: "zoom", initialZoomLevel: "fit", secondaryZoomLevel: levels => levels.initial * 2.5, maxZoomLevel: levels => Math.max(levels.initial * 2.5, Math.min(1, levels.initial * 8)), preload: [1, 1], arrowPrev: false, arrowNext: false, close: false, zoom: false, counter: false, bgOpacity: 1, showHideAnimationType: "fade", showAnimationDuration: 0, hideAnimationDuration: 220, zoomAnimationDuration: 220, errorMsg: "图片暂时无法加载，请重试。", mainClass: "image-studio-pswp" });
       session.viewer = pswp;
+      pswp.on("contentLoadImage", ({ content }) => { if (content.element?.tagName === "IMG") content.element.decoding = "async"; });
+      pswp.on("zoomPanUpdate", () => {
+        const wantsOriginal = mobileWantsOriginal(session);
+        if (session.wantsOriginal !== wantsOriginal) { session.wantsOriginal = wantsOriginal; syncMobileResolution(session); }
+      });
+      pswp.on("resolutionChanged", () => syncMobileResolution(session));
       pswp.addFilter("preventPointerEvent", (prevent, event) => event.target instanceof Element && event.target.closest(".image-studio-viewer-filmstrip") ? false : prevent);
       const placeholders = new Map(), destroyedSlides = new WeakSet();
       function syncPlaceholder(slide) {
@@ -2431,7 +2592,7 @@
       pswp.on("moveMainScroll", (event) => {
         if (event.dragging && pswp.gestures.dragAxis === "x") restoreMobileViewerBackground(session);
       });
-      pswp.on("resize", () => { if (isCurrentMobileSession(session)) { window.ImageStudioViewerBackdrop.resize(session.backdrop); session.filmstrip?.sync(); } });
+      pswp.on("resize", () => { if (isCurrentMobileSession(session)) { window.ImageStudioViewerBackdrop.resize(session.backdrop); session.filmstrip?.sync(); syncMobileResolution(session); } });
       pswp.on("pointerDown", (event) => trackMobilePointer(session, event, true));
       pswp.on("pointerUp", (event) => trackMobilePointer(session, event, false));
       pswp.on("verticalDrag", () => { void prepareMobileDetail(session); });
@@ -2466,6 +2627,8 @@
         const item = session.sequence[pswp.currIndex];
         const shouldSyncDetail = !suppressMobileDetailSync;
         session.active = false;
+        session.items.forEach(item => forgetDecodedImage(item.originalSrc));
+        session.mediaObjects.dispose();
         session.filmstrip?.destroy();
         cancelMobileWork(session);
         session.themeObserver?.disconnect();
@@ -2817,7 +2980,11 @@
     window.addEventListener("focus", refreshQuota);
     window.addEventListener("pagehide", () => { window.clearInterval(providerQuotaTimer); providerQuotaTimer = 0; });
     window.addEventListener("pageshow", () => { if (!providerQuotaTimer) providerQuotaTimer = window.setInterval(refreshQuota, PROVIDER_QUOTA_TTL); refreshQuota(); });
-    window.addEventListener("resize", () => { if (state.detailId) centerDetailFilmstrip(els.drawerBody.querySelector(".detail-filmstrip")); }, { passive: true });
+    window.addEventListener("resize", () => {
+      if (!state.detailId) return;
+      centerDetailFilmstrip(els.drawerBody.querySelector(".detail-filmstrip"));
+      if (touchImageDisplay() && state.detailData && !mobileViewerSession?.active) void loadDetailAssets(state.detailId, state.detailData, state.detailFallbackThumbnail);
+    }, { passive: true });
     els.galleryGrid.addEventListener("click", (event) => { const card = event.target.closest("[data-gallery-id]"); if (card && !event.target.closest(".gallery-selection")) void openDetail(card.dataset.galleryId); });
     els.galleryGrid.addEventListener("change", (event) => { const input = event.target.closest("[data-select-id]"); if (!input) return; input.checked ? state.selectedIds.add(input.dataset.selectId) : state.selectedIds.delete(input.dataset.selectId); updateSelection(); });
     document.querySelectorAll(".nav-item").forEach((button) => button.addEventListener("click", () => switchView(button.dataset.view)));

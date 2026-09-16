@@ -2,7 +2,9 @@
 
 在 AstrBot 中生成、编辑和管理图片。既能打开 WebUI 调整参数，也能在聊天中使用指令，或让 Agent 把生图作为任务中的一步，继续改图、拼接和制作其他作品。
 
-当前正式版本为 **1.3.1**。画廊进入和翻页时先显示页面与卡片占位，图片随后逐张加载；沿用 1.3.0 的 NovelAI 官方接口、ComfyUI 工作流及 Agent 模型搜索。完整变化见 [更新记录](CHANGELOG.md)。
+当前开发版本为 **1.3.2-dev.1**，基于正式版 **1.3.1** 继续开发。画廊进入和翻页时先显示页面与卡片占位，图片随后逐张加载；沿用 NovelAI 官方接口、ComfyUI 工作流及 Agent 模型搜索。正式安装请使用 [Releases](https://github.com/Eco404/astrbot_plugin_image_studio/releases) 中的版本，完整变化见 [更新记录](CHANGELOG.md)。
+
+本开发版优化手机和平板的大图浏览：切图时加载适合屏幕的显示图，放大时再读取原图，下载与参考图仍保留原始质量。
 
 ![Image Studio 生图工作台](docs/images/generate.png)
 
@@ -35,7 +37,7 @@ https://github.com/Eco404/astrbot_plugin_image_studio
 
 也可以从 [Releases](https://github.com/Eco404/astrbot_plugin_image_studio/releases) 下载 ZIP 安装。安装后，在插件详情中打开 **Image Studio** 页面。
 
-从旧版升级前，请停止 AstrBot 并备份完整插件数据目录。1.3.1 沿用 1.3.0 的正式 **v3 数据库**，从 1.3.0 升级无需迁移；1.1.0／1.2.0 用户由 v2 升级，1.0.0 用户按 v1 → v2 → v3 升级。最终 `3-dev.1` 开发库可直接转换，保留已有工作流和任务数据。
+从旧版升级前，请停止 AstrBot 并备份完整插件数据目录。当前开发版沿用 1.3.1 的正式 **v3 数据库**，从 1.3.0／1.3.1 升级无需迁移；1.1.0／1.2.0 用户由 v2 升级，1.0.0 用户按 v1 → v2 → v3 升级。最终 `3-dev.1` 开发库可直接转换，保留已有工作流和任务数据。
 
 数据库升级前会自动备份，失败则回滚；自动备份不包含图片和配置。如需回退，应同时恢复旧版代码与升级前的完整数据备份。详细兼容范围与恢复方法见 [开发与升级说明](https://github.com/Eco404/astrbot_plugin_image_studio/blob/main/docs/DEVELOPMENT.md)。
 

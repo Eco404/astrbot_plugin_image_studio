@@ -40,16 +40,23 @@ async function seed(page, files) {
   }
   return (await api(page, "post", prepared.commit_endpoint, {})).generation_id;
 }
-async function ready(inner, index, original = false) {
-  await inner.waitForFunction(({ index, original }) => {
+async function ready(inner, index, quality = "display") {
+  await inner.waitForFunction(({ index, quality }) => {
     const viewer = window.__idleViewer; const item = viewer?.currSlide;
-    return viewer?.currIndex === index && item?.content.state === "loaded" && item.content.element?.naturalWidth > 1 && (!original || !!item.data.originalSrc);
-  }, { index, original });
+    const source = quality === "original" ? item?.data.originalSrc : item?.data.displaySrc;
+    return viewer?.currIndex === index && item?.content.state === "loaded" && item.content.element?.naturalWidth > 1 && !!source && item.content.element.src === source;
+  }, { index, quality });
+}
+async function zoom(inner, multiplier = 2, duration = 0) {
+  await inner.evaluate(({ multiplier, duration }) => {
+    const viewer = window.__idleViewer;
+    viewer.zoomTo(viewer.currSlide.zoomLevels.initial * multiplier, { x: innerWidth / 2, y: innerHeight / 2 }, duration);
+  }, { multiplier, duration });
 }
 async function snapshot(inner) {
   return await inner.evaluate(() => {
     const viewer = window.__idleViewer; const slide = viewer.currSlide;
-    return { index: viewer.currIndex, id: slide.data.image_id, generation: slide.data.generation_id, src: slide.content.element?.src, preview: slide.data.previewSrc, original: slide.data.originalSrc || "", zoom: slide.currZoomLevel, pan: { ...slide.pan }, dragging: viewer.gestures.isDragging, shifted: viewer.mainScroll.isShifted(), animations: viewer.animations.activeAnimations.length };
+    return { index: viewer.currIndex, id: slide.data.image_id, generation: slide.data.generation_id, src: slide.content.element?.src, preview: slide.data.previewSrc, display: slide.data.displaySrc || "", original: slide.data.originalSrc || "", zoom: slide.currZoomLevel, pan: { ...slide.pan }, dragging: viewer.gestures.isDragging, shifted: viewer.mainScroll.isShifted(), animations: viewer.animations.activeAnimations.length };
   });
 }
 async function pointer(inner, type, x, y = 400) {
@@ -79,11 +86,26 @@ async function waitRequest(page, gate) {
 async function decoded(inner, imageId) { return await inner.evaluate((id) => window.__idleDecodes.filter((entry) => entry.id === id), imageId); }
 async function installProbe(inner, originals) {
   await inner.evaluate((originals) => {
-    window.__idleOriginals = new Map(originals); window.__idleDecodes = []; window.__idlePointerEvents = 0;
+    window.__idleOriginals = new Map(originals); window.__idleBlobOriginals = new Map(); window.__idleDecodes = []; window.__idlePointerEvents = 0;
+    // Original display now uses owned Blob URLs. Associate the actual returned
+    // URL with the exact original input bytes before the app starts decoding.
+    const createScope = window.ImageStudioMediaObjects.createScope;
+    window.ImageStudioMediaObjects = {
+      createScope() {
+        const scope = createScope(), source = scope.source;
+        scope.source = async (key, input) => {
+          const url = await source(key, input);
+          const id = window.__idleOriginals.get(input) || window.__idleBlobOriginals.get(input);
+          if (url && id) window.__idleBlobOriginals.set(url, id);
+          return url;
+        };
+        return scope;
+      },
+    };
     const decode = HTMLImageElement.prototype.decode;
     HTMLImageElement.prototype.decode = function () {
-      const id = window.__idleOriginals.get(this.src); const viewer = window.__idleViewer;
-      if (id) window.__idleDecodes.push({ id, current: viewer?.currSlide?.data.image_id, dragging: !!viewer?.gestures.isDragging, zooming: !!viewer?.gestures.isZooming, shifted: !!viewer?.mainScroll.isShifted(), animations: viewer?.animations.activeAnimations.length || 0, pointerHeld: !!window.__idlePointerHeld });
+      const id = window.__idleOriginals.get(this.src) || window.__idleBlobOriginals.get(this.src); const viewer = window.__idleViewer;
+      if (id) window.__idleDecodes.push({ id, sourceType: this.src.startsWith("blob:") ? "blob" : "data", current: viewer?.currSlide?.data.image_id, dragging: !!viewer?.gestures.isDragging, zooming: !!viewer?.gestures.isZooming, shifted: !!viewer?.mainScroll.isShifted(), animations: viewer?.animations.activeAnimations.length || 0, pointerHeld: !!window.__idlePointerHeld });
       return decode.call(this);
     };
     const Original = window.PhotoSwipe;
@@ -115,8 +137,8 @@ async function verifyPreparedDetails(page, frame, inner, items) {
   const previewRoute = async (route) => {
     const response = await route.fetch(); const body = await response.json(); const data = body.data || body;
     data.images[current.imageIndex].thumbnail_data_url = coldPreview;
-    // The viewer already decoded this image's original. A cold-thumbnail probe
-    // needs a new immutable identity; otherwise restoring the cached original
+    // The viewer already decoded this image's display. A cold-thumbnail probe
+    // needs a new immutable identity; otherwise restoring the cached display
     // correctly skips preview decoding entirely.
     data.images[current.imageIndex].sha256 = `cold-preview-${data.images[current.imageIndex].sha256}`;
     await route.fulfill({ response, json: body });
@@ -153,7 +175,7 @@ async function verifyPreparedDetails(page, frame, inner, items) {
   const pendingMarkup = await frame.locator("#drawerBody").innerHTML(); releaseSummary(); await page.waitForTimeout(180);
   assert.equal(await frame.locator("#drawerBody").innerHTML(), pendingMarkup, "a canceled vertical preparation must not repaint an old selection after horizontal navigation");
   await page.unroute(`**/gallery/detail/${items[1].generation}?*`, staleRoute);
-  await inner.evaluate(() => window.__idleViewer.goTo(7)); await ready(inner, 7, true);
+  await inner.evaluate(() => window.__idleViewer.goTo(7)); await ready(inner, 7);
 }
 
 (async () => {
@@ -174,7 +196,9 @@ async function verifyPreparedDetails(page, frame, inner, items) {
     const initial = await inner.evaluate(() => window.__idleInitial);
     assert.equal(initial.open, true, "the viewer should accept gestures as soon as afterInit runs");
     assert.equal(initial.firstPointerAccepted, true, "the first pointer must not be swallowed by an opening animation");
-    await ready(inner, 0, true);
+    assert.equal(initial.original, false, "fit viewing must not eagerly fetch originals");
+    await ready(inner, 0);
+    assert.equal((await snapshot(inner)).original, "");
     const items = await inner.evaluate(() => window.__idleViewer.options.dataSource.map((item) => ({ id: item.image_id, generation: item.generation_id, imageIndex: item.image_index })));
     assert.equal(items.length, 8, "search must isolate this test's two four-image groups");
     assert.notEqual(items[0].generation, items[4].generation);
@@ -190,28 +214,29 @@ async function verifyPreparedDetails(page, frame, inner, items) {
     });
 
     const held = blockOriginal(page, items[4].id); await held.install();
-    await inner.evaluate(() => window.__idleViewer.goTo(4)); await ready(inner, 4); await waitRequest(page, held);
+    await inner.evaluate(() => window.__idleViewer.goTo(4)); await ready(inner, 4); await zoom(inner); await waitRequest(page, held);
     await pointer(inner, "pointerdown", 285); held.release(); await page.waitForTimeout(140);
     assert.deepEqual(await decoded(inner, items[4].id), [], "an original decoded while the pointer remained pressed");
     assert.equal((await snapshot(inner)).original, "");
     await pointer(inner, "pointermove", 270); await page.waitForTimeout(30); await pointer(inner, "pointermove", 235); await page.waitForTimeout(40);
     assert.equal((await snapshot(inner)).dragging, true, "the probe must exercise PhotoSwipe's actual drag handler");
     assert.deepEqual(await decoded(inner, items[4].id), [], "an original decoded during drag");
-    await page.waitForTimeout(170); await pointer(inner, "pointerup", 235); await ready(inner, 4, true); await held.remove();
+    await page.waitForTimeout(170); await pointer(inner, "pointerup", 235); await ready(inner, 4, "original"); await held.remove();
     const dragDecodes = await decoded(inner, items[4].id); assert.ok(dragDecodes.length > 0);
+    assert.ok(dragDecodes.every(item => item.sourceType === "blob"), "the original decode probe must follow the owned Blob URL");
     assert.ok(dragDecodes.every((item) => !item.pointerHeld && !item.dragging && !item.zooming && !item.shifted && !item.animations), JSON.stringify(dragDecodes));
 
     const zoomGate = blockOriginal(page, items[5].id); await zoomGate.install();
-    await inner.evaluate(() => window.__idleViewer.goTo(5)); await ready(inner, 5); await waitRequest(page, zoomGate);
-    await inner.evaluate(() => { const viewer = window.__idleViewer; viewer.zoomTo(viewer.currSlide.zoomLevels.initial * 2, { x: innerWidth / 2, y: innerHeight / 2 }, 400); });
+    await inner.evaluate(() => window.__idleViewer.goTo(5)); await ready(inner, 5); await zoom(inner, 1.5); await waitRequest(page, zoomGate);
+    await zoom(inner, 2, 400);
     const zoomed = await snapshot(inner); assert.ok(zoomed.animations > 0, "zoom transition should be active"); zoomGate.release(); await page.waitForTimeout(90);
     assert.deepEqual(await decoded(inner, items[5].id), [], "an original decoded during zoom animation");
-    await ready(inner, 5, true); const upgraded = await snapshot(inner); assert.ok(Math.abs(upgraded.zoom - zoomed.zoom) < .001); assert.deepEqual(upgraded.pan, zoomed.pan); await zoomGate.remove();
+    await ready(inner, 5, "original"); const upgraded = await snapshot(inner); assert.ok(Math.abs(upgraded.zoom - zoomed.zoom) < .001); assert.deepEqual(upgraded.pan, zoomed.pan); await zoomGate.remove();
     await inner.evaluate(() => window.__idleViewer.zoomTo(window.__idleViewer.currSlide.zoomLevels.initial, undefined, 0));
 
     const stale = blockOriginal(page, items[6].id); await stale.install();
-    await inner.evaluate(() => window.__idleViewer.goTo(6)); await ready(inner, 6); await waitRequest(page, stale);
-    await inner.evaluate(() => window.__idleViewer.goTo(7)); await ready(inner, 7, true); stale.release(); await page.waitForTimeout(200);
+    await inner.evaluate(() => window.__idleViewer.goTo(6)); await ready(inner, 6); await zoom(inner); await waitRequest(page, stale);
+    await inner.evaluate(() => window.__idleViewer.goTo(7)); await ready(inner, 7); stale.release(); await page.waitForTimeout(200);
     assert.deepEqual(await decoded(inner, items[6].id), [], "a stale non-current original should not be decoded after a quick switch"); await stale.remove();
     assert.equal((await snapshot(inner)).id, items[7].id);
     const background = await inner.evaluate(() => {
@@ -229,33 +254,35 @@ async function verifyPreparedDetails(page, frame, inner, items) {
     await inner.evaluate(() => window.__idleViewer.close()); await frame.locator(".pswp--open").waitFor({ state: "detached" });
     await frame.locator(`.detail-filmstrip[data-generation-id="${items[7].generation}"] [data-detail-dot="${items[7].imageIndex}"][aria-current="true"]`).waitFor();
     await frame.locator("#detailUseReference:not(:disabled)").waitFor();
-    await frame.locator("[data-detail-image]").click(); await inner.waitForFunction(() => window.__idleViewer?.opener.isOpen); await ready(inner, 7, true);
+    await frame.locator("[data-detail-image]").click(); await inner.waitForFunction(() => window.__idleViewer?.opener.isOpen); await ready(inner, 7);
     assert.equal((await snapshot(inner)).id, items[7].id, "reopening must preserve the image selected in the viewer");
 
     const failure = blockOriginal(page, items[1].id, "测试原图暂时不可用"); await failure.install();
-    await inner.evaluate(() => window.__idleViewer.goTo(1)); await ready(inner, 1); await waitRequest(page, failure); failure.release();
-    await frame.locator(".image-studio-image-status:not([hidden])").waitFor(); assert.match(await frame.locator(".image-studio-image-status").innerText(), /原图加载失败|图片暂时无法加载/);
+    await inner.evaluate(() => window.__idleViewer.goTo(1)); await ready(inner, 1); await zoom(inner); await waitRequest(page, failure); failure.release();
+    await frame.locator(".image-studio-image-status:not([hidden])").waitFor(); assert.match(await frame.locator(".image-studio-image-status").innerText(), /高清图片加载失败|图片暂时无法加载/);
     await page.screenshot({ path: path.join(output, `${engine}-idle-retry.png`) }); await failure.remove();
+    await zoom(inner, 1); await ready(inner, 1);
     await pointer(inner, "pointerdown", 190, 300);
     for (const y of [320, 375, 440, 510, 590, 660]) { await pointer(inner, "pointermove", 190, y); await page.waitForTimeout(25); }
     await pointer(inner, "pointerup", 190, 660); await frame.locator(".pswp--open").waitFor({ state: "detached" });
     await frame.locator(`.detail-filmstrip[data-generation-id="${items[1].generation}"] [data-detail-dot="${items[1].imageIndex}"][aria-current="true"]`).waitFor();
     await frame.locator("#detailUseReference:not(:disabled)").waitFor();
-    await frame.locator("[data-detail-image]").click(); await inner.waitForFunction(() => window.__idleViewer?.opener.isOpen); await ready(inner, 1, true);
+    await frame.locator("[data-detail-image]").click(); await inner.waitForFunction(() => window.__idleViewer?.opener.isOpen); await ready(inner, 1);
+    await zoom(inner); await ready(inner, 1, "original");
     let repeatedOriginals = 0;
     const observeCachedOriginal = request => {
       const url = new URL(request.url());
       if (url.pathname.endsWith(`/${items[6].id}`) && url.searchParams.get("detail") === "original") repeatedOriginals++;
     };
     page.on("request", observeCachedOriginal);
-    await inner.evaluate(() => window.__idleViewer.goTo(6)); await ready(inner, 6, true); await page.waitForTimeout(160);
+    await inner.evaluate(() => window.__idleViewer.goTo(6)); await ready(inner, 6); await zoom(inner); await ready(inner, 6, "original"); await page.waitForTimeout(160);
     page.off("request", observeCachedOriginal);
     assert.equal(repeatedOriginals, 0, "a downloaded stale original must be reusable by a later viewer without another request");
     // Image 6's earlier stale response is reusable in the shared media cache.
     // Use an original that has never been requested for the pending-close case.
     const closingIndex = 3;
     const closing = blockOriginal(page, items[closingIndex].id); await closing.install();
-    await inner.evaluate(index => window.__idleViewer.goTo(index), closingIndex); await ready(inner, closingIndex); await waitRequest(page, closing);
+    await inner.evaluate(index => window.__idleViewer.goTo(index), closingIndex); await ready(inner, closingIndex); await zoom(inner); await waitRequest(page, closing);
     await inner.evaluate(() => { window.__idleClosingViewer = window.__idleViewer; window.__idleViewer.close(); }); await frame.locator(".pswp--open").waitFor({ state: "detached" });
     closing.release(); await page.waitForTimeout(180); await closing.remove();
     assert.equal(await frame.locator(".pswp--open").count(), 0, "a late original response must not revive the closed viewer");

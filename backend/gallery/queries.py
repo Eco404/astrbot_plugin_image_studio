@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import uuid
 from collections.abc import Callable
@@ -11,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..media.display import display_file_version
 from ..media.files import (
     _atomic_write,
     _is_within,
@@ -48,6 +50,7 @@ class QueryServices:
     gallery_revision: Callable[..., Any]
     gallery_thumbnail: Callable[..., Any]
     resolve_image_asset: Callable[..., Any]
+    report_external_failure: Callable[..., Any]
 
 
 class GalleryQueries:
@@ -553,7 +556,7 @@ class GalleryQueries:
             ),
         )
 
-    def gallery_image_data(self, image_id: str, detail: str) -> dict[str, Any] | None:
+    def gallery_image_source(self, image_id: str) -> dict[str, Any] | None:
         with self.context.connect() as conn:
             row = conn.execute(
                 "SELECT i.id AS image_id, i.generation_id, i.ordinal, a.path, "
@@ -570,6 +573,30 @@ class GalleryQueries:
             return None
         item = dict(row)
         if not self.services.external_generation_enabled(item["generation_id"]):
+            return None
+        return item
+
+    def gallery_display_source(
+        self, image_id: str
+    ) -> tuple[dict[str, Any], Path, tuple[int, ...]] | None:
+        """Recheck browsing access and actual file readability on every cache use."""
+        item = self.gallery_image_source(image_id)
+        if item is None:
+            return None
+        path = self.services.resolve_image_asset(item)
+        if path is None:
+            return None
+        try:
+            with path.open("rb") as stream:
+                version = display_file_version(os.fstat(stream.fileno()))
+        except OSError as exc:
+            self.services.report_external_failure(str(item["generation_id"]), exc)
+            return None
+        return item, path, version
+
+    def gallery_image_data(self, image_id: str, detail: str) -> dict[str, Any] | None:
+        item = self.gallery_image_source(image_id)
+        if item is None:
             return None
         original = self.services.resolve_image_asset(item)
         thumbnail = self.context.data_dir / str(item["thumbnail_path"] or "")
