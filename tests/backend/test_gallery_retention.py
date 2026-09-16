@@ -274,11 +274,14 @@ def test_database_release_version_is_explicit_and_future_versions_are_rejected(
             "database_version"
         ] == DATABASE_VERSION
         with sqlite3.connect(store.db_path) as conn:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
-            assert conn.execute(
-                "SELECT target_version,dev_revision FROM schema_meta"
-            ).fetchone() == (3, 1)
-            conn.execute("PRAGMA user_version = 3")
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+            assert (
+                conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name='schema_meta'"
+                ).fetchone()
+                is None
+            )
+            conn.execute("PRAGMA user_version = 4")
         with pytest.raises(RuntimeError, match="正式版本"):
             await GenerationStore(tmp_path).initialize()
 
@@ -785,6 +788,6 @@ def test_metadata_upgrade_refreshes_import_projection_but_preserves_request_and_
         ):
             assert generated_after[key] == generated_before[key]
         with store._connect() as conn:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
 
     asyncio.run(run())

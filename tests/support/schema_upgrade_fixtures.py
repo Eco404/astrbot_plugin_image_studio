@@ -1,4 +1,4 @@
-"""Frozen SQL from published v1 and final 1.1 development builds.
+"""Frozen SQL from published baselines and accepted final development builds.
 
 Independent of current schema definitions so upgrades cannot hide drift.
 """
@@ -160,4 +160,86 @@ def create_final_dev(conn, revision=2):
         for statement in DEVELOPMENT_V2_UPGRADE:
             conn.execute(statement)
     conn.execute("INSERT INTO schema_meta VALUES (1, 2, ?)", (revision,))
+    conn.commit()
+
+
+# Frozen published v2 and final 1.3 development SQL; never import runtime constants.
+V2_PUBLISHED_MIGRATION = (
+    """CREATE TABLE external_sources (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        type TEXT NOT NULL DEFAULT 'nai',
+        root_path TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 0,
+        recursive INTEGER NOT NULL DEFAULT 0,
+        permissions_json TEXT NOT NULL DEFAULT '{"favorite":true,"delete":true,"download":true,"reference":true}',
+        status_json TEXT NOT NULL DEFAULT '{}'
+    )""",
+    """CREATE TABLE external_records (
+        generation_id TEXT PRIMARY KEY REFERENCES generations(id) ON DELETE CASCADE,
+        source_id TEXT NOT NULL REFERENCES external_sources(id),
+        relative_path TEXT NOT NULL,
+        asset_id TEXT NOT NULL REFERENCES image_assets(id),
+        fingerprint TEXT NOT NULL,
+        sidecar_fingerprint TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL,
+        mtime_ns INTEGER NOT NULL,
+        available INTEGER NOT NULL DEFAULT 1,
+        time_source TEXT NOT NULL DEFAULT '',
+        metadata_created_at REAL,
+        file_birthtime REAL,
+        time_policy_version INTEGER NOT NULL DEFAULT 0,
+        UNIQUE(source_id, relative_path)
+    )""",
+    "CREATE INDEX idx_external_records_asset ON external_records(asset_id)",
+)
+V3_FINAL_DEVELOPMENT_STATEMENTS = (
+    """CREATE TABLE comfy_workflow_revisions (
+        id TEXT PRIMARY KEY,
+        fingerprint TEXT NOT NULL UNIQUE,
+        config_json TEXT NOT NULL,
+        created_at REAL NOT NULL
+    )""",
+    """CREATE TABLE comfy_jobs (
+        id TEXT PRIMARY KEY,
+        remote_id TEXT NOT NULL DEFAULT '',
+        provider_id TEXT NOT NULL,
+        model_id TEXT NOT NULL,
+        revision_id TEXT NOT NULL REFERENCES comfy_workflow_revisions(id),
+        status TEXT NOT NULL,
+        request_json TEXT NOT NULL,
+        input_refs_json TEXT NOT NULL DEFAULT '[]',
+        output_refs_json TEXT NOT NULL DEFAULT '[]',
+        result_json TEXT NOT NULL DEFAULT '{}',
+        error TEXT NOT NULL DEFAULT '',
+        generation_id TEXT NOT NULL DEFAULT '',
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        finished_at REAL
+    )""",
+    "CREATE INDEX idx_comfy_jobs_status ON comfy_jobs(status, created_at)",
+    "CREATE INDEX idx_comfy_jobs_provider ON comfy_jobs(provider_id, created_at)",
+    "CREATE UNIQUE INDEX idx_comfy_jobs_remote ON comfy_jobs(provider_id, remote_id) WHERE remote_id != ''",
+)
+DEVELOPMENT_META_STATEMENT = """CREATE TABLE schema_meta (
+    id INTEGER PRIMARY KEY CHECK(id = 1),
+    target_version INTEGER NOT NULL,
+    dev_revision INTEGER NOT NULL
+)"""
+
+
+def create_v2(conn):
+    create_v1(conn)
+    for statement in V2_PUBLISHED_MIGRATION:
+        conn.execute(statement)
+    conn.execute("PRAGMA user_version = 2")
+    conn.commit()
+
+
+def create_v3_dev(conn):
+    create_v2(conn)
+    for statement in V3_FINAL_DEVELOPMENT_STATEMENTS:
+        conn.execute(statement)
+    conn.execute(DEVELOPMENT_META_STATEMENT)
+    conn.execute("INSERT INTO schema_meta VALUES (1, 3, 1)")
     conn.commit()

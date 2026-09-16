@@ -463,7 +463,6 @@ def test_older_development_layout_is_rejected_without_rewriting_imports(tmp_path
             ):
                 conn.execute(f"DROP TABLE {table}")
             conn.execute("ALTER TABLE generation_images DROP COLUMN supplemental_json")
-            conn.execute("DROP TABLE schema_meta")
             conn.execute(
                 "CREATE TABLE schema_meta (id INTEGER PRIMARY KEY CHECK(id = 1), target_version INTEGER NOT NULL, dev_revision INTEGER NOT NULL)"
             )
@@ -585,7 +584,7 @@ def test_nai_source_aliases_share_filters_and_preserve_raw_import_information(tm
                     "SELECT asset_id, metadata_json FROM image_metadata ORDER BY asset_id"
                 )
             ] == original_metadata
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
 
     asyncio.run(run())
 

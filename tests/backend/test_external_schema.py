@@ -73,9 +73,14 @@ def test_create_and_upgrade_share_layout_and_repeat_without_writes(tmp_path, exi
             ), (
                 "Final dev promotion must preserve its original external tables and rows."
             )
-        assert schema.DATABASE_VERSION == "3-dev.1"
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
-        assert conn.execute("SELECT * FROM schema_meta").fetchall() == [(1, 3, 1)]
+        assert schema.DATABASE_VERSION == 3
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert (
+            conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='schema_meta'"
+            ).fetchone()
+            is None
+        )
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
         if existing != "empty":
             assert backup and backup.is_file()

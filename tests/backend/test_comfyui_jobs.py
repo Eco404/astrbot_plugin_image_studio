@@ -13,7 +13,8 @@ from astrbot_plugin_image_studio.backend.providers.comfyui.jobs import (
 )
 from astrbot_plugin_image_studio.backend.models import GeneratedImage, ReferenceImage
 from astrbot_plugin_image_studio.tests.support.schema_upgrade_fixtures import (
-    create_final_dev,
+    create_v2,
+    create_v3_dev,
 )
 
 WORKFLOW = {
@@ -31,9 +32,7 @@ async def store_and_revision(tmp_path):
 def test_published_v2_upgrade_has_verified_backup_and_preserves_data(tmp_path):
     database = tmp_path / "history.sqlite3"
     with closing(sqlite3.connect(database)) as conn:
-        create_final_dev(conn)
-        conn.execute("DROP TABLE schema_meta")
-        conn.execute("PRAGMA user_version=2")
+        create_v2(conn)
         conn.execute(
             "INSERT INTO image_assets VALUES ('asset','kept.png','image/png',5,1,1,123,'available')"
         )
@@ -43,8 +42,13 @@ def test_published_v2_upgrade_has_verified_backup_and_preserves_data(tmp_path):
         assert backup
         with closing(sqlite3.connect(backup)) as saved:
             assert tuple(saved.iterdump()) == before
-        assert conn.execute("PRAGMA user_version").fetchone() == (2,)
-        assert conn.execute("SELECT * FROM schema_meta").fetchall() == [(1, 3, 1)]
+        assert conn.execute("PRAGMA user_version").fetchone() == (3,)
+        assert (
+            conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='schema_meta'"
+            ).fetchone()
+            is None
+        )
         assert conn.execute("SELECT path FROM image_assets").fetchall() == [
             ("kept.png",)
         ]
@@ -58,7 +62,7 @@ def test_published_v2_upgrade_has_verified_backup_and_preserves_data(tmp_path):
 )
 def test_current_development_corruption_rejected_before_mutation(tmp_path, corruption):
     with closing(sqlite3.connect(tmp_path / "history.sqlite3")) as conn:
-        schema.ensure_release_schema(conn, backup_dir=tmp_path / "backups")
+        create_v3_dev(conn)
         if corruption == "marker":
             conn.execute("UPDATE schema_meta SET dev_revision=99")
         elif corruption == "missing_table":
