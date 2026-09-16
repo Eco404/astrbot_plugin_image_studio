@@ -9,7 +9,7 @@
   let typeahead = "";
   let typeaheadAt = 0;
   let lastTouchY = 0;
-  const ATTRIBUTE_NAMES = ["disabled", "hidden", "class", "style", "selected", "multiple", "data-all-label", "label", "value", "required", "name", "title", "aria-label", "aria-labelledby", "aria-describedby", "tabindex", "list"];
+  const ATTRIBUTE_NAMES = ["disabled", "hidden", "class", "style", "selected", "multiple", "data-all-label", "data-menu-layout", "data-menu-align", "label", "value", "required", "name", "data-tooltip", "aria-label", "aria-labelledby", "aria-describedby", "tabindex", "list"];
   const SOURCE_SELECTOR = "select, input[list], input[data-studio-datalist]";
   const GALLERY_SELECT_IDS = new Set(["galleryProvider", "galleryMode", "gallerySource", "galleryEngine"]);
 
@@ -64,7 +64,7 @@
       copy.querySelectorAll("select, button, .studio-select, svg").forEach((element) => element.remove());
       return copy.textContent.trim();
     }).filter(Boolean).join(" ");
-    return result || select.title || select.name || "选择选项";
+    return result || select.dataset.tooltip || select.name || "选择选项";
   }
 
   function optionData(select) {
@@ -100,7 +100,7 @@
     const disabled = select.matches(":disabled");
     const hidden = select.hidden || select.classList.contains("is-hidden") || select.style.display === "none" || select.style.visibility === "hidden";
     const classes = Array.from(select.classList).filter((name) => !["studio-select-native", "is-hidden"].includes(name)).join(" ");
-    const fingerprint = JSON.stringify([select.selectedIndex, options, select.multiple, select.dataset.allLabel, name, disabled, hidden, classes, select.required, select.getAttribute("aria-describedby"), select.title]);
+    const fingerprint = JSON.stringify([select.selectedIndex, options, select.multiple, select.dataset.allLabel, name, disabled, hidden, classes, select.required, select.getAttribute("aria-describedby"), select.dataset.tooltip]);
     if (fingerprint === control.fingerprint) {
       if (opened === control && (!isVisible(control) || disabled)) close();
       return;
@@ -124,7 +124,8 @@
       ? !selected.length ? "未选择" : selected.length === options.length ? select.dataset.allLabel || "全部" : selected.length === 1 ? selected[0].label : `已选 ${selected.length} 项`
       : selected[0]?.label || "请选择";
     control.valueElement.textContent = label;
-    trigger.title = select.title || `${name}：${selected.map((option) => option.label).join("、") || "未选择"}`;
+    trigger.dataset.tooltip = select.dataset.tooltip?.trim() || label;
+    trigger.dataset.tooltipOverflow = ".studio-select-value";
     control.validation.textContent = select.validationMessage || "";
     if (select.validity.valid) { wrapper.classList.remove("is-invalid"); trigger.removeAttribute("aria-invalid"); }
     if (opened === control) {
@@ -213,7 +214,7 @@
     control.fingerprint = fingerprint; control.options = options; wrapper.hidden = hidden; control.toggle.disabled = disabled;
     trigger.setAttribute("aria-disabled", String(disabled)); trigger.setAttribute("aria-required", String(input.required));
     if (!input.hasAttribute("aria-label") && !input.hasAttribute("aria-labelledby")) trigger.setAttribute("aria-label", name);
-    control.toggle.setAttribute("aria-label", `显示${name}选项`); control.toggle.title = `显示${name}选项`;
+    control.toggle.setAttribute("aria-label", `显示${name}选项`);
     if (opened === control) {
       if (!isVisible(control) || disabled) close();
       else { renderMenu(control); schedulePosition(); }
@@ -286,14 +287,14 @@
       const actions = document.createElement("div"); actions.className = "studio-select-actions";
       const enabled = enabledOptions(control);
       for (const [action, label, shortcut] of [["all", "全选", "Ctrl+A"], ["clear", "清空", "Ctrl+Shift+A"]]) {
-        const button = document.createElement("button"); button.type = "button"; button.tabIndex = -1; button.dataset.selectAction = action; button.textContent = label; button.title = `${label}（${shortcut}）`;
+        const button = document.createElement("button"); button.type = "button"; button.tabIndex = -1; button.dataset.selectAction = action; button.textContent = label; button.dataset.tooltip = `${label}（${shortcut}）`;
         button.disabled = !enabled.some((option) => option.selected !== (action === "all"));
         actions.appendChild(button);
       }
       if (GALLERY_SELECT_IDS.has(control.select.id)) {
         const button = document.createElement("button"); button.type = "button"; button.tabIndex = -1; button.dataset.selectAction = "default"; button.textContent = "设为默认";
         button.disabled = !!control.savingDefault || !enabled.some((option) => option.selected);
-        button.title = button.disabled ? "至少选择一项后才能设为默认" : "保存当前筛选，下次打开页面时使用（Ctrl+Enter）";
+        button.dataset.tooltip = control.savingDefault ? "正在保存筛选默认值" : button.disabled ? "至少选择一项后才能设为默认" : "保存当前筛选，下次打开页面时使用（Ctrl+Enter）";
         actions.appendChild(button);
       }
       listbox.id = `${control.identifier}-menu`; listbox.setAttribute("role", "listbox"); listbox.setAttribute("aria-label", controlName(control.select)); listbox.setAttribute("aria-multiselectable", "true");
@@ -448,7 +449,20 @@
     const rightEdge = (viewport?.offsetLeft || 0) + (viewport?.width || document.documentElement.clientWidth) - 8;
     const bottomEdge = (viewport?.offsetTop || 0) + (viewport?.height || window.innerHeight) - 8;
     if (rect.bottom < topEdge || rect.top > bottomEdge || rect.right < leftEdge || rect.left > rightEdge) { close(); return; }
-    const width = Math.max(0, Math.min(Math.max(rect.width, 180), rightEdge - leftEdge));
+    const contentSized = control.select.dataset.menuLayout === "content";
+    const dialog = contentSized ? control.select.closest(".studio-modal")?.getBoundingClientRect() : null;
+    const menuLeft = Math.max(leftEdge, dialog ? dialog.left + 12 : leftEdge);
+    const menuRight = Math.min(rightEdge, dialog ? dialog.right - 12 : rightEdge);
+    const availableWidth = Math.max(0, menuRight - menuLeft);
+    let width = Math.min(Math.max(rect.width, 180), availableWidth);
+    if (contentSized) {
+      // Use the option text's intrinsic width, keeping long workflow node names
+      // readable while allowing wrapping at the dialog/viewport boundary.
+      menu.style.minWidth = `${Math.min(width, 560)}px`;
+      menu.style.maxWidth = `${Math.min(560, availableWidth)}px`;
+      menu.style.width = "max-content";
+      width = menu.getBoundingClientRect().width;
+    } else { menu.style.minWidth = ""; menu.style.maxWidth = ""; }
     menu.style.width = `${width}px`;
     const contentHeight = (control.listbox?.scrollHeight || 0) + (menu.querySelector(".studio-select-actions")?.offsetHeight || 0) + 2;
     const naturalHeight = Math.min(contentHeight || 44, 300);
@@ -459,7 +473,8 @@
     menu.style.maxHeight = `${maxHeight}px`;
     const height = Math.min(contentHeight, maxHeight);
     const top = placeAbove ? rect.top - height - 5 : rect.bottom + 5;
-    menu.style.left = `${Math.max(leftEdge, Math.min(rect.left, rightEdge - width))}px`;
+    const preferredLeft = control.select.dataset.menuAlign === "end" ? rect.right - width : rect.left;
+    menu.style.left = `${Math.max(menuLeft, Math.min(preferredLeft, menuRight - width))}px`;
     menu.style.top = `${Math.max(topEdge, Math.min(top, bottomEdge - height))}px`;
     menu.dataset.placement = placeAbove ? "above" : "below";
   }

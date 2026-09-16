@@ -4,29 +4,24 @@
   window.__imageStudioAppLoaded = true;
 
   const state = {
-    view: "generate", mode: "text2img", providers: [], models: [], selectedProviderId: "", selectedModelRef: "", defaultModelRefs: { text2img: "", img2img: "" }, parameterValues: {}, parameterCarry: {}, negativePromptCarry: "", hasNegativePromptCarry: false, references: [],
-    resultImages: [], galleryItems: [], galleryPage: 0, galleryLimit: 24, galleryTotal: 0, selectedIds: new Set(), settings: null, selectedSettingsProviderId: "", selectedSettingsModelId: "", modelEditorTab: "model", editingToolParameter: "", editingToolDefaultChoices: [], detailId: "", detailData: null, detailFallbackThumbnail: "", detailImageIndex: 0, detailRequestedImageIndex: 0, detailAssetsLoaded: false, detailNavigating: false, imagePreviewItems: [], imagePreviewIndex: 0, imagePreviewTitle: "图片预览", imagePreviewDownloadFilename: "", imagePreviewContext: null, imagePreviewNavigating: false, imagePreviewSwipeAt: 0,
+    view: "generate", mode: "text2img", providers: [], models: [], comfyuiTemporaryModel: null, selectedProviderId: "", selectedModelRef: "", defaultModelRefs: { text2img: "", img2img: "" }, parameterValues: {}, parameterCarry: {}, negativePromptCarry: "", hasNegativePromptCarry: false, references: [],
+    resultImages: [], galleryItems: [], galleryPage: 0, galleryLimit: 24, galleryTotal: 0, selectedIds: new Set(), detailId: "", detailData: null, detailFallbackThumbnail: "", detailImageIndex: 0, detailRequestedImageIndex: 0, detailAssetsLoaded: false, detailNavigating: false, imagePreviewItems: [], imagePreviewIndex: 0, imagePreviewTitle: "图片预览", imagePreviewDownloadFilename: "", imagePreviewContext: null, imagePreviewNavigating: false, imagePreviewSwipeAt: 0,
   };
   let activeConfirmation = null;
-  let settingsLoadPromise = null;
-  let settingsBaseline = "";
-  let savedSettingsPayload = null;
-  let settingsReadPending = false;
-  let settingsReadPromise = null;
-  let settingsBootstrapPending = false;
-  let settingsSaving = false;
-  let settingsNavigationPending = false;
-  let storageRetention = null;
   let referencesUploading = false;
   let eventsBound = false;
   const providerQuotas = new Map();
   const PROVIDER_QUOTA_TTL = 30_000;
   let providerQuotaTimer = 0;
   let galleryRequestRevision = 0;
+  let galleryQueryKey = "";
+  let galleryDisplayedPageKey = "";
+  let galleryPreviewSession = null;
+  let galleryPreviewActive = 0;
+  const GALLERY_PREVIEW_CONCURRENCY = 4;
   const galleryFilterFields = [["galleryProvider", "provider_ids"], ["galleryMode", "modes"], ["gallerySource", "sources"], ["galleryEngine", "generation_engines"]];
   const galleryFilterSelections = new Map();
   let gallerySort = "created";
-  let gallerySortDraft = "created";
   let detailRequestRevision = 0;
   let detailFilmstripScrollFrame = 0;
   let detailBackdropSource = "";
@@ -54,16 +49,15 @@
   let mobileDetailSyncRevision = 0;
   let mobileViewerOpening = false;
   let suppressMobileDetailSync = false;
-  const MODEL_DEFAULT_CHOICE = "__model_default__";
   const EMPTY_MOBILE_IMAGE = "data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=";
   const $ = (id) => document.getElementById(id);
   const els = {
     pageTitle: $("pageTitle"), pageSubtitle: $("pageSubtitle"), runtimeStatus: $("runtimeStatus"), providerStatus: $("providerStatus"), providerStatusName: $("providerStatusName"), providerQuota: $("providerQuota"),
-    modelChoice: $("modelChoice"), modelProvider: $("modelProvider"), workspaceEmpty: $("workspaceEmpty"), generatorWorkspace: $("generatorWorkspace"), modelParameters: $("modelParameters"), referenceField: $("referenceField"), referenceUpload: $("referenceUpload"), referenceStrip: $("referenceStrip"),
+    modelChoice: $("modelChoice"), modelProvider: $("modelProvider"), comfyWorkflowWorkspace: $("comfyWorkflowWorkspace"), comfyWorkflowChoice: $("comfyWorkflowChoice"), workspaceEmpty: $("workspaceEmpty"), generatorWorkspace: $("generatorWorkspace"), modelParameters: $("modelParameters"), referenceField: $("referenceField"), referenceUpload: $("referenceUpload"), referenceStrip: $("referenceStrip"),
     generationForm: $("generationForm"), prompt: $("prompt"), negativePromptField: $("negativePromptField"), negativePrompt: $("negativePrompt"), negativePromptHint: $("negativePromptHint"), resetNegativePromptButton: $("resetNegativePromptButton"), advancedParameters: $("advancedParameters"), parameters: $("parameters"), generationError: $("generationError"), generateButton: $("generateButton"), resultEmpty: $("resultEmpty"), resultGrid: $("resultGrid"), resultMeta: $("resultMeta"),
     galleryGrid: $("galleryGrid"), galleryEmpty: $("galleryEmpty"), galleryPagination: $("galleryPagination"), galleryPrev: $("galleryPrev"), galleryNext: $("galleryNext"), galleryPageLabel: $("galleryPageLabel"), gallerySearch: $("gallerySearch"), galleryProvider: $("galleryProvider"), galleryMode: $("galleryMode"), gallerySource: $("gallerySource"), selectionBar: $("selectionBar"), selectionCount: $("selectionCount"),
     detailDrawer: $("detailDrawer"), drawerBody: $("drawerBody"), detailDate: $("detailDate"), scrim: $("scrim"), imagePreview: $("imagePreview"), imagePreviewBody: $("imagePreviewBody"), imagePreviewPrev: $("imagePreviewPrev"), imagePreviewNext: $("imagePreviewNext"), imagePreviewDots: $("imagePreviewDots"), previewImage: $("previewImage"), imagePreviewTitle: $("imagePreviewTitle"), downloadImageButton: $("downloadImageButton"),
-    settingTool: $("settingTool"), agentImageReturnMode: $("agentImageReturnMode"), agentPreviewMaxEdge: $("agentPreviewMaxEdge"), agentPreviewQuality: $("agentPreviewQuality"), storageHealthStatus: $("storageHealthStatus"), storageHealthCheckedAt: $("storageHealthCheckedAt"), storageHealthDuration: $("storageHealthDuration"), storageHealthAssets: $("storageHealthAssets"), storageHealthLeases: $("storageHealthLeases"), storageHealthGenerations: $("storageHealthGenerations"), storageHealthSize: $("storageHealthSize"), storageHealthErrors: $("storageHealthErrors"), runMaintenanceButton: $("runMaintenanceButton"), runDeepMaintenanceButton: $("runDeepMaintenanceButton"), settingPageDefaultTextModel: $("settingPageDefaultTextModel"), settingPageDefaultImageModel: $("settingPageDefaultImageModel"), settingToolDefaultTextModel: $("settingToolDefaultTextModel"), settingToolDefaultImageModel: $("settingToolDefaultImageModel"), historyEnabled: $("historyEnabled"), retainReferences: $("retainReferences"), recordInvocationIdentity: $("recordInvocationIdentity"), historyRecords: $("historyRecords"), historyMegabytes: $("historyMegabytes"), settingsProviderList: $("settingsProviderList"), providerForm: $("providerForm"), settingsModelList: $("settingsModelList"), modelForm: $("modelForm"), settingsError: $("settingsError"), addProviderButton: $("addProviderButton"), addModelButton: $("addModelButton"), newModelChoice: $("newModelChoice"), newModelChoices: $("newModelChoices"), saveSettingsButton: $("saveSettingsButton"), parameterDialog: $("parameterDialog"), toolParameterExposed: $("toolParameterExposed"), toolParameterDescription: $("toolParameterDescription"), toolParameterDefault: $("toolParameterDefault"), toolParameterDefaultChoice: $("toolParameterDefaultChoice"), toolParameterDefaultHint: $("toolParameterDefaultHint"), toolParameterChoices: $("toolParameterChoices"),
+    parameterDialog: $("parameterDialog"),
   };
 
   async function bridge() {
@@ -187,8 +181,17 @@
 
   function configuredReferenceLimit(value, maximum = 8) { const number = Number(value); return Math.max(1, Math.min(maximum, Number.isFinite(number) ? Math.trunc(number) : 1)); }
   function referenceLimitForModel(model) { return model?.supports_img2img ? configuredReferenceLimit(model.max_reference_images) : 0; }
-  function modelsForMode() { return state.models.filter((item) => state.mode === "text2img" ? item.supports_text2img : referenceLimitForModel(item) > 0); }
-  function selectedModel() { return state.models.find((item) => item.model_ref === state.selectedModelRef) || null; }
+  function generationModels() {
+    const temporary = state.comfyuiTemporaryModel;
+    return temporary && state.providers.some(provider => provider.id === temporary.provider_id && provider.kind === "comfyui" && provider.enabled !== false) ? [...state.models, temporary] : state.models;
+  }
+  function modelsForMode() { const current = selectedModel(); return generationModels().map(item => item.model_ref === current?.model_ref ? current : item).filter((item) => state.mode === "text2img" ? item.supports_text2img : referenceLimitForModel(item) > 0); }
+  function selectedModel() {
+    const model = generationModels().find(item => item.model_ref === state.selectedModelRef) || null;
+    const snapshot = state.comfyuiModelOverride;
+    if (model && snapshot?.model_ref === model.model_ref) return { ...model, ...snapshot.model, model_ref: model.model_ref, provider_id: model.provider_id, provider_name: model.provider_name, provider_kind: model.provider_kind };
+    return model;
+  }
   function selectedProvider() { const model = selectedModel(); return state.providers.find((item) => item.id === (model?.provider_id || state.selectedProviderId)) || null; }
   function text(value) { return value === null || value === undefined ? "" : String(value); }
   function escape(value) { const div = document.createElement("div"); div.textContent = text(value); return div.innerHTML.replaceAll('"', "&quot;").replaceAll("'", "&#39;"); }
@@ -213,22 +216,36 @@
 
   function quotaProvider() {
     const provider = selectedProvider();
-    return state.view === "generate" && selectedModel() && provider?.kind === "nai_direct" ? provider : null;
+    return state.view === "generate" && selectedModel() && ["nai_direct", "novelai_official"].includes(provider?.kind) ? provider : null;
   }
 
   function renderProviderStatus() {
     const model = selectedModel(), provider = selectedProvider(), active = quotaProvider();
     els.providerStatusName.textContent = model && provider ? `${model.name} · ${provider.name}` : "未选择模型";
-    els.providerStatusName.title = els.providerStatusName.textContent;
+    els.providerStatusName.dataset.tooltip = els.providerStatusName.textContent;
+    els.providerStatusName.dataset.tooltipOverflow = "";
     els.providerStatus.classList.toggle("has-provider-quota", !!active);
     els.providerQuota.hidden = !active;
-    if (!active) { els.providerQuota.textContent = ""; els.providerQuota.removeAttribute("title"); return; }
+    if (!active) { els.providerQuota.textContent = ""; delete els.providerQuota.dataset.tooltip; return; }
     const quota = providerQuotas.get(active.id);
     const failed = !!quota?.error;
     els.providerQuota.classList.toggle("is-unavailable", failed);
+    if (active.kind === "novelai_official") {
+      const data = quota?.data, usage = data?.usage;
+      const showV5Usage = model?.id?.startsWith("nai-diffusion-5-") === true;
+      const amount = value => value === null || value === undefined ? "未知" : value.toLocaleString("zh-CN");
+      const allowance = usage?.is_negative === true ? "已用尽" : usage?.percent === null || usage?.percent === undefined ? "未知" : `${Math.max(0, usage.percent)}%`;
+      els.providerQuota.classList.toggle("is-warning", !!data && showV5Usage && usage?.is_negative === true);
+      els.providerQuota.textContent = failed ? "额度暂不可用" : data ? `Anlas ${amount(data.remaining)}${showV5Usage ? ` · V5 ${allowance}` : ""}${data.subscription_active ? "" : " · 未订阅"}` : "额度查询中…";
+      const availability = usage?.is_negative === false ? "可用" : usage?.is_negative === true ? "已用尽" : "状态未知";
+      const refill = usage?.time_until_next_percent === null || usage?.time_until_next_percent === undefined ? "" : `\n距离下一个百分比恢复约 ${usage.time_until_next_percent} 秒`;
+      const usageDetail = showV5Usage ? `\nV5 免费额度：${allowance}（${availability}），与 Anlas 余额独立${refill}` : "";
+      els.providerQuota.dataset.tooltip = failed ? quota.error : data ? `服务商：${active.name}\n订阅：${data.subscription_active ? "有效" : "未订阅"}\nAnlas：订阅 ${amount(data.subscription_anlas)}，购买 ${amount(data.purchased_anlas)}${usageDetail}${data.subscription_active ? "" : "\n未订阅不代表服务商已停用；Anlas 余额不代表免费试用剩余次数。"}\n更新于 ${formatDate(data.checked_at)}` : `正在查询 ${active.name} 的额度`;
+      return;
+    }
     els.providerQuota.classList.toggle("is-warning", !!quota?.data && (!quota.data.enabled || quota.data.remaining === 0));
     els.providerQuota.textContent = failed ? "额度暂不可用" : quota?.data ? `剩余额度 ${quota.data.remaining.toLocaleString("zh-CN")}${quota.data.enabled ? "" : " · 已停用"}` : "额度查询中…";
-    els.providerQuota.title = failed ? quota.error : quota?.data ? `服务商：${active.name}\n更新于 ${formatDate(quota.data.checked_at)}` : `正在查询 ${active.name} 的额度`;
+    els.providerQuota.dataset.tooltip = failed ? quota.error : quota?.data ? `服务商：${active.name}\n更新于 ${formatDate(quota.data.checked_at)}` : `正在查询 ${active.name} 的额度`;
   }
 
   function refreshProviderQuota() {
@@ -240,7 +257,15 @@
     providerQuotas.set(provider.id, entry);
     renderProviderStatus();
     void apiGet("studio/provider-quota", { provider_id: provider.id }).then((payload) => {
-      if (payload?.provider_id !== provider.id || !Number.isSafeInteger(payload.remaining) || payload.remaining < 0 || typeof payload.enabled !== "boolean" || !Number.isFinite(payload.checked_at)) throw new Error("额度查询返回的数据格式不正确");
+      const nullableAmount = value => value === null || Number.isSafeInteger(value) && value >= 0;
+      const nullableNumber = value => value === null || Number.isFinite(value) && value >= 0;
+      const usage = payload?.usage;
+      const validQuota = provider.kind === "novelai_official"
+        ? payload?.kind === "novelai_official" && typeof payload.subscription_active === "boolean" && nullableAmount(payload.tier)
+          && [payload.remaining, payload.subscription_anlas, payload.purchased_anlas].every(nullableAmount)
+          && (usage === null || usage && typeof usage === "object" && (usage.percent === null || Number.isFinite(usage.percent)) && (usage.is_negative === null || typeof usage.is_negative === "boolean") && nullableNumber(usage.time_until_next_percent))
+        : Number.isSafeInteger(payload?.remaining) && payload.remaining >= 0 && typeof payload.enabled === "boolean";
+      if (payload?.provider_id !== provider.id || !validQuota || !Number.isFinite(payload.checked_at)) throw new Error("额度查询返回的数据格式不正确");
       entry.data = payload;
     }).catch((error) => { entry.error = errorMessage(error, "额度查询失败"); }).finally(() => {
       entry.pending = false; entry.updatedAt = Date.now();
@@ -266,37 +291,17 @@
   }
 
   function switchView(view) {
-    if (view !== "settings" && state.view === "settings" && (settingsSaving || settingsDirty())) {
-      void leaveSettings(view);
+    if (view !== "settings" && state.view === "settings" && (settings.isSaving() || settings.settingsDirty())) {
+      void settings.leaveSettings(view);
       return;
     }
     showView(view);
   }
 
-  async function leaveSettings(view) {
-    if (settingsNavigationPending) return;
-    if (settingsSaving) { showNotice("正在保存设置，请稍候再切换页面。", "info"); return; }
-    settingsNavigationPending = true;
-    try {
-      const discard = await library.openModal("有未保存的设置", "<p>离开设置页面会放弃本次尚未保存的调整，包括主题与显示设置。</p>", [
-        { label: "放弃设置", danger: true, id: "discardSettingsButton", action: () => true },
-        { label: "留在设置页面", primary: true, id: "staySettingsButton", action: () => false },
-      ], { focus: "staySettingsButton" });
-      if (!discard) return;
-      // Restore every editor from the last successful save, without requiring
-      // another network request or losing drafts when choosing to stay.
-      if (savedSettingsPayload && !await loadSettings(true, structuredClone(savedSettingsPayload))) return;
-      window.ImageStudioAppearance.discard();
-      gallerySortDraft = gallerySort;
-      if ($("gallerySort")) { $("gallerySort").value = gallerySortDraft; window.ImageStudioSelect?.refresh($("gallerySort")); }
-      updateSettingsDirty();
-      showView(view);
-    } finally { settingsNavigationPending = false; }
-  }
-
   function showView(view) {
     window.ImageStudioSelect?.close();
     state.view = view;
+    if (view !== "gallery") stopGalleryPreviews();
     document.querySelectorAll(".nav-item").forEach((button) => button.classList.toggle("is-active", button.dataset.view === view));
     document.querySelectorAll(".view").forEach((item) => item.classList.toggle("is-active", item.id === `${view}View`));
     const labels = { generate: ["生图", "选择模式和模型后开始创作"], gallery: ["画廊", "搜索、筛选、复现或导出历史生成记录"], import: ["导入", "图片与生成参数"], settings: ["设置", "管理运行策略、历史、生图服务商和模型"], };
@@ -310,6 +315,7 @@
   }
 
   function collectModelParameters() {
+    novelaiControls.collect();
     const values = {};
     effectiveModelParameters(selectedModel()).forEach(([name, descriptor]) => {
       if (descriptor.webui_visible === false && Object.prototype.hasOwnProperty.call(state.parameterValues, name)) values[name] = state.parameterValues[name];
@@ -319,44 +325,88 @@
       const key = input.dataset.modelParameter;
       if (input.dataset.nullValue === "true") values[key] = null;
       else if (input.type === "checkbox") values[key] = input.checked;
-      else if (input.dataset.parameterType === "number") values[key] = input.value === "" ? "" : Number(input.value);
+      else if (input.dataset.parameterType === "number") values[key] = input.value === "" ? "" : comfyuiControls.active(selectedModel()) ? comfyuiControls.numericValue(input.value) : Number(input.value);
       else if (input.dataset.parameterType === "json") { try { values[key] = input.value.trim() ? JSON.parse(input.value) : {}; } catch { values[key] = input.value; } }
+      else if (input.dataset.parameterType === "select" && comfyuiControls.active(selectedModel())) { const choices = selectedModel()?.parameters?.[key]?.choices || []; const matched = choices.find(choice => String(typeof choice === "object" ? choice.value : choice) === input.value); values[key] = matched === undefined ? input.value : typeof matched === "object" ? matched.value : matched; }
       else values[key] = input.value;
     });
     return values;
   }
 
+  function schemaParameterTitle(name, descriptor) {
+    const fieldName = String(name).trim();
+    const label = String(descriptor.label || "").trim();
+    return label || fieldName;
+  }
+
+  function schemaParameterTooltip(name, descriptor) {
+    const requestKey = String(descriptor.request_key || "").trim() || String(name).trim();
+    const description = String(descriptor.description || "").trim();
+    return description ? `${requestKey}\n${description}` : requestKey;
+  }
+
+  function schemaParameterLabel(name, descriptor, tag = "label") {
+    const label = escape(schemaParameterTitle(name, descriptor));
+    const tooltip = escape(schemaParameterTooltip(name, descriptor));
+    const textTag = tag === "strong" ? "strong" : "span";
+    if (tooltip === label) return `<span class="schema-parameter-label"><${tag}>${label}</${tag}></span>`;
+    return `<span class="schema-parameter-label"><button type="button" class="parameter-help-text" data-tooltip="${tooltip}" data-tooltip-toggle aria-label="查看${label}说明"><${textTag}>${label}</${textTag}></button></span>`;
+  }
+
   function renderModelParameter(name, descriptor) {
     const type = String(descriptor.type || "text").toLowerCase();
-    const label = escape(name);
-    const description = escape(descriptor.description || descriptor.label || name);
+    const label = schemaParameterLabel(name, descriptor);
+    const accessibleLabel = escape(schemaParameterTitle(name, descriptor));
     let value = Object.prototype.hasOwnProperty.call(state.parameterValues, name) ? state.parameterValues[name] : descriptor.default ?? "";
+    const specialized = novelaiControls.parameter(name, descriptor, value);
+    if (specialized !== null) return specialized;
     const requestKey = escape(descriptor.request_key || name);
     if (type === "preset" && Array.isArray(descriptor.choices)) {
       const options = descriptor.choices.map((choice) => `<option value="${escape(choice.value)}" ${String(choice.value) === String(value) ? "selected" : ""}>${escape(choice.label || choice.value)}</option>`).join("");
-      return `<div class="field"><label title="${description}">${label}</label><select data-model-parameter="${escape(name)}" data-parameter-type="preset" data-preset-target="${escape(descriptor.target || "")}" data-ui-only="true">${options}</select></div>`;
+      return `<div class="field">${label}<select aria-label="${accessibleLabel}" data-model-parameter="${escape(name)}" data-parameter-type="preset" data-preset-target="${escape(descriptor.target || "")}" data-ui-only="true">${options}</select></div>`;
     }
     if (type === "select" && Array.isArray(descriptor.choices)) {
       const selected = descriptor.choices.some((choice) => String(typeof choice === "object" ? choice.value : choice) === String(value));
       const options = `${selected ? "" : '<option value="" selected>未设置</option>'}${descriptor.choices.map((choice) => { const option = typeof choice === "object" ? choice : { value: choice, label: choice }; return `<option value="${escape(option.value)}" ${String(option.value) === String(value) ? "selected" : ""}>${escape(option.label)}</option>`; }).join("")}`;
-      return `<div class="field"><label title="${description}">${label}</label><select data-model-parameter="${escape(name)}" data-parameter-type="select" data-request-key="${requestKey}">${options}</select></div>`;
+      return `<div class="field">${label}<select aria-label="${accessibleLabel}" data-model-parameter="${escape(name)}" data-parameter-type="select" data-request-key="${requestKey}">${options}</select></div>`;
     }
-    if (type === "boolean" || type === "bool") return `<div class="toggle-row" title="${description}"><label>${label}</label><label class="toggle-control"><input data-model-parameter="${escape(name)}" data-request-key="${requestKey}" type="checkbox" ${value ? "checked" : ""} /><span aria-hidden="true"></span></label></div>`;
-    if (type === "json" || type === "object") return `<div class="field field-wide"><label title="${description}">${label}</label><textarea data-model-parameter="${escape(name)}" data-parameter-type="json" data-request-key="${requestKey}" rows="3" spellcheck="false">${escape(typeof value === "string" ? value : JSON.stringify(value || {}, null, 2))}</textarea></div>`;
-    if (type === "textarea") return `<div class="field field-wide"><label title="${description}">${label}</label><textarea data-model-parameter="${escape(name)}" data-parameter-type="text" data-request-key="${requestKey}" rows="4">${escape(value)}</textarea></div>`;
+    if (type === "boolean" || type === "bool") return `<div class="toggle-row">${label}<label class="toggle-control"><input aria-label="${accessibleLabel}" data-model-parameter="${escape(name)}" data-request-key="${requestKey}" type="checkbox" ${value ? "checked" : ""} /><span aria-hidden="true"></span></label></div>`;
+    if (type === "json" || type === "object") return `<div class="field field-wide">${label}<textarea aria-label="${accessibleLabel}" data-model-parameter="${escape(name)}" data-parameter-type="json" data-request-key="${requestKey}" rows="3" spellcheck="false">${escape(typeof value === "string" ? value : JSON.stringify(value || {}, null, 2))}</textarea></div>`;
+    if (type === "textarea") return `<div class="field field-wide">${label}<textarea aria-label="${accessibleLabel}" data-model-parameter="${escape(name)}" data-parameter-type="text" data-request-key="${requestKey}" rows="4">${escape(value)}</textarea></div>`;
     const inputType = ["number", "int", "integer", "float"].includes(type) ? "number" : "text";
     const min = descriptor.min !== undefined ? ` min="${escape(descriptor.min)}"` : "";
     const max = descriptor.max !== undefined ? ` max="${escape(descriptor.max)}"` : "";
     const step = descriptor.step !== undefined ? ` step="${escape(descriptor.step)}"` : inputType === "number" ? " step=\"any\"" : "";
-    return `<div class="field"><label title="${description}">${label}</label><input data-model-parameter="${escape(name)}" data-parameter-type="${inputType === "number" ? "number" : "text"}" data-request-key="${requestKey}" type="${inputType}" value="${escape(value)}"${min}${max}${step} /></div>`;
+    return `<div class="field">${label}<input aria-label="${accessibleLabel}" data-model-parameter="${escape(name)}" data-parameter-type="${inputType === "number" ? "number" : "text"}" data-request-key="${requestKey}" type="${inputType}" value="${escape(value)}"${min}${max}${step} /></div>`;
   }
 
   function renderModelChoices() {
     const available = modelsForMode();
     if (!available.some((item) => item.model_ref === state.selectedModelRef)) state.selectedModelRef = "";
-    els.modelChoice.innerHTML = available.length ? `<option value="">请选择模型</option>${available.map((item) => `<option value="${escape(item.model_ref)}" ${item.model_ref === state.selectedModelRef ? "selected" : ""}>${escape(item.name)} · ${escape(item.provider_name)}</option>`).join("")}` : '<option value="">当前模式没有可用模型</option>';
-    els.modelChoice.disabled = available.length === 0;
-    els.modelChoice.value = state.selectedModelRef;
+    const comfyProviders = new Map(state.providers.filter(item => item.kind === "comfyui" && item.enabled !== false).map(item => [item.id, item.name]));
+    const model = selectedModel();
+    if (model) state.selectedProviderId = model.provider_id;
+    else if (!comfyProviders.has(state.selectedProviderId)) state.selectedProviderId = "";
+    const listed = new Set();
+    const options = available.map(item => {
+      if (item.provider_kind !== "comfyui") return `<option value="${escape(item.model_ref)}">${escape(item.name)} · ${escape(item.provider_name)}</option>`;
+      if (listed.has(item.provider_id)) return "";
+      listed.add(item.provider_id);
+      return `<option value="${escape(`@comfy:${item.provider_id}`)}">${escape(item.provider_name)} · ComfyUI</option>`;
+    }).join("") + Array.from(comfyProviders).filter(([id]) => !listed.has(id)).map(([id, name]) => `<option value="${escape(`@comfy:${id}`)}">${escape(name || id)} · ComfyUI</option>`).join("");
+    els.modelChoice.innerHTML = options ? `<option value="">请选择模型或 ComfyUI</option>${options}` : '<option value="">当前模式没有可用模型</option>';
+    els.modelChoice.disabled = !options;
+    const comfy = comfyProviders.has(state.selectedProviderId);
+    els.modelChoice.value = comfy ? `@comfy:${state.selectedProviderId}` : state.selectedModelRef;
+    document.querySelector('.model-select-row > label').textContent = comfy ? "服务商" : "模型";
+    const workflows = comfy ? available.filter(item => item.provider_id === state.selectedProviderId && item.provider_kind === "comfyui") : [];
+    $("generationSelectors").classList.toggle("has-workflow", comfy);
+    els.comfyWorkflowWorkspace.classList.toggle("is-hidden", !comfy);
+    els.comfyWorkflowChoice.disabled = !workflows.length;
+    els.comfyWorkflowChoice.innerHTML = '<option value="">请选择工作流</option>' + workflows.map(item => `<option value="${escape(item.model_ref)}">${escape(item.name || item.id)}${item.temporary ? " · 临时" : ""}</option>`).join("");
+    els.comfyWorkflowChoice.value = comfy ? state.selectedModelRef : "";
+    els.workspaceEmpty.textContent = comfy ? "请选择工作流" : "请选择模型";
+    els.modelProvider.textContent = comfy ? `${workflows.length} 个工作流` : model?.provider_name || "";
     renderModelWorkspace();
   }
 
@@ -377,17 +427,18 @@
 
   function renderModelWorkspace() {
     const model = selectedModel();
+    comfyuiControls.renderWorkspace(model);
     els.generatorWorkspace.disabled = !model;
     els.workspaceEmpty.classList.toggle("is-hidden", !!model);
     els.generatorWorkspace.classList.toggle("is-hidden", !model);
     if (!model) {
       els.modelParameters.innerHTML = "";
-      els.modelProvider.textContent = "";
       renderGenerationForm();
       return;
     }
-    els.modelProvider.textContent = model.provider_name || "";
-    els.modelParameters.innerHTML = effectiveModelParameters(model).filter(([, descriptor]) => descriptor.webui_visible !== false).map(([name, descriptor]) => renderModelParameter(name, descriptor)).join("") || '<div class="workspace-placeholder">该模型没有额外参数。</div>';
+    els.prompt.closest(".field").classList.toggle("is-hidden", !comfyuiControls.promptRequired(model));
+    els.prompt.setAttribute("aria-required", String(comfyuiControls.promptRequired(model)));
+    els.modelParameters.innerHTML = effectiveModelParameters(model).filter(([, descriptor]) => descriptor.webui_visible !== false && parameterAppliesToMode(descriptor)).map(([name, descriptor]) => renderModelParameter(name, descriptor)).join("") || '<div class="workspace-placeholder">该模型没有额外参数。</div>';
     els.modelParameters.querySelectorAll("[data-model-parameter]").forEach((input) => {
       if (!Object.prototype.hasOwnProperty.call(state.parameterValues, input.dataset.modelParameter)) input.dataset.unsetValue = "true";
       const update = () => {
@@ -399,6 +450,7 @@
       input.addEventListener("input", update); input.addEventListener("change", update);
     });
     effectiveModelParameters(model).forEach(([, descriptor]) => { if (descriptor.target) syncParameterPresets(descriptor.target); });
+    novelaiControls.bindParameters();
     renderGenerationForm();
   }
 
@@ -455,9 +507,12 @@
     return values;
   }
 
-  function applyGenerationSelection(mode, modelRef) {
+  function applyGenerationSelection(mode, modelRef, providerId = "") {
     const previousModel = selectedModel(); if (previousModel?.supports_negative_prompt) { state.negativePromptCarry = els.negativePrompt.value; state.hasNegativePromptCarry = true; }
-    const carried = carriedParameterValues(); state.parameterCarry = carried; state.mode = mode; state.selectedModelRef = modelRef || "";
+    const carried = carriedParameterValues();
+    state.comfyuiSnapshot = null; state.comfyuiModelOverride = null;
+    state.parameterCarry = carried; state.mode = mode; state.selectedModelRef = modelRef || "";
+    state.selectedProviderId = selectedModel()?.provider_id || providerId;
     state.parameterValues = parameterValuesForModel(selectedModel(), carried);
     const nextModel = selectedModel(); if (nextModel?.supports_negative_prompt) { els.negativePrompt.value = state.hasNegativePromptCarry ? state.negativePromptCarry : (nextModel.negative_prompt_default || ""); state.negativePromptCarry = els.negativePrompt.value; state.hasNegativePromptCarry = true; }
     document.querySelectorAll(".segment").forEach((button) => button.classList.toggle("is-active", button.dataset.mode === state.mode));
@@ -471,18 +526,22 @@
     $("referenceChooseButton").disabled = disabled;
     $("referenceChooseButton").setAttribute("aria-busy", String(referencesUploading));
     els.referenceUpload.disabled = disabled;
+    if (novelaiControls.renderReferences(els.referenceStrip, index => { state.references.splice(index, 1); renderReferences(); })) return;
     els.referenceStrip.innerHTML = state.references.map((item, index) => `<div class="reference-item"><img src="${item.preview_data_url}" alt="参考图 ${index + 1}" /><button type="button" data-reference-index="${index}" aria-label="移除参考图"><span aria-hidden="true">×</span></button></div>`).join("");
     els.referenceStrip.querySelectorAll("[data-reference-index]").forEach((button) => button.addEventListener("click", () => { state.references.splice(Number(button.dataset.referenceIndex), 1); renderReferences(); }));
   }
 
   async function bootstrap() {
     const payload = await apiGet("studio/bootstrap");
+    state.comfyuiSnapshot = null; state.comfyuiModelOverride = null;
+    settings.setNovelAIModels(payload.novelai_models);
     providerQuotas.clear();
     state.providers = Array.isArray(payload.providers) ? payload.providers : [];
     state.models = Array.isArray(payload.models) ? payload.models : [];
     state.parameterValues = {}; state.parameterCarry = {}; state.negativePromptCarry = ""; state.hasNegativePromptCarry = false;
     state.defaultModelRefs = { text2img: payload.defaults?.text2img_model_ref || "", img2img: payload.defaults?.img2img_model_ref || "" };
     state.selectedModelRef = state.defaultModelRefs[state.mode] || "";
+    state.selectedProviderId = selectedModel()?.provider_id || "";
     state.parameterValues = parameterValuesForModel(selectedModel(), {});
     els.negativePrompt.value = selectedModel()?.negative_prompt_default || "";
     if (selectedModel()?.supports_negative_prompt) { state.negativePromptCarry = els.negativePrompt.value; state.hasNegativePromptCarry = true; }
@@ -515,6 +574,7 @@
 
   async function generate(event) {
     event.preventDefault(); setError(els.generationError, "");
+    if (comfyuiControls.promptRequired(selectedModel()) && !els.prompt.value.trim()) { setError(els.generationError, "请填写提示词。"); return; }
     if (referencesUploading) { setError(els.generationError, "请等待参考图上传完成。"); return; }
     let parameters = {};
     if (els.parameters.value.trim()) {
@@ -524,10 +584,13 @@
     const provider = selectedProvider();
     if (!model || !provider) { setError(els.generationError, "请先选择支持当前模式的模型"); return; }
     if (state.mode === "img2img" && !state.references.length) { setError(els.generationError, "图生图需要至少一张参考图"); return; }
+    const novelaiError = novelaiControls.validate();
+    if (novelaiError) { setError(els.generationError, novelaiError); return; }
     const schema = model.parameters || {};
     const mappedParameters = Object.fromEntries(Object.entries(collectModelParameters()).map(([name, value]) => [schema[name]?.request_key || name, value]));
     for (const [name, descriptor] of effectiveModelParameters(model)) {
       const key = descriptor.request_key || name;
+      if (!parameterAppliesToMode(descriptor)) { delete parameters[key]; delete parameters[name]; delete mappedParameters[key]; }
       if (descriptor.webui_visible === false && Object.prototype.hasOwnProperty.call(parameters, key)) delete mappedParameters[key];
     }
     const size = mappedParameters.size || "";
@@ -539,27 +602,65 @@
     for (const [name, descriptor] of Object.entries(schema)) if (modelParameterMatches(name, descriptor, MODEL_SCHEDULING_FIELDS)) { delete parameters[name]; delete parameters[descriptor.request_key]; }
     els.generateButton.disabled = true; els.generateButton.textContent = "生成中";
     try {
-      const result = await apiPost("studio/generate", { mode: state.mode, provider_id: provider.id, model_ref: model.model_ref, prompt: els.prompt.value, negative_prompt: els.negativePrompt.value, model: model.id, size, count: Number(count), parameters: { ...parameters, ...mappedParameters }, reference_ids: state.references.map((item) => item.id) });
-      state.resultImages = result.images || []; state.references = []; renderReferences();
-      els.resultEmpty.classList.toggle("is-hidden", state.resultImages.length > 0); els.resultGrid.innerHTML = state.resultImages.map((image, index) => `<div class="result-card"><div class="result-frame"><img class="result-image-backdrop" src="${image.data_url}" alt="" aria-hidden="true" /><img class="result-image" src="${image.data_url}" alt="生成结果" data-result-preview="${index}" /></div><div class="result-card-actions"><button class="quiet-button" data-result-reference="${index}" type="button">用作参考图</button></div></div>`).join("");
-      els.resultGrid.querySelectorAll("[data-result-reference]").forEach((button) => button.addEventListener("click", () => void useDataUrlAsReference(state.resultImages[Number(button.dataset.resultReference)].data_url, "generated-reference.png")));
-      els.resultGrid.querySelectorAll("[data-result-preview]").forEach((image) => image.addEventListener("click", () => { const index = Number(image.dataset.resultPreview); openImagePreview(image.src, `生成结果-${index + 1}`, state.resultImages[index]?.download_filename, state.resultImages, index); }));
-      els.resultMeta.textContent = `${result.provider_name} · ${result.model} · ${(result.elapsed_ms / 1000).toFixed(1)} 秒${result.generation_id ? " · 已保存到画廊" : " · 历史未保留"}`;
-      if (result.warning) { setError(els.generationError, result.warning); showNotice(result.warning); }
+      const request = { mode: state.mode, provider_id: provider.id, model_ref: model.model_ref, prompt: els.prompt.value, negative_prompt: els.negativePrompt.value, model: model.id, size, count: Number(count), parameters: { ...parameters, ...mappedParameters }, reference_ids: state.references.map((item) => item.id), ...(provider.kind === "comfyui" && state.comfyuiSnapshot ? { comfyui: state.comfyuiSnapshot } : {}) };
+      if (provider.kind === "comfyui") {
+        if (model.temporary) request.temporary_model = comfyuiControls.temporaryModel(model);
+        await comfyuiControls.submit(request); showNotice("工作流任务已提交，可展开任务队列查看进度。", "success"); return;
+      }
+      const result = await apiPost("studio/generate", request);
+      state.resultImages = result.images || []; state.references = [];
+      for (const [name, descriptor] of effectiveModelParameters(model)) if ((descriptor.request_key || name) === "reference_settings") state.parameterValues[name] = [];
+      renderReferences();
+      renderGenerationResult(result);
     } catch (error) { setError(els.generationError, errorMessage(error, "生成失败")); }
     finally {
       els.generateButton.disabled = false; els.generateButton.textContent = "生成图片";
-      if (provider.kind === "nai_direct") { providerQuotas.delete(provider.id); refreshProviderQuota(); }
+      if (["nai_direct", "novelai_official"].includes(provider.kind)) { providerQuotas.delete(provider.id); refreshProviderQuota(); }
     }
+  }
+
+  function renderGenerationResult(result) {
+    state.resultImages = result.images || [];
+    els.resultEmpty.classList.toggle("is-hidden", state.resultImages.length > 0);
+    els.resultGrid.innerHTML = state.resultImages.map((image, index) => `<div class="result-card"><div class="result-frame"><img class="result-image-backdrop" src="${escape(image.data_url)}" alt="" aria-hidden="true" /><img class="result-image" src="${escape(image.data_url)}" alt="生成结果" data-result-preview="${index}" /></div><div class="result-card-actions"><button class="quiet-button" data-result-reference="${index}" type="button">用作参考图</button></div></div>`).join("");
+    els.resultGrid.querySelectorAll("[data-result-reference]").forEach(button => button.addEventListener("click", () => void useDataUrlAsReference(state.resultImages[Number(button.dataset.resultReference)].data_url, "generated-reference.png")));
+    els.resultGrid.querySelectorAll("[data-result-preview]").forEach(image => image.addEventListener("click", () => { const index = Number(image.dataset.resultPreview); openImagePreview(image.src, `生成结果-${index + 1}`, state.resultImages[index]?.download_filename, state.resultImages, index); }));
+    els.resultMeta.textContent = `${result.provider_name || "ComfyUI"} · ${result.model || "工作流"} · ${(Number(result.elapsed_ms || 0) / 1000).toFixed(1)} 秒${result.generation_id ? " · 已保存到画廊" : " · 历史未保留"}`;
+    if (result.warning) { setError(els.generationError, result.warning); showNotice(result.warning); }
+  }
+
+  function viewComfyResult(result) {
+    renderGenerationResult(result);
+    const first = state.resultImages[0];
+    if (first?.data_url) openImagePreview(first.data_url, "生成结果-1", first.download_filename, state.resultImages, 0);
   }
 
   async function loadGallery(page = state.galleryPage) {
     library.closeGalleryPagePicker();
     if (state.view === "gallery") state.galleryLimit = library.galleryPageSize();
     const requestedPage = Math.max(0, Number.isFinite(Number(page)) ? Math.floor(Number(page)) : 0);
+    const filters = galleryFilters();
+    const queryKey = JSON.stringify({ ...filters, limit: state.galleryLimit });
+    const pageKey = `${queryKey}:${requestedPage}`;
     const revision = ++galleryRequestRevision;
+    const preserveCards = pageKey === galleryDisplayedPageKey;
+    if (!preserveCards) stopGalleryPreviews();
+    if (queryKey !== galleryQueryKey) state.galleryTotal = 0;
+    galleryQueryKey = queryKey;
+    state.galleryPage = requestedPage;
+    if (!preserveCards) {
+      state.galleryItems = [];
+      galleryDisplayedPageKey = "";
+      const remaining = state.galleryTotal - requestedPage * state.galleryLimit;
+      const count = Math.max(1, Math.min(state.galleryLimit, remaining > 0 ? remaining : state.galleryLimit));
+      els.galleryGrid.innerHTML = Array.from({ length: count }, () => library.renderGalleryPlaceholder()).join("");
+      els.galleryGrid.querySelectorAll(".gallery-image-pending").forEach(mount => mount.append(window.ImageStudioImagePlaceholder.create()));
+      els.galleryEmpty.classList.add("is-hidden");
+    }
+    setGalleryLoading(true);
+    updateGalleryPagination();
     try {
-      const payload = await apiGet("gallery/list", { ...galleryFilters(), limit: state.galleryLimit, offset: requestedPage * state.galleryLimit });
+      const payload = await apiGet("gallery/list", { ...filters, light: 1, limit: state.galleryLimit, offset: requestedPage * state.galleryLimit });
       if (revision !== galleryRequestRevision) return false;
       const total = Math.max(0, Number(payload.total || 0));
       const limit = Math.max(1, Number(payload.limit || state.galleryLimit));
@@ -569,13 +670,152 @@
       const dataChanged = payload.revision ? observeGalleryRevision(payload.revision) : true;
       if (!payload.revision) invalidateBrowseCache();
       state.galleryItems = payload.items || []; renderGallery(payload);
+      galleryDisplayedPageKey = `${queryKey}:${state.galleryPage}`;
+      setGalleryLoading(false);
+      startGalleryPreviews();
       if (detailNavigationSession?.active && browseFilterKey(detailNavigationSession.filters) !== browseFilterKey(galleryFilters())) refreshDetailSequence(detailNavigationSession);
       else if (dataChanged && detailNavigationSession?.active) void warmDetailNeighbors(detailNavigationSession);
       return true;
     } catch (error) {
-      showNotice(errorMessage(error, "画廊加载失败"), "error");
+      if (revision !== galleryRequestRevision) return false;
+      setGalleryLoading(false, preserveCards ? "刷新失败，仍显示上次的内容。" : "画廊加载失败，请重试。");
+      if (!preserveCards) els.galleryGrid.replaceChildren();
+      else startGalleryPreviews();
+      if (state.view === "gallery") showNotice(errorMessage(error, "画廊加载失败"), "error");
       return false;
     }
+  }
+
+  function setGalleryLoading(loading, error = "") {
+    els.galleryGrid.setAttribute("aria-busy", String(loading));
+    $("galleryLoadingStatus").textContent = error;
+    $("galleryLoadState").hidden = !error;
+    $("galleryRetry").hidden = !error;
+    $("selectAllButton").disabled = loading;
+  }
+
+  function updateGalleryPagination() {
+    const totalPages = Math.max(1, Math.ceil(state.galleryTotal / Math.max(1, state.galleryLimit)));
+    els.galleryPagination.classList.toggle("is-hidden", totalPages <= 1 && state.galleryPage === 0);
+    els.galleryPageLabel.textContent = `第 ${state.galleryPage + 1} / ${totalPages} 页 · 共 ${state.galleryTotal} 条`;
+    els.galleryPrev.disabled = state.galleryPage <= 0;
+    els.galleryNext.disabled = state.galleryPage >= totalPages - 1;
+    library.syncFloatingBars();
+  }
+
+  function stopGalleryPreviews() {
+    if (!galleryPreviewSession) return;
+    galleryPreviewSession.active = false;
+    galleryPreviewSession.observer?.disconnect();
+    galleryPreviewSession.queue.length = 0;
+    galleryPreviewSession = null;
+  }
+
+  function currentGalleryPreview(session, card, item) {
+    return session.active && galleryPreviewSession === session && state.view === "gallery"
+      && card.isConnected && card.galleryMediaKey === imageMediaKey(item, "preview");
+  }
+
+  function galleryPreviewFailed(session, card, item, source = "") {
+    if (!currentGalleryPreview(session, card, item)) return;
+    if (source) { discardImageMediaSource(source); delete item.thumbnail_data_url; }
+    card.galleryThumbnail = "";
+    card.dataset.previewStatus = "error";
+    const wrap = card.querySelector(".gallery-image-wrap");
+    wrap.setAttribute("aria-busy", "false");
+    wrap.querySelector("img")?.remove();
+    wrap.querySelector(".gallery-image-pending")?.remove();
+    if (wrap.querySelector(".gallery-preview-retry")) return;
+    const retry = document.createElement("button");
+    retry.type = "button"; retry.className = "quiet-button gallery-preview-retry";
+    retry.textContent = "重试预览"; retry.setAttribute("aria-label", "预览加载失败，重新加载此图片");
+    retry.addEventListener("click", event => {
+      event.stopPropagation(); retry.remove();
+      const pending = document.createElement("div"); pending.className = "gallery-image-pending";
+      pending.append(window.ImageStudioImagePlaceholder.create()); wrap.prepend(pending);
+      card.dataset.previewStatus = "pending"; wrap.setAttribute("aria-busy", "true");
+      session.queue.unshift({ card, item }); pumpGalleryPreviews();
+    });
+    wrap.append(retry);
+  }
+
+  function paintGalleryPreview(session, card, item, source) {
+    if (!currentGalleryPreview(session, card, item)) return;
+    const wrap = card.querySelector(".gallery-image-wrap");
+    let image = wrap.querySelector("img");
+    if (!image) {
+      image = document.createElement("img"); image.alt = item.prompt_preview || "";
+      image.decoding = "async"; wrap.prepend(image);
+    }
+    const ready = () => {
+      if (!currentGalleryPreview(session, card, item) || image.getAttribute("src") !== source) return;
+      card.dataset.previewStatus = "ready"; card.galleryThumbnail = source;
+      item.thumbnail_data_url = source;
+      wrap.setAttribute("aria-busy", "false");
+      wrap.querySelector(".gallery-image-pending")?.remove();
+    };
+    image.onload = ready;
+    image.onerror = () => galleryPreviewFailed(session, card, item, source);
+    if (image.getAttribute("src") !== source) image.src = source;
+    if (image.complete && image.naturalWidth > 0) ready();
+  }
+
+  function pumpGalleryPreviews() {
+    const session = galleryPreviewSession;
+    if (!session?.active || state.view !== "gallery") return;
+    // Old in-flight bridge calls cannot be aborted; discard their queued work
+    // and keep a global bound so rapid paging cannot flood the connection.
+    while (galleryPreviewActive < GALLERY_PREVIEW_CONCURRENCY && session.queue.length) {
+      const { card, item } = session.queue.shift();
+      if (!currentGalleryPreview(session, card, item)) continue;
+      galleryPreviewActive++;
+      void loadImageMedia(item, "preview").then(source => paintGalleryPreview(session, card, item, source))
+        .catch(() => galleryPreviewFailed(session, card, item))
+        .finally(() => { galleryPreviewActive--; pumpGalleryPreviews(); });
+    }
+  }
+
+  function startGalleryPreviews() {
+    stopGalleryPreviews();
+    if (state.view !== "gallery") return;
+    const session = { active: true, queue: [], observer: null };
+    galleryPreviewSession = session;
+    const items = new Map(state.galleryItems.map(item => [item.id, item]));
+    const enqueue = card => {
+      if (!session.active || card.dataset.previewStatus !== "pending") return;
+      const item = items.get(card.dataset.galleryId);
+      if (!item) return;
+      card.dataset.previewStatus = "queued";
+      session.observer?.unobserve(card);
+      session.queue.push({ card, item });
+    };
+    if (typeof IntersectionObserver !== "undefined") session.observer = new IntersectionObserver(entries => {
+      for (const entry of entries) if (entry.isIntersecting) enqueue(entry.target);
+      // Visible cards take priority over the near-viewport buffer.
+      session.queue.sort((a, b) => {
+        const distance = card => { const rect = card.getBoundingClientRect(); return Math.max(0, rect.top - innerHeight, -rect.bottom); };
+        return distance(a.card) - distance(b.card);
+      });
+      pumpGalleryPreviews();
+    }, { rootMargin: "240px" });
+    els.galleryGrid.querySelectorAll("[data-gallery-id]").forEach(card => {
+      const item = items.get(card.dataset.galleryId);
+      card.galleryMediaKey = imageMediaKey(item, "preview");
+      const source = item.thumbnail_data_url || getImageMedia(item, "preview");
+      card.querySelector(".gallery-preview-retry")?.remove();
+      if (source) { paintGalleryPreview(session, card, item, source); return; }
+      const wrap = card.querySelector(".gallery-image-wrap");
+      if (!wrap.querySelector(".gallery-image-pending")) {
+        const pending = document.createElement("div"); pending.className = "gallery-image-pending";
+        wrap.prepend(pending);
+      }
+      const pending = wrap.querySelector(".gallery-image-pending");
+      if (!pending.firstChild) pending.append(window.ImageStudioImagePlaceholder.create());
+      card.dataset.previewStatus = "pending"; wrap.setAttribute("aria-busy", "true");
+      if (session.observer) session.observer.observe(card);
+      else enqueue(card);
+    });
+    pumpGalleryPreviews();
   }
 
   function galleryFilters() {
@@ -602,6 +842,7 @@
   }
 
   function renderGallery(payload) {
+    els.galleryGrid.querySelectorAll(".gallery-card.is-placeholder").forEach(card => card.remove());
     updateGalleryFilterOptions(els.galleryProvider, (payload.filters?.providers || []).map((item) => [item.id, item.name || item.id || "未指定服务商"]));
     updateGalleryFilterOptions(els.galleryMode, (payload.filters?.modes || []).map(value => [value, library.modeLabel(value)]));
     updateGalleryFilterOptions(els.gallerySource, (payload.filters?.sources || []).map(value => [value, sourceLabel(value)]));
@@ -614,6 +855,7 @@
     for (const [id, card] of existing) if (!wanted.has(id)) card.remove();
     // Unchanged records keep their decoded images, focus and hover state across refreshes.
     state.galleryItems.forEach((item, index) => {
+      item.thumbnail_data_url ||= getImageMedia(item, "preview");
       cacheImageMedia(item, "preview", item.thumbnail_data_url);
       const { thumbnail_data_url: thumbnail, ...fields } = item;
       const signature = JSON.stringify(fields);
@@ -634,8 +876,7 @@
       card.querySelector("[data-select-id]").checked = state.selectedIds.has(item.id);
       if (els.galleryGrid.children[index] !== card) els.galleryGrid.insertBefore(card, els.galleryGrid.children[index] || null);
     });
-    const limit = Math.max(1, Number(payload.limit || state.galleryLimit)); const total = Math.max(0, Number(payload.total || state.galleryTotal)); const totalPages = Math.max(1, Math.ceil(total / limit));
-    els.galleryPagination.classList.toggle("is-hidden", totalPages <= 1); els.galleryPageLabel.textContent = `第 ${state.galleryPage + 1} / ${totalPages} 页 · 共 ${total} 条`; els.galleryPrev.disabled = state.galleryPage <= 0; els.galleryNext.disabled = state.galleryPage >= totalPages - 1;
+    updateGalleryPagination();
     updateSelection();
     library.galleryRendered(payload);
     window.ImageStudioSelect?.refresh();
@@ -1235,7 +1476,7 @@
       strip.setAttribute("aria-label", "本组生成图片缩略图");
       strip.innerHTML = `<div class="detail-filmstrip-track">${images.map((item, index) => {
         const preview = item.thumbnail_data_url || (index === 0 ? state.detailFallbackThumbnail : "");
-        return `<button class="detail-filmstrip-thumb" data-detail-dot="${index}" type="button" aria-label="查看本次生成的第 ${index + 1} 张图片" title="第 ${index + 1} / ${images.length} 张"><span class="detail-filmstrip-preview"><span class="detail-filmstrip-placeholder" aria-hidden="true" ${preview ? "hidden" : ""}>${index + 1}</span>${preview ? `<img src="${escape(preview)}" alt="" draggable="false" loading="lazy" decoding="async" />` : ""}</span></button>`;
+        return `<button class="detail-filmstrip-thumb" data-detail-dot="${index}" type="button" aria-label="查看本次生成的第 ${index + 1} 张图片"><span class="detail-filmstrip-preview"><span class="detail-filmstrip-placeholder" aria-hidden="true" ${preview ? "hidden" : ""}>${index + 1}</span>${preview ? `<img src="${escape(preview)}" alt="" draggable="false" loading="lazy" decoding="async" />` : ""}</span></button>`;
       }).join("")}</div>`;
       strip.querySelectorAll("img").forEach((image) => image.addEventListener("error", () => { image.hidden = true; image.parentElement.querySelector(".detail-filmstrip-placeholder").hidden = false; }));
       const selectImage = (index, focus = false) => {
@@ -1519,7 +1760,7 @@
   function closeDetail() { library.clearDetailParameterLayout(); stopDetailNavigation(); window.ImageStudioBackdrop.dispose(els.drawerBody.querySelector(".detail-image-backdrop:not(.detail-backdrop-previous)")); detailImagePaintRevision++; mobileDetailSyncRevision++; decodedDisplayImages.clear(); detailBackdropSource = ""; detailRequestRevision += 1; if (mobileImageViewer) { suppressMobileDetailSync = true; mobileImageViewer.close(); } state.detailId = ""; state.detailData = null; state.detailFallbackThumbnail = ""; state.detailAssetsLoaded = false; state.detailNavigating = false; state.detailImageIndex = 0; state.detailRequestedImageIndex = 0; closeImagePreview(); els.detailDrawer.classList.remove("is-open"); els.detailDrawer.setAttribute("aria-hidden", "true"); syncPageScrollLock(); }
 
   function isMobileDetailPreview(context) {
-    return context?.type === "detail" && window.matchMedia("(max-width: 540px)").matches && typeof window.PhotoSwipe === "function";
+    return context?.type === "detail" && window.ImageStudioDetailSwipe.usesTouchInteraction() && typeof window.PhotoSwipe === "function";
   }
 
   function mobileSourceForSequenceItem(sequenceItem, fallbackDataUrl, context, knownImages, galleryById) {
@@ -1877,7 +2118,151 @@
   }
 
   function toggleMobileImageControls() {
-    mobileImageViewer?.element?.classList.toggle("image-studio-controls-visible");
+    const session = mobileViewerSession;
+    if (!isCurrentMobileSession(session)) return;
+    const visible = session.viewer.element.classList.toggle("image-studio-controls-visible");
+    session.filmstrip?.setVisible(visible);
+  }
+
+  function createMobileFilmstrip(session) {
+    const viewer = session.viewer;
+    const strip = document.createElement("div");
+    strip.className = "detail-filmstrip image-studio-viewer-filmstrip";
+    strip.setAttribute("role", "group"); strip.setAttribute("aria-label", "本组生成图片缩略图");
+    strip.setAttribute("aria-hidden", "true"); strip.inert = true; strip.hidden = true;
+    viewer.element.appendChild(strip);
+    const groups = new Map();
+    session.items.forEach((item, index) => {
+      const id = String(item.generation_id);
+      if (!groups.has(id)) groups.set(id, []);
+      groups.get(id).push(index);
+    });
+    let visible = false, generation = "", revision = 0, frame = 0, active = 0;
+    let observer = null, queue = [];
+    const currentGroup = () => String(session.items[viewer.currIndex]?.generation_id || "");
+    const current = token => visible && token === revision && isCurrentMobileSession(session) && generation === currentGroup();
+
+    function paint(button, source, token) {
+      if (!source || !current(token) || !button.isConnected) return;
+      const mount = button.querySelector(".detail-filmstrip-preview");
+      if (mount.querySelector("img")?.getAttribute("src") === source) return;
+      const image = document.createElement("img");
+      image.alt = ""; image.draggable = false; image.decoding = "async";
+      image.onload = () => { if (current(token) && image.parentNode === mount) mount.querySelector(".detail-filmstrip-placeholder").hidden = true; };
+      image.onerror = () => {
+        if (!current(token) || image.parentNode !== mount) return;
+        discardImageMediaSource(source); image.remove(); mount.querySelector(".detail-filmstrip-placeholder").hidden = false;
+      };
+      image.src = source; mount.querySelector("img")?.remove(); mount.append(image);
+      if (image.complete && image.naturalWidth > 0) mount.querySelector(".detail-filmstrip-placeholder").hidden = true;
+    }
+
+    function pump() {
+      if (!visible || !isCurrentMobileSession(session)) return;
+      while (active < 2 && queue.length) {
+        const { button, index, token } = queue.shift();
+        if (!current(token) || !button.isConnected) continue;
+        active++;
+        // Filmstrip reads populate the shared preview cache only. They must not
+        // promote a far-away PhotoSwipe slide or touch the main blur compositor.
+        void loadImageMedia(session.items[index], "preview").then(source => paint(button, source, token))
+          .catch(() => { if (current(token) && button.isConnected) delete button.dataset.previewQueued; })
+          .finally(() => { active--; pump(); });
+      }
+    }
+
+    function load(button) {
+      const index = Number(button.dataset.viewerIndex), item = session.items[index];
+      if (!item || !current(revision)) return;
+      const source = item.previewSrc || getImageMedia(item, "preview");
+      if (source) { paint(button, source, revision); return; }
+      if (button.dataset.previewQueued) return;
+      button.dataset.previewQueued = "true";
+      queue.push({ button, index, token: revision }); pump();
+    }
+
+    function render() {
+      if (!visible || !isCurrentMobileSession(session)) return;
+      const id = currentGroup(), indices = groups.get(id) || [];
+      strip.hidden = indices.length <= 1;
+      if (strip.hidden) return;
+      if (generation !== id) {
+        observer?.disconnect(); queue = []; revision++; generation = id;
+        strip.dataset.generationId = id;
+        strip.innerHTML = `<div class="detail-filmstrip-track">${indices.map(index => `<button class="detail-filmstrip-thumb" data-viewer-index="${index}" type="button" aria-label="查看本组第 ${Number(session.items[index].image_index) + 1} 张图片"><span class="detail-filmstrip-preview"><span class="detail-filmstrip-placeholder" aria-hidden="true">${Number(session.items[index].image_index) + 1}</span></span></button>`).join("")}</div>`;
+      }
+      delete strip.dataset.groupPending;
+      strip.inert = false; strip.setAttribute("aria-busy", "false");
+      const buttons = [...strip.querySelectorAll("[data-viewer-index]")];
+      buttons.forEach(button => {
+        const selected = Number(button.dataset.viewerIndex) === viewer.currIndex;
+        button.classList.toggle("is-active", selected); button.setAttribute("aria-current", String(selected)); button.tabIndex = selected ? 0 : -1;
+      });
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        if (!visible || generation !== currentGroup() || !isCurrentMobileSession(session)) return;
+        const selected = strip.querySelector('[aria-current="true"]');
+        if (selected) strip.scrollLeft = selected.offsetLeft + selected.offsetWidth / 2 - strip.clientWidth / 2;
+        observer?.disconnect();
+        if (typeof IntersectionObserver === "function") {
+          observer = new IntersectionObserver(entries => { for (const entry of entries) if (entry.isIntersecting) load(entry.target); }, { root: strip, rootMargin: "0px 120px" });
+          buttons.forEach(button => observer.observe(button));
+        } else buttons.filter(button => Math.abs(Number(button.dataset.viewerIndex) - viewer.currIndex) <= 2).forEach(load);
+      });
+    }
+
+    function sync() {
+      const indices = groups.get(currentGroup()) || [];
+      const hasFilmstrip = indices.length > 1;
+      const pending = hasFilmstrip && generation !== currentGroup();
+      viewer.element.classList.toggle("has-viewer-filmstrip", hasFilmstrip);
+      // Keep the glass surface mounted and visible between multi-image groups.
+      // Only the old thumbnail content waits for the gesture's idle handoff.
+      strip.hidden = !hasFilmstrip;
+      strip.toggleAttribute("data-group-pending", pending);
+      strip.inert = !visible || pending || !hasFilmstrip;
+      strip.setAttribute("aria-busy", String(visible && pending));
+      if (generation !== currentGroup() || indices.length <= 1) {
+        observer?.disconnect(); queue = []; revision++;
+        strip.querySelectorAll("[data-preview-queued]").forEach(button => delete button.dataset.previewQueued);
+      }
+      // Defer DOM rebuilding and centering until the main image finishes moving.
+      if (visible) void queueMobileWork(session, "filmstrip", render);
+    }
+
+    strip.addEventListener("click", event => {
+      event.stopPropagation();
+      const button = event.target.closest("[data-viewer-index]");
+      if (button && visible && generation === currentGroup()) viewer.goTo(Number(button.dataset.viewerIndex));
+    });
+    strip.addEventListener("keydown", event => {
+      if (!visible || generation !== currentGroup() || strip.inert) return;
+      const button = event.target.closest("[data-viewer-index]");
+      if (!button) return;
+      const indices = groups.get(generation) || [], offset = indices.indexOf(Number(button.dataset.viewerIndex));
+      const target = ({ ArrowLeft: Math.max(0, offset - 1), ArrowRight: Math.min(indices.length - 1, offset + 1), Home: 0, End: indices.length - 1 })[event.key];
+      if (target === undefined) return;
+      event.preventDefault(); event.stopPropagation();
+      viewer.goTo(indices[target]); strip.querySelector(`[data-viewer-index="${indices[target]}"]`)?.focus({ preventScroll: true });
+    });
+    strip.addEventListener("wheel", event => {
+      event.stopPropagation();
+      if (event.ctrlKey || event.metaKey || strip.scrollWidth <= strip.clientWidth || Math.abs(event.deltaX) >= Math.abs(event.deltaY)) return;
+      event.preventDefault(); strip.scrollLeft += event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? strip.clientWidth : 1);
+    }, { passive: false });
+    // The strip is a sibling of PhotoSwipe's scrollWrap. Leave native touch
+    // scrolling intact and prevent its clicks from becoming main-image taps.
+    sync();
+    return {
+      sync,
+      setVisible(value) {
+        if (!value && strip.contains(document.activeElement)) viewer.element.focus({ preventScroll: true });
+        visible = value; strip.inert = !value; strip.setAttribute("aria-hidden", String(!value));
+        if (value) sync();
+        else { observer?.disconnect(); queue = []; revision++; strip.querySelectorAll("[data-preview-queued]").forEach(button => delete button.dataset.previewQueued); }
+      },
+      destroy() { visible = false; revision++; cancelAnimationFrame(frame); observer?.disconnect(); queue = []; strip.remove(); },
+    };
   }
 
   async function prepareMobileViewerBackdrop(item) {
@@ -1947,6 +2332,7 @@
       // PhotoSwipe blocks input during its opening animation; the visual fade is independent.
       const pswp = new window.PhotoSwipe({ dataSource: mobileImageDataSource, index: initialIndex, loop: false, closeOnVerticalDrag: true, pinchToClose: false, tapAction: toggleMobileImageControls, imageClickAction: toggleMobileImageControls, bgClickAction: toggleMobileImageControls, doubleTapAction: "zoom", initialZoomLevel: "fit", secondaryZoomLevel: 2.5, maxZoomLevel: 4, preload: [1, 1], arrowPrev: false, arrowNext: false, close: false, zoom: false, counter: false, bgOpacity: 1, showHideAnimationType: "fade", showAnimationDuration: 0, hideAnimationDuration: 220, zoomAnimationDuration: 220, errorMsg: "图片暂时无法加载，请重试。", mainClass: "image-studio-pswp" });
       session.viewer = pswp;
+      pswp.addFilter("preventPointerEvent", (prevent, event) => event.target instanceof Element && event.target.closest(".image-studio-viewer-filmstrip") ? false : prevent);
       const placeholders = new Map(), destroyedSlides = new WeakSet();
       function syncPlaceholder(slide) {
         if (!session.active || pswp.isDestroying || !slide?.holderElement || destroyedSlides.has(slide)) return;
@@ -2027,10 +2413,11 @@
         updateMobileViewerFeedback(session);
       });
       pswp.on("uiRegister", () => {
-        pswp.ui.registerElement({ name: "image-studio-download", className: "pswp__button--image-studio-download", isButton: true, appendTo: "root", title: "下载图片", ariaLabel: "下载当前图片", html: '<svg class="image-studio-download-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>', onClick: () => void downloadMobileImage() });
+        pswp.ui.registerElement({ name: "image-studio-download", className: "pswp__button--image-studio-download", isButton: true, appendTo: "root", ariaLabel: "下载当前图片", html: '<svg class="image-studio-download-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>', onInit: (element) => { element.dataset.tooltip = "下载图片"; }, onClick: () => void downloadMobileImage() });
       });
       pswp.on("change", () => {
         if (!isCurrentMobileSession(session)) return;
+        session.filmstrip?.sync();
         // Do not carry the previous slide's error through the next gesture
         // while the idle work queue catches up with its new selection.
         if (session.status) session.status.hidden = true;
@@ -2044,7 +2431,7 @@
       pswp.on("moveMainScroll", (event) => {
         if (event.dragging && pswp.gestures.dragAxis === "x") restoreMobileViewerBackground(session);
       });
-      pswp.on("resize", () => { if (isCurrentMobileSession(session)) window.ImageStudioViewerBackdrop.resize(session.backdrop); });
+      pswp.on("resize", () => { if (isCurrentMobileSession(session)) { window.ImageStudioViewerBackdrop.resize(session.backdrop); session.filmstrip?.sync(); } });
       pswp.on("pointerDown", (event) => trackMobilePointer(session, event, true));
       pswp.on("pointerUp", (event) => trackMobilePointer(session, event, false));
       pswp.on("verticalDrag", () => { void prepareMobileDetail(session); });
@@ -2055,6 +2442,7 @@
       });
       pswp.on("afterInit", () => {
         bindMobileGestureInterruption(session);
+        session.filmstrip = createMobileFilmstrip(session);
         const download = pswp.element?.querySelector(".pswp__button--image-studio-download");
         if (download) download.hidden = session.items[pswp.currIndex]?.allowed_actions?.download === false;
         const backgroundLayer = document.createElement("div"); backgroundLayer.className = "image-studio-viewer-background"; backgroundLayer.setAttribute("aria-hidden", "true");
@@ -2073,11 +2461,12 @@
         if (!window.matchMedia("(prefers-reduced-motion: reduce)").matches) session.entryAnimation = pswp.element.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, easing: "ease-out" });
         syncPageScrollLock();
       });
-      pswp.on("openingAnimationEnd", () => pswp.element?.classList.remove("image-studio-controls-visible"));
+      pswp.on("openingAnimationEnd", () => { pswp.element?.classList.remove("image-studio-controls-visible"); session.filmstrip?.setVisible(false); });
       pswp.on("destroy", () => {
         const item = session.sequence[pswp.currIndex];
         const shouldSyncDetail = !suppressMobileDetailSync;
         session.active = false;
+        session.filmstrip?.destroy();
         cancelMobileWork(session);
         session.themeObserver?.disconnect();
         window.ImageStudioViewerBackdrop.dispose(session.backdrop);
@@ -2271,6 +2660,10 @@
   async function reproduce(id) {
     try {
       await bootstrap();
+      const currentImage = state.detailData?.images?.[state.detailImageIndex];
+      if ([currentImage?.supplemental?.generation_engine, state.detailData?.generation_engine, currentImage?.metadata?.format, state.detailData?.provider_kind].some(value => String(value || "").toLowerCase() === "comfyui")) {
+        if (await comfyuiControls.fromGallery(state.detailData, currentImage)) return;
+      }
       if (state.detailData?.source === "import") {
         const payload = await apiGet(`gallery/parameters/${id}`, { image_id: state.detailData.images?.[state.detailImageIndex]?.id, format: "studio" });
         await library.resolveParameters(typeof payload.content === "string" ? payload.content : JSON.stringify(payload.content), undefined, { forReproduction: true });
@@ -2285,8 +2678,16 @@
   }
 
   function applyDraft(draft, { forReproduction = false } = {}) {
+    if (draft.temporary_model) {
+      const provider = state.providers.find(item => item.id === draft.provider_id && item.kind === "comfyui" && item.enabled !== false);
+      if (!provider) throw new Error("目标 ComfyUI 服务商已停用或删除，请重新选择。");
+      const model = structuredClone(draft.temporary_model);
+      state.comfyuiTemporaryModel = { ...model, model_ref: draft.model_ref || `${provider.id}:${model.id}`, provider_id: provider.id, provider_name: provider.name, provider_kind: "comfyui", temporary: true, seed_warnings: draft.seed_warnings || [] };
+    }
+    state.comfyuiSnapshot = draft.comfyui || null;
     state.mode = draft.mode === "img2img" ? "img2img" : "text2img"; state.selectedProviderId = draft.provider_id || ""; state.references = draft.references || [];
     state.selectedModelRef = draft.model_ref || (draft.provider_id && draft.model ? `${draft.provider_id}:${draft.model}` : "");
+    state.comfyuiModelOverride = draft.comfyui_model ? { model_ref: state.selectedModelRef, model: draft.comfyui_model } : null;
     const rawParameterValues = { ...(draft.parameters || {}) };
     if (Object.prototype.hasOwnProperty.call(draft, "size")) rawParameterValues.size = draft.size;
     if (Object.prototype.hasOwnProperty.call(draft, "count")) rawParameterValues.count = draft.count;
@@ -2299,562 +2700,10 @@
     if (draft.notice) setError(els.generationError, draft.notice);
   }
 
-  function populateDefaultModelSelect(select, models, selectedRef) {
-    select.innerHTML = `<option value="">未设置</option>${models.map((model) => `<option value="${escape(model.model_ref)}">${escape(model.name)} · ${escape(model.provider_name)}</option>`).join("")}`;
-    select.value = models.some((model) => model.model_ref === selectedRef) ? selectedRef : "";
-    window.ImageStudioSelect?.refresh(select);
-  }
-
-  function refreshSettingsDefaultModels(defaults = null) {
-    if (!state.settings) return;
-    const models = state.settings.webui.providers.filter((provider) => provider.enabled).flatMap((provider) => (provider.models || []).map((model) => ({ ...model, provider_name: provider.name, model_ref: `${provider.id}:${model.id}` })));
-    for (const [select, scope, mode, supported] of [
-      [els.settingPageDefaultTextModel, "page", "text2img", "supports_text2img"],
-      [els.settingPageDefaultImageModel, "page", "img2img", "supports_img2img"],
-      [els.settingToolDefaultTextModel, "tool", "text2img", "supports_text2img"],
-      [els.settingToolDefaultImageModel, "tool", "img2img", "supports_img2img"],
-    ]) {
-      const available = models.filter((model) => model[supported] && (scope !== "tool" || model.tool?.enabled !== false));
-      populateDefaultModelSelect(select, available, defaults ? defaults[scope]?.[`${mode}_model_ref`] || "" : select.value);
-    }
-  }
-
-  function syncAgentImageSettings() { els.agentPreviewMaxEdge.disabled = false; els.agentPreviewQuality.disabled = false; }
-
-  function renderStorageHealth(report) {
-    const stats = report?.stats || {}; const errors = Array.isArray(report?.errors) ? report.errors : [];
-    const labels = { healthy: "正常", warning: "需关注", error: "异常", never: "未检查" };
-    els.storageHealthStatus.textContent = report?.running ? "检查中" : (labels[report?.status] || "未知");
-    els.storageHealthStatus.dataset.status = report?.status || "never";
-    els.storageHealthCheckedAt.textContent = report?.checked_at ? formatDate(report.checked_at) : "尚未执行";
-    els.storageHealthDuration.textContent = report?.duration_ms >= 0 ? `${Number(report.duration_ms)} ms` : "-";
-    els.storageHealthAssets.textContent = `${Number(stats.assets || 0)} / ${Number(stats.thumbnails || 0)}`;
-    els.storageHealthLeases.textContent = String(Number(stats.active_leases || 0)); els.storageHealthGenerations.textContent = String(Number(stats.generations || 0)); els.storageHealthSize.textContent = formatBytes(stats.size_bytes || 0);
-    els.storageHealthErrors.textContent = errors.length ? errors.join("；") : "暂无异常。";
-    if (report?.retention) storageRetention = report.retention;
-    if (Array.isArray(report?.external_sources)) externalSources.ingest(report.external_sources);
-    renderStorageQuotas();
-  }
-
-  function renderStorageQuotas() {
-    const retention = storageRetention;
-    for (const [id, used, limit, exempt, unit] of [
-      ["storageQuotaRecords", retention?.record_count, state.settings ? Number(els.historyRecords.value) : retention?.limit_records, retention?.exempt_record_count, "records"],
-      ["storageQuotaBytes", retention?.size_bytes, state.settings ? Number(els.historyMegabytes.value) * 1024 * 1024 : retention?.limit_bytes, retention?.exempt_size_bytes, "bytes"],
-    ]) {
-      const container = $(id); container.classList.toggle("is-hidden", !retention || !(limit > 0));
-      if (!retention || !(limit > 0)) continue;
-      const current = Math.max(0, Number(used) || 0); const ratio = current / limit;
-      const format = (value) => unit === "records" ? `${Number(value || 0).toLocaleString()} 条` : formatBytes(value);
-      container.dataset.status = ratio > 1 ? "over" : ratio >= .9 ? "warning" : "normal";
-      $(id + "Label").textContent = `${format(current)} / ${format(limit)} · ${(ratio * 100).toFixed(1)}%`;
-      const progress = $(id + "Progress"); progress.max = limit; progress.value = Math.min(current, limit);
-      progress.setAttribute("aria-valuetext", `${format(current)}，限额 ${format(limit)}${ratio > 1 ? "，已超出限额" : ""}`);
-      $(id + "Exempt").textContent = `限额外（豁免）：${format(exempt)}`;
-    }
-  }
-
-  async function loadStorageHealth() { try { renderStorageHealth(await apiGet("storage/health")); } catch (error) { els.storageHealthStatus.textContent = "读取失败"; els.storageHealthErrors.textContent = errorMessage(error, "存储状态读取失败"); } }
-
-  async function runStorageMaintenance(deep) {
-    if (deep && !await confirmAction("深度检查会重新计算全部原图哈希，历史较多时可能耗时较长。继续执行？")) return;
-    els.runMaintenanceButton.disabled = true; els.runDeepMaintenanceButton.disabled = true; els.storageHealthStatus.textContent = "检查中";
-    try { const report = await apiPost("storage/maintenance", { deep: !!deep }); renderStorageHealth(report); await loadStorageHealth(); showNotice(deep ? "存储深度检查已完成。" : "存储检查已完成。", report.status === "error" ? "error" : "success"); }
-    catch (error) { showNotice(errorMessage(error, "存储检查失败"), "error"); await loadStorageHealth(); }
-    finally { els.runMaintenanceButton.disabled = false; els.runDeepMaintenanceButton.disabled = false; }
-  }
-
-  async function loadSettings(force = false, suppliedPayload = null) {
-    if (state.settings && !force) {
-      if (settingsReadPending) {
-        try { await rereadConfirmedSettings(); }
-        catch (error) { showNotice(`设置已保存，但重新读取失败：${errorMessage(error, "请稍后重试")}`, "info"); }
-      }
-      return true;
-    }
-    if (settingsLoadPromise) return settingsLoadPromise;
-    els.addProviderButton.disabled = true; els.addModelButton.disabled = true; els.saveSettingsButton.disabled = true;
-    setError(els.settingsError, "正在读取设置…");
-    settingsLoadPromise = (async () => {
-      try {
-        const payload = suppliedPayload || await apiGet("settings/get");
-        if (!payload?.base || !payload?.webui || !Array.isArray(payload.webui.providers)) throw new Error("设置接口返回的数据格式无效");
-        normalizeSettingsModelDefaults(payload);
-        savedSettingsPayload = structuredClone(payload);
-        state.settings = payload;
-        els.settingTool.checked = !!payload.base.enable_llm_tool;
-        const llmPolicy = payload.webui.llm_policy || {}; const assetPolicy = payload.webui.asset_policy || {}; els.agentImageReturnMode.value = ["asset", "preview", "original"].includes(llmPolicy.image_return_mode) ? llmPolicy.image_return_mode : "preview"; els.agentPreviewMaxEdge.value = Number(assetPolicy.preview_max_edge || 768); els.agentPreviewQuality.value = Number(assetPolicy.preview_quality || 80); syncAgentImageSettings();
-        const history = payload.webui.history; els.historyEnabled.checked = !!history.enabled; els.retainReferences.checked = !!history.retain_reference_images; els.recordInvocationIdentity.checked = !!history.record_invocation_identity; els.historyRecords.value = history.max_records; els.historyMegabytes.value = history.max_megabytes;
-        refreshSettingsDefaultModels(payload.webui.generation_defaults || {});
-        if (!payload.webui.providers.some((item) => item.id === state.selectedSettingsProviderId)) state.selectedSettingsProviderId = payload.webui.providers[0]?.id || "";
-        state.selectedSettingsModelId = "";
-        renderSettingsProviders();
-        externalSources.settingsLoaded();
-        window.ImageStudioSelect?.refresh($("settingsView"));
-        settingsBaseline = settingsFingerprint(settingsDraft()); updateSettingsDirty();
-        const warnings = Array.isArray(payload.validation_errors) ? payload.validation_errors.filter(Boolean) : [];
-        setError(els.settingsError, warnings.length ? `配置提示：${warnings.join("；")}` : "");
-        return true;
-      } catch (error) {
-        state.settings = null;
-        els.settingsProviderList.innerHTML = '<div class="provider-empty">设置加载失败，请点击“新增服务商”或“保存全部设置”重试。</div>';
-        els.providerForm.innerHTML = "";
-        const message = errorMessage(error, "设置加载失败");
-        setError(els.settingsError, message); showNotice(message, "error");
-        return false;
-      } finally {
-        els.addProviderButton.disabled = false; els.addModelButton.disabled = false; els.saveSettingsButton.disabled = false;
-      }
-    })();
-    const loaded = await settingsLoadPromise;
-    settingsLoadPromise = null;
-    return loaded;
-  }
-
-  const PROVIDER_KINDS = [["openai_images", "OpenAI Images"], ["gemini", "Gemini 图片输出"], ["nai_direct", "NAI 第三方 GET（nai.sta1n.cn）"], ["custom_json", "自定义 JSON"]];
-  const NAI_MODELS = [
-    { id: "nai-diffusion-4-5-full", name: "NAI V4.5 完整版" },
-    { id: "nai-diffusion-5-full", name: "NAI V5 完整版" },
-  ];
-  const PROVIDER_DEFAULTS = {
-    openai_images: { base_url: "https://api.openai.com/v1", generate_path: "/images/generations", edit_path: "/images/edits", models_path: "/models", edit_request_format: "multipart", request_template: "", response_image_path: "", max_concurrent_generations: 2 },
-    gemini: { base_url: "https://generativelanguage.googleapis.com", generate_path: "/v1beta/models/{model}:generateContent", edit_path: "/v1beta/models/{model}:generateContent", models_path: "/v1beta/models", edit_request_format: "json_data_url", request_template: "", response_image_path: "", max_concurrent_generations: 2 },
-    nai_direct: { base_url: "https://nai.sta1n.cn", generate_path: "/generate", edit_path: "", models_path: "/models", edit_request_format: "json_data_url", request_template: "", response_image_path: "", max_concurrent_generations: 2 },
-    custom_json: { base_url: "", generate_path: "/v1/images/generations", edit_path: "/v1/images/edits", models_path: "/models", edit_request_format: "json_data_url", request_template: "", response_image_path: "", max_concurrent_generations: 2 },
-  };
-  const NAI_ARTIST_PRESETS = {
-    vertical: "[[[artist:dishwasher1910]]], {{yd_(orange_maru)}}, [artist:ciloranko], [artist:sho_(sho_lwlw)], [ningen mame], year 2024,",
-    comicDoujin: "(masterpiece:1.3), (best quality:1.2), (highres), (absurdres),\n" +
-      "(extremely detailed illustration:1.2), (anime style:1.1),\n\n" +
-      "(artist:feipin zhanshi:1.0), (artist:nlebo-hentai:0.9), (artist:sos adult:0.85),\n" +
-      "(artist:hews:0.4),\n\n(detailed skin texture:1.15), (glossy skin:1.1),\n" +
-      "(thick lineart:1.1), (high contrast:1.15),\n(vivid colors:1.1), (detailed shading:1.15),\n" +
-      "(warm color palette:1.05),\n(cute face:1.1), (detailed eyes:1.15), (detailed face:1.1),",
-    r18: "0.9::misaka_12003-gou ::, dino_(dinoartforame), wanke, liduke, year 2025, realistic, 4k, -2::green ::, " +
-      "textless version, The image is highly intricate finished drawn. Only the character's face is in anime style, but their body is in realistic style. " +
-      "1.35::A highly finished photo-style artwork that has lively color, graphic texture, realistic skin surface, and lifelike flesh with little obliques::. " +
-      "1.63::photorealistic::, 1.63::photo(medium)::, \n20::best quality, absurdres, very aesthetic, detailed, masterpiece::,, very aesthetic, masterpiece, no text,",
-    lolita25d: "0.9::misaka_12003-gou & dino, rurudo,  mignon,wanke & liduk::, year 2025, realistic, 4k, -2::green ::, " +
-      "textless version, The image is highly intricate finished drawn. Only the character's face is in anime style, but their body is in realistic style. " +
-      "1.35::A highly finished photo-style artwork that has lively color, graphic texture, realistic skin surface, and lifelike flesh with little obliques::. " +
-      "1.63::photorealistic::, 1.63::photo(medium)::, \n20::best quality, absurdres, very aesthetic, detailed, masterpiece::,, very aesthetic, masterpiece, no text,",
-    anime: "1.4::asanagi::,{{{{{artist:asanagi}}}}},1.2::xiaoluo_xl::,1.3::Artist: misaka_12003-gou::," +
-      "1.2::Artist:shexyo::,0.7::Artist:b.sa_(bbbs)::,1::Artist:qiandaiyiyu::,1.05::artist:natedecock::," +
-      "1.05::artist:kunaboto::,0.75::artist:kandata_nijou::,1.05::artist:zer0.zer0 ::,1.05::artist:jasony::," +
-      "0.75::misaka_12003-gou ::, dino_(dinoartforame), wanke, liduke, year 2025, realistic, 4k, -2::green ::, " +
-      "{textless version, The image is highly intricate finished drawn,write realistically,true to life}, " +
-      "1.35::A highly finished photo-style artwork that has lively color, graphic texture, realistic skin surface, and lifelike flesh with little obliques::, " +
-      "1.63::photorealistic::,3::age slider::,1.63::photo(medium)::, 2::best quality, absurdres, very aesthetic, detailed, masterpiece::,-4::Muscle definition, abs::",
-    galgame: "artist:ningen_mame,, noyu_(noyu23386566),, toosaka asagi,, location,\\n" +
-      "20::best quality, absurdres, very aesthetic, detailed, masterpiece::,:,, very aesthetic, masterpiece, no text,",
-  };
-  const NAI_DEFAULT_NEGATIVE = "{{bad anatomy}},{bad feet},bad hands,{{{bad proportions}}},{blurry},cloned face,cropped,{{{deformed}}},{{{disfigured}}},error,{{{extra arms}}},{extra digit},{{{extra legs}}},extra limbs,{{extra limbs}},{fewer digits},{{{fused fingers}}},gross proportions,ink eyes,ink hair,jpeg artifacts,{{{{long neck}}}},low quality,{malformed limbs},{{missing arms}},{missing fingers},{{missing legs}},{{{more than 2 nipples}}},mutated hands,{{{mutation}}},normal quality,owres,{{poorly drawn face}},{{poorly drawn hands}},reen eyes,signature,text,{{too many fingers}},{{{ugly}}},username,uta,watermark,worst quality,{{{more than 2 legs}}},awkward hand sign,weird hand gesture,contorted hand,unnatural finger pose,deformed hand gesture,{shaka},{hang loose},{{rock on}},{shaka sign}";
-  const BATCH_PRESET = {
-    count: { type: "integer", label: "生图张数", description: "本次生成的总图片数量，插件根据模型单次请求图片上限自动分批。取值范围：[1, 16]。", default: 1, min: 1, max: 16, step: 1, request_key: "count", refill_from_history: false },
-  };
-  const MODEL_PRESETS = {
-    openai_images: { size: { type: "select", label: "尺寸", default: "1024x1024", choices: ["1024x1024", "1536x1024", "1024x1536"], request_key: "size" }, count: { type: "number", label: "数量", default: 1, min: 1, max: 4, step: 1, request_key: "count" }, quality: { type: "select", label: "质量", default: "auto", choices: ["auto", "low", "medium", "high"], request_key: "quality" }, background: { type: "select", label: "背景", default: "auto", choices: ["auto", "transparent", "opaque"], request_key: "background" }, output_format: { type: "select", label: "输出格式", default: "png", choices: ["png", "jpeg", "webp"], request_key: "output_format" } },
-    gemini: { aspect_ratio: { type: "select", label: "画面比例", default: "1:1", choices: ["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"], request_key: "aspect_ratio" }, image_size: { type: "select", label: "图片尺寸", default: "1K", choices: ["1K", "2K", "4K"], request_key: "image_size" } },
-    nai_direct: {
-      ...BATCH_PRESET,
-      style: { type: "preset", label: "绘画风格", description: "选择预设绘画风格；自定义会清空画师串。", default: "custom", target: "artist", ui_only: true, choices: [{ value: "vertical", label: "韩漫小清新风", fill: NAI_ARTIST_PRESETS.vertical }, { value: "comicDoujin", label: "漫画同人风", fill: NAI_ARTIST_PRESETS.comicDoujin }, { value: "r18", label: "2.5D唯美风", fill: NAI_ARTIST_PRESETS.r18 }, { value: "lolita25d", label: "2.5D唯美风（萝）", fill: NAI_ARTIST_PRESETS.lolita25d }, { value: "anime", label: "本子里番风", fill: NAI_ARTIST_PRESETS.anime }, { value: "galgame", label: "GalGame风", fill: NAI_ARTIST_PRESETS.galgame }, { value: "custom", label: "自定义", fill: "" }] }, artist: { type: "textarea", label: "画师串", description: "追加到提示词前方的画师与质量标签串。", default: "", request_key: "artist" }, size: { type: "select", label: "尺寸", description: "nai.sta1n.cn 使用的中文画幅与分辨率名称。", default: "竖图", choices: ["竖图", "横图", "方图", "2K竖图", "2K横图", "2K方图", "4K竖图", "4K横图", "4K方图"], request_key: "size" }, sampler: { type: "select", label: "采样器", description: "控制从噪声生成画面的采样方式。", default: "k_euler_ancestral", choices: ["k_dpmpp_2m_sde", "k_dpmpp_2m", "k_dpmpp_sde", "k_dpmpp_2s_ancestral", "k_euler_ancestral", "k_euler", "ddim"], request_key: "sampler" }, steps: { type: "number", label: "采样步数", description: "采样迭代次数；当前第三方接口路由限制为 1–28。", default: 24, min: 1, max: 28, step: 1, request_key: "steps" }, scale: { type: "number", label: "提示词引导强度", description: "数值越高越强调遵循提示词，过高可能产生不自然效果。", default: 6, min: 1, max: 20, step: 0.1, request_key: "scale" }, cfg: { type: "number", label: "CFG Rescale", description: "缓解高提示词引导造成的颜色过饱和；上游映射为 cfg_rescale。", default: 0.3, min: 0, max: 1, step: 0.05, request_key: "cfg" }, noise_schedule: { type: "select", label: "噪声调度", description: "控制采样过程中的噪声变化曲线。", default: "karras", choices: ["karras", "exponential", "polyexponential", "native"], request_key: "noise_schedule" } },
-    custom_json: { size: { type: "text", label: "尺寸（可选）", default: "1024x1024", request_key: "size" }, count: { type: "number", label: "数量", default: 1, min: 1, max: 4, step: 1, request_key: "count" } },
-  };
-  function providerDefaults(kind) { return { ...(PROVIDER_DEFAULTS[kind] || PROVIDER_DEFAULTS.custom_json) }; }
-  function modelPreset(kind) {
-    const preset = JSON.parse(JSON.stringify({ ...BATCH_PRESET, ...(MODEL_PRESETS[kind] || MODEL_PRESETS.custom_json) }));
-    Object.entries(preset).forEach(([name, descriptor]) => { if (modelParameterMatches(name, descriptor, ["count", "n"])) descriptor.refill_from_history = false; });
-    if (kind === "nai_direct") preset.style.record_in_history = false;
-    return preset;
-  }
   function modelParameterMatches(name, descriptor, keys) { return keys.includes(name) || keys.includes(descriptor?.request_key); }
-  const MODEL_SCHEDULING_FIELDS = ["batch_mode", "concurrency", "native_count_supported", "native_batch_size", "native_batch_size_source", "max_concurrent_requests"];
+  function parameterAppliesToMode(descriptor) { return !Array.isArray(descriptor?.modes) || descriptor.modes.includes(state.mode); }
   function effectiveModelParameters(model) { return Object.entries(model?.parameters || {}).filter(([name, descriptor]) => !modelParameterMatches(name, descriptor, MODEL_SCHEDULING_FIELDS)); }
-  function ensureBatchConfig(model, provider) {
-    const nai = provider.kind === "nai_direct";
-    model.native_batch_size = nai ? 1 : Number(model.native_batch_size ?? 1);
-    model.native_batch_size_source = nai ? "fixed" : model.native_batch_size_source || "default";
-    model.max_concurrent_requests = Number(model.max_concurrent_requests ?? 8);
-    model.parameters = model.parameters || {};
-    if (!Object.entries(model.parameters).some(([name, descriptor]) => modelParameterMatches(name, descriptor, ["count", "n"]))) model.parameters.count = JSON.parse(JSON.stringify(BATCH_PRESET.count));
-  }
-  function currentSettingsProvider() { return state.settings?.webui.providers.find((item) => item.id === state.selectedSettingsProviderId) || null; }
-  function renderSettingsProviders() {
-    const providers = state.settings?.webui.providers || []; els.settingsProviderList.innerHTML = providers.length ? providers.map((item) => `<button class="provider-row ${item.id === state.selectedSettingsProviderId ? "is-active" : ""}" type="button" data-settings-provider="${escape(item.id)}"><strong>${escape(item.name || item.id)}</strong><span>${item.enabled ? "启用" : "停用"}</span></button>`).join("") : '<div class="provider-empty">尚未添加生图服务商</div>';
-    els.settingsProviderList.querySelectorAll("[data-settings-provider]").forEach((button) => button.addEventListener("click", () => { state.selectedSettingsProviderId = button.dataset.settingsProvider; state.selectedSettingsModelId = ""; renderSettingsProviders(); }));
-    renderProviderEditor();
-    renderModelEditor();
-    updateSettingsDirty();
-  }
-  function renderProviderEditor() {
-    const provider = currentSettingsProvider(); if (!provider) { els.providerForm.innerHTML = '<div class="provider-empty">选择或新增生图服务商后编辑详细配置。</div>'; return; }
-    const kind = provider.kind || "custom_json";
-    const credentialField = kind === "nai_direct" ? `${field("api_key", "生图 Token（toUserId）", provider.api_key)}<div class="field"><span class="field-hint">填写在 nai.sta1n.cn 申请的 toUserId。</span></div>` : field("api_key", "接口密钥（API Key）", provider.api_key);
-    const headersField = kind === "nai_direct" ? "" : textAreaField("custom_headers", "自定义请求头（JSON 或每行一个 Header）", provider.custom_headers);
-    const common = `${field("id", "ID", provider.id)}${field("name", "名称", provider.name)}${selectField("kind", "供应类型", kind, PROVIDER_KINDS)}${field("base_url", "接口地址（Base URL）", provider.base_url)}${credentialField}${field("timeout_seconds", "超时秒数", provider.timeout_seconds, "number")}${field("max_concurrent_generations", "Provider 最大并发", provider.max_concurrent_generations ?? 2, "number")}${toggleField("enabled", "启用", provider.enabled)}${headersField}`;
-    const typeFields = kind === "openai_images" ? `${field("generate_path", "文生图路径", provider.generate_path)}${field("edit_path", "图生图路径", provider.edit_path)}${field("models_path", "模型列表路径", provider.models_path || "/models")}${selectField("edit_request_format", "图生图请求格式", provider.edit_request_format, [["multipart", "multipart"], ["json_data_url", "JSON data URL"]])}` : kind === "gemini" ? `${field("generate_path", "generateContent 路径（支持 {model}）", provider.generate_path)}${field("models_path", "模型列表路径", provider.models_path || "/v1beta/models")}` : kind === "nai_direct" ? `${field("generate_path", "生成路径", provider.generate_path)}<div class="field field-wide"><span class="field-hint">第三方服务协议：GET /generate；Token 作为 token 查询参数发送。该类型不是 NovelAI 官方 API，且仅支持文生图。</span></div>` : `${field("generate_path", "文生图路径", provider.generate_path)}${field("edit_path", "图生图路径", provider.edit_path)}${field("models_path", "模型列表路径", provider.models_path || "/models")}${selectField("edit_request_format", "图生图请求格式", provider.edit_request_format, [["multipart", "multipart"], ["json_data_url", "JSON data URL"]])}${textAreaField("request_template", "请求 JSON 模板（可选）", provider.request_template)}${field("response_image_path", "响应图片路径（可选）", provider.response_image_path)}<div class="field field-wide"><span class="field-hint">模板可使用 {{prompt}}、{{model}}、{{size}}、{{count}} 和参数字段。</span></div>`;
-    const discoveryButton = kind === "nai_direct" ? "" : '<button class="quiet-button" id="discoverModelsButton" type="button">获取模型</button>';
-    els.providerForm.innerHTML = `<h3>${escape(provider.name || "生图服务商")}</h3>${common}${typeFields}<div class="provider-editor-actions"><button class="danger-button" id="removeProviderButton" type="button">删除服务商</button>${discoveryButton}</div>`;
-    els.providerForm.querySelectorAll("[data-provider-field]").forEach((input) => input.addEventListener("input", () => updateProviderField(input))); els.providerForm.querySelectorAll("[data-provider-field]").forEach((input) => input.addEventListener("change", () => updateProviderField(input)));
-    $("removeProviderButton")?.addEventListener("click", async () => { if (!await confirmAction("删除此生图服务商？历史记录不会删除。")) return; state.settings.webui.providers = state.settings.webui.providers.filter((item) => item.id !== provider.id); state.selectedSettingsProviderId = state.settings.webui.providers[0]?.id || ""; renderSettingsProviders(); showNotice("已从设置草稿中删除，保存全部设置后生效。", "success"); });
-    $("discoverModelsButton")?.addEventListener("click", () => void discoverProviderModels(provider));
-    window.ImageStudioSelect?.refresh(els.providerForm);
-  }
-  function field(key, label, value, type = "text") { return `<div class="field"><label>${label}</label><input data-provider-field="${key}" type="${type}" value="${escape(value)}" /></div>`; }
-  function textAreaField(key, label, value) { return `<div class="field field-wide"><label>${label}</label><textarea data-provider-field="${key}" rows="3">${escape(value)}</textarea></div>`; }
-  function selectField(key, label, value, options) { return `<div class="field"><label>${label}</label><select data-provider-field="${key}">${options.map(([id, name]) => `<option value="${id}" ${id === value ? "selected" : ""}>${name}</option>`).join("")}</select></div>`; }
-  function toggleField(key, label, value) { return `<div class="toggle-row"><label>${label}</label><label class="toggle-control"><input data-provider-field="${key}" type="checkbox" ${value ? "checked" : ""} /><span aria-hidden="true"></span></label></div>`; }
-  function updateProviderField(input) { const provider = currentSettingsProvider(); if (!provider) return; const key = input.dataset.providerField; const value = input.type === "checkbox" ? input.checked : input.type === "number" ? Number(input.value) : input.value; if (key === "kind" && value !== provider.kind) { Object.assign(provider, providerDefaults(value)); provider.kind = value; state.selectedSettingsModelId = ""; renderProviderEditor(); renderModelEditor(); return; } provider[key] = value; if (key === "id") { state.selectedSettingsProviderId = input.value; const activeRow = els.settingsProviderList.querySelector(".provider-row.is-active"); if (activeRow) { activeRow.dataset.settingsProvider = input.value; if (!provider.name) activeRow.querySelector("strong").textContent = input.value; } } refreshSettingsDefaultModels(); }
-  async function discoverProviderModels(provider) { const button = $("discoverModelsButton"); if (button) { button.disabled = true; button.textContent = "获取中…"; } try { const payload = await apiPost("provider/models", { provider }); provider.discovered_models = payload.models || []; for (const model of provider.models || []) { const discovered = provider.discovered_models.find((item) => item.id === model.id); if (discovered && model.native_batch_size_source !== "manual") { model.native_batch_size = Number(discovered.native_batch_size) || 1; model.native_batch_size_source = discovered.native_batch_size_source || "default"; } } renderModelEditor(); updateSettingsDirty(); showNotice(`已获取 ${provider.discovered_models.length} 个模型，可在新增模型时选择。`, "success"); } catch (error) { showNotice(errorMessage(error, "获取模型失败"), "error"); } finally { if (button) { button.disabled = false; button.textContent = "获取模型"; } } }
-  function renderNewModelChoices(provider = currentSettingsProvider()) { const models = provider?.kind === "nai_direct" ? NAI_MODELS : provider?.discovered_models || []; els.newModelChoices.innerHTML = models.map((item) => `<option value="${escape(item.id)}">${escape(item.name || item.id)}${item.capability_source === "unknown" ? " · 能力未知" : ""}</option>`).join(""); els.newModelChoice.value = ""; els.newModelChoice.placeholder = provider?.kind === "nai_direct" ? "选择 NAI 模型或手动输入 ID" : "选择或输入模型 ID"; }
-
-  function currentSettingsModel() { const provider = currentSettingsProvider(); return provider?.models?.find((item) => item.id === state.selectedSettingsModelId) || null; }
-  function renderModelEditor() {
-    const provider = currentSettingsProvider();
-    refreshSettingsDefaultModels();
-    renderNewModelChoices(provider);
-    if (!provider) { els.settingsModelList.innerHTML = '<div class="provider-empty">请先选择服务商</div>'; els.modelForm.innerHTML = '<div class="provider-empty">选择服务商后配置模型能力。</div>'; return; }
-    provider.models = Array.isArray(provider.models) ? provider.models : [];
-    if (!provider.models.some((item) => item.id === state.selectedSettingsModelId)) state.selectedSettingsModelId = provider.models[0]?.id || "";
-    els.settingsModelList.innerHTML = provider.models.length ? provider.models.map((item) => `<button class="provider-row ${item.id === state.selectedSettingsModelId ? "is-active" : ""}" type="button" data-settings-model="${escape(item.id)}"><strong>${escape(item.name || item.id)}</strong><span>${referenceLimitForModel(item) > 0 ? "图生图" : item.supports_text2img ? "文生图" : "未开放"}</span></button>`).join("") : '<div class="provider-empty">该服务商尚未添加模型</div>';
-    els.settingsModelList.querySelectorAll("[data-settings-model]").forEach((button) => button.addEventListener("click", () => { state.selectedSettingsModelId = button.dataset.settingsModel; renderModelEditor(); }));
-    const model = currentSettingsModel();
-    if (!model) { els.modelForm.innerHTML = '<div class="provider-empty">点击“新增模型”开始配置。</div>'; return; }
-    ensureToolConfig(model, provider);
-    const tabs = `<div class="model-tabs"><button class="model-tab ${state.modelEditorTab === "model" ? "is-active" : ""}" data-model-tab="model" type="button">模型配置</button><button class="model-tab ${state.modelEditorTab === "tool" ? "is-active" : ""}" data-model-tab="tool" type="button">工具配置</button></div>`;
-    els.modelForm.innerHTML = state.modelEditorTab === "tool" ? `${tabs}${renderToolConfiguration(model)}` : `${tabs}${renderModelConfiguration(provider, model)}`;
-    els.modelForm.querySelectorAll("[data-model-tab]").forEach((button) => button.addEventListener("click", () => { state.modelEditorTab = button.dataset.modelTab; renderModelEditor(); }));
-    bindModelConfiguration(provider, model);
-    window.ImageStudioSelect?.refresh(els.modelForm);
-  }
-  function renderModelConfiguration(provider, model) {
-    const schemaText = JSON.stringify(model.parameters || modelPreset(provider.kind), null, 2);
-    const discoveredIds = (provider.discovered_models || []).map((item) => item.id); const modelChoices = provider.kind === "nai_direct" ? ["nai-diffusion-4-5-full", "nai-diffusion-5-full"] : discoveredIds;
-    const modelIdField = modelChoices.length ? modelSelectField("id", "模型 ID", model.id, modelChoices, true) : modelField("id", "模型 ID", model.id);
-    const negativeDefaultField = model.supports_negative_prompt ? modelTextAreaField("negative_prompt_default", "默认反向提示词", model.negative_prompt_default || "") : "";
-    const testDisabled = !model.supports_text2img;
-    const defaults = `<section class="schema-preview"><h4>参数默认值</h4>${effectiveModelParameters(model).map(([name, descriptor]) => renderSchemaDefault(name, descriptor)).join("") || '<span class="field-hint">当前 schema 没有参数。</span>'}</section>`;
-    const batchFields = `<div class="field"><label title="单次接口请求最多生成的图片张数；总张数超出时自动分批。">单次请求图片上限</label><input data-model-field="native_batch_size" type="number" min="1" step="1" value="${escape(model.native_batch_size)}"${provider.kind === "nai_direct" ? " disabled" : ""} /></div><div class="field"><label title="该模型在所有任务中共享的最大并发请求数，仍受服务商最大并发限制。取值范围：[1, 16]。">模型最大并发请求数</label><input data-model-field="max_concurrent_requests" type="number" min="1" max="16" step="1" value="${escape(model.max_concurrent_requests)}" /></div>`;
-    const raw = `<details class="schema-raw"><summary>高级：参数 Schema</summary><textarea id="modelParametersSchema" data-model-field="parameters" rows="14" spellcheck="false">${escape(schemaText)}</textarea><span class="field-hint">每个字段支持 type、label、description、default、request_key、min、max、step、choices、webui_visible、record_in_history、refill_from_history。</span></details>`;
-    const capabilityEditable = ["unknown", "manual"].includes(model.capability_source);
-    const capabilityHint = model.supports_img2img ? `<div class="field"><label>参考图能力上限</label><input data-model-field="max_reference_images" type="number" min="1" max="8" step="1" value="${configuredReferenceLimit(model.max_reference_images)}"${capabilityEditable ? "" : " disabled"} /><span class="field-hint">${capabilityEditable ? "无法获取时可手动填写，取值范围：1–8 张。" : `来源：${escape(model.capability_source)}，已获取的能力不可在此覆盖。`}</span></div>` : "";
-    return `<h3>${escape(model.name || model.id)}</h3>${modelIdField}${modelField("name", "显示名称", model.name)}${batchFields}${modelToggle("supports_text2img", "支持文生图", model.supports_text2img)}${modelToggle("supports_img2img", "支持图生图", model.supports_img2img, provider.kind === "nai_direct")}${modelToggle("supports_negative_prompt", "支持专用反向提示词", model.supports_negative_prompt, provider.kind === "gemini")}${capabilityHint}${negativeDefaultField}${defaults}${raw}<div class="provider-editor-actions"><button class="danger-button" id="removeModelButton" type="button">删除模型</button><button class="quiet-button" id="testModelButton" type="button"${testDisabled ? ' disabled title="仅支持图生图的模型需要参考图，暂不能在此测试"' : ""}>测试模型</button></div>`;
-  }
-  function renderSchemaDefault(name, descriptor) {
-    const type = String(descriptor.type || "text").toLowerCase();
-    const title = escape(descriptor.description || descriptor.label || name);
-    const value = descriptor.default ?? "";
-    const label = `<div class="field-label-row"><label title="${title}">${escape(name)}</label>${library.schemaPolicyButton(name)}</div>`;
-    if ((type === "select" || type === "preset") && Array.isArray(descriptor.choices)) return `<div class="field">${label}<select data-schema-default="${escape(name)}">${descriptor.choices.map((choice) => { const item = typeof choice === "object" ? choice : { value: choice, label: choice }; return `<option value="${escape(item.value)}" ${String(item.value) === String(value) ? "selected" : ""}>${escape(item.label || item.value)}</option>`; }).join("")}</select></div>`;
-    if (type === "boolean" || type === "bool") return `<div class="field">${label}<label class="toggle-control"><input data-schema-default="${escape(name)}" aria-label="${escape(name)} 默认值" type="checkbox" ${value ? "checked" : ""} /><span aria-hidden="true"></span></label></div>`;
-    const inputType = ["number", "int", "integer", "float"].includes(type) ? "number" : "text";
-    return `<div class="field">${label}<input data-schema-default="${escape(name)}" type="${inputType}" value="${escape(value)}"${descriptor.min !== undefined ? ` min="${escape(descriptor.min)}"` : ""}${descriptor.max !== undefined ? ` max="${escape(descriptor.max)}"` : ""}${descriptor.step !== undefined ? ` step="${escape(descriptor.step)}"` : ""} /></div>`;
-  }
-  function toolModelParameters(model) {
-    const entries = effectiveModelParameters(model).filter(([name, descriptor]) => name !== "negative_prompt" && (!descriptor.ui_only || String(descriptor.type).toLowerCase() === "preset"));
-    if (model.supports_negative_prompt) entries.unshift(["negative_prompt", { type: "textarea", label: "反向提示词", description: "专用反向提示词，只填写不希望出现在画面中的内容；省略时使用此处的默认值。", default: model.negative_prompt_default ?? "" }]);
-    return entries;
-  }
-  function toolParameterDescriptor(model, name) { return toolModelParameters(model).find(([key]) => key === name)?.[1] || {}; }
-  function renderToolConfiguration(model) { const tool = model.tool; const configuredLimit = configuredReferenceLimit(model.max_reference_images); const refLimit = model.supports_img2img ? `<div class="field"><label>LLM 最大参考图数量</label><input data-tool-field="max_reference_images" type="number" min="1" max="${configuredLimit}" step="1" value="${configuredReferenceLimit(tool.max_reference_images, configuredLimit)}" /><span class="field-hint">不能超过模型能力上限 ${configuredLimit}</span></div>` : ""; const rows = toolModelParameters(model).map(([name, descriptor]) => { const policy = tool.parameters?.[name] || {}; return `<div class="tool-parameter-row"><strong title="${escape(policy.description || descriptor.description || descriptor.label || name)}">${escape(name)}</strong><span>${policy.exposed === false ? "未暴露" : "已暴露"}</span><button class="quiet-button" data-edit-tool-parameter="${escape(name)}" type="button">编辑</button></div>`; }).join(""); return `<h3>${escape(model.name || model.id)}</h3>${modelToggle("tool_enabled", "允许 LLM 调用此模型", tool.enabled !== false)}${modelTextAreaField("tool_selection_description", "什么时候使用", tool.selection_description || "")}${modelSelectField("tool_prompt_profile", "提示词类型", tool.prompt_profile || "natural_language", ["natural_language", "nai_tags", "custom"])}${modelTextAreaField("tool_prompt_instructions", "提示词编写要求", tool.prompt_instructions || "")}${refLimit}<div class="tool-parameter-list"><span class="field-hint">LLM 可用参数</span>${rows || '<span class="field-hint">当前模型没有可暴露参数。</span>'}</div>`; }
-  function bindModelConfiguration(provider, model) {
-    els.modelForm.querySelectorAll("[data-model-field]").forEach((input) => { input.addEventListener("input", () => updateModelField(input)); input.addEventListener("change", () => updateModelField(input, true)); });
-    els.modelForm.querySelectorAll("[data-schema-default]").forEach((input) => input.addEventListener("change", () => { const descriptor = model.parameters[input.dataset.schemaDefault]; descriptor.default = input.type === "checkbox" ? input.checked : input.type === "number" ? Number(input.value) : input.value; const raw = $("modelParametersSchema"); if (raw) raw.value = JSON.stringify(model.parameters, null, 2); }));
-    els.modelForm.querySelectorAll("[data-tool-field]").forEach((input) => {
-      const update = (commit) => { const key = input.dataset.toolField; model.tool[key] = key === "max_reference_images" ? configuredReferenceLimit(input.value, configuredReferenceLimit(model.max_reference_images)) : input.type === "number" ? Number(input.value) : input.value; if (commit && key === "max_reference_images") input.value = model.tool[key]; refreshSettingsDefaultModels(); };
-      input.addEventListener("input", () => update(false)); input.addEventListener("change", () => update(true));
-    });
-    els.modelForm.querySelectorAll("[data-edit-tool-parameter]").forEach((button) => button.addEventListener("click", () => openToolParameterDialog(button.dataset.editToolParameter)));
-    els.modelForm.querySelectorAll("[data-edit-schema-policy]").forEach((button) => button.addEventListener("click", async () => {
-      const name = button.dataset.editSchemaPolicy;
-      const policy = await library.editParameterPolicy(name, model.parameters[name]);
-      if (!policy) return;
-      Object.assign(model.parameters[name], policy);
-      const raw = $("modelParametersSchema"); if (raw) raw.value = JSON.stringify(model.parameters, null, 2);
-      updateSettingsDirty();
-    }));
-    $("removeModelButton")?.addEventListener("click", async () => { if (!await confirmAction("删除此模型？历史记录不会删除。")) return; provider.models = provider.models.filter((item) => item.id !== model.id); state.selectedSettingsModelId = provider.models[0]?.id || ""; renderModelEditor(); showNotice("已从设置草稿中删除模型，保存全部设置后生效。", "success"); });
-    $("testModelButton")?.addEventListener("click", () => void testModel(provider, model));
-  }
-  function modelField(key, label, value, type = "text") { return `<div class="field"><label>${label}</label><input data-model-field="${key}" type="${type}" value="${escape(value)}" /></div>`; }
-  function modelTextAreaField(key, label, value) { return `<div class="field field-wide"><label>${label}</label><textarea data-model-field="${key}" rows="4">${escape(value)}</textarea></div>`; }
-  function modelSelectField(key, label, value, choices, editable = false) { const values = choices.includes(value) ? choices : [value, ...choices]; return `<div class="field"><label>${label}</label><select data-model-field="${key}">${values.map((item) => `<option value="${escape(item)}" ${item === value ? "selected" : ""}>${escape(item)}</option>`).join("")}${editable ? '<option value="__manual__">手动输入…</option>' : ""}</select></div>`; }
-  function modelToggle(key, label, value, disabled = false) { return `<div class="toggle-row"><label>${label}</label><label class="toggle-control"><input data-model-field="${key}" type="checkbox" ${value ? "checked" : ""}${disabled ? " disabled" : ""} /><span aria-hidden="true"></span></label></div>`; }
-  function updateModelField(input, commit = false) {
-    const model = currentSettingsModel(); if (!model) return;
-    const key = input.dataset.modelField;
-    if (key === "parameters") { try { model.parameters = input.value.trim() ? JSON.parse(input.value) : {}; input.setCustomValidity(""); } catch { input.setCustomValidity("参数 schema 必须是合法 JSON"); } return; }
-    if (key.startsWith("tool_")) { const toolKey = key.slice(5); model.tool[toolKey] = input.type === "checkbox" ? input.checked : input.value; if (toolKey === "enabled") refreshSettingsDefaultModels(); return; }
-    if (key === "id" && input.value === "__manual__") {
-      if (commit) void editManualModelId(input, model);
-      return;
-    }
-    model[key] = input.type === "checkbox" ? input.checked : input.type === "number" ? Number(input.value) : input.value;
-    if (key === "native_batch_size") {
-      model.native_batch_size_source = currentSettingsProvider().kind === "nai_direct" ? "fixed" : "manual";
-    } else if (key === "supports_img2img") {
-      renderModelEditor();
-    } else if (key === "max_reference_images") {
-      model.max_reference_images = configuredReferenceLimit(input.value); if (commit) input.value = model.max_reference_images;
-      model.capability_source = "manual";
-      if (commit) model.tool.max_reference_images = configuredReferenceLimit(model.tool.max_reference_images, model.max_reference_images);
-    } else if (key === "supports_text2img" || key === "supports_negative_prompt") {
-      if (key === "supports_negative_prompt" && !model.supports_negative_prompt) model.tool.negative_prompt_exposed = false;
-      renderModelEditor();
-    } else if (key === "id") {
-      state.selectedSettingsModelId = input.value;
-      const activeRow = els.settingsModelList.querySelector(".provider-row.is-active");
-      if (activeRow) { activeRow.dataset.settingsModel = input.value; if (!model.name) activeRow.querySelector("strong").textContent = input.value; }
-    }
-    refreshSettingsDefaultModels();
-  }
-
-  async function editManualModelId(input, model) {
-    input.value = model.id;
-    window.ImageStudioSelect?.refresh(input);
-    const value = await library.openModal("输入模型 ID", `<label class="field">模型 ID<input id="manualModelId" value="${escape(model.id)}" autocomplete="off" /></label>`, [
-      { label: "取消", action: () => false },
-      { label: "确认", primary: true, action: () => {
-        const id = $("manualModelId").value.trim();
-        if (!id || id === "__manual__") throw new Error("请填写有效的模型 ID。");
-        return id;
-      } },
-    ], { focus: "manualModelId" });
-    if (!value || currentSettingsModel() !== model || !input.isConnected) return;
-    if (!Array.from(input.options).some(option => option.value === value)) input.add(new Option(value, value));
-    input.value = value;
-    updateModelField(input, true);
-    window.ImageStudioSelect?.refresh(input);
-    updateSettingsDirty();
-  }
-  function defaultToolParameterDescription(name, descriptor) {
-    const base = String(descriptor.description || descriptor.label || name);
-    const numeric = ["number", "int", "integer", "float"].includes(String(descriptor.type || "").toLowerCase());
-    if (!numeric) return base;
-    const hasMin = descriptor.min !== undefined && descriptor.min !== null; const hasMax = descriptor.max !== undefined && descriptor.max !== null;
-    if (!hasMin && !hasMax) return base;
-    const separator = /[。！？.!?]$/.test(base) ? "" : "。";
-    const range = hasMin && hasMax ? `取值范围：[${descriptor.min}, ${descriptor.max}]。` : hasMin ? `取值范围：不小于 ${descriptor.min}。` : `取值范围：不大于 ${descriptor.max}。`;
-    if (base.endsWith(range)) return base;
-    return `${base}${separator}${range}`;
-  }
-  function ensureToolConfig(model, provider) {
-    ensureBatchConfig(model, provider);
-    const nai = provider.kind === "nai_direct";
-    model.max_reference_images = configuredReferenceLimit(model.max_reference_images);
-    if (nai) model.supports_img2img = false;
-    const defaults = { enabled: true, selection_description: nai ? "仅在用户明确要求 NAI 或 NovelAI 风格标签生图时使用。" : "适合一般自然语言生图需求。", prompt_profile: nai ? "nai_tags" : "natural_language", prompt_instructions: nai ? "使用英文逗号分隔标签。必须完整描述主体数量、全身或半身范围、姿态、镜头距离、视角、背景、光照和画面边界，避免残图；不得改变用户明确指定的主体、数量、动作和服装。" : "使用清晰、连贯的自然语言描述，不要使用英文逗号分隔的 NAI tag 串。", negative_prompt_exposed: !!model.supports_negative_prompt, max_reference_images: model.max_reference_images, parameters: {} };
-    model.tool = { ...defaults, ...(model.tool || {}) }; if (!model.supports_negative_prompt) model.tool.negative_prompt_exposed = false; model.tool.parameters = model.tool.parameters || {};
-    model.tool.max_reference_images = configuredReferenceLimit(model.tool.max_reference_images, model.max_reference_images);
-    toolModelParameters(model).forEach(([name, descriptor]) => {
-      const current = model.tool.parameters[name] || {}; const legacyDescription = descriptor.description || descriptor.label || name;
-      const description = !current.description || current.description === legacyDescription ? defaultToolParameterDescription(name, descriptor) : current.description;
-      const exposed = name === "negative_prompt" ? model.tool.negative_prompt_exposed !== false : true;
-      model.tool.parameters[name] = { exposed, ...current, description };
-    });
-    if (model.supports_negative_prompt) model.tool.negative_prompt_exposed = model.tool.parameters.negative_prompt.exposed !== false;
-  }
-  function toolDefaultChoices(descriptor) { if (!Array.isArray(descriptor?.choices)) return []; return descriptor.choices.flatMap((choice) => { if (choice && typeof choice === "object") { if (!Object.prototype.hasOwnProperty.call(choice, "value")) return []; return [{ value: choice.value, label: choice.label ?? choice.value }]; } return [{ value: choice, label: choice }]; }); }
-  function sameToolDefault(left, right) { return JSON.stringify(left) === JSON.stringify(right); }
-  function toolDefaultLabel(value) { if (value === undefined) return "未设置"; if (value === "") return "空字符串"; if (value && typeof value === "object") return JSON.stringify(value); return String(value); }
-  function openToolParameterDialog(name) {
-    const model = currentSettingsModel(); if (!model) return;
-    ensureToolConfig(model, currentSettingsProvider());
-    const descriptor = toolParameterDescriptor(model, name); const policy = model.tool.parameters[name] || {};
-    const choices = toolDefaultChoices(descriptor); const usesChoice = choices.length > 0;
-    state.editingToolParameter = name; state.editingToolDefaultChoices = choices;
-    $("parameterDialogTitle").textContent = `编辑工具参数：${name}`;
-    els.toolParameterExposed.checked = policy.exposed !== false; els.toolParameterDescription.value = policy.description || "";
-    els.toolParameterDefault.classList.toggle("is-hidden", usesChoice); els.toolParameterDefaultChoice.classList.toggle("is-hidden", !usesChoice);
-    $("toolParameterDefaultLabel").htmlFor = usesChoice ? "toolParameterDefaultChoice" : "toolParameterDefault";
-    if (usesChoice) {
-      els.toolParameterDefaultChoice.innerHTML = `<option value="${MODEL_DEFAULT_CHOICE}">模型默认值</option>${choices.map((choice, index) => `<option value="${index}">${escape(choice.label)}</option>`).join("")}`;
-      const selectedIndex = Object.prototype.hasOwnProperty.call(policy, "default_override") ? choices.findIndex((choice) => sameToolDefault(choice.value, policy.default_override)) : -1;
-      els.toolParameterDefaultChoice.value = selectedIndex >= 0 ? String(selectedIndex) : MODEL_DEFAULT_CHOICE;
-      els.toolParameterDefaultHint.textContent = `模型配置当前默认值：${toolDefaultLabel(descriptor.default)}`;
-      els.toolParameterDefault.value = "";
-    } else {
-      els.toolParameterDefault.value = policy.default_override ?? ""; els.toolParameterDefaultChoice.innerHTML = "";
-      els.toolParameterDefaultHint.textContent = "留空时使用模型配置中的默认值";
-    }
-    const choiceDescriptions = policy.choice_descriptions;
-    els.toolParameterChoices.value = choiceDescriptions && typeof choiceDescriptions === "object" && !Array.isArray(choiceDescriptions) && Object.keys(choiceDescriptions).length ? JSON.stringify(choiceDescriptions, null, 2) : "";
-    window.ImageStudioDialogMotion.show(els.parameterDialog); syncPageScrollLock();
-    window.ImageStudioSelect?.refresh(els.parameterDialog);
-  }
-  function closeToolParameterDialog() {
-    state.editingToolParameter = ""; state.editingToolDefaultChoices = [];
-    window.ImageStudioSelect?.close();
-    window.ImageStudioDialogMotion.hide(els.parameterDialog, syncPageScrollLock);
-    syncPageScrollLock();
-  }
-  function applyToolParameterDialog() {
-    const model = currentSettingsModel(); const name = state.editingToolParameter; if (!model || !name) return;
-    let choiceDescriptions = {}; try { choiceDescriptions = els.toolParameterChoices.value.trim() ? JSON.parse(els.toolParameterChoices.value) : {}; } catch { showNotice("选项说明必须是合法 JSON。", "error"); return; }
-    if (!choiceDescriptions || typeof choiceDescriptions !== "object" || Array.isArray(choiceDescriptions)) { showNotice("选项说明必须是 JSON 对象。", "error"); return; }
-    const descriptor = toolParameterDescriptor(model, name); const policy = { exposed: els.toolParameterExposed.checked, description: els.toolParameterDescription.value };
-    if (Object.keys(choiceDescriptions).length) policy.choice_descriptions = choiceDescriptions;
-    if (state.editingToolDefaultChoices.length) {
-      if (els.toolParameterDefaultChoice.value !== MODEL_DEFAULT_CHOICE) {
-        const selected = state.editingToolDefaultChoices[Number(els.toolParameterDefaultChoice.value)];
-        if (selected) policy.default_override = selected.value;
-      }
-    } else if (els.toolParameterDefault.value !== "") {
-      policy.default_override = ["number", "int", "integer", "float"].includes(String(descriptor.type).toLowerCase()) ? Number(els.toolParameterDefault.value) : els.toolParameterDefault.value;
-    }
-    model.tool.parameters[name] = policy;
-    if (name === "negative_prompt") model.tool.negative_prompt_exposed = policy.exposed;
-    closeToolParameterDialog(); renderModelEditor(); updateSettingsDirty();
-  }
-  async function testModel(provider, model) {
-    const button = $("testModelButton");
-    if (button) { button.disabled = true; button.textContent = "测试中…"; }
-    setError(els.settingsError, `正在测试模型 ${model.name || model.id}…`);
-    try {
-      const payload = await apiPost("model/test", { provider, model_id: model.id });
-      setError(els.settingsError, ""); showNotice(`模型测试成功，返回 ${payload.image_count} 张图片。`, "success");
-    } catch (error) {
-      const message = errorMessage(error, "模型测试失败"); setError(els.settingsError, message); showNotice(message, "error");
-    } finally { if (button) { button.disabled = !model.supports_text2img; button.textContent = "测试模型"; } }
-  }
-  async function addProvider() {
-    if (!state.settings && !await loadSettings()) return;
-    const id = `provider_${Date.now().toString(36)}`;
-    state.settings.webui.providers.push({ id, name: "新服务商", enabled: true, kind: "openai_images", ...providerDefaults("openai_images"), api_key: "", custom_headers: "", timeout_seconds: 180, discovered_models: [], models: [] });
-    state.selectedSettingsProviderId = id; state.selectedSettingsModelId = ""; renderSettingsProviders(); showNotice("已新增生图服务商，请填写连接配置并添加模型。", "success");
-  }
-  async function addModel() {
-    if (!state.settings && !await loadSettings()) return;
-    const provider = currentSettingsProvider();
-    if (!provider) { showNotice("请先选择一个服务商，再新增模型。", "error"); return; }
-    provider.models = Array.isArray(provider.models) ? provider.models : [];
-    const requestedId = els.newModelChoice.value.trim();
-    if (!requestedId) { showNotice("请选择或输入模型 ID。", "error"); els.newModelChoice.focus(); return; }
-    if (provider.models.some((item) => item.id === requestedId)) { showNotice("该服务商中已经存在相同模型 ID。", "error"); return; }
-    const discovered = (provider.discovered_models || []).find((item) => item.id === requestedId);
-    const naiChoice = provider.kind === "nai_direct" ? NAI_MODELS.find((item) => item.id === requestedId) : null;
-    const chosen = discovered || (naiChoice ? { ...naiChoice, supports_text2img: true, supports_img2img: false, supports_negative_prompt: true, max_reference_images: 1, capability_source: "builtin" } : null);
-    const capabilityKnown = !!chosen?.capability_source && chosen.capability_source !== "unknown";
-    const maxRefs = capabilityKnown ? configuredReferenceLimit(chosen.max_reference_images) : 1;
-    provider.models.push({ id: requestedId, name: chosen?.name || requestedId, native_batch_size: provider.kind === "nai_direct" ? 1 : Number(chosen?.native_batch_size) || 1, native_batch_size_source: provider.kind === "nai_direct" ? "fixed" : chosen?.native_batch_size_source || "default", max_concurrent_requests: 8, supports_text2img: chosen ? !!chosen.supports_text2img : true, supports_img2img: provider.kind !== "nai_direct" && capabilityKnown ? !!chosen.supports_img2img : false, supports_negative_prompt: chosen ? !!chosen.supports_negative_prompt : provider.kind === "nai_direct", negative_prompt_default: provider.kind === "nai_direct" ? NAI_DEFAULT_NEGATIVE : "", max_reference_images: maxRefs, capability_source: chosen?.capability_source || "manual", parameters: modelPreset(provider.kind), tool: { enabled: true, max_reference_images: maxRefs } });
-    state.selectedSettingsModelId = requestedId; renderModelEditor(); showNotice("已新增模型，请填写能力和参数 schema。", "success");
-  }
-  async function saveSettings() {
-    if (settingsSaving) return;
-    if (!await loadSettings()) return;
-    await window.ImageStudioAppearance.ready;
-    if (settingsSaving) return;
-    const invalid = $("settingsView").querySelector('input:invalid, textarea:invalid, select:invalid, [aria-invalid="true"]');
-    if (invalid) { invalid.reportValidity?.(); setError(els.settingsError, "请先修正无效的设置项。"); return; }
-    settingsSaving = true; setError(els.settingsError, "正在保存设置…"); els.saveSettingsButton.disabled = true; library.setCommandLabel("saveSettingsButton", "保存中…");
-    const draft = settingsDraft(); const submitted = settingsFingerprint(draft); const webui = draft.studio;
-    const appearance = window.ImageStudioAppearance;
-    const appearanceSnapshot = appearance.get(), saveAppearance = appearance.isDirty();
-    const sortSnapshot = gallerySortDraft, saveSort = sortSnapshot !== gallerySort;
-    let savedAny = false;
-    try {
-      let warnings = [];
-      if (submitted !== settingsBaseline) {
-        const saved = await apiPost("settings/save", { settings_revision: webui.revision ?? webui.ui?.settings_revision, ...draft });
-        savedAny = true;
-        warnings = Array.isArray(saved?.warnings) ? saved.warnings.filter(Boolean) : [];
-        const confirmed = { base: structuredClone(draft.base), webui: structuredClone(draft.studio), validation_errors: [] };
-        const revision = Number(saved?.settings_revision ?? Number(webui.revision ?? webui.ui?.settings_revision ?? 0) + 1);
-        confirmed.webui.revision = revision;
-        confirmed.webui.ui = { ...(confirmed.webui.ui || {}), settings_revision: revision };
-        // The write is already committed. Keep its acknowledged snapshot even
-        // if either follow-up request fails, without replacing newer edits.
-        adoptConfirmedSettings(confirmed, draft.studio.external_sources);
-        settingsReadPending = true;
-        settingsBootstrapPending = true;
-        try { await rereadConfirmedSettings(); }
-        catch (error) { warnings.push(`设置已保存，但重新读取失败：${errorMessage(error, "请稍后重试")}`); }
-      }
-      if (settingsBootstrapPending) {
-        try { await bootstrap(); settingsBootstrapPending = false; }
-        catch (error) { warnings.push(`设置已保存，但生图面板刷新失败：${errorMessage(error, "请稍后重试")}`); }
-      }
-      if (saveAppearance) { await appearance.save(appearanceSnapshot); savedAny = true; }
-      if (saveSort) {
-        await window.ImageStudioGalleryPreferences.setSort(sortSnapshot);
-        savedAny = true; gallerySort = sortSnapshot;
-        invalidateBrowseCache(); state.galleryPage = 0;
-      }
-      setError(els.settingsError, warnings.join("；")); showNotice(warnings.length ? `设置已保存。${warnings.join("；")}` : "设置已保存并生效。", warnings.length ? "info" : "success");
-      await loadStorageHealth();
-      await externalSources.refresh();
-    } catch (error) {
-      const message = `${savedAny ? "部分设置已保存，其余更改仍未保存：" : ""}${errorMessage(error, "设置保存失败")}`; setError(els.settingsError, message); showNotice(message, "error");
-    } finally { settingsSaving = false; els.saveSettingsButton.disabled = false; library.setCommandLabel("saveSettingsButton", "保存全部设置"); updateSettingsDirty(); }
-  }
-
-  function adoptConfirmedSettings(payload, submittedSources) {
-    const confirmed = structuredClone(payload);
-    normalizeSettingsModelDefaults(confirmed);
-    savedSettingsPayload = confirmed;
-    settingsBaseline = settingsFingerprint({ base: confirmed.base, studio: confirmed.webui });
-    if (state.settings) {
-      state.settings.webui.revision = confirmed.webui.revision;
-      state.settings.webui.ui = { ...(state.settings.webui.ui || {}), settings_revision: confirmed.webui.revision };
-      state.settings.webui.external_sources = structuredClone(confirmed.webui.external_sources || {});
-      externalSources.settingsLoaded(true, submittedSources || confirmed.webui.external_sources || {});
-    }
-    updateSettingsDirty();
-  }
-
-  function rereadConfirmedSettings() {
-    if (settingsReadPromise) return settingsReadPromise;
-    const previous = structuredClone(savedSettingsPayload);
-    const baseline = settingsBaseline;
-    settingsReadPromise = (async () => {
-      const server = await apiGet("settings/get");
-      if (!server?.base || !server?.webui || !Array.isArray(server.webui.providers)) throw new Error("设置接口返回的数据格式无效");
-      if (savedSettingsPayload?.webui.revision !== previous?.webui.revision) return;
-      const revision = Number(server.webui.revision ?? server.webui.ui?.settings_revision);
-      if (!Number.isFinite(revision) || revision < Number(previous.webui.revision)) throw new Error("尚未读取到最新的已保存设置");
-      normalizeSettingsModelDefaults(server);
-      if (settingsFingerprint(settingsDraft()) === baseline) {
-        if (!await loadSettings(true, server)) throw new Error("无法更新已保存的设置");
-      } else adoptConfirmedSettings(server, previous.webui.external_sources);
-      settingsReadPending = false;
-    })().finally(() => { settingsReadPromise = null; });
-    return settingsReadPromise;
-  }
-
-  function settingsDraft() {
-    if (!state.settings) return null;
-    const webui = JSON.parse(JSON.stringify(state.settings.webui));
-    webui.history = { ...(webui.history || {}), enabled: els.historyEnabled.checked, retain_reference_images: els.retainReferences.checked, record_invocation_identity: els.recordInvocationIdentity.checked, max_records: Number(els.historyRecords.value), max_megabytes: Number(els.historyMegabytes.value) };
-    webui.llm_policy = { ...(webui.llm_policy || {}), image_return_mode: els.agentImageReturnMode.value };
-    webui.asset_policy = { preview_max_edge: Number(els.agentPreviewMaxEdge.value), preview_quality: Number(els.agentPreviewQuality.value) };
-    webui.generation_defaults = { page: { text2img_model_ref: els.settingPageDefaultTextModel.value, img2img_model_ref: els.settingPageDefaultImageModel.value }, tool: { text2img_model_ref: els.settingToolDefaultTextModel.value, img2img_model_ref: els.settingToolDefaultImageModel.value } };
-    externalSources.settingsDraft(webui);
-    return { base: { enable_llm_tool: els.settingTool.checked }, studio: webui };
-  }
-
-  function normalizeSettingsModelDefaults(payload) {
-    (payload.webui?.providers || []).forEach((provider) => (provider.models || []).forEach((model) => ensureToolConfig(model, provider)));
-  }
-
-  function settingsFingerprint(value) {
-    const copy = value ? JSON.parse(JSON.stringify(value)) : value;
-    if (copy?.studio) { delete copy.studio.revision; if (copy.studio.ui) delete copy.studio.ui.settings_revision; }
-    const normalize = (item) => Array.isArray(item) ? item.map(normalize) : item && typeof item === "object" ? Object.fromEntries(Object.keys(item).sort().map((key) => [key, normalize(item[key])])) : item;
-    return JSON.stringify(normalize(copy));
-  }
-
-  function settingsDirty() {
-    return !!window.ImageStudioAppearance?.isDirty() || gallerySortDraft !== gallerySort
-      || !!$("settingsView").querySelector('input:invalid, textarea:invalid, select:invalid, [aria-invalid="true"]')
-      || (!!state.settings && !!settingsBaseline && settingsFingerprint(settingsDraft()) !== settingsBaseline);
-  }
-
-  function updateSettingsDirty() {
-    const dirty = settingsDirty();
-    els.saveSettingsButton.classList.toggle("is-dirty", dirty); $("settingsDirtyStatus").textContent = dirty ? "有未保存的更改" : state.settings ? "已保存" : "";
-    $("settingsDirtyStatus").classList.toggle("is-saved", !dirty && !!state.settings);
-    renderStorageQuotas();
-  }
+  const MODEL_SCHEDULING_FIELDS = ["batch_mode", "concurrency", "native_count_supported", "native_batch_size", "native_batch_size_source", "max_concurrent_requests"];
 
   function dataUrlToFile(dataUrl, name) { const [head, encoded] = dataUrl.split(",", 2); const type = (head.match(/data:([^;]+)/) || [])[1] || "image/png"; const bytes = Uint8Array.from(atob(encoded), (char) => char.charCodeAt(0)); return new File([bytes], name, { type }); }
   async function checkGalleryAction(ids, action) {
@@ -2960,24 +2809,8 @@
       showNotice("已设为此浏览器的默认筛选。", "success");
     });
     window.addEventListener("image-studio-gallery-default-error", event => showNotice(event.detail?.message || "默认筛选保存失败。", "error"));
-    const bindGallerySort = () => {
-      const select = $("gallerySort");
-      if (!select || select.dataset.bound) return;
-      select.dataset.bound = "true"; select.value = gallerySortDraft;
-      select.addEventListener("change", () => {
-        gallerySortDraft = select.value === "latest_content" ? "latest_content" : "created";
-        updateSettingsDirty();
-      });
-      window.ImageStudioSelect?.refresh(select);
-    };
-    bindGallerySort();
-    window.addEventListener("image-studio-display-settings-ready", bindGallerySort);
-    window.addEventListener("image-studio-appearance-change", updateSettingsDirty);
-    window.addEventListener("beforeunload", event => {
-      if (state.view !== "settings" || !settingsDirty()) return;
-      event.preventDefault(); event.returnValue = "";
-    });
     library.bind();
+    settings.bind();
     const refreshQuota = () => refreshProviderQuota();
     providerQuotaTimer = window.setInterval(refreshQuota, PROVIDER_QUOTA_TTL);
     document.addEventListener("visibilitychange", refreshQuota);
@@ -2987,34 +2820,47 @@
     window.addEventListener("resize", () => { if (state.detailId) centerDetailFilmstrip(els.drawerBody.querySelector(".detail-filmstrip")); }, { passive: true });
     els.galleryGrid.addEventListener("click", (event) => { const card = event.target.closest("[data-gallery-id]"); if (card && !event.target.closest(".gallery-selection")) void openDetail(card.dataset.galleryId); });
     els.galleryGrid.addEventListener("change", (event) => { const input = event.target.closest("[data-select-id]"); if (!input) return; input.checked ? state.selectedIds.add(input.dataset.selectId) : state.selectedIds.delete(input.dataset.selectId); updateSelection(); });
-    ["input", "change", "click"].forEach((name) => $("settingsView").addEventListener(name, () => window.setTimeout(updateSettingsDirty, 0)));
-    $("parameterDialogApply").addEventListener("click", () => window.setTimeout(updateSettingsDirty, 0));
     document.querySelectorAll(".nav-item").forEach((button) => button.addEventListener("click", () => switchView(button.dataset.view)));
     document.querySelectorAll(".segment").forEach((button) => button.addEventListener("click", () => applyGenerationSelection(button.dataset.mode, state.defaultModelRefs[button.dataset.mode] || "")));
-    document.querySelectorAll("[data-default-scope]").forEach((button) => button.addEventListener("click", () => { document.querySelectorAll("[data-default-scope]").forEach((item) => item.classList.toggle("is-active", item === button)); document.querySelectorAll("[data-default-panel]").forEach((panel) => panel.classList.toggle("is-hidden", panel.dataset.defaultPanel !== button.dataset.defaultScope)); }));
-    els.agentImageReturnMode.addEventListener("change", syncAgentImageSettings);
-    els.runMaintenanceButton.addEventListener("click", () => void runStorageMaintenance(false)); els.runDeepMaintenanceButton.addEventListener("click", () => void runStorageMaintenance(true));
-    els.modelChoice.addEventListener("change", () => applyGenerationSelection(state.mode, els.modelChoice.value));
+    els.modelChoice.addEventListener("change", () => {
+      const value = els.modelChoice.value;
+      if (value.startsWith("@comfy:")) applyGenerationSelection(state.mode, "", value.slice(7));
+      else applyGenerationSelection(state.mode, value);
+    });
+    els.comfyWorkflowChoice.addEventListener("change", () => applyGenerationSelection(state.mode, els.comfyWorkflowChoice.value, state.selectedProviderId));
     els.resetNegativePromptButton.addEventListener("click", () => { els.negativePrompt.value = selectedModel()?.negative_prompt_default || ""; els.negativePrompt.focus(); });
     $("referenceChooseButton").addEventListener("click", () => els.referenceUpload.click());
     els.referenceUpload.addEventListener("change", async () => { setError(els.generationError, ""); try { await uploadReferences(els.referenceUpload.files); } catch (error) { setError(els.generationError, errorMessage(error, "上传参考图失败")); } finally { els.referenceUpload.value = ""; } });
-    els.generationForm.addEventListener("submit", generate); $("galleryRefresh").addEventListener("click", () => void loadGallery()); els.galleryPrev.addEventListener("click", () => void loadGallery(state.galleryPage - 1)); els.galleryNext.addEventListener("click", () => void loadGallery(state.galleryPage + 1)); els.gallerySearch.addEventListener("change", () => void loadGallery(0)); els.galleryProvider.addEventListener("change", () => void loadGallery(0)); els.galleryMode.addEventListener("change", () => void loadGallery(0)); els.gallerySource.addEventListener("change", () => void loadGallery(0));
+    els.generationForm.addEventListener("submit", generate); $("galleryRefresh").addEventListener("click", () => void loadGallery()); $("galleryRetry").addEventListener("click", () => void loadGallery()); els.galleryPrev.addEventListener("click", () => void loadGallery(state.galleryPage - 1)); els.galleryNext.addEventListener("click", () => void loadGallery(state.galleryPage + 1)); els.gallerySearch.addEventListener("change", () => void loadGallery(0)); els.galleryProvider.addEventListener("change", () => void loadGallery(0)); els.galleryMode.addEventListener("change", () => void loadGallery(0)); els.gallerySource.addEventListener("change", () => void loadGallery(0));
     $("cancelSelectionButton").addEventListener("click", clearGallerySelection); $("selectAllButton").addEventListener("click", () => { state.galleryItems.forEach((item) => state.selectedIds.add(item.id)); els.galleryGrid.querySelectorAll("[data-select-id]").forEach((input) => { input.checked = true; }); updateSelection(); }); $("exportButton").addEventListener("click", () => void exportSelected()); $("deleteButton").addEventListener("click", () => void deleteSelected());
-    $("closeDrawer").addEventListener("click", closeDetail); $("closeImagePreview").addEventListener("click", closeImagePreview); els.imagePreviewPrev.addEventListener("click", () => void navigateImagePreview(-1)); els.imagePreviewNext.addEventListener("click", () => void navigateImagePreview(1)); bindImagePreviewGestures(); els.imagePreview.querySelector("[data-close-image-preview]").addEventListener("click", closeImagePreview); els.previewImage.addEventListener("click", () => { if (Date.now() - state.imagePreviewSwipeAt < 500) return; closeImagePreview(); }); els.scrim.addEventListener("click", () => { if (!els.parameterDialog.classList.contains("is-hidden")) return; if (activeConfirmation) activeConfirmation(false); else closeDetail(); }); $("parameterDialogCancel").addEventListener("click", closeToolParameterDialog); $("parameterDialogApply").addEventListener("click", applyToolParameterDialog); els.addProviderButton.addEventListener("click", () => void addProvider()); els.addModelButton.addEventListener("click", () => void addModel()); els.saveSettingsButton.addEventListener("click", () => void saveSettings());
+    $("closeDrawer").addEventListener("click", closeDetail); $("closeImagePreview").addEventListener("click", closeImagePreview); els.imagePreviewPrev.addEventListener("click", () => void navigateImagePreview(-1)); els.imagePreviewNext.addEventListener("click", () => void navigateImagePreview(1)); bindImagePreviewGestures(); els.imagePreview.querySelector("[data-close-image-preview]").addEventListener("click", closeImagePreview); els.previewImage.addEventListener("click", () => { if (Date.now() - state.imagePreviewSwipeAt < 500) return; closeImagePreview(); }); els.scrim.addEventListener("click", () => { if (!els.parameterDialog.classList.contains("is-hidden")) return; if (activeConfirmation) activeConfirmation(false); else closeDetail(); });
     document.addEventListener("keydown", (event) => { if (mobileImageViewer || library.modalOpen()) return; if (event.key === "Escape") { if (!els.parameterDialog.classList.contains("is-hidden")) closeToolParameterDialog(); else if (!els.imagePreview.classList.contains("is-hidden")) closeImagePreview(); else if (els.detailDrawer.classList.contains("is-open") && !activeConfirmation) closeDetail(); return; } if (event.target.closest('input,textarea,select,[role="combobox"],[contenteditable=true]')) return; if (!els.imagePreview.classList.contains("is-hidden")) { if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); void navigateImagePreview(event.key === "ArrowLeft" ? -1 : 1); } return; } if (!els.detailDrawer.classList.contains("is-open") || activeConfirmation) return; if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); void navigateDetail(event.key === "ArrowLeft" ? -1 : 1); } });
   }
 
-  const externalSources = window.ImageStudioExternalSources({ state, apiGet, apiPost, escape, formatBytes, formatDate, showNotice, errorMessage, updateSettingsDirty, invalidateBrowseCache, openModal: (...args) => library.openModal(...args) });
-  const library = window.ImageStudioLibrary({ state, escape, apiGet, apiPost, bridge, showNotice, errorMessage, formatDate, formatBytes, sourceLabel, getGallerySort: () => gallerySort, syncPageScrollLock, switchView, requestParameters, loadGallery, clearGallerySelection, openDetail, closeDetail, reproduce, applyDraft, useDataUrlAsReference, useGalleryImageAsReference, ensureDetailMetadata, ensureDetailPreview, getImageMedia, cacheImageMedia, loadImageMedia, checkGalleryAction });
+  const modal = window.ImageStudioModal({ escape, showNotice, errorMessage, syncPageScrollLock });
+  const library = window.ImageStudioLibrary({ state, modal, escape, apiGet, apiPost, bridge, showNotice, errorMessage, formatDate, formatBytes, sourceLabel, getGallerySort: () => gallerySort, syncPageScrollLock, switchView, requestParameters, loadGallery, clearGallerySelection, openDetail, closeDetail, reproduce, applyDraft, useDataUrlAsReference, useGalleryImageAsReference, ensureDetailMetadata, ensureDetailPreview, getImageMedia, cacheImageMedia, loadImageMedia, checkGalleryAction });
+  const settings = window.ImageStudioSettings({
+    escape, apiGet, apiPost, showNotice, errorMessage, formatDate, formatBytes, setError, confirmAction,
+    syncPageScrollLock, schemaParameterTitle, schemaParameterLabel, configuredReferenceLimit, referenceLimitForModel,
+    effectiveModelParameters, modelParameterMatches, bootstrap, closeDetail, switchView, library,
+    getView: () => state.view, showView, confirmationOpen: () => !!activeConfirmation,
+    getGallerySort: () => gallerySort,
+    onGallerySortSaved: value => { gallerySort = value; invalidateBrowseCache(); state.galleryPage = 0; },
+    externalSources: () => externalSources, comfyui: () => comfyuiControls,
+  });
+  const { loadSettings, loadStorageHealth, updateSettingsDirty, currentSettingsModel, renderModelEditor, prepareComfyWorkflowSettings, addComfyWorkflowDraft, closeToolParameterDialog } = settings;
+  const externalSources = window.ImageStudioExternalSources({ getView: () => state.view, getSettings: settings.getSettings, apiGet, apiPost, escape, formatBytes, formatDate, showNotice, errorMessage, updateSettingsDirty, invalidateBrowseCache, openModal: (...args) => library.openModal(...args) });
+  const novelaiControls = window.ImageStudioNovelAI({ state, model: selectedModel, escape, schemaParameterTitle, schemaParameterLabel, rerenderReferences: renderReferences, uploadFile: async file => (await bridge()).upload("studio/reference/upload", file), openModal: (...args) => library.openModal(...args), showNotice });
+  const comfyuiControls = window.ImageStudioComfyUI({ state, escape, apiGet, apiPost, bridge, showNotice, errorMessage, currentSettingsModel, renderModelEditor, updateSettingsDirty, applyDraft, prepareWorkflowSettings: prepareComfyWorkflowSettings, addWorkflowDraft: addComfyWorkflowDraft, invalidateBrowseCache, renderResult: renderGenerationResult, viewResult: viewComfyResult, openModal: (...args) => library.openModal(...args) });
 
   async function start() {
     try {
       await window.ImageStudioGalleryPreferences.ready(await bridge());
       gallerySort = window.ImageStudioGalleryPreferences.getSort();
-      gallerySortDraft = gallerySort;
+      settings.resetGallerySort();
     } catch { showNotice("未能读取此浏览器的画廊偏好，暂用默认显示。", "error"); }
     bindEvents();
-    try { await bootstrap(); }
+    try { await bootstrap(); void comfyuiControls.restore(); }
     catch (error) { const message = errorMessage(error, "页面初始化失败"); els.runtimeStatus.textContent = "页面初始化失败"; showNotice(message, "error"); }
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", () => void start(), { once: true });

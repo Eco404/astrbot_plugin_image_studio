@@ -2,13 +2,10 @@
 
 import asyncio
 import base64
-import copy
 import hashlib
 import json
 import os
 import re
-import shlex
-import shutil
 import time
 import uuid
 from pathlib import Path
@@ -20,8 +17,6 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.message_components import File, Image, Plain, Record, Reply, Video
 from astrbot.api.star import Context, Star, StarTools, register
-from astrbot.api.web import error_response, file_response, json_response
-from astrbot.api.web import request as web_request
 from astrbot.core.agent.message import TextPart
 from astrbot.core.computer.computer_client import get_booter
 from astrbot.core.utils.quoted_message import extract_quoted_message_images
@@ -29,43 +24,31 @@ from astrbot.core.workspace import (
     default_workspace_root,
     resolve_workspace_root_for_umo,
 )
-from starlette.background import BackgroundTask
 
-from .appearance import (
-    APPEARANCE_COOKIE,
-    decode_appearance_cookie,
-    encode_appearance_cookie,
-    normalize_appearance,
-)
-from .config import (
+from .backend.config import (
     load_studio_settings,
-    normalize_webui_settings,
     runtime_settings,
-    save_studio_settings,
 )
-from .external_gallery import ExternalGalleryManager
-from .gallery_preferences import (
-    GALLERY_PREFERENCES_COOKIE,
-    decode_gallery_preferences,
-    encode_gallery_preferences,
-    merge_gallery_preferences,
+from .backend.tools.capabilities import query_capabilities
+from .backend.commands.handler import run_image_command
+from .backend.api.comfyui import ComfyAPI
+from .backend.api.settings import SettingsAPI
+from .backend.api.gallery import GalleryAPI
+from .backend.api.imports import ImportsAPI
+from .backend.api.generation import GenerationAPI
+from .backend.api import preferences
+from .backend.api.routes import register_web_apis
+from .backend.gallery.external import ExternalGalleryManager
+from .backend.models import (
+    ImageProvider,
+    InvocationSource,
+    ReferenceImage,
 )
-from .models import ImageProvider, InvocationSource, ReferenceImage
-from .image_metadata import parse_metadata_fields
-from .parameter_exchange import export_parameters, resolve_parameters
-from .providers import ProviderError, ProviderExecutor
-from .service import ImageGenerationService
-from .storage import (
-    WORKFLOW_ASSET_RETENTION_SECONDS,
-    ExternalDeleteError,
-    ExternalPermissionError,
-    GenerationStore,
-    ImportDuplicateError,
-    ImportEditConflictError,
-    detect_mime_type,
-    export_image_filename,
-    image_data_url,
-)
+from .backend.providers.executor import ProviderError, ProviderExecutor
+from .backend.providers.comfyui.runtime import ComfyRuntime
+from .backend.generation.service import ImageGenerationService
+from .backend.gallery.store import GenerationStore
+from .backend.media.images import export_image_filename, image_data_url
 
 PLUGIN_NAME = "astrbot_plugin_image_studio"
 PAGE_PREFIX = f"/{PLUGIN_NAME}"
@@ -75,6 +58,8 @@ AGENT_WORKFLOW_PROMPT_MARKER = "<!-- image_studio_agent_workflow_v1 -->"
 AGENT_WORKFLOW_PROMPT = (
     "使用 image_studio 系列工具时遵循以下流程和规范："
     "先调用 image_studio_get_capabilities 获取模型参数，再调用 image_studio_generate 进行图像生成或处理，"
+    "用户指定模型或工作流名称时可用 search 查找，或用 providers 查找服务商；"
+    "搜索摘要不包含完整参数，选定后使用 model 和 model_refs 查询。"
     "仅在需要查看指定资产或检查原图细节时调用 image_studio_view_asset。"
     "严格使用查询工具返回的模型参数，不得编造参数；严格遵守模型的提示词输入方式(自然语言/NAI tag)；"
     "插件内继续处理图片时只使用 asset_id；发送到当前会话或交给外部工具处理时，"
@@ -98,8 +83,8 @@ IMAGE_WORKFLOW_CONTINUATION_PROMPT = (
 @register(
     PLUGIN_NAME,
     "econeco",
-    "多服务商 AI 生图与图库工作台，支持OpenAI接口、Gemini接口、NAI请求、自定义接口。支持对话生图改图、并发批量生成、图片参数导入。支持扫描nai_image插件的图片以及任意自定义目录，并在画廊中统一浏览和管理。",
-    "1.2.0",
+    "多服务商 AI 生图与图库工作台，支持 OpenAI、Gemini、ComfyUI 工作流、NovelAI 官方、NAI 第三方及自定义接口。支持对话生图改图、并发批量生成、图片参数导入与工作流复现，可扫描 nai-image 插件图库及自定义目录，统一浏览和管理图片。WebUI 适配桌面与手机。",
+    "1.3.1",
 )
 class ImageStudioPlugin(Star):
     """Own Image Studio configuration, generation, gallery, and tool APIs."""
@@ -113,11 +98,9 @@ class ImageStudioPlugin(Star):
         self.store = GenerationStore(Path(self.data_dir))
         self._session: aiohttp.ClientSession | None = None
         self._service: ImageGenerationService | None = None
+        self._comfy: ComfyRuntime | None = None
         self._settings_lock = asyncio.Lock()
         self._maintenance_task: asyncio.Task[None] | None = None
-        self._exports: dict[str, tuple[Path, float]] = {}
-        self._imports: dict[str, dict[str, Any]] = {}
-        self._import_groups: dict[str, dict[str, Any]] = {}
         self._studio_settings, studio_errors = load_studio_settings(Path(self.data_dir))
         self._settings, runtime_errors = runtime_settings(config, self._studio_settings)
         self._settings_errors = [*studio_errors, *runtime_errors]
@@ -145,6 +128,9 @@ class ImageStudioPlugin(Star):
             executor=ProviderExecutor(self._session),
             store=self.store,
         )
+        self._comfy = ComfyRuntime(self._service)
+        self._service.comfy_runtime = self._comfy
+        await self._comfy.start()
         self._register_web_apis()
         await self._external_gallery.start()
         if self._settings_errors:
@@ -162,6 +148,9 @@ class ImageStudioPlugin(Star):
         """Close plugin-owned HTTP resources during reload or shutdown."""
 
         await self._external_gallery.close()
+        if self._comfy is not None:
+            await self._comfy.close()
+            self._comfy = None
         if self._maintenance_task is not None:
             self._maintenance_task.cancel()
             try:
@@ -173,8 +162,8 @@ class ImageStudioPlugin(Star):
             await self._session.close()
         self._session = None
         self._service = None
-        self._imports.clear()
-        self._import_groups.clear()
+        if getattr(self, "_imports_controller", None) is not None:
+            self._imports_controller.clear()
         await self.store.close()
 
     async def _configure_external_gallery(self) -> None:
@@ -188,6 +177,10 @@ class ImageStudioPlugin(Star):
         while True:
             await asyncio.sleep(3600)
             try:
+                if getattr(self, "_comfy", None) is not None:
+                    await self._comfy.store.cleanup_terminal_files(
+                        terminal_before=time.time() - 7 * 86400
+                    )
                 await self._expire_import_groups()
                 await self.store.run_maintenance(
                     self._settings.history,
@@ -200,1497 +193,247 @@ class ImageStudioPlugin(Star):
                 logger.warning("%s 定时存储维护失败: %s", LOG_TAG, type(exc).__name__)
 
     def _register_web_apis(self) -> None:
-        routes = (
-            (
-                "appearance",
-                self._api_get_appearance,
-                ["GET"],
-                "Image Studio: browser appearance",
-            ),
-            (
-                "appearance",
-                self._api_set_appearance,
-                ["POST"],
-                "Image Studio: save browser appearance cookie",
-            ),
-            (
-                "gallery/preferences",
-                self._api_get_gallery_preferences,
-                ["GET"],
-                "Image Studio: browser gallery preferences",
-            ),
-            (
-                "gallery/preferences",
-                self._api_set_gallery_preferences,
-                ["POST"],
-                "Image Studio: save browser gallery preferences",
-            ),
-            (
-                "imports/inspect",
-                self._api_import_inspect,
-                ["POST"],
-                "Image Studio: inspect image metadata",
-            ),
-            (
-                "imports/prepare",
-                self._api_import_prepare,
-                ["POST"],
-                "Image Studio: prepare imports",
-            ),
-            (
-                "imports/check",
-                self._api_import_check,
-                ["POST"],
-                "Image Studio: check import batch hashes",
-            ),
-            (
-                "imports/merge-targets",
-                self._api_import_merge_targets,
-                ["GET"],
-                "Image Studio: matching imported image groups",
-            ),
-            (
-                "imports/group/<group_id>/commit",
-                self._api_import_group_commit,
-                ["POST"],
-                "Image Studio: commit import batch",
-            ),
-            (
-                "imports/group/<group_id>/cancel",
-                self._api_import_group_cancel,
-                ["POST"],
-                "Image Studio: cancel import batch",
-            ),
-            (
-                "imports/upload/<upload_id>",
-                self._api_import_upload,
-                ["POST"],
-                "Image Studio: import image",
-            ),
-            (
-                "studio/parameters/resolve",
-                self._api_resolve_parameters,
-                ["POST"],
-                "Image Studio: resolve parameters",
-            ),
-            (
-                "gallery/import-edit/<generation_id>",
-                self._api_gallery_import_edit,
-                ["GET", "POST"],
-                "Image Studio: edit imported parameters and image order",
-            ),
-            (
-                "gallery/parameters/<generation_id>",
-                self._api_gallery_parameters,
-                ["GET"],
-                "Image Studio: export parameters",
-            ),
-            (
-                "gallery/favorite",
-                self._api_gallery_favorite,
-                ["POST"],
-                "Image Studio: favorite record",
-            ),
-            (
-                "gallery/favorite/status",
-                self._api_gallery_favorite_status,
-                ["POST"],
-                "Image Studio: selected favorite states",
-            ),
-            (
-                "gallery/images/delete",
-                self._api_gallery_delete_images,
-                ["POST"],
-                "Image Studio: delete selected images",
-            ),
-            (
-                "studio/bootstrap",
-                self._api_bootstrap,
-                ["GET"],
-                "Image Studio: bootstrap",
-            ),
-            (
-                "studio/provider-quota",
-                self._api_provider_quota,
-                ["GET"],
-                "Image Studio: provider account quota",
-            ),
-            ("studio/generate", self._api_generate, ["POST"], "Image Studio: generate"),
-            (
-                "studio/reference/upload",
-                self._api_upload_reference,
-                ["POST"],
-                "Image Studio: upload reference",
-            ),
-            (
-                "studio/reference/from-gallery",
-                self._api_gallery_as_reference,
-                ["POST"],
-                "Image Studio: retain a gallery original as reference",
-            ),
-            (
-                "external/status",
-                self._api_external_status,
-                ["GET"],
-                "Image Studio: external gallery scan status",
-            ),
-            (
-                "external/scan",
-                self._api_external_scan,
-                ["POST"],
-                "Image Studio: rescan external gallery",
-            ),
-            (
-                "settings/get",
-                self._api_get_settings,
-                ["GET"],
-                "Image Studio: get settings",
-            ),
-            (
-                "settings/save",
-                self._api_save_settings,
-                ["POST"],
-                "Image Studio: save settings",
-            ),
-            (
-                "storage/health",
-                self._api_storage_health,
-                ["GET"],
-                "Image Studio: storage health",
-            ),
-            (
-                "storage/maintenance",
-                self._api_storage_maintenance,
-                ["POST"],
-                "Image Studio: storage maintenance",
-            ),
-            (
-                "model/test",
-                self._api_test_model,
-                ["POST"],
-                "Image Studio: test model",
-            ),
-            (
-                "provider/models",
-                self._api_provider_models,
-                ["POST"],
-                "Image Studio: discover provider models",
-            ),
-            (
-                "gallery/list",
-                self._api_gallery_list,
-                ["GET"],
-                "Image Studio: list gallery",
-            ),
-            (
-                "gallery/detail/<generation_id>",
-                self._api_gallery_detail,
-                ["GET"],
-                "Image Studio: gallery detail",
-            ),
-            (
-                "gallery/assets/<generation_id>",
-                self._api_gallery_assets,
-                ["GET"],
-                "Image Studio: gallery assets",
-            ),
-            (
-                "gallery/image-sequence",
-                self._api_gallery_image_sequence,
-                ["GET"],
-                "Image Studio: gallery image sequence",
-            ),
-            (
-                "gallery/image/<image_id>",
-                self._api_gallery_image,
-                ["GET"],
-                "Image Studio: gallery image data",
-            ),
-            (
-                "gallery/image-info/<image_id>",
-                self._api_gallery_image_info,
-                ["GET"],
-                "Image Studio: gallery image metadata",
-            ),
-            (
-                "gallery/reference-image/<reference_id>",
-                self._api_gallery_reference_image,
-                ["GET"],
-                "Image Studio: gallery reference preview",
-            ),
-            (
-                "gallery/download/<image_id>",
-                self._api_gallery_image_download,
-                ["GET"],
-                "Image Studio: download gallery image",
-            ),
-            (
-                "gallery/reproduce/<generation_id>",
-                self._api_gallery_reproduce,
-                ["POST"],
-                "Image Studio: reproduce draft",
-            ),
-            (
-                "gallery/delete",
-                self._api_gallery_delete,
-                ["POST"],
-                "Image Studio: delete gallery records",
-            ),
-            (
-                "gallery/delete/preview",
-                self._api_gallery_delete_preview,
-                ["POST"],
-                "Image Studio: inspect external originals before deletion",
-            ),
-            (
-                "gallery/reference/delete",
-                self._api_reference_delete,
-                ["POST"],
-                "Image Studio: delete reference",
-            ),
-            (
-                "gallery/export",
-                self._api_gallery_export,
-                ["POST"],
-                "Image Studio: export gallery",
-            ),
-            (
-                "gallery/export/<export_id>",
-                self._api_download_export,
-                ["GET"],
-                "Image Studio: download export",
-            ),
-        )
-        for suffix, handler, methods, description in routes:
-            self.context.register_web_api(
-                f"{PAGE_PREFIX}/{suffix}", handler, methods, description
-            )
+        register_web_apis(self, PAGE_PREFIX)
 
     def _service_or_raise(self) -> ImageGenerationService:
         if self._service is None:
             raise RuntimeError("Image Studio 正在初始化，请稍后重试")
         return self._service
 
-    async def _api_get_appearance(self) -> Any:
-        response = json_response(
-            decode_appearance_cookie(web_request.cookies.get(APPEARANCE_COOKIE))
+    def _comfy_or_raise(self):
+        if getattr(self, "_comfy", None) is None:
+            self._comfy = ComfyRuntime(self._service_or_raise())
+            self._service_or_raise().comfy_runtime = self._comfy
+        return self._comfy
+
+    def _apply_settings(self, studio):
+        self._studio_settings = studio
+        self._settings, self._settings_errors = runtime_settings(self.config, studio)
+        self._service_or_raise().update_settings(self._settings)
+
+    def _settings_api(self):
+        return SettingsAPI(
+            config=self.config,
+            data_dir=self.data_dir,
+            settings_lock=self._settings_lock,
+            get_settings=lambda: self._settings,
+            get_studio=lambda: self._studio_settings,
+            apply_settings=self._apply_settings,
+            get_external=lambda: self._external_gallery,
+            configure_external=self._configure_external_gallery,
         )
-        response.headers["Cache-Control"] = "no-store"
-        return response
+
+    def _import_api(self):
+        if getattr(self, "_imports_controller", None) is None:
+            self._imports_controller = ImportsAPI(
+                store=self.store, get_settings=lambda: self._settings
+            )
+        return self._imports_controller
+
+    def _gallery_api(self):
+        if getattr(self, "_gallery_controller", None) is None:
+            self._gallery_controller = GalleryAPI(
+                store=self.store,
+                get_settings=lambda: self._settings,
+                get_service=self._service_or_raise,
+                get_external=lambda: self._external_gallery,
+            )
+        return self._gallery_controller
+
+    def _generation_api(self):
+        return GenerationAPI(
+            store=self.store,
+            get_settings=lambda: self._settings,
+            get_service=self._service_or_raise,
+            peek_service=lambda: self._service,
+            serialize_result=_result_payload,
+        )
+
+    def _comfy_api(self):
+        """Build a stateless API controller around current plugin services."""
+        return ComfyAPI(
+            get_settings=lambda: self._settings,
+            store=self.store,
+            get_service=self._service_or_raise,
+            get_runtime=self._comfy_or_raise,
+            serialize_result=_result_payload,
+        )
+
+    async def _api_comfy_import(self):
+        return await self._comfy_api()._api_comfy_import()
+
+    async def _api_comfy_inspect(self):
+        return await self._comfy_api()._api_comfy_inspect()
+
+    async def _api_comfy_submit(self):
+        return await self._comfy_api()._api_comfy_submit()
+
+    async def _api_comfy_jobs(self):
+        return await self._comfy_api()._api_comfy_jobs()
+
+    async def _api_comfy_cancel(self):
+        return await self._comfy_api()._api_comfy_cancel()
+
+    async def _api_comfy_resume(self):
+        return await self._comfy_api()._api_comfy_resume()
+
+    async def _api_comfy_dismiss(self):
+        return await self._comfy_api()._api_comfy_dismiss()
+
+    async def _api_comfy_save_workflow(self):
+        return await self._settings_api()._api_comfy_save_workflow()
+
+    async def _api_get_appearance(self) -> Any:
+        return await preferences._api_get_appearance()
 
     async def _api_set_appearance(self) -> Any:
-        settings = normalize_appearance(await web_request.json(default={}))
-        response = json_response(settings)
-        response.headers["Cache-Control"] = "no-store"
-        # The host prefixes plugin API URLs; a namespaced root cookie also works
-        # behind a reverse proxy without granting the opaque iframe cookie access.
-        response.set_cookie(
-            APPEARANCE_COOKIE,
-            encode_appearance_cookie(settings),
-            max_age=365 * 24 * 60 * 60,
-            httponly=True,
-            samesite="lax",
-            path="/",
-        )
-        return response
+        return await preferences._api_set_appearance()
 
     async def _api_get_gallery_preferences(self) -> Any:
-        value = decode_gallery_preferences(
-            web_request.cookies.get(GALLERY_PREFERENCES_COOKIE)
-        )
-        response = json_response(value)
-        response.headers["Cache-Control"] = "no-store"
-        return response
+        return await preferences._api_get_gallery_preferences()
 
     async def _api_set_gallery_preferences(self) -> Any:
-        try:
-            current = decode_gallery_preferences(
-                web_request.cookies.get(GALLERY_PREFERENCES_COOKIE)
-            )
-            settings = merge_gallery_preferences(
-                current, await web_request.json(default={})
-            )
-            encoded = encode_gallery_preferences(settings)
-        except (ValueError, TypeError, RecursionError) as exc:
-            return error_response(str(exc), status_code=400)
-        response = json_response(settings)
-        response.headers["Cache-Control"] = "no-store"
-        response.set_cookie(
-            GALLERY_PREFERENCES_COOKIE,
-            encoded,
-            max_age=365 * 24 * 60 * 60,
-            httponly=True,
-            samesite="lax",
-            path="/",
-        )
-        return response
+        return await preferences._api_set_gallery_preferences()
 
     async def _api_bootstrap(self) -> Any:
-        return json_response(
-            {
-                "settings_revision": self._settings.revision,
-                "defaults": {
-                    "text2img_model_ref": self._settings.default_model_ref(
-                        "text2img", "webui"
-                    ),
-                    "img2img_model_ref": self._settings.default_model_ref(
-                        "img2img", "webui"
-                    ),
-                },
-                "providers": [
-                    provider.public_dict()
-                    for provider in self._settings.providers
-                    if provider.enabled
-                ],
-                "models": [
-                    {
-                        **model.public_dict(),
-                        "provider_id": provider.id,
-                        "provider_name": provider.name,
-                        "provider_kind": provider.kind,
-                        "model_ref": f"{provider.id}:{model.id}",
-                    }
-                    for provider in self._settings.providers
-                    if provider.enabled
-                    for model in provider.models
-                ],
-                "modes": ["text2img", "img2img"],
-            }
-        )
+        return await self._settings_api()._api_bootstrap()
 
     async def _api_get_settings(self) -> Any:
-        studio, errors = normalize_webui_settings(self._studio_settings)
-        return json_response(
-            {
-                "base": {
-                    "enable_llm_tool": bool(self.config.get("enable_llm_tool", True)),
-                },
-                "studio": studio,
-                "webui": studio,
-                "validation_errors": errors,
-            }
-        )
+        return await self._settings_api()._api_get_settings()
 
     async def _api_save_settings(self) -> Any:
-        body = await web_request.json(default={})
-        if not isinstance(body, dict):
-            return error_response("请求体必须是 JSON 对象", status_code=400)
-        expected_revision = _as_int(body.get("settings_revision"), -1)
-        warnings: list[str] = []
-        async with self._settings_lock:
-            current_studio, _ = normalize_webui_settings(self._studio_settings)
-            current_revision = _as_int(current_studio.get("revision"), 0)
-            if expected_revision < 0:
-                expected_revision = _as_int(
-                    body.get("studio", body.get("webui", {}))
-                    .get("ui", {})
-                    .get("settings_revision"),
-                    -1,
-                )
-            if expected_revision != current_revision:
-                return error_response(
-                    "设置已被其他操作更新，请刷新后再保存", status_code=409
-                )
-            candidate, errors = normalize_webui_settings(
-                body.get("studio", body.get("webui"))
-            )
-            if errors:
-                return error_response("；".join(errors), status_code=400)
-            try:
-                await asyncio.to_thread(
-                    self._external_gallery.validate_configuration,
-                    candidate["external_sources"],
-                )
-            except (ValueError, OSError) as exc:
-                return error_response(str(exc), status_code=400)
-            candidate["revision"] = current_revision + 1
-            candidate["ui"]["settings_revision"] = candidate["revision"]
-            base = body.get("base") if isinstance(body.get("base"), dict) else {}
-            previous = copy.deepcopy(dict(self.config))
-            previous_studio = copy.deepcopy(self._studio_settings)
-            for key in ("enable_llm_tool",):
-                if key in base:
-                    self.config[key] = base[key]
-            try:
-                await save_studio_settings(Path(self.data_dir), candidate)
-                await _save_config_async(self.config)
-            except Exception as exc:
-                self.config.clear()
-                self.config.update(previous)
-                try:
-                    await save_studio_settings(Path(self.data_dir), previous_studio)
-                except Exception:
-                    logger.warning("%s 恢复插件配置文件失败", LOG_TAG)
-                logger.warning(
-                    "%s 保存 WebUI 配置失败: %s", LOG_TAG, type(exc).__name__
-                )
-                return error_response("配置保存失败", status_code=500)
-            self._studio_settings = candidate
-            self._settings, self._settings_errors = runtime_settings(
-                self.config, self._studio_settings
-            )
-            self._service_or_raise().update_settings(self._settings)
-            try:
-                await self._configure_external_gallery()
-            except Exception as exc:
-                logger.exception("%s 设置已保存，但外部图库配置应用失败", LOG_TAG)
-                warnings.append(
-                    f"设置已保存，但外部图库配置未能应用：{type(exc).__name__}。请检查存储状态后重新保存。"
-                )
-        return json_response(
-            {"settings_revision": self._settings.revision, "warnings": warnings}
-        )
+        return await self._settings_api()._api_save_settings()
 
     async def _api_storage_health(self) -> Any:
-        report = await self.store.maintenance_report()
-        report["retention"] = await self.store.retention_status(self._settings.history)
-        report["external_sources"] = await self._external_gallery.status()
-        return json_response(report)
+        return await self._gallery_api()._api_storage_health()
 
     async def _api_external_status(self) -> Any:
-        return json_response(
-            {
-                "types": self._external_gallery.source_types(),
-                "sources": await self._external_gallery.status(),
-            }
-        )
+        return await self._gallery_api()._api_external_status()
 
     async def _api_external_scan(self) -> Any:
-        body = await web_request.json(default={})
-        if not isinstance(body, dict):
-            return error_response("请求体必须是 JSON 对象", status_code=400)
-        try:
-            result = await self._external_gallery.request_scan(
-                str(body.get("source_id") or "nai")
-            )
-        except ValueError as exc:
-            return error_response(str(exc), status_code=400)
-        return json_response(result)
+        return await self._gallery_api()._api_external_scan()
 
     async def _api_gallery_as_reference(self) -> Any:
-        body = await web_request.json(default={})
-        if not isinstance(body, dict):
-            return error_response("请求体必须是 JSON 对象", status_code=400)
-        try:
-            result = await self.store.stage_gallery_reference(
-                str(body.get("image_id") or "")
-            )
-        except ExternalPermissionError as exc:
-            return error_response(str(exc), status_code=403)
-        except (ValueError, OSError) as exc:
-            return error_response(str(exc), status_code=400)
-        return json_response(result)
+        return await self._gallery_api()._api_gallery_as_reference()
 
     async def _api_import_inspect(self) -> Any:
-        body = await web_request.json(default={})
-        if not isinstance(body, dict) or not isinstance(body.get("metadata"), dict):
-            return error_response("元数据必须是对象", status_code=400)
-        try:
-            if len(json.dumps(body, ensure_ascii=False)) > 4 * 1024 * 1024:
-                raise ValueError("元数据不能超过 4 MB")
-            width = max(0, min(65535, int(body.get("width") or 0)))
-            height = max(0, min(65535, int(body.get("height") or 0)))
-            output_node_id = body.get("output_node_id", "")
-            if not isinstance(output_node_id, str):
-                raise ValueError("ComfyUI 输出节点 ID 必须是字符串")
-            result = await asyncio.to_thread(
-                parse_metadata_fields,
-                body["metadata"],
-                width=width,
-                height=height,
-                output_node_id=output_node_id,
-            )
-            return json_response(result)
-        except (ValueError, TypeError, OverflowError) as exc:
-            return error_response(str(exc), status_code=400)
-
-    @staticmethod
-    def _import_hash_items(body: Any) -> list[dict[str, str]]:
-        items = body.get("items") if isinstance(body, dict) else None
-        if not isinstance(items, list) or not 1 <= len(items) <= 100:
-            raise ValueError("每批请选择 1 至 100 张图片")
-        result, seen = [], set()
-        for item in items:
-            if not isinstance(item, dict):
-                raise ValueError("导入项目格式错误")
-            client_id, digest = item.get("client_id"), item.get("sha256")
-            if (
-                not isinstance(client_id, str)
-                or not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", client_id)
-                or client_id in seen
-            ):
-                raise ValueError("导入图片标识无效或重复")
-            if not isinstance(digest, str) or not re.fullmatch(
-                r"[a-fA-F0-9]{64}", digest
-            ):
-                raise ValueError(f"图片 {client_id} 缺少有效的 SHA-256，请重新选择图片")
-            seen.add(client_id)
-            result.append({"client_id": client_id, "sha256": digest.lower()})
-        return result
-
-    async def _check_import_items(self, items: list[dict[str, str]]) -> dict[str, Any]:
-        hashes = [item["sha256"] for item in items]
-        seen, repeated = set(), set()
-        for digest in hashes:
-            if digest in seen:
-                repeated.add(digest)
-            seen.add(digest)
-        if repeated:
-            return {
-                "allowed": False,
-                "code": "batch_duplicates",
-                "duplicate_hashes": sorted(repeated),
-                "message": "本次选择包含内容相同的图片，请移除重复图片后重试",
-            }
-        return await self.store.check_import_hashes(hashes)
+        return await self._import_api()._api_import_inspect()
 
     async def _api_import_check(self) -> Any:
-        try:
-            items = self._import_hash_items(await web_request.json(default={}))
-            return json_response(await self._check_import_items(items))
-        except ValueError as exc:
-            return error_response(str(exc), status_code=400)
-
-    @staticmethod
-    def _import_merge_engine(value: Any) -> str:
-        if not isinstance(value, str) or not value.strip() or len(value.strip()) > 80:
-            raise ValueError("请先为待合并图片选择明确的生图来源")
-        engine = value.strip()
-        if engine.lower() in {"unknown", "mixed"}:
-            raise ValueError("未知或混合来源不能合并，请先为图片选择相同的生图来源")
-        return "novelai" if engine.lower() in {"nai", "novelai"} else engine
+        return await self._import_api()._api_import_check()
 
     async def _api_import_merge_targets(self) -> Any:
-        try:
-            engine = self._import_merge_engine(
-                web_request.query.get("generation_engine")
-            )
-            limit = int(web_request.query.get("limit", 24))
-            offset = int(web_request.query.get("offset", 0))
-            if not 1 <= limit <= 60 or offset < 0:
-                raise ValueError("分页数量须为 1 至 60，偏移量不能为负数")
-            result = await self.store.list_import_merge_targets(
-                engine,
-                limit=limit,
-                offset=offset,
-                query=str(web_request.query.get("query", ""))[:240],
-                sort=str(web_request.query.get("sort", "created")),
-            )
-            return json_response(result)
-        except (ValueError, TypeError, OverflowError) as exc:
-            return error_response(str(exc), status_code=400)
+        return await self._import_api()._api_import_merge_targets()
 
     async def _api_import_prepare(self) -> Any:
-        body = await web_request.json(default={})
-        items = body.get("items") if isinstance(body, dict) else None
-        if not isinstance(items, list) or not 1 <= len(items) <= 100:
-            return error_response("每批请选择 1 至 100 张图片", status_code=400)
-        try:
-            hashes = self._import_hash_items(body)
-            check = await self._check_import_items(hashes)
-        except ValueError as exc:
-            return error_response(str(exc), status_code=400)
-        if not check["allowed"]:
-            return json_response(check)
-        hashes_by_id = {item["client_id"]: item["sha256"] for item in hashes}
-        as_group = body.get("as_group", False)
-        if not isinstance(as_group, bool):
-            return error_response("图组选项必须是布尔值", status_code=400)
-        merge_target_id = body.get("merge_target_id", "")
-        if not isinstance(merge_target_id, str) or (
-            merge_target_id and not re.fullmatch(r"[a-f0-9]{32}", merge_target_id)
-        ):
-            return error_response("合并目标图组 ID 无效", status_code=400)
-        if as_group and merge_target_id:
-            return error_response("新建图组和合并已有图组不能同时选择", status_code=400)
-        expected_engine = ""
-        if merge_target_id:
-            try:
-                expected_engine = self._import_merge_engine(
-                    body.get("generation_engine")
-                )
-                target = await self.store.generation_detail(
-                    merge_target_id, include_assets=False
-                )
-                if target is None:
-                    raise ValueError("目标图组已被删除或不存在，请重新选择")
-                if target.get("source") != "import":
-                    raise ValueError("只能合并到手动导入的图片或图组")
-                if (
-                    self._import_merge_engine(target.get("generation_engine"))
-                    != expected_engine
-                ):
-                    raise ValueError("目标图组与待导入图片的生图来源不一致，请重新选择")
-                if len(target.get("images", [])) + len(items) > 100:
-                    raise ValueError("合并后图组不能超过 100 张图片")
-            except ValueError as exc:
-                return error_response(str(exc), status_code=400)
-        if as_group and len(items) < 2:
-            return error_response("图组至少需要两张图片", status_code=400)
-        await self._expire_import_groups()
-        now = time.time()
-        self._imports = {
-            key: value
-            for key, value in self._imports.items()
-            if now - value["created_at"] < 3600
-        }
-        pending: list[tuple[str, dict[str, Any]]] = []
-        seen: set[str] = set()
-        for item in items:
-            if not isinstance(item, dict):
-                return error_response("导入项目格式错误", status_code=400)
-            client_id = str(item.get("client_id") or "")
-            overrides = item.get("overrides", {})
-            if (
-                not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", client_id)
-                or client_id in seen
-            ):
-                return error_response("导入图片标识无效或重复", status_code=400)
-            if (
-                not isinstance(overrides, dict)
-                or len(json.dumps(overrides, ensure_ascii=False)) > 1024 * 1024
-            ):
-                return error_response("补充参数必须是小于 1 MB 的对象", status_code=400)
-            if not isinstance(overrides.get("parameters", {}), dict):
-                return error_response("补充参数 parameters 必须是对象", status_code=400)
-            if merge_target_id and "generation_engine" in overrides:
-                try:
-                    if (
-                        self._import_merge_engine(overrides["generation_engine"])
-                        != expected_engine
-                    ):
-                        raise ValueError(
-                            f"图片 {item.get('filename') or client_id} 的生图来源与本批合并来源不一致"
-                        )
-                except ValueError as exc:
-                    return error_response(str(exc), status_code=400)
-            seen.add(client_id)
-            pending.append(
-                (
-                    uuid.uuid4().hex,
-                    {
-                        "client_id": client_id,
-                        "sha256": hashes_by_id[client_id],
-                        "created_at": now,
-                        "filename": str(item.get("filename") or "import.png")[:240],
-                        "overrides": copy.deepcopy(overrides),
-                    },
-                )
-            )
-        if len(self._imports) + len(pending) > 500:
-            return error_response(
-                "待上传项目过多，请完成已有上传后重试", status_code=429
-            )
-        if as_group:
-            models = [item["overrides"].get("model") for _, item in pending]
-            if any(not isinstance(model, str) or not model.strip() for model in models):
-                return error_response(
-                    "作为图组导入时，每张图片都必须填写模型", status_code=400
-                )
-            if len({model.strip() for model in models}) != 1:
-                details = "；".join(
-                    f"{item['filename']}：{model.strip()}"
-                    for (_, item), model in zip(pending, models)
-                )
-                return error_response(
-                    f"图组中的模型必须相同，当前模型不一致：{details}", status_code=400
-                )
-        group_id = uuid.uuid4().hex
-        directory = self.store.imports_dir / group_id
-        await asyncio.to_thread(directory.mkdir, parents=True, exist_ok=False)
-        for ordinal, (token, item) in enumerate(pending):
-            item.update(
-                group_id=group_id,
-                path=directory / f"{ordinal:03d}-{token}.image",
-                uploaded=False,
-            )
-            if as_group:
-                item["overrides"]["model"] = item["overrides"]["model"].strip()
-        self._import_groups[group_id] = {
-            "created_at": now,
-            "directory": directory,
-            "items": pending,
-            "lock": asyncio.Lock(),
-            "result": None,
-            "merge_target_id": merge_target_id,
-            "expected_engine": expected_engine,
-            "mode": "merge" if merge_target_id else "group" if as_group else "separate",
-        }
-        group_response = {
-            "allowed": True,
-            "group_id": group_id,
-            "commit_endpoint": f"imports/group/{group_id}/commit",
-            "cancel_endpoint": f"imports/group/{group_id}/cancel",
-        }
-        self._imports.update(pending)
-        return json_response(
-            {
-                **group_response,
-                "items": [
-                    {
-                        "client_id": item["client_id"],
-                        "upload_endpoint": f"imports/upload/{token}",
-                    }
-                    for token, item in pending
-                ],
-            }
-        )
+        return await self._import_api()._api_import_prepare()
 
     async def _api_import_upload(self, upload_id: str) -> Any:
-        item = self._imports.get(upload_id)
-        if item is None or time.time() - item["created_at"] >= 3600:
-            self._imports.pop(upload_id, None)
-            return error_response("导入准备已过期，请重试上传", status_code=410)
-        files = await web_request.files()
-        upload = files.get("file")
-        if upload is None:
-            return error_response("缺少图片文件", status_code=400)
-        limit = 30 * 1024 * 1024
-        if upload.content_length is not None and upload.content_length > limit:
-            return error_response("导入图片不能超过 30 MB", status_code=400)
-        raw = await upload.read(limit + 1)
-        if not raw or len(raw) > limit:
-            return error_response("图片为空或超过 30 MB", status_code=400)
-        actual_digest = hashlib.sha256(raw).hexdigest()
-        if actual_digest != item["sha256"]:
-            return json_response(
-                {
-                    "allowed": False,
-                    "code": "hash_mismatch",
-                    "client_id": item["client_id"],
-                    "expected_sha256": item["sha256"],
-                    "actual_sha256": actual_digest,
-                    "message": "上传图片内容与查重时不一致，请重新选择或上传原图片",
-                }
-            )
-        if item.get("group_id"):
-            group = self._import_groups.get(item["group_id"])
-            if group is None:
-                return error_response("导入批次已过期或取消，请重试", status_code=410)
-            async with group["lock"]:
-                if self._import_groups.get(item["group_id"]) is not group:
-                    return error_response("导入批次已取消，请重试", status_code=410)
-                if group["result"] is not None:
-                    return json_response(
-                        {
-                            "allowed": True,
-                            "uploaded": True,
-                            "group_id": item["group_id"],
-                            "committed": True,
-                        }
-                    )
-                try:
-                    await self.store.stage_import_file(item["path"], raw)
-                    item["uploaded"] = True
-                    return json_response(
-                        {
-                            "allowed": True,
-                            "uploaded": True,
-                            "group_id": item["group_id"],
-                            "client_id": item["client_id"],
-                        }
-                    )
-                except ValueError as exc:
-                    return error_response(str(exc), status_code=400)
-                except OSError:
-                    return error_response(
-                        "图片暂存失败，请检查磁盘空间后重试", status_code=500
-                    )
-        return error_response("导入批次不存在，请重新选择图片", status_code=410)
+        return await self._import_api()._api_import_upload(upload_id)
 
     async def _expire_import_groups(self) -> None:
-        now = time.time()
-        for group_id, group in list(self._import_groups.items()):
-            if now - group["created_at"] >= 3600:
-                async with group["lock"]:
-                    await self._discard_import_group(group_id, group)
-
-    async def _discard_import_group(self, group_id: str, group: dict[str, Any]) -> None:
-        """Remove only this server-created import staging directory."""
-        directory = group["directory"]
-        if (
-            directory.parent.resolve() != self.store.imports_dir.resolve()
-            or directory.name != group_id
-        ):
-            raise ValueError("图组暂存路径无效")
-        if directory.exists():
-            try:
-                await asyncio.to_thread(shutil.rmtree, directory)
-            except FileNotFoundError:
-                pass
-        for token, _ in group["items"]:
-            self._imports.pop(token, None)
-        self._import_groups.pop(group_id, None)
+        return await self._import_api()._expire_import_groups()
 
     async def _api_import_group_cancel(self, group_id: str) -> Any:
-        group = self._import_groups.get(group_id)
-        if group is not None:
-            async with group["lock"]:
-                await self._discard_import_group(group_id, group)
-        return json_response({"cancelled": True})
-
-    @staticmethod
-    def _import_batch_result(saved: dict[str, Any]) -> dict[str, Any]:
-        return {
-            **saved,
-            "allowed": True,
-            "merged": saved["mode"] == "merge",
-            "added_count": saved["added"],
-        }
+        return await self._import_api()._api_import_group_cancel(group_id)
 
     async def _api_import_group_commit(self, group_id: str) -> Any:
-        if not re.fullmatch(r"[a-f0-9]{32}", group_id):
-            return error_response("导入批次 ID 无效", status_code=400)
-        group = self._import_groups.get(group_id)
-        if group is None or time.time() - group["created_at"] >= 3600:
-            previous = await self.store.get_import_batch_result(
-                f"import_batch:{group_id}"
-            )
-            if previous is not None:
-                return json_response(self._import_batch_result(previous))
-            return error_response("导入批次已过期或取消，请重试", status_code=410)
-        async with group["lock"]:
-            if (
-                self._import_groups.get(group_id) is not group
-                or time.time() - group["created_at"] >= 3600
-            ):
-                return error_response("导入批次已过期或取消，请重试", status_code=410)
-            if group["result"] is not None:
-                return json_response(group["result"])
-            missing = [
-                item["filename"] for _, item in group["items"] if not item["uploaded"]
-            ]
-            if missing:
-                return error_response(
-                    f"本批尚有图片未上传：{'、'.join(missing)}", status_code=400
-                )
-            try:
-                saved = await self.store.commit_import_batch(
-                    [item for _, item in group["items"]],
-                    import_key=f"import_batch:{group_id}",
-                    mode=group["mode"],
-                    target_id=group.get("merge_target_id", ""),
-                    expected_engine=group.get("expected_engine", ""),
-                    preview_max_edge=self._settings.asset_preview_max_edge,
-                    preview_quality=self._settings.asset_preview_quality,
-                )
-                result = self._import_batch_result(saved)
-            except ImportDuplicateError as exc:
-                await self._discard_import_group(group_id, group)
-                return json_response(exc.as_dict())
-            except ValueError as exc:
-                await self._discard_import_group(group_id, group)
-                return error_response(str(exc), status_code=400)
-            except OSError:
-                return error_response(
-                    "导入保存失败，请检查磁盘空间后重试", status_code=500
-                )
-            group["result"] = result
-            for token, _ in group["items"]:
-                self._imports.pop(token, None)
-            group["items"] = []
-            # A lost response can retry the commit, without keeping another copy of the images.
-            try:
-                await asyncio.to_thread(shutil.rmtree, group["directory"])
-            except OSError:
-                logger.warning("%s 导入批次已保存，暂存目录将由维护任务清理", LOG_TAG)
-            return json_response(result)
+        return await self._import_api()._api_import_group_commit(group_id)
 
     async def _api_resolve_parameters(self) -> Any:
-        body = await web_request.json(default={})
-        if not isinstance(body, dict) or not isinstance(body.get("content"), str):
-            return error_response("请粘贴参数文本", status_code=400)
-        if len(body["content"]) > 4 * 1024 * 1024:
-            return error_response("参数文本不能超过 4 MB", status_code=400)
-        try:
-            result = await asyncio.to_thread(
-                resolve_parameters,
-                body["content"],
-                self._settings,
-                str(body.get("model_ref") or ""),
-                for_reproduction=body.get("for_reproduction") is True,
-            )
-            return json_response(result)
-        except ValueError as exc:
-            return error_response(str(exc), status_code=400)
+        return await self._import_api()._api_resolve_parameters()
 
     async def _api_gallery_import_edit(self, generation_id: str) -> Any:
-        try:
-            if web_request.method == "GET":
-                if "output_node_id" in web_request.query:
-                    return json_response(
-                        await self.store.project_import_edit_image(
-                            generation_id,
-                            str(web_request.query.get("image_id", "")),
-                            str(web_request.query.get("item_revision", "")),
-                            str(web_request.query.get("output_node_id", "")),
-                        )
-                    )
-                return json_response(
-                    await self.store.import_edit_snapshot(
-                        generation_id,
-                        light=str(web_request.query.get("light", "")).lower()
-                        in {"1", "true", "yes"},
-                        image_id=str(web_request.query.get("image_id", "")),
-                        item_revision=str(web_request.query.get("item_revision", "")),
-                        include_preview=str(
-                            web_request.query.get("include_preview", "1")
-                        ).lower()
-                        not in {"0", "false", "no"},
-                    )
-                )
-            body = await web_request.json(default={})
-            if not isinstance(body, dict) or set(body) != {"revision", "items"}:
-                raise ValueError("编辑请求必须包含 revision 和 items")
-            return json_response(
-                await self.store.edit_import(
-                    generation_id, body["revision"], body["items"]
-                )
-            )
-        except ImportEditConflictError as exc:
-            return error_response(str(exc), status_code=409)
-        except LookupError as exc:
-            return error_response(str(exc), status_code=404)
-        except (ValueError, TypeError, OverflowError, RecursionError) as exc:
-            return error_response(str(exc), status_code=400)
+        return await self._import_api()._api_gallery_import_edit(generation_id)
 
     async def _api_gallery_parameters(self, generation_id: str) -> Any:
-        image_id = str(web_request.query.get("image_id") or "")
-        try:
-            detail = await self.store.generation_image_context(generation_id, image_id)
-            if detail is None:
-                return error_response("生成记录不存在", status_code=404)
-            result = export_parameters(
-                detail,
-                image_id,
-                str(web_request.query.get("format") or "studio"),
-            )
-            return json_response(result)
-        except ValueError as exc:
-            return error_response(str(exc), status_code=400)
+        return await self._import_api()._api_gallery_parameters(generation_id)
 
     async def _api_gallery_favorite(self) -> Any:
-        body = await web_request.json(default={})
-        if isinstance(body, dict) and "generation_ids" in body:
-            if body.get("action") != "toggle":
-                return error_response("批量收藏操作必须为 toggle", status_code=400)
-            try:
-                return json_response(
-                    await self.store.toggle_favorites(body["generation_ids"])
-                )
-            except ExternalPermissionError as exc:
-                return error_response(str(exc), status_code=403)
-            except ValueError as exc:
-                return error_response(str(exc), status_code=400)
-        if not isinstance(body, dict) or not isinstance(body.get("favorite"), bool):
-            return error_response("收藏状态必须是布尔值", status_code=400)
-        try:
-            result = await self.store.set_favorite(
-                str(body.get("generation_id") or ""), body["favorite"]
-            )
-            return json_response(result)
-        except ExternalPermissionError as exc:
-            return error_response(str(exc), status_code=403)
-        except ValueError as exc:
-            return error_response(str(exc), status_code=400)
+        return await self._gallery_api()._api_gallery_favorite()
 
     async def _api_gallery_favorite_status(self) -> Any:
-        body = await web_request.json(default={})
-        if not isinstance(body, dict):
-            return error_response("请求体必须是 JSON 对象", status_code=400)
-        try:
-            return json_response(
-                await self.store.favorite_status(body.get("generation_ids"))
-            )
-        except ValueError as exc:
-            return error_response(str(exc), status_code=400)
+        return await self._gallery_api()._api_gallery_favorite_status()
 
     async def _api_gallery_delete_images(self) -> Any:
-        body = await web_request.json(default={})
-        if not isinstance(body, dict) or not isinstance(body.get("image_ids"), list):
-            return error_response("请选择需要删除的图片", status_code=400)
-        if not 1 <= len(body["image_ids"]) <= 100:
-            return error_response("请选择 1 至 100 张图片", status_code=400)
-        try:
-            preview = await self.store.external_action_preview(
-                [str(body.get("generation_id") or "")], "delete"
-            )
-            if not preview["allowed"]:
-                return error_response(
-                    "；".join(item["message"] for item in preview["denied"]),
-                    status_code=403,
-                )
-            if preview["external_count"] and body.get("confirm_external") is not True:
-                return error_response(
-                    "本次删除包含外部资源，将删除来源插件中的原图，请确认后重试",
-                    status_code=409,
-                )
-            result = await self.store.delete_images(
-                str(body.get("generation_id") or ""), body["image_ids"]
-            )
-            return json_response(result)
-        except ExternalDeleteError as exc:
-            details = exc.as_dict()
-            if details.get("generation_deleted"):
-                return json_response(
-                    {
-                        "deleted": body["image_ids"],
-                        "remaining": 0,
-                        "generation_deleted": True,
-                        "errors": [details],
-                    }
-                )
-            return error_response(str(exc), status_code=409)
-        except ExternalPermissionError as exc:
-            return error_response(str(exc), status_code=403)
-        except ValueError as exc:
-            return error_response(str(exc), status_code=400)
+        return await self._gallery_api()._api_gallery_delete_images()
 
     async def _api_storage_maintenance(self) -> Any:
-        body = await web_request.json(default={})
-        if not isinstance(body, dict):
-            return error_response("请求体必须是 JSON 对象", status_code=400)
-        report = await self.store.run_maintenance(
-            self._settings.history,
-            preview_max_edge=self._settings.asset_preview_max_edge,
-            preview_quality=self._settings.asset_preview_quality,
-            deep=bool(body.get("deep", False)),
-        )
-        return json_response(report)
+        return await self._gallery_api()._api_storage_maintenance()
 
     async def _api_upload_reference(self) -> Any:
-        files = await web_request.files()
-        upload = files.get("file")
-        if upload is None:
-            return error_response("缺少参考图文件", status_code=400)
-        if (
-            upload.content_length is not None
-            and upload.content_length > 20 * 1024 * 1024
-        ):
-            return error_response("参考图不能超过 20 MB", status_code=400)
-        raw = await upload.read()
-        mime_type = detect_mime_type(raw, str(upload.content_type or ""))
-        if not raw or mime_type not in {
-            "image/png",
-            "image/jpeg",
-            "image/webp",
-            "image/gif",
-        }:
-            return error_response("仅支持 PNG、JPEG、WebP 或 GIF 图片", status_code=400)
-        try:
-            data = await self.store.stage_reference(
-                filename=str(upload.filename or "reference"),
-                content=raw,
-                mime_type=mime_type,
-            )
-        except ValueError as exc:
-            return error_response(str(exc), status_code=400)
-        return json_response(data)
+        return await self._generation_api()._api_upload_reference()
 
     async def _api_generate(self) -> Any:
-        body = await web_request.json(default={})
-        if not isinstance(body, dict):
-            return error_response("请求体必须是 JSON 对象", status_code=400)
-        try:
-            references = await self._service_or_raise().staged_references(
-                body.get("reference_ids")
-            )
-            result = await self._service_or_raise().generate(
-                mode=str(body.get("mode") or "text2img"),
-                provider_id=str(body.get("provider_id") or ""),
-                prompt=str(body.get("prompt") or ""),
-                negative_prompt=str(body.get("negative_prompt") or ""),
-                model_ref=str(body.get("model_ref") or ""),
-                model=str(body.get("model") or ""),
-                size=str(body.get("size") or ""),
-                count=body.get("count"),
-                parameters=body.get("parameters"),
-                references=references,
-                source="webui",
-            )
-        except (ValueError, ProviderError) as exc:
-            return error_response(str(exc), status_code=400)
-        download_detail = (
-            await self.store.generation_detail(
-                result.generation_id, include_assets=False
-            )
-            if result.generation_id
-            else None
-        )
-        return json_response(_result_payload(result, download_detail=download_detail))
+        return await self._generation_api()._api_generate()
 
     async def _api_test_model(self) -> Any:
-        body = await web_request.json(default={})
-        if not isinstance(body, dict) or not isinstance(body.get("provider"), dict):
-            return error_response("需要服务商配置", status_code=400)
-        provider = ImageProvider.from_mapping(body["provider"])
-        model_id = str(body.get("model_id") or "").strip()
-        test_model = next(
-            (item for item in provider.models if item.id == model_id), None
-        )
-        if not provider.id or not provider.base_url or test_model is None:
-            return error_response(
-                "服务商需要 id、base_url 和有效的测试模型", status_code=400
-            )
-        if not test_model.text2img:
-            return error_response(
-                "当前模型仅支持图生图，无法进行无参考图测试", status_code=400
-            )
-        try:
-            result = await self._service_or_raise().run_provider_request(
-                provider,
-                self._test_request(provider, test_model.id),
-            )
-        except (ValueError, ProviderError) as exc:
-            return error_response(str(exc), status_code=400)
-        return json_response(
-            {
-                "ok": True,
-                "image_count": len(result),
-                "preview_data_url": image_data_url(result[0].data, result[0].mime_type),
-            }
-        )
+        return await self._generation_api()._api_test_model()
 
     async def _api_provider_models(self) -> Any:
-        body = await web_request.json(default={})
-        if not isinstance(body, dict) or not isinstance(body.get("provider"), dict):
-            return error_response("需要服务商配置", status_code=400)
-        try:
-            provider = ImageProvider.from_mapping(body["provider"])
-            if not provider.id or not provider.base_url:
-                return error_response("服务商需要 id 和 base_url", status_code=400)
-            models = await self._service_or_raise().executor.discover_models(provider)
-        except (ValueError, ProviderError) as exc:
-            return error_response(str(exc), status_code=400)
-        return json_response({"models": models, "provider_id": provider.id})
+        return await self._generation_api()._api_provider_models()
 
     async def _api_provider_quota(self) -> Any:
-        provider_id = str(web_request.query.get("provider_id", "")).strip()
-        if not provider_id:
-            return error_response("请选择要查询的 NAI 服务商", status_code=400)
-        provider = self._settings.provider(provider_id)
-        if provider is None:
-            return error_response("服务商不存在或未启用", status_code=404)
-        if provider.kind != "nai_direct":
-            return error_response("当前服务商不支持额度查询", status_code=400)
-        if not provider.api_key.strip():
-            return error_response("NAI 服务商尚未配置密钥", status_code=400)
-        if self._service is None:
-            return error_response(
-                "Image Studio 正在初始化，请稍后重试", status_code=503
-            )
-        try:
-            quota = await self._service.executor.fetch_quota(provider)
-        except ProviderError as exc:
-            return error_response(str(exc), status_code=502)
-        response = json_response({"provider_id": provider.id, **quota})
-        response.headers["Cache-Control"] = "no-store"
-        return response
+        return await self._generation_api()._api_provider_quota()
 
     def _test_request(self, provider: ImageProvider, model_id: str):
-        from .models import GenerationRequest
-
-        model = provider.get_model(model_id)
-        size = "竖图" if provider.kind == "nai_direct" else "1024x1024"
-        parameters: dict[str, Any] = {}
-        for name, descriptor in model.active_parameters.items():
-            if descriptor.get("ui_only") or "default" not in descriptor:
-                continue
-            request_key = str(descriptor.get("request_key") or name)
-            if request_key == "size":
-                size = str(descriptor["default"])
-            elif request_key in {"count", "n"}:
-                continue
-            else:
-                parameters[request_key] = descriptor["default"]
-        return GenerationRequest(
-            mode="text2img",
-            provider_id=provider.id,
-            prompt="A simple landscape photograph with one tree and clear daylight.",
-            negative_prompt=model.negative_prompt_default,
-            model=model.id,
-            size=size,
-            count=1,
-            parameters=parameters,
-            source="webui",
-            native_batch_size=model.native_batch_size,
-            max_concurrent_requests=model.max_concurrent_requests,
-        )
-
-    @staticmethod
-    def _gallery_request_filters() -> dict[str, Any]:
-        filters = {
-            "query": web_request.query.get("query", ""),
-            "provider_id": web_request.query.get("provider_id", ""),
-            "mode": web_request.query.get("mode", ""),
-            "source": web_request.query.get("source", ""),
-            "generation_engine": web_request.query.get("generation_engine", ""),
-            "favorite": web_request.query.get("favorite", ""),
-            "sort": web_request.query.get("sort", "created"),
-            "limit": web_request.query.get("limit", 24),
-            "offset": web_request.query.get("offset", 0),
-        }
-        for key in ("provider_ids", "modes", "sources", "generation_engines"):
-            if key in web_request.query:
-                filters[key] = web_request.query.get(key)
-        return filters
+        return GenerationAPI._test_request(provider, model_id)
 
     async def _api_gallery_list(self) -> Any:
-        try:
-            payload = await self.store.list_generations(self._gallery_request_filters())
-        except ValueError as exc:
-            return error_response(str(exc), status_code=400)
-        retention = await self.store.gallery_retention_status(self._settings.history)
-        candidates = set(retention.get("candidate_ids", []))
-        for item in payload["items"]:
-            item["cleanup_warning"] = item["id"] in candidates
-        payload["retention"] = retention
-        return json_response(payload)
+        return await self._gallery_api()._api_gallery_list()
 
     async def _api_gallery_detail(self, generation_id: str) -> Any:
-        light = str(web_request.query.get("light", "")).lower() in {"1", "true", "yes"}
-        revision = await self.store.gallery_revision() if light else ""
-        include_assets = str(web_request.query.get("assets", "1")).lower() not in {
-            "0",
-            "false",
-            "no",
-        }
-        detail = await self.store.generation_detail(
-            generation_id,
-            include_assets=include_assets,
-            light=light,
-        )
-        if detail is None:
-            return error_response("生成记录不存在", status_code=404)
-        if light:
-            detail["gallery_revision"] = revision
-        return json_response(detail)
+        return await self._gallery_api()._api_gallery_detail(generation_id)
 
     async def _api_gallery_assets(self, generation_id: str) -> Any:
-        detail = await self.store.generation_detail(generation_id, include_assets=True)
-        if detail is None:
-            return error_response("生成记录不存在", status_code=404)
-        return json_response(
-            {"images": detail["images"], "references": detail["references"]}
-        )
+        return await self._gallery_api()._api_gallery_assets(generation_id)
 
     async def _api_gallery_image_sequence(self) -> Any:
-        try:
-            revision = await self.store.gallery_revision()
-            items = await self.store.gallery_image_sequence(
-                self._gallery_request_filters()
-            )
-        except ValueError as exc:
-            return error_response(str(exc), status_code=400)
-        return json_response(
-            {"items": items, "total": len(items), "revision": revision}
-        )
+        return await self._gallery_api()._api_gallery_image_sequence()
 
     async def _api_gallery_image(self, image_id: str) -> Any:
-        detail = str(web_request.query.get("detail", "preview")).strip().lower()
-        if detail not in {"preview", "original"}:
-            return error_response(
-                "图片读取方式仅支持 preview 或 original", status_code=400
-            )
-        image = await self.store.gallery_image_data(image_id, detail=detail)
-        if image is None:
-            return error_response("生成图片不存在", status_code=404)
-        return json_response(image)
+        return await self._gallery_api()._api_gallery_image(image_id)
 
     async def _api_gallery_image_download(self, image_id: str) -> Any:
-        try:
-            image = await self.store.gallery_image_file(image_id)
-        except ValueError as exc:
-            return error_response(str(exc), status_code=403)
-        if image is None:
-            return error_response("生成图片不存在", status_code=404)
-        path, mime_type, filename = image
-        return file_response(path, filename=filename, content_type=mime_type)
+        return await self._gallery_api()._api_gallery_image_download(image_id)
 
     async def _api_gallery_image_info(self, image_id: str) -> Any:
-        image = await self.store.gallery_image_info(
-            image_id,
-            include_preview=str(web_request.query.get("include_preview", "1")).lower()
-            not in {"0", "false", "no"},
-        )
-        if image is None:
-            return error_response("生成图片不存在", status_code=404)
-        return json_response(image)
+        return await self._gallery_api()._api_gallery_image_info(image_id)
 
     async def _api_gallery_reference_image(self, reference_id: str) -> Any:
-        image = await self.store.gallery_reference_image(reference_id)
-        if image is None:
-            return error_response("参考图片不存在", status_code=404)
-        return json_response(image)
+        return await self._gallery_api()._api_gallery_reference_image(reference_id)
 
     async def _api_gallery_reproduce(self, generation_id: str) -> Any:
-        try:
-            body = await web_request.json(default={})
-            image_id = str(body.get("image_id") or "") if isinstance(body, dict) else ""
-            plan = await self._service_or_raise().reproduction_plan(
-                generation_id, image_id
-            )
-        except ValueError as exc:
-            return error_response(str(exc), status_code=404)
-        return json_response(plan)
+        return await self._gallery_api()._api_gallery_reproduce(generation_id)
 
     async def _api_gallery_delete(self) -> Any:
-        body = await web_request.json(default={})
-        ids = body.get("ids") if isinstance(body, dict) else []
-        if not isinstance(ids, list) or not 1 <= len(ids) <= 200:
-            return error_response("请选择 1 至 200 条生成记录", status_code=400)
-        try:
-            preview = await self.store.external_action_preview(ids, "delete")
-        except ValueError as exc:
-            return error_response(str(exc), status_code=400)
-        if not preview["allowed"]:
-            return error_response(
-                "；".join(item["message"] for item in preview["denied"]),
-                status_code=403,
-            )
-        if preview["external_count"] and body.get("confirm_external") is not True:
-            return error_response(
-                "本次删除包含外部资源，将删除来源插件中的原图，请确认后重试",
-                status_code=409,
-            )
-        try:
-            return json_response(await self.store.delete_generations(ids))
-        except ValueError as exc:
-            return error_response(str(exc), status_code=403)
+        return await self._gallery_api()._api_gallery_delete()
 
     async def _api_gallery_delete_preview(self) -> Any:
-        body = await web_request.json(default={})
-        if not isinstance(body, dict):
-            return error_response("请求体必须是 JSON 对象", status_code=400)
-        action = str(body.get("action") or "delete")
-        limit = 1000 if action == "favorite" else 200
-        if not isinstance(body.get("ids"), list) or not 1 <= len(body["ids"]) <= limit:
-            return error_response(f"请选择 1 至 {limit} 条生成记录", status_code=400)
-        try:
-            return json_response(
-                await self.store.external_action_preview(body.get("ids"), action)
-            )
-        except ValueError as exc:
-            return error_response(str(exc), status_code=400)
+        return await self._gallery_api()._api_gallery_delete_preview()
 
     async def _api_reference_delete(self) -> Any:
-        body = await web_request.json(default={})
-        reference_id = (
-            str(body.get("reference_id") or "") if isinstance(body, dict) else ""
-        )
-        if not await self.store.delete_reference(reference_id):
-            return error_response("参考图不存在或已删除", status_code=404)
-        return json_response({"reference_id": reference_id})
+        return await self._gallery_api()._api_reference_delete()
 
     async def _api_gallery_export(self) -> Any:
-        body = await web_request.json(default={})
-        ids = body.get("ids") if isinstance(body, dict) else []
-        if not isinstance(ids, list):
-            return error_response("ids 必须是列表", status_code=400)
-        try:
-            path = await self.store.export_generations(
-                [str(item or "") for item in ids]
-            )
-        except ExternalPermissionError as exc:
-            return error_response(str(exc), status_code=403)
-        except ValueError as exc:
-            return error_response(str(exc), status_code=400)
-        await self.store.cleanup_exports()
-        export_id = uuid.uuid4().hex
-        self._exports[export_id] = (path, time.time())
-        return json_response(
-            {"download_endpoint": f"gallery/export/{export_id}", "filename": path.name}
-        )
+        return await self._gallery_api()._api_gallery_export()
 
     async def _api_download_export(self, export_id: str) -> Any:
-        item = self._exports.get(export_id)
-        if item is None:
-            return error_response("导出文件已过期，请重新导出", status_code=404)
-        path, created_at = item
-        if time.time() - created_at > 3600 or not path.is_file():
-            self._exports.pop(export_id, None)
-            await asyncio.to_thread(_remove_export_file, path)
-            return error_response("导出文件已过期，请重新导出", status_code=404)
-        response = file_response(
-            path,
-            filename=path.name,
-            content_type="application/zip",
-        )
-        self._exports.pop(export_id, None)
-        response.background = BackgroundTask(_remove_export_file, path)
-        return response
+        return await self._gallery_api()._api_download_export(export_id)
 
     @filter.command("image_gen", alias={"img"})
     async def image_gen(self, event: AstrMessageEvent):
         """Generate one or more images through the configured default provider."""
 
-        try:
-            options = _parse_command(str(event.message_str or ""))
-            if options["help"]:
-                yield event.plain_result(COMMAND_HELP)
-                return
-            service = self._service_or_raise()
-            mode = options["mode"]
-            explicit_text = options["mode_explicit"] and mode.strip().lower() in {
-                "text2img",
-                "text",
-                "txt2img",
-            }
-            sources = (
-                []
-                if explicit_text
-                else await self._command_reference_sources(
-                    event, options["reference_paths"]
-                )
-            )
-            if not options["mode_explicit"] and sources:
-                mode = "img2img"
-            _, selected_model = service.resolve_command_model(
-                mode=mode, provider_id=options["provider_id"], model=options["model"]
-            )
-            references = (
-                await self._event_references(
-                    event,
-                    ordered_sources=sources,
-                    max_images=selected_model.max_reference_images,
-                )
-                if sources
-                else ()
-            )
-            if (
-                not explicit_text
-                and (options["mode_explicit"] or sources)
-                and not references
-            ):
-                raise ValueError(
-                    "图生图未读取到可用参考图，请附带图片、引用含图消息或填写 --ref"
-                )
-            result = await service.generate(
-                mode=mode,
-                provider_id=options["provider_id"],
-                prompt=options["prompt"],
-                negative_prompt=options["negative_prompt"],
-                model=options["model"],
-                size=options["size"],
-                count=options["count"],
-                parameters=options["parameters"],
-                references=references,
-                source="command",
-                invocation_source=(
-                    _invocation_source(event)
-                    if self._settings.history.record_invocation_identity
-                    else None
-                ),
-            )
-        except (ValueError, ProviderError) as exc:
-            yield event.plain_result(f"生图失败：{exc}")
-            return
-        message = f"已生成 {len(result.images)} 张图片"
-        if result.warning:
-            message += f"\n{result.warning}"
-        chain: list[Any] = [Plain(message)]
-        chain.extend(Image.fromBytes(image.data) for image in result.images)
-        yield event.chain_result(chain)
+        async for result in run_image_command(
+            event,
+            get_service=self._service_or_raise,
+            get_settings=lambda: self._settings,
+            resolve_sources=self._command_reference_sources,
+            resolve_references=self._event_references,
+            invocation_source=_invocation_source,
+        ):
+            yield result
 
     async def _command_reference_sources(
         self, event: AstrMessageEvent, explicit_references: list[str]
@@ -1718,17 +461,41 @@ class ImageStudioPlugin(Star):
         include_event_references: bool = True,
         ordered_sources: list[tuple[Any, bool]] | None = None,
         max_images: int = 8,
+        reject_excess: bool = False,
     ) -> tuple[Any, ...]:
+        def limit_error() -> ValueError:
+            return ValueError(
+                f"当前模型/工具最多允许 {max_images} 张参考图；请减少输入，避免底图、蒙版与角色参考编号错位"
+            )
+
+        # Explicit entries have positional meaning, including duplicate images
+        # assigned to different NovelAI roles. Validate their count before I/O.
+        required_count = (
+            sum(required for _, required in ordered_sources)
+            if ordered_sources is not None
+            else len(explicit_references or [])
+        )
+        if reject_excess and required_count > max_images:
+            raise limit_error()
         service = self._service_or_raise()
         references: list[Any] = []
         seen: set[str] = set()
+        # Automatic discovery can encounter aliases for the same image. Read
+        # one additional unique image to detect overflow after deduplication.
+        read_limit = max_images + int(reject_excess)
+
+        def result() -> tuple[Any, ...]:
+            if reject_excess and len(references) > max_images:
+                raise limit_error()
+            return tuple(references[:max_images])
+
         workspace_root = await _event_workspace_root(
             event,
             getattr(self, "context", None),
         )
 
         async def append_reference(raw_ref: str, *, required: bool = False) -> bool:
-            if len(references) >= max_images:
+            if len(references) >= read_limit:
                 return True
             try:
                 reference = await service.reference_from_media_ref(
@@ -1749,14 +516,14 @@ class ImageStudioPlugin(Star):
                     raise ValueError("显式参考图不存在或不是有效图片")
                 return False
             digest = hashlib.sha256(reference.data).hexdigest()
-            if digest not in seen:
+            if required or digest not in seen:
                 seen.add(digest)
                 references.append(reference)
             return True
 
         if ordered_sources is not None:
             for source, required in ordered_sources:
-                if len(references) >= max_images:
+                if len(references) >= read_limit:
                     break
                 if isinstance(source, Image):
                     try:
@@ -1767,9 +534,9 @@ class ImageStudioPlugin(Star):
                         )
                         continue
                 await append_reference(str(source or ""), required=required)
-            return tuple(references)
+            return result()
 
-        for item in (explicit_references or [])[:8]:
+        for item in (explicit_references or [])[:read_limit]:
             if isinstance(item, dict):
                 asset_id = str(item.get("asset_id") or "").strip().lower()
                 path = str(item.get("path") or "").strip()
@@ -1789,22 +556,21 @@ class ImageStudioPlugin(Star):
                         )
                     image, internal_path = loaded
                     digest = hashlib.sha256(image.data).hexdigest()
-                    if digest not in seen:
-                        seen.add(digest)
-                        references.append(
-                            ReferenceImage(
-                                id=f"asset-{asset_id[:24]}",
-                                filename=Path(internal_path).name,
-                                data=image.data,
-                                mime_type=image.mime_type,
-                            )
+                    seen.add(digest)
+                    references.append(
+                        ReferenceImage(
+                            id=f"asset-{asset_id[:24]}",
+                            filename=Path(internal_path).name,
+                            data=image.data,
+                            mime_type=image.mime_type,
                         )
+                    )
                     continue
                 await append_reference(path, required=True)
                 continue
             await append_reference(str(item or ""), required=True)
         if not include_event_references:
-            return tuple(references[:8])
+            return result()
         message_chain = event.get_messages() if hasattr(event, "get_messages") else []
         for component in _iter_event_images(message_chain):
             try:
@@ -1831,7 +597,7 @@ class ImageStudioPlugin(Star):
             await append_reference(raw_ref)
         for raw_ref in _provider_request_image_refs(event):
             await append_reference(raw_ref)
-        return tuple(references[:8])
+        return result()
 
     @filter.on_llm_request()
     async def inject_agent_workflow_prompt(
@@ -1915,218 +681,49 @@ class ImageStudioPlugin(Star):
         event: AstrMessageEvent,
         query_type: str = "default",
         mode: str = "",
-        model_ref: str = "",
+        model_refs: list[str] | None = None,
+        query: str = "",
+        provider_id: str = "",
+        provider_kind: str = "",
+        limit: int = 10,
+        offset: int = 0,
     ) -> mcp.types.CallToolResult:
         """使用 image_studio_generate 工具前必须先调用本工具查询模型能力。
 
+        search/providers 只返回候选摘要；选定后使用 model 和 model_refs 获取完整参数。
+        default/all/model 返回完整能力，可按成功结果直接生成。
+
         Args:
-            query_type(string): default(查询默认模型参数)/all(查询全部模型参数)/model(搭配model_ref参数查询指定模型参数); 默认 default
-            mode(string): text2img/img2img; query_type=default 时可省略
-            model_ref(string): provider_id:model_id; 仅在 query_type=model 时使用
+            query_type(string): default(查询默认模型参数)/all(查询全部模型参数)/model(使用model_refs查询指定模型参数)/providers(查询服务商)/search(搜索模型或工作流); 默认 default
+            mode(string): 按 text2img/img2img 筛选；省略时查询两种模式
+            model_refs(array[string]): provider_id:model_id 字符串数组；query_type=model 时必填，各项独立返回成功结果或错误说明
+            query(string): 模型或工作流名称、ID、使用说明，或服务商名称、ID；仅 search/providers 使用，留空列出全部候选
+            provider_id(string): 限定服务商 ID；仅 search/providers 使用
+            provider_kind(string): 限定服务商类型，例如 comfyui；仅 search/providers 使用
+            limit(number): search/providers 每页数量，整数 1 至 50，默认 10
+            offset(number): search/providers 起始位置，非负整数，默认 0
         """
 
-        if not self._settings.enable_llm_tool:
-            return mcp.types.CallToolResult(
-                content=[
-                    mcp.types.TextContent(
-                        type="text", text="Image Studio 的 LLM 生图工具已关闭。"
-                    )
-                ],
-                isError=True,
+        try:
+            payload = query_capabilities(
+                self._settings,
+                query_type=query_type,
+                mode=mode,
+                model_refs=model_refs,
+                query=query,
+                provider_id=provider_id,
+                provider_kind=provider_kind,
+                limit=limit,
+                offset=offset,
             )
-        normalized_mode = str(mode or "").strip().lower()
-        if normalized_mode not in {"", "text2img", "img2img"}:
-            return mcp.types.CallToolResult(
-                content=[
-                    mcp.types.TextContent(
-                        type="text", text="mode 仅支持 text2img 或 img2img。"
-                    )
-                ],
-                isError=True,
+        except ValueError as exc:
+            return _tool_error(str(exc))
+        if payload["query_type"] in {"default", "all", "model"} and payload["models"]:
+            _remember_capability_query(
+                event, self._settings.revision, payload["models"]
             )
-        normalized_query_type = str(query_type or "default").strip().lower()
-        requested_ref = str(model_ref or "").strip()
-        if normalized_query_type != "model" and requested_ref:
-            normalized_query_type = "model"
-        if normalized_query_type not in {"all", "default", "model"}:
-            return _tool_error("query_type 仅支持 all、default 或 model。")
-        requested_refs: set[str] = set()
-        default_modes_by_ref: dict[str, list[str]] = {}
-        if normalized_query_type == "default":
-            target_modes = (
-                (normalized_mode,) if normalized_mode else ("text2img", "img2img")
-            )
-            for target_mode in target_modes:
-                default_ref = self._settings.default_model_ref(target_mode, "llm_tool")
-                if not default_ref:
-                    continue
-                requested_refs.add(default_ref)
-                default_modes_by_ref.setdefault(default_ref, []).append(target_mode)
-            if not requested_refs:
-                return _tool_error(
-                    "当前模式尚未设置默认 LLM 生图模型。"
-                    if normalized_mode
-                    else "尚未设置可用的文生图或图生图默认 LLM 模型。"
-                )
-        elif normalized_query_type == "model" and not requested_ref:
-            return _tool_error("查询指定模型时必须传入 model_ref。")
-        elif normalized_query_type == "model":
-            requested_refs.add(requested_ref)
-        entries: list[dict[str, Any]] = []
-        for provider in self._settings.providers:
-            if not provider.enabled:
-                continue
-            for model in provider.models:
-                if not model.llm_enabled:
-                    continue
-                ref = f"{provider.id}:{model.id}"
-                matched_requested_ref = next(
-                    (
-                        candidate
-                        for candidate in requested_refs
-                        if candidate in {ref, model.id}
-                    ),
-                    "",
-                )
-                if requested_refs and not matched_requested_ref:
-                    continue
-                modes = [
-                    candidate
-                    for candidate, supported in (
-                        ("text2img", model.supports("text2img")),
-                        ("img2img", model.supports("img2img")),
-                    )
-                    if supported
-                ]
-                if normalized_mode and normalized_mode not in modes:
-                    continue
-                default_for_modes = [
-                    candidate
-                    for candidate in default_modes_by_ref.get(
-                        matched_requested_ref or ref, ()
-                    )
-                    if candidate in modes
-                ]
-                if normalized_query_type == "default" and not default_for_modes:
-                    continue
-                query_modes = (
-                    default_for_modes
-                    if normalized_query_type == "default"
-                    else [normalized_mode]
-                    if normalized_mode
-                    else modes
-                )
-                tool = model.tool
-                exposed_parameters: dict[str, Any] = {}
-                configured_parameters = tool.get("parameters")
-                exposed_parameter_names = model.llm_exposed_parameter_names
-                for name, descriptor in model.parameters.items():
-                    # This dedicated field uses tool policy, not model schema.
-                    if name == "negative_prompt":
-                        continue
-                    if name not in exposed_parameter_names:
-                        continue
-                    policy = (
-                        configured_parameters.get(name)
-                        if isinstance(configured_parameters, dict)
-                        else None
-                    )
-                    policy = policy if isinstance(policy, dict) else {}
-                    visible = _llm_parameter_descriptor(descriptor, policy)
-                    if "default_override" in policy:
-                        visible["default"] = policy["default_override"]
-                    exposed_parameters[name] = visible
-                if model.llm_negative_prompt_enabled:
-                    exposed_parameters["negative_prompt"] = _llm_parameter_descriptor(
-                        {
-                            "type": "string",
-                            "description": (
-                                "专用反向提示词，只填写不希望出现在画面中的内容；"
-                                "省略时使用此处的默认值。"
-                            ),
-                            "default": model.llm_negative_prompt_default,
-                        },
-                        model.llm_negative_prompt_policy,
-                    )
-                prompt_profile = tool.get("prompt_profile", "natural_language")
-                prompt_instructions = tool.get("prompt_instructions", "")
-                entry = {
-                    "model_ref": ref,
-                    "provider_name": provider.name,
-                    "model_name": model.name,
-                    "modes": modes,
-                    "query_modes": query_modes,
-                    "max_reference_images": model.llm_max_reference_images,
-                    "selection_description": tool.get("selection_description", ""),
-                    "prompt_contract": {
-                        "format": prompt_profile,
-                        "instruction": prompt_instructions,
-                        "negative_prompt": (
-                            "仅在 parameters 返回该字段时使用。"
-                            if model.llm_negative_prompt_enabled
-                            else "不要传入 negative_prompt。"
-                        ),
-                    },
-                    "parameters": exposed_parameters,
-                }
-                if default_for_modes:
-                    entry["default_for_modes"] = default_for_modes
-                entries.append(entry)
-        for candidate in requested_refs:
-            if ":" in candidate:
-                continue
-            matching_entries = [
-                entry
-                for entry in entries
-                if str(entry.get("model_ref") or "").endswith(f":{candidate}")
-            ]
-            if len(matching_entries) > 1:
-                return _tool_error("模型 ID 不唯一，请使用 provider_id:model_id 查询。")
-        if not entries:
-            return _tool_error(
-                "没有符合条件的模型；模型可能不存在、已停用、不支持该模式或未向 LLM 工具开放。"
-            )
-        _remember_capability_query(event, self._settings.revision, entries)
-        _activate_image_workflow(event)
-        if normalized_query_type == "default":
-            next_action = (
-                "按请求模式选择 default_for_modes；普通画面描述不是能力缺口。满足明确能力则直接生成，"
-                "否则查询相同 mode 的 all。"
-                if not normalized_mode
-                else "普通画面描述不是能力缺口；满足明确能力则直接生成，否则查询相同 mode 的 all。"
-            )
-        elif normalized_query_type == "all":
-            next_action = "选择满足要求的模型直接生成，无需再次 model 查询。"
-        else:
-            next_action = "按 prompt_contract 和 parameters 直接生成。"
-        payload = {
-            "query_type": normalized_query_type,
-            "next_action": next_action,
-            "asset_policy": {
-                "return_mode": self._settings.llm_image_return_mode,
-                "preview_max_edge": self._settings.asset_preview_max_edge,
-                "temporary_retention_hours": WORKFLOW_ASSET_RETENTION_SECONDS // 3600,
-                "temporary_retention_policy": "生成或成功读取后临时保护 1 小时；到期仅允许清理无其他保留关系的图片，不撤销会话访问权限",
-                "access_policy": "当前会话已授权的 asset_id，只要原图仍在即可继续使用；其他会话不能据此访问",
-                "private_asset_handle": "asset_id",
-                "view_tool": "image_studio_view_asset",
-                "delivery_tool": "image_studio_send_output",
-                "temporary_preview_path": "data/temp/tool_images 仅供框架内部视觉预览，不得作为资产路径使用",
-            },
-            "default_model_refs": {
-                "text2img": self._settings.default_model_ref("text2img", "llm_tool"),
-                "img2img": self._settings.default_model_ref("img2img", "llm_tool"),
-            },
-            "models": entries,
-        }
-        return mcp.types.CallToolResult(
-            content=[
-                mcp.types.TextContent(
-                    type="text",
-                    text=json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
-                )
-            ]
-        )
+            _activate_image_workflow(event)
+        return _tool_json(payload)
 
     @filter.llm_tool(name="image_studio_generate")
     async def image_studio_generate(
@@ -2164,6 +761,7 @@ class ImageStudioPlugin(Star):
                 ]
             )
         try:
+            model_ref = _generation_model_ref(model_ref)
             if references is None:
                 explicit_references: list[Any] = []
             elif isinstance(references, (list, tuple)):
@@ -2174,12 +772,30 @@ class ImageStudioPlugin(Star):
             normalized_requested_mode = (
                 _llm_mode(requested_mode) if requested_mode else ""
             )
+            reference_options: dict[str, Any] = {}
+            if normalized_requested_mode != "text2img":
+                try:
+                    reference_provider, reference_model, _ = _select_llm_tool_model(
+                        self._settings, "img2img", model_ref=model_ref
+                    )
+                except ValueError:
+                    # With an omitted mode and no explicit images, retain the
+                    # existing message-image fallback and text-mode inference.
+                    if normalized_requested_mode or explicit_references:
+                        raise
+                else:
+                    if reference_provider.kind in {"novelai_official", "comfyui"}:
+                        reference_options = {
+                            "max_images": reference_model.llm_max_reference_images,
+                            "reject_excess": True,
+                        }
             resolved_references = await self._event_references(
                 event,
                 explicit_references,
                 include_event_references=(
                     not explicit_references and normalized_requested_mode != "text2img"
                 ),
+                **reference_options,
             )
             normalized_mode = normalized_requested_mode or (
                 "img2img" if resolved_references else "text2img"
@@ -2607,6 +1223,24 @@ class ImageStudioPlugin(Star):
         return len(components)
 
 
+def _generation_model_ref(value: Any) -> str:
+    """Normalize accidental singleton arguments without changing the tool schema."""
+
+    if isinstance(value, list):
+        if len(value) != 1 or not isinstance(value[0], str) or not value[0].strip():
+            raise ValueError("model_ref 必须是字符串，例如 provider_id:model_id。")
+        value = value[0]
+    if not isinstance(value, str):
+        raise ValueError("model_ref 必须是字符串，例如 provider_id:model_id。")
+    return value.strip()
+
+
+def _tool_json(payload: dict[str, Any]) -> mcp.types.CallToolResult:
+    return _tool_text_result(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    )
+
+
 def _tool_error(message: str) -> mcp.types.CallToolResult:
     return mcp.types.CallToolResult(
         content=[mcp.types.TextContent(type="text", text=message)], isError=True
@@ -2888,20 +1522,6 @@ def _select_llm_tool_model(
     return matches[0]
 
 
-async def _save_config_async(config: Any) -> None:
-    save = getattr(config, "save_config_async", None)
-    if callable(save):
-        await save()
-        return
-    save = getattr(config, "save_config", None)
-    if callable(save):
-        result = save()
-        if asyncio.iscoroutine(result):
-            await result
-        return
-    raise RuntimeError("当前插件配置对象不支持保存")
-
-
 def _result_payload(
     result, *, download_detail: dict[str, Any] | None = None
 ) -> dict[str, Any]:
@@ -2936,44 +1556,6 @@ def _result_payload(
             for image_index, image in enumerate(result.images, start=1)
         ],
     }
-
-
-def _llm_parameter_descriptor(
-    descriptor: dict[str, Any], policy: dict[str, Any]
-) -> dict[str, Any]:
-    visible = {
-        key: descriptor[key]
-        for key in ("type", "default", "min", "max", "step")
-        if key in descriptor
-    }
-    description = str(
-        policy.get("description")
-        or descriptor.get("description")
-        or descriptor.get("label")
-        or ""
-    )
-    if description:
-        visible["description"] = description
-    choices = descriptor.get("choices")
-    choice_descriptions = policy.get("choice_descriptions")
-    if isinstance(choices, list):
-        visible_choices: list[dict[str, Any]] = []
-        for choice in choices:
-            value = choice.get("value") if isinstance(choice, dict) else choice
-            label = choice.get("label", value) if isinstance(choice, dict) else value
-            choice_description = (
-                choice_descriptions.get(str(value), "")
-                if isinstance(choice_descriptions, dict)
-                else ""
-            )
-            visible_choice = {"value": value}
-            if label != value:
-                visible_choice["label"] = label
-            if choice_description:
-                visible_choice["description"] = choice_description
-            visible_choices.append(visible_choice)
-        visible["choices"] = visible_choices
-    return visible
 
 
 _QUOTED_ATTACHMENT_IMAGE_URL_RE = re.compile(
@@ -3085,121 +1667,6 @@ def _set_event_extra(event: Any, key: str, value: Any) -> None:
         setter(key, value)
     except (AttributeError, KeyError, TypeError, ValueError):
         return
-
-
-COMMAND_HELP = """Image Studio 生图指令
-/image_gen <提示词> [参数]，别名 /img
-
---provider ID：指定服务商
---model ID：指定模型，可用 服务商ID:模型ID
---mode text2img|img2img：文生图或图生图
---size 尺寸：如 1024x1024，NAI 可用 竖图、2K横图
---n 数量：缺省使用模型默认值，超出模型上限时截断
---negative 内容：缺省使用模型默认反向提示词；--negative '' 清空
---ref 路径或URL：可重复填写多张参考图
---param-参数名 值：如 --param-steps 26，值保持字符串
-
-默认模型在 WebUI 设置的“默认值 → 页面”中配置。
-未指定模式时，有图片或 --ref 则使用图生图，否则文生图。
-参考图顺序：当前消息、引用消息、--ref；去重后按模型上限截断。
-指定图生图但没有可用参考图会报错；指定文生图则忽略参考图。
-参数可写成 --key=value；包含空格的值请使用英文引号。
-单独 /img --help 显示此帮助；与其他内容混用时忽略 --help。
-
-示例：/img 清晨的山间湖泊
-示例：/img 重绘这张图 --mode img2img --ref input.png
-示例：/img '1girl, solo, full body, garden' --provider nai --model nai-diffusion-4-5-full --param-style galgame
-""".strip()
-
-
-def _parse_command(raw: str) -> dict[str, Any]:
-    tokens = shlex.split(raw.strip())
-    if tokens and tokens[0] in {"/image_gen", "image_gen", "/img", "img"}:
-        tokens.pop(0)
-    help_only = tokens == ["--help"]
-    tokens = [token for token in tokens if token != "--help"]
-    values: dict[str, Any] = {
-        "mode": "text2img",
-        "provider_id": "",
-        "model": "",
-        "size": "",
-        "negative_prompt": None,
-        "count": None,
-        "reference_paths": [],
-        "mode_explicit": False,
-        "parameters": {},
-        "help": help_only,
-    }
-    if help_only:
-        values["prompt"] = ""
-        return values
-    known = {"mode", "provider", "model", "size", "negative", "n", "ref"}
-    prompt_parts: list[str] = []
-    index = 0
-    while index < len(tokens):
-        token = tokens[index]
-        if token.startswith("--") and "=" in token:
-            key, value = token[2:].split("=", 1)
-        elif token.startswith("--") and index + 1 < len(tokens):
-            key, value = token[2:], tokens[index + 1]
-            if (key in known or key.startswith("param-")) and value.startswith("--"):
-                raise ValueError(f"参数 --{key} 缺少值")
-            index += 1
-        else:
-            if token.startswith("--") and (
-                token[2:] in known or token.startswith("--param-")
-            ):
-                raise ValueError(f"参数 {token} 缺少值")
-            prompt_parts.append(token)
-            index += 1
-            continue
-        if key in {"mode", "provider", "model", "size", "ref"} and not value.strip():
-            raise ValueError(f"参数 --{key} 不能为空")
-        if key == "mode":
-            values["mode"] = value
-            values["mode_explicit"] = True
-        elif key == "provider":
-            values["provider_id"] = value
-        elif key == "model":
-            values["model"] = value
-        elif key == "size":
-            values["size"] = value
-        elif key == "negative":
-            values["negative_prompt"] = value
-        elif key == "n":
-            try:
-                values["count"] = int(value)
-            except ValueError as exc:
-                raise ValueError("参数 --n 必须是正整数") from exc
-            if values["count"] <= 0:
-                raise ValueError("参数 --n 必须是正整数")
-        elif key == "ref":
-            values["reference_paths"].append(value)
-        elif key.startswith("param-"):
-            if key == "param-":
-                raise ValueError("--param- 后必须填写参数名")
-            values["parameters"][key.removeprefix("param-")] = value
-        else:
-            prompt_parts.append(token)
-        index += 1
-    values["prompt"] = " ".join(prompt_parts).strip()
-    if not values["prompt"]:
-        raise ValueError("请填写提示词；使用 /image_gen --help 查看指令帮助")
-    return values
-
-
-def _remove_export_file(path: Path) -> None:
-    try:
-        path.unlink(missing_ok=True)
-    except OSError:
-        pass
-
-
-def _as_int(value: Any, default: int) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
 
 
 def _invocation_source(event: Any) -> InvocationSource:

@@ -2,43 +2,43 @@
 
 面向维护者。使用说明见 [README](../README.md)，正式版本变化见 [CHANGELOG](../CHANGELOG.md)。
 
-当前正式版本为插件 `1.2.0`，基于正式插件 `1.1.0` 和数据库 v2；本次发布没有数据库结构变化，继续使用正式 `user_version=2`，无需新的迁移标记。
+代码分区和依赖边界见 [目录结构](ARCHITECTURE.md)，统一检查及隔离浏览器验证见 [测试入口](TESTING.md)。后端实现位于 `backend/`，插件注册仍在根目录 `main.py`；移动内部 Python 模块不改变配置、数据库或 Web API 格式。
 
-## 1.2.0 正式基线
+当前正式基线为插件 `1.3.1`、数据库 **v3**。1.3.1 调整画廊加载，不增加数据库迁移；沿用 1.3.0 发布的 `v2 → v3` 升级路径，正式库不保留开发标记。ComfyUI 已完成基础真实生图测试，覆盖范围见下方接入说明；NovelAI 官方仍需可用账户完成成功生图验证。
 
-本次正式插件版本为 `1.2.0`，沿用图库数据库正式版本 **v2**。本次发布不改变数据库结构，不增加迁移步骤；开发期间的资产访问、临时保留和 WebUI 改动均在现有 v2 结构上完成。
+官方协议构造与解析集中在 `backend/providers/novelai/protocol.py`，不依赖完整第三方 SDK。`GeneratedImage.effective_parameters` 通过 `generation_images.supplemental_json.effective_request` 保存经过记录策略过滤的实际参数；原始请求仍保留在生成记录上。隐写元数据解析器版本为 9，既有缓存更新沿用现有回填流程。
 
-| 标识 | 当前值 | 含义 |
-| --- | --- | --- |
-| 插件版本 | `1.2.0` | `metadata.yaml` 与 `main.py` 注册版本相同 |
-| 数据库正式版本 | `2` | SQLite `PRAGMA user_version`，由 `database_schema.py` 管理 |
-| 配置格式版本 | `2` | `studio_config.json` 的 `schema_version`，与数据库版本独立 |
+官方资料、与 NAI2API 的差异和待验证项见 [NovelAI 官方接口核对](NOVELAI_API_REVIEW.md)。
 
-## 1.1.0 正式基线（历史）
+ComfyUI 架构、工作流绑定、任务恢复与范围见 [ComfyUI 接入](COMFYUI_IMPLEMENTATION.md)。`backend/providers/comfyui/client.py` 负责原生协议，`backend/providers/comfyui/workflows.py` 负责执行图和绑定，`backend/providers/comfyui/jobs.py` 保存修订/任务/临时文件，`backend/providers/comfyui/runtime.py` 接入现有生成与图库流程。运行中任务不受浏览器连接生命周期影响。
 
-1.1.0 发布时的正式插件版本为 `1.1.0`，图库数据库版本为 **v2**。开发期的外部来源修订已收拢为一次 `v1 → v2` 发布迁移；新库直接创建最终结构，正式库不保留 `schema_meta` 开发标记。
+## 1.3.1 正式基线
 
 | 标识 | 当前值 | 含义 |
 | --- | --- | --- |
-| 插件版本 | `1.1.0` | `metadata.yaml` 与 `main.py` 注册版本相同 |
-| 数据库正式版本 | `2` | SQLite `PRAGMA user_version`，由 `database_schema.py` 管理 |
+| 插件版本 | `1.3.1` | `metadata.yaml` 与 `main.py` 注册版本相同 |
+| 数据库正式版本 | `3` | SQLite `PRAGMA user_version`，由 `backend/database/schema.py` 管理 |
 | 配置格式版本 | `2` | `studio_config.json` 的 `schema_version`，与数据库版本独立 |
-| 图片解析器版本 | `image_metadata.PARSER_VERSION` | 控制派生元数据回填，与数据库结构版本独立 |
+| 图片解析器版本 | `9` | 控制派生元数据回填，与数据库结构版本独立 |
 
-数据库结构和发布迁移集中在 `database_schema.py`。已发布的 v1 定义保持不变，v2 增加最终版本的 `external_sources`、`external_records` 及相关索引，不再先建早期开发表再逐列升级。
+数据库结构和发布迁移集中在 `backend/database/schema.py`。已发布的 v1 定义与 `v1 → v2` 迁移保持不变：v2 增加外部图库登记，v3 一次性增加最终版本的 `comfy_workflow_revisions`、`comfy_jobs` 及相关索引。新库直接创建完整 v3，不回放开发中的中间结构。
 
-`storage.GenerationStore.initialize()` 调用 `ensure_release_schema()`。尺寸、生图来源和图片元数据的派生修复，以及租约和孤立文件维护，继续在结构迁移事务外执行，失败后可重试。
+`backend/gallery/store.py` 的 `GenerationStore.initialize()` 调用 `ensure_release_schema()`，ComfyUI 任务存储也使用同一迁移入口，启动先后顺序不改变结果。尺寸、生图来源和图片元数据的派生修复，以及租约和孤立文件维护，继续在结构迁移事务外执行，失败后可重试。
+
+历史版本对应关系：插件 1.0.0 使用数据库 v1，1.1.0 和 1.2.0 使用数据库 v2；1.3.0 开发后期使用 `3-dev.1`，本正式版将其转换为 v3。插件版本、数据库版本、配置格式版本和解析器版本分别维护。
 
 ## 升级与开发库转换
 
-| 当前数据库 | 1.1.0 的处理 |
+| 当前数据库 | 1.3.1 的处理 |
 | --- | --- |
-| 空库 | 直接创建正式 v2，不备份空库 |
-| 正式 v1（1.0.0） | 核验、备份，在一个事务中执行 `v1 → v2` |
-| 正式 v2 | 只校验结构，不重复备份和迁移 |
-| `user_version=1`、`schema_meta(2,2)` | 核验最终 `2-dev.2` 布局、备份，移除开发标记并转为 v2 |
-| `user_version=0`、`schema_meta(1,3)` | 保留历史兼容：核验最终 `1-dev.3` 布局、备份，在一个事务中转换并升级为 v2 |
-| `2-dev.1`、更早或未知开发修订、未来版本、结构异常 | 拒绝自动升级，不清空业务数据 |
+| 空库 | 直接创建正式 v3，不备份空库 |
+| 正式 v1（1.0.0） | 核验、备份，在一个事务中执行 `v1 → v2 → v3` |
+| 正式 v2（1.1.0／1.2.0） | 核验、备份，执行一次 `v2 → v3` |
+| 正式 v3 | 只校验结构，不重复备份和迁移 |
+| `user_version=2`、`schema_meta(3,1)` | 核验最终 `3-dev.1` 布局、备份，移除开发标记并转为 v3，不重建业务表 |
+| `user_version=1`、`schema_meta(2,2)` | 核验最终 `2-dev.2` 布局、备份，移除开发标记并执行 `v2 → v3` |
+| `user_version=0`、`schema_meta(1,3)` | 保留历史兼容：核验最终 `1-dev.3` 布局、备份，在一个事务中转换并升级为 v3 |
+| `2-dev.1`、其他未知开发修订、未来版本、结构异常 | 拒绝自动升级，不清空业务数据 |
 
 表中的 `schema_meta(目标,修订)` 省略了固定主键 `id=1`。开发标记必须与实际的列、默认值、外键及索引结构一致，不能只改版本号。
 
@@ -48,20 +48,20 @@
 
 ```text
 data/plugin_data/astrbot_plugin_image_studio/backups/
-  history-pre-v2-<UTC时间>-<唯一后缀>.sqlite3
+  history-pre-v3-<UTC时间>-<唯一后缀>.sqlite3
 ```
 
 备份失败不继续升级。迁移在 `BEGIN IMMEDIATE` 事务内再次核验数据库状态，成功后才写入正式版本号；中途失败整体回滚，备份保留。数据库备份不参与图片配额或临时文件清理。
 
 自动备份只包含数据库，**不包含配置和图片文件**。升级前应停止 AstrBot，备份完整插件数据目录；不要只复制运行中的主 `.sqlite3` 文件而忽略 WAL 数据。
 
-回退应同时恢复升级前代码与完整数据副本。不要让旧版插件打开已升级的 v2 库，也不要把自动备份覆盖到正在运行的数据库上；单独恢复数据库前必须核对原图、参考图和 WAL/SHM 状态。
+回退应同时恢复升级前代码与完整数据副本。不要让旧版插件打开已升级的 v3 库，也不要把自动备份覆盖到正在运行的数据库上；单独恢复数据库前必须核对原图、参考图、ComfyUI 任务文件和 WAL/SHM 状态。不存在自动降级迁移。
 
 ## 外部图库维护
 
 外部来源与本地记录共用分页、搜索和连续浏览。外部原图留在来源目录，缩略图由 Image Studio 管理；只有自有原图才进入本地资产清理流程。
 
-- 扫描器位于 `external_gallery.py`，通过适配器枚举文件和读取附属参数。新增来源时扩展适配器，不调用来源插件的初始化或迁移逻辑。
+- 扫描器位于 `backend/gallery/external.py`，通过适配器枚举文件和读取附属参数。新增来源时扩展适配器，不调用来源插件的初始化或迁移逻辑。
 - 默认每 5 分钟增量扫描。读取原图或预览发现丢失、变化时立即补扫；手动、定时及异常恢复共用同一调度，同一来源已有任务时复用任务。
 - 只有完整枚举成功后才能清除已消失的索引。目录不可读、读取失败、取消和停用都不能当作空目录处理。
 - 来源配置以稳定实例 ID 为键，记录类型、名称、路径、递归选项和权限；旧 `nai.enabled` 配置保留原 ID 转换。移除来源使用专用索引清除流程，不调用原图删除方法。
@@ -72,44 +72,35 @@ data/plugin_data/astrbot_plugin_image_studio/backups/
 
 ## 后续开发版本
 
-1. 从 `1.2.0` 和数据库正式 v2 基线继续开发，不修改已发布结构的版本含义。
-2. 普通 UI、指令或 Provider 修改可继续使用数据库 v2。只有结构变化时才启用下一个数据库目标版本。
-3. 若下一次结构目标为 v3，开发库保留 `user_version=2`，另以 `schema_meta(target_version=3, dev_revision=1,2,...)` 标识 `3-dev.1` 等修订；结构和开发标记在同一事务内提交。
-4. 插件开发版本使用 `1.2.1-dev.1` 等名称，与数据库版本独立。开发测试使用临时目录或独立数据副本，不与正式部署共用数据目录。
+1. 从 `1.3.1` 和数据库正式 v3 基线继续开发，不修改已发布结构的版本含义。
+2. 普通 UI、指令或 Provider 修改可继续使用数据库 v3。只有结构变化时才启用下一个数据库目标版本。
+3. 若下一次结构目标为 v4，开发库保留 `user_version=3`，另以 `schema_meta(target_version=4, dev_revision=1,2,...)` 标识 `4-dev.1` 等修订；结构和开发标记在同一事务内提交。本次正式版不预先创建这些标记。
+4. 后续插件开发版本使用 `下一版本-dev.N` 名称，与数据库版本独立。开发测试使用临时目录或独立数据副本，不与正式部署共用数据目录。
 5. 正式版只接纳明确支持的正式基线和最终开发布局，拒绝其他未发布标记；不能通过“缺列就补”绕过结构校验。
 6. 下次发布前将当期开发修订压缩为一次正式迁移，同时保留最终开发库到正式库的受控转换入口。
-7. 已发布迁移不得删除。未来 v3 需保留 `v1 → v2 → v3` 的升级路径，并验证最终结构与直接创建 v3 一致。
+7. 已发布迁移不得删除。未来 v4 需保留 `v1 → v2 → v3 → v4` 的升级路径，并验证升级结果与直接创建最终版本一致。
 
 ## 测试与构建
 
-使用 Python 3.12+ 的 AstrBot 环境。包含 AstrBot 导入的测试在临时工作目录执行，避免宿主初始化把运行文件写入仓库。以下示例从插件根目录开始，假定 AstrBot 源码位于同级 `AstrBot` 目录，环境名为 `astrbot`：
+使用 Python 3.12+ 的 AstrBot 虚拟环境。从插件根目录运行统一入口，默认执行静态检查、全部 Python 回归和安装包构建。入口使用当前 Python 解释器，并在临时目录运行宿主相关测试，避免初始化文件写入仓库。环境准备和浏览器依赖安装见 [测试入口](TESTING.md)。
 
 ```bash
-studio_repo_dir="$(pwd)"
-studio_check_dir="$(mktemp -d)"
-cd "$studio_check_dir"
-PYTHONPATH="$studio_repo_dir/..:$studio_repo_dir/../AstrBot" conda run -n astrbot python -m pytest -q "$studio_repo_dir/tests"
-conda run -n astrbot ruff check --select F,E9 "$studio_repo_dir"
-conda run -n astrbot ruff format --check "$studio_repo_dir"
-node --check "$studio_repo_dir/pages/image-studio/app.js"
-node --check "$studio_repo_dir/pages/image-studio/library.js"
-node --check "$studio_repo_dir/pages/image-studio/appearance.js"
-node --check "$studio_repo_dir/pages/image-studio/viewer-backdrop.js"
-git -C "$studio_repo_dir" diff --check
-conda run -n astrbot python "$studio_repo_dir/scripts/build_plugin_package.py"
+python scripts/verify.py
+python scripts/verify.py --webui comfy_workspace comfy_gallery_run --browser chromium
+python scripts/verify.py --webui comfy_gallery_run --browser webkit
 ```
 
-构建默认输出 `dist/astrbot_plugin_image_studio-v1.2.0.zip`，实际文件名跟随元数据版本；支持 `--root` 和 `--output`。构建读取当前工作区，不要求先提交，不执行数据库转换。
+当前正式版构建默认输出 `dist/astrbot_plugin_image_studio-v1.3.1.zip`，实际文件名跟随元数据版本；支持 `--root` 和 `--output`。构建读取当前工作区，不要求先提交，不执行数据库转换。
 
 安装包只包含运行模块、WebUI、使用说明和指定的演示截图，不包含真实数据、日志、开发数据库、测试或维护文档。新增运行模块或 README 图片时，同步更新构建白名单和测试；第三方静态资源的许可证随包保留。
 
-浏览器测试只连接 `tests/webui_harness.py` 创建的隔离服务，通过 `STUDIO_TEST_URL` 和 `STUDIO_PLAYWRIGHT` 指定地址与 Playwright。不要把含导入、删除或配置保存操作的测试对准真实部署。对手机合成、触摸或高刷的结论，应区分浏览器模拟与真实设备验证。
+浏览器场景位于 `tests/webui/`，只连接 `tests/support/webui_harness.py` 创建的隔离服务；统一入口负责传入 `STUDIO_TEST_URL` 和 `STUDIO_PLAYWRIGHT`。Python 业务测试位于 `tests/backend/`，共享样例位于 `tests/support/`。不要把含导入、删除或配置保存操作的测试对准真实部署。对手机合成、触摸或高刷的结论，应区分浏览器模拟与真实设备验证。
 
 每次数据库发布至少验证：
 
 - 空库初始化、重复启动，以及新库与升级库结构一致。
 - 上一正式版完整数据升级，图片、收藏、引用、租约和导入关系保留。
-- 受支持的最终开发库转换，外部来源、权限、时间字段和资产引用保留。
+- 受支持的最终开发库转换，外部来源、权限、时间字段、资产引用及 ComfyUI 工作流修订、任务和文件关系保留；图库与任务存储分别先启动均成功。
 - 备份可读取和恢复；备份失败不写库，中途失败回滚结构和版本。
 - 未知版本、开发标记与实际结构不符、备份后状态变化时拒绝迁移。
 - 元数据回填失败可重试，不影响已提交的结构版本。

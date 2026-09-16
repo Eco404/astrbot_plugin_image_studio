@@ -1,0 +1,96 @@
+.studio-tooltip {
+  position: fixed;
+  z-index: 100001;
+  box-sizing: border-box;
+  width: max-content;
+  max-width: min(380px, calc(100vw - 20px));
+  max-height: min(360px, calc(100dvh - 20px));
+  overflow: auto;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--appearance-glass-solid, #fcfdfd);
+  color: var(--text);
+  box-shadow: 0 8px 24px rgba(20, 30, 25, .15), inset 0 1px 0 var(--line);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.55;
+  letter-spacing: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  text-align: left;
+  scrollbar-width: thin;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+.studio-tooltip[hidden] { display: none; }
+.studio-tooltip.is-visible { opacity: 1; pointer-events: auto; }
+@supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .studio-tooltip {
+    background: var(--menu-glass, var(--glass));
+    backdrop-filter: blur(var(--glass-blur, 22px)) saturate(var(--glass-saturation, 115%));
+    -webkit-backdrop-filter: blur(var(--glass-blur, 22px)) saturate(var(--glass-saturation, 115%));
+  }
+}
+
+.schema-parameter-label {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 100%;
+  vertical-align: middle;
+}
+.tool-parameter-row > .schema-parameter-label { color: var(--text); font-size: inherit; }
+.schema-parameter-label > .parameter-help-text {
+  appearance: none;
+  -webkit-appearance: none;
+  -webkit-tap-highlight-color: transparent;
+  display: inline-block;
+  position: static;
+  flex: 0 1 auto;
+  width: auto;
+  min-width: 0;
+  max-width: 100%;
+  height: auto;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  box-shadow: none;
+  font: inherit;
+  line-height: 1.45;
+  letter-spacing: inherit;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: left;
+  cursor: default;
+  touch-action: manipulation;
+  transition: none;
+}
+.schema-parameter-label > .parameter-help-text:hover,
+.schema-parameter-label > .parameter-help-text:active {
+  background: transparent;
+  box-shadow: none;
+  text-shadow: none;
+  transform: none;
+  filter: none;
+  opacity: 1;
+}
+.schema-parameter-label > .parameter-help-text:focus:not(:focus-visible) { outline: none; }
+.schema-parameter-label > .parameter-help-text:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.field .schema-parameter-label > .parameter-help-text { color: var(--muted); font-size: 12px; font-weight: 650; }
+.tool-parameter-row .parameter-help-text { font-size: 12px; }
+.schema-parameter-label > .parameter-help-text > span,
+.schema-parameter-label > .parameter-help-text > strong { color: inherit; font-size: inherit; }
+@media (prefers-reduced-motion: reduce) { .studio-tooltip { transition: none; } }
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+  .studio-tooltip { background: var(--appearance-glass-solid, #fcfdfd); backdrop-filter: none; -webkit-backdrop-filter: none; }
+}
+@media (forced-colors: active) { .studio-tooltip { border-color: CanvasText; background: Canvas; color: CanvasText; box-shadow: none; } }

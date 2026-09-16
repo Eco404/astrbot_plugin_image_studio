@@ -28,25 +28,28 @@
     })();
   </script>
   <script src="/api/plugin/page/bridge-sdk.js"></script>
-  <script src="./appearance.js?v=1.2.0"></script>
+  <script src="./appearance.js?v=1.3.1"></script>
   <link rel="stylesheet" href="./vendor/photoswipe/photoswipe.css?v=5.4.4" />
-  <link rel="stylesheet" href="./app.css?v=1.2.0" />
-  <link rel="stylesheet" href="./library.css?v=1.2.0" />
-  <link rel="stylesheet" href="./sortable.css?v=1.2.0" />
-  <link rel="stylesheet" href="./detail-swipe.css?v=1.2.0" />
-  <link rel="stylesheet" href="./select.css?v=1.2.0" />
-  <link rel="stylesheet" href="./appearance.css?v=1.2.0" />
-  <link rel="stylesheet" href="./controls.css?v=1.2.0" />
+  <link rel="stylesheet" href="./app.css?v=1.3.1" />
+  <link rel="stylesheet" href="./library.css?v=1.3.1" />
+  <link rel="stylesheet" href="./sortable.css?v=1.3.1" />
+  <link rel="stylesheet" href="./detail-swipe.css?v=1.3.1" />
+  <link rel="stylesheet" href="./select.css?v=1.3.1" />
+  <link rel="stylesheet" href="./appearance.css?v=1.3.1" />
+  <link rel="stylesheet" href="./controls.css?v=1.3.1" />
+  <link rel="stylesheet" href="./novelai-controls.css?v=1.3.1" />
+  <link rel="stylesheet" href="./comfyui-controls.css?v=1.3.1" />
+  <link rel="stylesheet" href="./tooltip.css?v=1.3.1" />
 </head>
 <body>
   <main class="app-shell quiet-glass-background">
     <aside class="sidebar glass" aria-label="Image Studio 导航">
       <div class="brand"><div><strong>Image Studio</strong><span>生图工作台</span></div></div>
       <nav class="nav-list">
-        <button class="nav-item is-active" data-view="generate" type="button" aria-label="生图" title="生图"><span class="nav-icon" aria-hidden="true">✦</span><span>生图</span></button>
-        <button class="nav-item" data-view="gallery" type="button" aria-label="画廊" title="画廊"><span class="nav-icon nav-icon-gallery" aria-hidden="true"><span></span></span><span>画廊</span></button>
-        <button class="nav-item" data-view="import" type="button" aria-label="导入" title="导入"><span class="nav-icon" data-studio-icon="FolderInput" aria-hidden="true"></span><span>导入</span></button>
-        <button class="nav-item" data-view="settings" type="button" aria-label="设置" title="设置"><span class="nav-icon nav-icon-settings" aria-hidden="true">⚙︎</span><span>设置</span></button>
+        <button class="nav-item is-active" data-view="generate" type="button" aria-label="生图"><span class="nav-icon" aria-hidden="true">✦</span><span>生图</span></button>
+        <button class="nav-item" data-view="gallery" type="button" aria-label="画廊"><span class="nav-icon nav-icon-gallery" aria-hidden="true"><span></span></span><span>画廊</span></button>
+        <button class="nav-item" data-view="import" type="button" aria-label="导入"><span class="nav-icon" data-studio-icon="FolderInput" aria-hidden="true"></span><span>导入</span></button>
+        <button class="nav-item" data-view="settings" type="button" aria-label="设置"><span class="nav-icon nav-icon-settings" aria-hidden="true">⚙︎</span><span>设置</span></button>
       </nav>
       <div class="sidebar-footer" id="runtimeStatus">正在读取配置</div>
     </aside>
@@ -59,21 +62,25 @@
       </header>
       <div class="app-notice is-hidden" id="appNotice" role="status" aria-live="polite">
         <div class="app-notice__message" id="appNoticeMessage"></div>
-        <button class="app-notice__close" id="appNoticeClose" type="button" aria-label="关闭通知" title="关闭通知"><span aria-hidden="true">×</span></button>
+        <button class="app-notice__close" id="appNoticeClose" type="button" aria-label="关闭通知" data-tooltip="关闭通知"><span aria-hidden="true">×</span></button>
       </div>
 
       <section class="view is-active" id="generateView">
         <div class="generation-mode-row"><div class="mode-tabs" role="group" aria-label="生成模式">
           <button class="segment is-active" data-mode="text2img" type="button">文生图</button>
           <button class="segment" data-mode="img2img" type="button">图生图</button>
-        </div><button class="studio-icon-button" id="pasteParametersButton" type="button" aria-label="从剪贴板读取参数" title="从剪贴板读取参数" data-studio-icon="ClipboardPaste"></button></div>
-        <div class="model-select-row"><label for="modelChoice">模型</label><select id="modelChoice" aria-label="选择生图模型" disabled><option value="">请先选择模式</option></select><span class="model-provider" id="modelProvider"></span></div>
+        </div><button class="studio-icon-button" id="pasteParametersButton" type="button" aria-label="从剪贴板读取参数" data-tooltip="从剪贴板读取参数" data-studio-icon="ClipboardPaste"></button></div>
+        <div class="generation-selectors" id="generationSelectors">
+          <div class="model-select-row"><label for="modelChoice">模型</label><select id="modelChoice" aria-label="选择生图模型或 ComfyUI 服务商" disabled><option value="">请先选择模式</option></select><span class="model-provider" id="modelProvider"></span></div>
+          <div class="model-select-row is-hidden" id="comfyWorkflowWorkspace"><label for="comfyWorkflowChoice">工作流</label><select id="comfyWorkflowChoice" aria-label="选择 ComfyUI 工作流" disabled><option value="">请选择工作流</option></select></div>
+        </div>
         <div class="parameter-import-notice is-hidden" id="parameterImportNotice" role="status"></div>
+        <details class="comfy-jobs glass" id="comfyJobs" aria-label="ComfyUI 任务" hidden><summary>任务队列<span id="comfyJobsSummary" role="status"></span></summary><div id="comfyJobList"></div></details>
         <div class="workspace-empty glass" id="workspaceEmpty">请选择模型</div>
         <fieldset id="generatorWorkspace" class="generator-workspace is-hidden" disabled>
         <div class="generator-layout">
           <form class="generator-form glass" id="generationForm">
-            <div class="field field-wide"><label for="prompt">提示词</label><textarea id="prompt" rows="6" maxlength="6000" placeholder="描述希望生成的画面" required></textarea></div>
+            <div class="field field-wide"><label for="prompt">提示词</label><textarea id="prompt" rows="6" maxlength="6000" placeholder="描述希望生成的画面" aria-required="true"></textarea></div>
             <div class="field field-wide" id="negativePromptField"><div class="field-label-row"><label for="negativePrompt">反向提示词</label><button class="field-reset-button" id="resetNegativePromptButton" type="button">恢复默认</button></div><textarea id="negativePrompt" rows="2" maxlength="4000" placeholder="可选"></textarea><span class="field-hint" id="negativePromptHint"></span></div>
             <div class="model-parameters field-wide" id="modelParameters"></div>
             <div class="field field-wide is-hidden" id="referenceField">
@@ -100,21 +107,22 @@
 
       <section class="view" id="galleryView">
         <div class="gallery-toolbar">
-          <div class="search-field"><label for="gallerySearch">搜索</label><div class="search-input-wrap"><input id="gallerySearch" placeholder="提示词、模型、群聊或用户" /><button class="studio-icon-button" id="galleryClearSearch" type="button" aria-label="清空搜索" title="清空搜索" data-studio-icon="X" disabled></button></div></div>
+          <div class="search-field"><label for="gallerySearch">搜索</label><div class="search-input-wrap"><input id="gallerySearch" placeholder="提示词、模型、群聊或用户" /><button class="studio-icon-button" id="galleryClearSearch" type="button" aria-label="清空搜索" data-tooltip="清空搜索" data-studio-icon="X" disabled></button></div></div>
           <select id="galleryProvider" multiple data-all-label="全部服务商" aria-label="按生图服务商筛选"></select>
           <select id="galleryMode" multiple data-all-label="全部模式" aria-label="按模式筛选"></select>
           <select id="gallerySource" multiple data-all-label="全部来源" aria-label="按调用来源筛选"></select>
           <select id="galleryEngine" multiple data-all-label="全部生图来源" aria-label="按生图来源筛选"></select>
-          <button class="studio-icon-button gallery-tool-button" id="galleryFavorite" type="button" value="" aria-label="仅查看已收藏" aria-pressed="false" title="仅查看已收藏" data-studio-icon="Star"></button>
-          <button class="studio-icon-button gallery-tool-button" id="galleryRefresh" type="button" aria-label="刷新画廊" title="刷新画廊" data-studio-icon="RefreshCw"></button>
+          <button class="studio-icon-button gallery-tool-button" id="galleryFavorite" type="button" value="" aria-label="仅查看已收藏" aria-pressed="false" data-tooltip="仅查看已收藏" data-studio-icon="Star"></button>
+          <button class="studio-icon-button gallery-tool-button" id="galleryRefresh" type="button" aria-label="刷新画廊" data-tooltip="刷新画廊" data-studio-icon="RefreshCw"></button>
         </div>
         <div id="selectionAnchor" aria-hidden="true"></div>
         <div class="selection-bar gallery-selection-bar glass is-hidden" id="selectionBar"><span id="selectionCount">已选 0 项</span><button class="quiet-button" id="cancelSelectionButton" type="button">取消</button><button class="quiet-button" id="selectAllButton" type="button">全选当前页</button><button class="quiet-button" id="favoriteSelectionButton" type="button" disabled>收藏</button><button class="quiet-button" id="exportButton" type="button">导出</button><button class="danger-button" id="deleteButton" type="button">删除</button></div>
-        <div class="gallery-grid" id="galleryGrid"></div>
+        <div class="gallery-load-state" id="galleryLoadState" hidden><span id="galleryLoadingStatus" role="status"></span><button class="quiet-button" id="galleryRetry" type="button" hidden>重试</button></div>
+        <div class="gallery-grid" id="galleryGrid" aria-busy="false"></div>
         <div class="empty-state is-hidden" id="galleryEmpty">画廊中还没有保留的生成记录。</div>
         <div class="gallery-page-picker floatingbar" id="galleryPagePicker" role="region" aria-label="选择画廊页码" hidden><div class="gallery-page-cards" id="galleryPageCards" role="group" aria-label="页码"><div id="galleryPageTrack"></div></div><form class="gallery-page-jump" id="galleryPageJump"><label for="galleryPageInput">跳至</label><input id="galleryPageInput" type="number" min="1" step="1" inputmode="numeric" aria-label="目标页码" /><button class="quiet-button" type="submit">前往</button></form></div>
         <div class="gallery-floatingbar floatingbar">
-        <div class="gallery-pagination is-hidden" id="galleryPagination" aria-label="画廊分页"><button class="quiet-button" id="galleryPrev" type="button">上一页</button><button class="gallery-page-label" id="galleryPageLabel" type="button" aria-live="polite" aria-expanded="false" aria-controls="galleryPagePicker" title="选择页码">第 1 / 1 页</button><button class="quiet-button" id="galleryNext" type="button">下一页</button></div>
+        <div class="gallery-pagination is-hidden" id="galleryPagination" aria-label="画廊分页"><button class="quiet-button" id="galleryPrev" type="button">上一页</button><button class="gallery-page-label" id="galleryPageLabel" type="button" aria-live="polite" aria-expanded="false" aria-controls="galleryPagePicker" data-tooltip="选择页码">第 1 / 1 页</button><button class="quiet-button" id="galleryNext" type="button">下一页</button></div>
         </div>
       </section>
 
@@ -165,7 +173,7 @@
             <div class="field"><label for="agentPreviewQuality">预览图压缩质量</label><input id="agentPreviewQuality" type="number" min="40" max="95" step="1" aria-describedby="agentPreviewQualityHint" /><span class="field-hint" id="agentPreviewQualityHint">数值越高，预览细节保留越多，文件通常越大。不影响原图质量。</span></div>
           </section>
           <section class="settings-panel glass" id="externalSourcesPanel">
-            <div class="section-heading"><div><h2>外部图库</h2><p>将其他插件或目录中的图片加入画廊，原图保留在来源目录。</p></div><button class="studio-icon-button" id="addExternalSource" type="button" aria-label="添加外部图库" title="添加外部图库" data-studio-icon="Plus"></button></div>
+            <div class="section-heading"><div><h2>外部图库</h2><p>将其他插件或目录中的图片加入画廊，原图保留在来源目录。</p></div><button class="studio-icon-button" id="addExternalSource" type="button" aria-label="添加外部图库" data-tooltip="添加外部图库" data-studio-icon="Plus"></button></div>
             <div id="externalSourcesList"></div>
             <p class="field-hint" id="externalSourcesEmpty">尚未添加外部图库。</p>
             <p class="inline-error" id="externalSourcesError" role="status"></p>
@@ -197,14 +205,14 @@
   <aside class="detail-drawer" id="detailDrawer" role="dialog" aria-modal="true" aria-label="生成详情" aria-hidden="true" tabindex="-1">
     <div class="drawer-head"><div><h2>生成详情</h2><p id="detailDate"></p></div><button class="icon-button" id="closeDrawer" type="button" aria-label="关闭详情"><span aria-hidden="true">×</span></button></div>
     <div class="drawer-body" id="drawerBody"></div>
-    <div class="detail-footer" id="detailFooter"><button class="studio-icon-button" id="detailFavorite" type="button" aria-label="收藏生成记录" title="收藏生成记录" data-studio-icon="Star"></button><button class="studio-icon-button" id="detailImportEdit" type="button" aria-label="编辑导入记录" title="编辑导入记录" data-studio-icon="Pencil" hidden></button><button class="quiet-button detail-command" id="detailReproduce" type="button"><span data-studio-icon="RefreshCw" aria-hidden="true"></span><span>复现参数</span></button><div class="copy-format-control"><select id="detailCopyFormat" aria-label="复制参数格式"></select><button class="studio-icon-button" id="detailCopy" type="button" aria-label="复制完整参数" title="复制完整参数" data-studio-icon="Copy"></button></div><button class="studio-icon-button" id="detailWorkflowDownload" type="button" aria-label="下载工作流" title="下载工作流" data-studio-icon="Download" hidden></button><button class="quiet-button detail-command" id="detailUseReference" type="button" aria-label="将当前成图用作新参考图" title="将当前成图用作新参考图"><span data-studio-icon="ImagePlus" aria-hidden="true"></span><span>用作参考图</span></button><button class="studio-icon-button is-danger" id="detailDelete" type="button" aria-label="删除图片" title="删除图片" data-studio-icon="Trash2"></button></div>
+    <div class="detail-footer" id="detailFooter"><button class="studio-icon-button" id="detailFavorite" type="button" aria-label="收藏生成记录" data-tooltip="收藏生成记录" data-studio-icon="Star"></button><button class="studio-icon-button" id="detailImportEdit" type="button" aria-label="编辑导入记录" data-tooltip="编辑导入记录" data-studio-icon="Pencil" hidden></button><button class="quiet-button detail-command" id="detailReproduce" type="button"><span data-studio-icon="RefreshCw" aria-hidden="true"></span><span>复现参数</span></button><div class="copy-format-control"><select id="detailCopyFormat" aria-label="复制参数格式"></select><button class="studio-icon-button" id="detailCopy" type="button" aria-label="复制完整参数" data-tooltip="复制完整参数" data-studio-icon="Copy"></button></div><button class="studio-icon-button" id="detailWorkflowDownload" type="button" aria-label="下载工作流" data-tooltip="下载工作流" data-studio-icon="Download" hidden></button><button class="quiet-button detail-command" id="detailUseReference" type="button" aria-label="将当前成图用作新参考图" data-tooltip="将当前成图用作新参考图"><span data-studio-icon="ImagePlus" aria-hidden="true"></span><span>用作参考图</span></button><button class="studio-icon-button is-danger" id="detailDelete" type="button" aria-label="删除图片" data-tooltip="删除图片" data-studio-icon="Trash2"></button></div>
   </aside>
   <div class="scrim is-hidden" id="scrim"></div>
-  <div class="studio-modal-root is-hidden" id="studioModalRoot"><div class="studio-modal-scrim"></div><section class="studio-modal glass" id="studioModal" role="dialog" aria-modal="true" aria-labelledby="studioModalTitle" tabindex="-1"><header><h2 id="studioModalTitle"></h2><button class="studio-icon-button" id="studioModalClose" type="button" aria-label="关闭窗口" title="关闭窗口" data-studio-icon="X"></button></header><div class="studio-modal-body" id="studioModalBody"></div><div class="studio-modal-error" id="studioModalError" role="alert"></div><footer id="studioModalFooter"></footer></section></div>
+  <div class="studio-modal-root is-hidden" id="studioModalRoot"><div class="studio-modal-scrim"></div><section class="studio-modal glass" id="studioModal" role="dialog" aria-modal="true" aria-labelledby="studioModalTitle" tabindex="-1"><header><h2 id="studioModalTitle"></h2><button class="studio-icon-button" id="studioModalClose" type="button" aria-label="关闭窗口" data-tooltip="关闭窗口" data-studio-icon="X"></button></header><div class="studio-modal-body" id="studioModalBody"></div><div class="studio-modal-error" id="studioModalError" role="alert"></div><footer id="studioModalFooter"></footer></section></div>
   <div class="image-preview is-hidden" id="imagePreview" role="dialog" aria-modal="true" aria-labelledby="imagePreviewTitle">
     <div class="image-preview__backdrop" data-close-image-preview></div>
     <section class="image-preview__panel">
-      <div class="image-preview__head"><h2 id="imagePreviewTitle">图片预览</h2><button class="icon-button" id="closeImagePreview" type="button" aria-label="关闭图片预览" title="关闭图片预览"><span aria-hidden="true">×</span></button></div>
+      <div class="image-preview__head"><h2 id="imagePreviewTitle">图片预览</h2><button class="icon-button" id="closeImagePreview" type="button" aria-label="关闭图片预览" data-tooltip="关闭图片预览"><span aria-hidden="true">×</span></button></div>
       <div class="image-preview__viewport"><div class="image-preview__body" id="imagePreviewBody"><img id="previewImage" alt="图片预览" /></div><button class="detail-carousel-nav image-preview__nav is-previous" id="imagePreviewPrev" type="button" aria-label="查看上一张图片"><span aria-hidden="true">‹</span></button><button class="detail-carousel-nav image-preview__nav is-next" id="imagePreviewNext" type="button" aria-label="查看下一张图片"><span aria-hidden="true">›</span></button><div class="detail-carousel-dots image-preview__dots is-hidden" id="imagePreviewDots" aria-label="预览图片位置"></div></div>
       <div class="image-preview__actions"><a class="quiet-button" id="downloadImageButton" href="#" download>下载图片</a></div>
     </section>
@@ -267,21 +275,30 @@
       window.__reportImageStudioPageError(false);
     });
   </script>
+  <script src="./tooltip.js?v=1.3.1" onerror="window.__reportImageStudioPageError(true)"></script>
   <script src="./vendor/photoswipe/photoswipe.umd.min.js?v=5.4.4"></script>
   <script src="./vendor/exifreader/exif-reader.js?v=4.44.1"></script>
   <script src="./vendor/lucide/icons.js?v=0.468.0-studio2"></script>
-  <script src="./image-placeholder.js?v=1.2.0" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./image-placeholder.js?v=1.3.1" onerror="window.__reportImageStudioPageError(true)"></script>
   <script src="./vendor/js-sha256/sha256.min.js?v=0.11.1"></script>
-  <script src="./hash.js?v=1.2.0" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./gallery-preferences.js?v=1.2.0" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./select.js?v=1.2.0" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./sortable.js?v=1.2.0" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./dialog-motion.js?v=1.2.0" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./library.js?v=1.2.0" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./detail-swipe.js?v=1.2.0" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./backdrop.js?v=1.2.0" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./viewer-backdrop.js?v=1.2.0" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./external-sources.js?v=1.2.0" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./app.js?v=1.2.0" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./hash.js?v=1.3.1" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./gallery-preferences.js?v=1.3.1" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./select.js?v=1.3.1" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./sortable.js?v=1.3.1" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./dialog-motion.js?v=1.3.1" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./components/presentation.js?v=1.3.1" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./components/modal.js?v=1.3.1" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./gallery/metadata.js?v=1.3.1" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./gallery/metadata-markup.js?v=1.3.1" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./gallery/imports.js?v=1.3.1" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./library.js?v=1.3.1" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./detail-swipe.js?v=1.3.1" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./backdrop.js?v=1.3.1" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./viewer-backdrop.js?v=1.3.1" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./external-sources.js?v=1.3.1" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./novelai-controls.js?v=1.3.1" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./comfyui-controls.js?v=1.3.1" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./settings/controller.js?v=1.3.1" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./app.js?v=1.3.1" onerror="window.__reportImageStudioPageError(true)"></script>
 </body>
 </html>

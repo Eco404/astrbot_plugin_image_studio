@@ -39,7 +39,8 @@
     --detail-footer-tint: color-mix(in srgb, var(--appearance-glass-solid) var(--detail-footer-tint-opacity, 18.75%), transparent);
   }
 }
-.topbar, .floatingbar, .selection-bar.gallery-selection-bar {
+.topbar, .floatingbar, .selection-bar.gallery-selection-bar,
+.image-studio-viewer-filmstrip {
   background: var(--glass);
   backdrop-filter: blur(22px) saturate(115%);
   -webkit-backdrop-filter: blur(22px) saturate(115%);

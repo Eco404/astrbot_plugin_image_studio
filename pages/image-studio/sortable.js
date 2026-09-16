@@ -9,6 +9,8 @@
       const itemSelector = options.itemSelector || "[data-import-id]";
       const handleSelector = options.handleSelector || "[data-sort-handle]";
       const getId = options.getId || ((item) => item.dataset.importId);
+      const itemName = options.itemName || "图片";
+      const itemUnit = options.itemUnit || "张";
       const items = () => Array.from(grid.children).filter((item) => item.matches(itemSelector));
       const enabled = () => grid.isConnected && options.isEnabled?.() !== false && items().length > 1;
       let drag = null;
@@ -42,7 +44,7 @@
         drag.target = target;
         drag.after = order.indexOf(target) > order.indexOf(drag.item);
         target.classList.add(drag.after ? "is-sort-target-after" : "is-sort-target-before");
-        live.textContent = `松开移到第 ${order.indexOf(target) + 1} 张`;
+        live.textContent = `松开移到第 ${order.indexOf(target) + 1} ${itemUnit}`;
       }
 
       function tick() {
@@ -84,7 +86,7 @@
           image.alt = ""; ghost.appendChild(image);
         }
         const label = document.createElement("span");
-        label.textContent = drag.item.querySelector(".import-card-header strong")?.textContent || "移动图片";
+        label.textContent = options.getLabel?.(drag.item) || drag.item.querySelector(".import-card-header strong")?.textContent || `移动${itemName}`;
         ghost.appendChild(label); document.body.appendChild(ghost);
         drag.ghost = ghost;
         drag.offsetX = ghost.getBoundingClientRect().width / 2;
@@ -92,7 +94,7 @@
         drag.item.classList.add("is-sort-dragging");
         drag.capture.setAttribute("aria-pressed", "true");
         grid.classList.add("is-sorting");
-        live.textContent = "正在移动图片，松开以确认，按 Escape 取消";
+        live.textContent = `正在移动${itemName}，松开以确认，按 Escape 取消`;
         tick();
       }
 
@@ -105,7 +107,8 @@
         cancelAnimationFrame(animation); animation = 0;
         current.ghost?.remove();
         current.item.classList.remove("is-sort-dragging");
-        current.capture.removeAttribute("aria-pressed");
+        if (current.originalPressed === null) current.capture.removeAttribute("aria-pressed");
+        else current.capture.setAttribute("aria-pressed", current.originalPressed);
         grid.classList.remove("is-sorting");
         if (current.capture.hasPointerCapture?.(current.pointerId)) current.capture.releasePointerCapture(current.pointerId);
         if (current.started) {
@@ -115,13 +118,13 @@
         if (valid) {
           grid.insertBefore(current.item, current.after ? target.nextSibling : target);
           announceAndCommit(current.item);
-        } else if (current.started) live.textContent = "已取消图片移动";
+        } else if (current.started) live.textContent = `已取消${itemName}移动`;
         options.onDragEnd?.();
       }
 
       function announceAndCommit(item) {
         const order = items();
-        live.textContent = `图片已移到第 ${order.indexOf(item) + 1} 张，共 ${order.length} 张`;
+        live.textContent = `${itemName}已移到第 ${order.indexOf(item) + 1} ${itemUnit}，共 ${order.length} ${itemUnit}`;
         options.onReorder?.(order.map(getId));
       }
 
@@ -136,7 +139,7 @@
         if (!capture || item?.parentElement !== grid || capture.matches(":disabled") || event.target.closest("input, textarea, select, a")) return;
         event.preventDefault();
         handle?.focus({ preventScroll: true });
-        drag = { pointerId: event.pointerId, capture, item, x: event.clientX, y: event.clientY, startX: event.clientX, startY: event.clientY, scroller: scrollParent(grid), started: false, target: null };
+        drag = { pointerId: event.pointerId, capture, item, originalPressed: capture.getAttribute("aria-pressed"), x: event.clientX, y: event.clientY, startX: event.clientX, startY: event.clientY, scroller: scrollParent(grid), started: false, target: null };
         capture.setPointerCapture?.(event.pointerId);
       }
 

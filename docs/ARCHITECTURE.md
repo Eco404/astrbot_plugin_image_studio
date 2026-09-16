@@ -1,0 +1,112 @@
+# 目录与职责
+
+后端按职责归入 `backend/`，插件入口委托页面接口、指令编排和能力查询组装。数据库、配置格式、外部 API 地址和工具名称保持原有约定。内部 Python 导入路径已迁移，不保留根目录兼容副本。
+
+```text
+main.py                         AstrBot 注册、生命周期、入口及事件适配
+backend/
+  config.py                     配置读取、规范化、持久化
+  models.py                     请求/结果结构、模型配置与参数策略
+  api/
+    routes.py                   WebUI 路由目录
+    comfyui.py                  工作流导入、检查、任务查询与提交接口
+    settings.py                 配置读取、保存、回滚及工作流配置写入
+    generation.py               生图、参考图上传、服务商发现与额度
+    gallery.py                  图库浏览、收藏、删除、导出与外部状态
+    imports.py                  导入预检、上传票据、提交与编辑
+    preferences.py              浏览器主题与图库偏好 Cookie
+  commands/
+    parser.py                   无宿主依赖的指令参数解析
+    handler.py                  指令编排，显式注入事件图片解析等依赖
+  tools/
+    capability_catalog.py       服务商/模型发现、批量选择
+    capabilities.py             完整能力载荷组装
+  generation/service.py         生图校验、批次、并发、结果登记与复现
+  generation/concurrency.py     服务商、模型与官方账号共享限流
+  providers/
+    executor.py                 通用服务商调度及 HTTP 适配
+    comfyui/
+      client.py                 ComfyUI HTTP/WebSocket 协议
+      workflows.py              执行图规范化、参数绑定、执行计划
+      jobs.py                   任务/修订持久化与任务管理
+      runtime.py                生图服务与可恢复任务的协调
+      imports.py                图片/JSON 导入结果适配
+    novelai/
+      protocol.py               官方接口请求/响应处理
+      catalog.py                模型能力目录
+      inputs.py                 高级输入处理
+      inpaint.py                蒙版与重绘合成
+  gallery/
+    store.py                    统一异步入口、修改锁、仓储组装与缓存修订
+    context.py                  共用路径、数据库连接策略及外部异常回调
+    imports.py                  导入、编辑、合并和批次收据事务
+    queries.py                  图库查询、详情与媒体读取
+    records.py                  生成记录、收藏、删除及导出事务
+    assets.py                   资产、引用和临时保护
+    external_records.py         外部图库索引与权限校验
+    metadata_records.py         元数据缓存及回填
+    maintenance.py              配额、清理和健康维护
+    projection.py               参数投影和检索字段转换
+    errors.py / constants.py    存储错误类型和共享规则
+    external.py                 外部图库扫描及来源适配
+    timestamps.py               外部图片的时间判定
+  metadata/
+    parser.py                   元数据解析的公共入口
+    common.py / readers.py      共用解码、时间识别和图片字段读取
+    novelai.py                  NovelAI 字段及隐写数据
+    stable_diffusion.py         SD 参数文本
+    comfyui*.py                 展示用工作流分析、候选提示词与去重
+    exchange.py                 参数复制、导入与复现映射
+  media/                        图片格式/编码/缩略图/文件名及文件辅助函数
+  database/schema.py            数据库正式/开发版本和迁移
+  ui/                           浏览器主题、图库偏好的传输格式
+pages/image-studio/
+  app.js                       页面启动、生图与图库/详情协调
+  library.js                   图库操作和详情参数展示
+  components/                  通用展示辅助与弹窗生命周期
+  settings/controller.js       配置草稿、模型/服务商编辑和保存流程
+  gallery/imports.js           导入队列、图组编辑和快照缓存
+  gallery/metadata*.js         浏览器图片元数据读取和参数展示
+  vendor/                      随包附许可证的第三方静态资源
+tests/
+  backend/                     Python 业务与安装包回归
+  webui/                       浏览器场景
+  support/                     隔离服务和数据库升级样例
+scripts/                       验证入口和发布包构建
+```
+
+## 入口与依赖
+
+`main.py` 保留 AstrBot 的插件类、装饰器和注册签名。能力工具调用 `query_capabilities(settings, ...)` 获取载荷，再由入口维护本次事件的能力查询状态。搜索摘要不会触发完整能力授权。纯载荷模块不导入插件入口或 AstrBot 事件。
+
+各 API 控制器通过构造参数接收配置读取函数、存储、服务获取函数等明确依赖。每次请求读取当前设置，避免保存配置后仍使用旧快照；不通过继承或全局状态访问插件实例。`SettingsAPI` 使用原有设置锁完成持久化与回滚，成功后调用入口的配置应用函数更新运行服务。`ImportsAPI` 管理待上传项目与批次锁，`GalleryAPI` 管理导出下载票据，插件维护与关闭流程显式调用它们。
+
+`routes.py` 仅集中登记现有路径、方法、处理函数和描述。处理函数继续经过插件入口的薄包装；不改变宿主提供的认证、上下文绑定或返回格式。
+
+`backend/` 子包的 `__init__.py` 保持轻量。内部调用使用明确的相对导入；测试引用相应的新模块，避免根目录转发层和模块别名掩盖循环依赖。
+
+## 页面状态
+
+前端保留原生 JavaScript 模块工厂与既有加载顺序。通用弹窗拥有自己的打开/关闭与退出动画状态；导入模块拥有上传队列、编辑草稿和受容量限制的快照缓存；设置模块拥有配置草稿、已保存基线和保存/重读队列。它们通过明确回调访问导航或当前选中图片，不持有整个应用状态。
+
+图库列表、详情导航和图片缓存仍由 `app.js` 协调，既有手势、模糊背景与媒体复用组件沿用原边界。此处保留紧密相关的状态以避免跨组件转交期间重置缓存或丢失手势。后续可依据实际新增功能继续提取，不以文件行数作为唯一拆分目标。
+
+1.3.1 的画廊使用 `gallery/list?light=1` 获取不含图片字节的列表，立即展示卡片占位，再通过既有单图接口加载预览；未指定 `light` 的调用保持兼容。列表请求使用修订号防止迟到响应覆盖当前页，图片加载使用独立页面会话和最多四个并发请求，优先处理可见及邻近卡片。预览复用详情页的图片身份、缩略图版本缓存及请求去重；同页刷新保留 DOM，过期页面只停止待执行图片任务，已发出的 bridge 请求不再更新旧卡片。
+
+## 持久化边界
+
+代码目录移动不移动数据。`StarTools.get_data_dir` 仍是运行数据目录入口，原配置文件、图库路径、SQLite 文件、任务修订和资产编号均沿用既有位置与格式。
+
+`GenerationStore` 保留异步调用、原修改锁、缓存修订和取消保护。同步事务整体移入对应仓储，仓储共用 `GalleryContext`，不创建独立修改锁，也不通过代理访问整个 store。跨仓储调用以显式服务回调传入，数据库连接仍由原事务发起者持有。ComfyUI 任务继续使用同一图库数据库和原任务状态机，结构迁移由 `backend/database/schema.py` 集中处理。
+
+1.3.0 的数据库正式基线为 v3：已发布的 v1 → v2 与本次 v2 → v3 分别保留，开发修订不进入正式迁移链。当前 `3-dev.1` 在结构核验及备份后移除开发标记；升级和恢复细节见 [开发与发布维护](DEVELOPMENT.md)。
+
+`GenerationConcurrency` 由主生成服务持有并随当前设置调整；ComfyUI 执行视图通过构造参数借用同一组件。历史任务和临时工作流不会用快照重新覆盖当前并发上限，异常和取消仍释放已占用的所有层级。NovelAI 官方相同账号继续共用串行限制。
+
+元数据中的 ComfyUI 图分析用于展示和导入参数识别，执行图校验与绑定仍在 `providers/comfyui/workflows.py`。两者保留独立语义，不能把展示用的近似图直接视为可执行工作流。
+
+安装包显式要求入口和关键后端文件，并只从 `backend/` 收集 Python 运行文件。打包测试检查遗漏、符号链接、临时数据排除，并在隔离目录从解压包导入全部模块，防止测试意外依赖源码工作区。开发用 npm 依赖、测试、日志和缓存不进入插件包。
+
+## 维护约定
+
+按模块职责新增实现，宿主注册签名集中在 `main.py`；无状态功能不要反向依赖存储入口。保留事务和异步生命周期边界，再考虑进一步拆小。通过统一验证入口检查工具注册、接口、持久化及对应浏览器场景，避免在结构整理中混入生成行为、配置格式或数据库版本变更。

@@ -333,10 +333,10 @@
     panel.setAttribute("aria-labelledby", "appearanceTitle");
     panel.innerHTML = `<div class="section-heading appearance-heading"><h2 id="appearanceTitle">主题与显示</h2><button type="button" class="quiet-button appearance-reset" aria-expanded="false" aria-controls="appearanceResetConfirmation">${icon("RefreshCw")}恢复默认</button></div>
       <fieldset class="appearance-fieldset"><legend>显示模式</legend><div class="appearance-modes">${modes.map(([value, title]) => `<label><input type="radio" name="appearanceMode" value="${value}"><span>${title}</span></label>`).join("")}</div></fieldset>
-      <fieldset class="appearance-fieldset"><legend>强调色</legend><div class="appearance-swatches">${swatches.map(([hue, title]) => `<label title="${title}" style="--swatch-h:${hue}"><input type="radio" name="appearanceAccent" value="${hue}" aria-label="${title}"><span>${icon("Check")}</span></label>`).join("")}</div></fieldset>
-      <div class="appearance-custom-color"><input type="color" id="appearanceColor" aria-label="自选强调色" title="自选颜色"><input type="text" id="appearanceHex" aria-label="强调色 HEX 色值" maxlength="7" spellcheck="false" autocapitalize="off" autocomplete="off"><button type="button" id="appearanceEyedropper" class="studio-icon-button" aria-label="吸取颜色" title="吸取颜色">${icon("Pipette")}</button></div>
+      <fieldset class="appearance-fieldset"><legend>强调色</legend><div class="appearance-swatches">${swatches.map(([hue, title]) => `<label data-tooltip="${title}" style="--swatch-h:${hue}"><input type="radio" name="appearanceAccent" value="${hue}" aria-label="${title}"><span>${icon("Check")}</span></label>`).join("")}</div></fieldset>
+      <div class="appearance-custom-color"><input type="color" id="appearanceColor" aria-label="自选强调色" data-tooltip="自选颜色"><input type="text" id="appearanceHex" aria-label="强调色 HEX 色值" maxlength="7" spellcheck="false" autocapitalize="off" autocomplete="off"><button type="button" id="appearanceEyedropper" class="studio-icon-button" aria-label="吸取颜色" data-tooltip="吸取颜色">${icon("Pipette")}</button></div>
       <section id="appearanceSampler" class="appearance-sampler" aria-label="图片取色" hidden>
-        <div class="appearance-sample-head"><button type="button" id="appearanceSampleChoose" class="quiet-button">${icon("ImagePlus")}选择取色图片</button><button type="button" id="appearanceSampleClose" class="studio-icon-button" aria-label="取消图片取色" title="取消取色">${icon("X")}</button></div>
+        <div class="appearance-sample-head"><button type="button" id="appearanceSampleChoose" class="quiet-button">${icon("ImagePlus")}选择取色图片</button><button type="button" id="appearanceSampleClose" class="studio-icon-button" aria-label="取消图片取色" data-tooltip="取消取色">${icon("X")}</button></div>
         <input type="file" id="appearanceSampleFile" accept="image/png,image/jpeg,image/webp,image/gif,image/avif,image/bmp" hidden>
         <div class="appearance-sample-image"><canvas id="appearanceSampleCanvas" width="0" height="0" tabindex="0" aria-label="取色图片" hidden></canvas><span class="appearance-sample-point" hidden aria-hidden="true"></span></div>
         <div class="appearance-sample-actions"><span id="appearanceSampleSwatch" aria-hidden="true"></span><output id="appearanceSampleValue" aria-live="polite">尚未取色</output><button type="button" id="appearanceSampleApply" class="quiet-button" disabled>使用颜色</button></div>
@@ -360,7 +360,7 @@
     hexInput.addEventListener("change", commitHex);
     hexInput.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); commitHex(); } });
     const eyedropper = panel.querySelector("#appearanceEyedropper");
-    eyedropper.title = typeof window.EyeDropper === "function" && window.isSecureContext ? "从屏幕吸取颜色" : "从本地图片吸取颜色";
+    eyedropper.dataset.tooltip = typeof window.EyeDropper === "function" && window.isSecureContext ? "从屏幕吸取颜色" : "从本地图片吸取颜色";
     eyedropper.addEventListener("click", () => void pickScreenColor());
     panel.querySelector("#appearanceSampleChoose").addEventListener("click", () => panel.querySelector("#appearanceSampleFile").click());
     panel.querySelector("#appearanceSampleFile").addEventListener("change", (event) => { void loadSampleImage(event.target.files[0]); event.target.value = ""; });

@@ -1,0 +1,11 @@
+{
+  "name": "astrbot-plugin-image-studio-dev",
+  "private": true,
+  "description": "Pinned browser test dependencies; not part of the plugin runtime",
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "playwright": "1.62.0"
+  }
+}
