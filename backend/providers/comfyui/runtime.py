@@ -380,10 +380,8 @@ class ComfyRuntime:
             settings=replace(self.service.settings, providers=(provider,)),
             executor=Executor(),
             store=ChildGalleryStore() if is_child else self.service.store,
+            concurrency=self.service.concurrency,
         )
-        # Reuse real limiters rather than giving each detached task its own cap.
-        isolated._limiters = self.service._limiters
-        isolated._model_limiters = self.service._model_limiters
         result = await isolated.generate(
             **values,
             provider_id=provider.id,

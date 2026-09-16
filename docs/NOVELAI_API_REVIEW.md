@@ -8,8 +8,8 @@
 
 - `backend/providers/novelai/protocol.py` / `backend/providers/novelai/inputs.py` / `backend/providers/executor.py`：Bearer 鉴权，JSON 优先、ZIP 兼容的完整原图接收，单底图、逐图角色/风格参考、Vibe 编码、多角色、局部重绘及订阅查询。
 - `models.py` / `service.py`：四款内置模型的基础参数、按模式过滤参数、基础图生图默认开启且最多一张底图、同 Token 跨 Provider 共享串行限制。
-- `storage.py` / `parameter_exchange.py`：逐图实际参数写入已有补充字段；按记录策略过滤，详情与复现跟随所选图片；官方与第三方同属 NovelAI 来源但各自映射参数。
-- `image_metadata.py`：常规元数据与 alpha 隐写元数据合并，保留冲突来源；解析器 9，数据库仍为 v2。
+- `backend/gallery/` / `backend/metadata/exchange.py`：逐图实际参数写入已有补充字段；按记录策略过滤，详情与复现跟随所选图片；官方与第三方同属 NovelAI 来源但各自映射参数。
+- `backend/metadata/parser.py` / `backend/metadata/novelai.py`：常规元数据与 alpha 隐写元数据合并，保留冲突来源；解析器 9，NovelAI 接入本身未改变数据库结构。
 - WebUI：官方服务商配置和预设、按模式显示重绘参数、Anlas 与 V5 使用额度分开显示。
 
 按 2026-09-14 当前官网公开代码，四款模型默认均使用 `params_version=4`，新建模型 23 步，V4.5 scale=5、V5 scale=7；已有用户配置不覆盖。不注入 `use_new_shared_trial`，也未集成试用验证码流程。流式预览、放大和 Director Tools 等独立工具不在本次范围内。

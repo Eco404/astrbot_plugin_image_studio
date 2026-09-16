@@ -102,7 +102,7 @@ python scripts/verify.py --webui comfy_gallery_run --browser webkit
 
 安装包只包含运行模块、WebUI、使用说明和指定的演示截图，不包含真实数据、日志、开发数据库、测试或维护文档。新增运行模块或 README 图片时，同步更新构建白名单和测试；第三方静态资源的许可证随包保留。
 
-浏览器测试只连接 `tests/webui_harness.py` 创建的隔离服务，通过 `STUDIO_TEST_URL` 和 `STUDIO_PLAYWRIGHT` 指定地址与 Playwright。不要把含导入、删除或配置保存操作的测试对准真实部署。对手机合成、触摸或高刷的结论，应区分浏览器模拟与真实设备验证。
+浏览器场景位于 `tests/webui/`，只连接 `tests/support/webui_harness.py` 创建的隔离服务；统一入口负责传入 `STUDIO_TEST_URL` 和 `STUDIO_PLAYWRIGHT`。Python 业务测试位于 `tests/backend/`，共享样例位于 `tests/support/`。不要把含导入、删除或配置保存操作的测试对准真实部署。对手机合成、触摸或高刷的结论，应区分浏览器模拟与真实设备验证。
 
 每次数据库发布至少验证：
 

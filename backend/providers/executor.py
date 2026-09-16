@@ -28,7 +28,7 @@ from .novelai.protocol import (
     parse_subscription,
 )
 from .novelai.inpaint import composite_inpaint_results
-from ..gallery.store import detect_mime_type, image_data_url
+from ..media.images import detect_mime_type, image_data_url
 
 
 class ProviderError(RuntimeError):

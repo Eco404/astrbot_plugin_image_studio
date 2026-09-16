@@ -1,7 +1,7 @@
 (function () {
   "use strict";
   window.ImageStudioExternalSources = function (hooks) {
-    const { state, apiGet, apiPost, escape, formatBytes, formatDate, showNotice, errorMessage } = hooks;
+    const { getView, getSettings, apiGet, apiPost, escape, formatBytes, formatDate, showNotice, errorMessage } = hooks;
     const $ = id => document.getElementById(id), copy = value => JSON.parse(JSON.stringify(value));
     const equal = (left, right) => JSON.stringify(left) === JSON.stringify(right);
     const sources = new Map(), scanRequests = new Set();
@@ -14,7 +14,7 @@
     }
     function normalizeMap(value) { return Object.fromEntries(Object.entries(value || {}).map(([id, item]) => [id, normalize(item, id)])); }
     function dirty(id) { return !equal(drafts[id], saved[id]); }
-    function isVisible() { return !disposed && state.view === "settings" && !document.hidden; }
+    function isVisible() { return !disposed && getView() === "settings" && !document.hidden; }
     function running(source) { return ["enumerating", "scanning"].includes(source?.status); }
     function statusText(source) {
       if (!source.enabled) return "已停用";
@@ -53,7 +53,7 @@
         row.setAttribute("aria-label", `${value.name}，${label}，编辑图库`);
       }
       $("externalSourcesEmpty").hidden = !!ids.size;
-      $("addExternalSource").disabled = !state.settings;
+      $("addExternalSource").disabled = !getSettings();
       renderEditorStatus();
     }
     function renderHealth() {
@@ -163,7 +163,7 @@
     }
     function settingsLoaded(preserveDraft = false, submittedSources = null) {
       revision++;
-      const incoming = normalizeMap(state.settings?.webui.external_sources);
+      const incoming = normalizeMap(getSettings()?.webui.external_sources);
       if (preserveDraft && submittedSources) {
         const submitted = normalizeMap(submittedSources), next = {};
         for (const id of new Set([...Object.keys(incoming), ...Object.keys(drafts), ...Object.keys(submitted)])) {

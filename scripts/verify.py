@@ -94,7 +94,7 @@ def positive_number(value: str) -> float:
 def suites() -> dict[str, Path]:
     return {
         path.stem.removeprefix("webui_"): path
-        for path in sorted((ROOT / "tests").glob("webui_*.cjs"))
+        for path in sorted((ROOT / "tests" / "webui").glob("webui_*.cjs"))
     }
 
 
@@ -349,7 +349,12 @@ def isolated_harness(*, env: dict[str, str], workdir: Path, log: Path, timeout: 
     }
     with log.open("w", encoding="utf-8") as output:
         process = subprocess.Popen(
-            [sys.executable, str(ROOT / "tests" / "webui_harness.py"), "--port", port],
+            [
+                sys.executable,
+                str(ROOT / "tests" / "support" / "webui_harness.py"),
+                "--port",
+                port,
+            ],
             cwd=workdir,
             env=harness_env,
             stdout=output,

@@ -7,8 +7,6 @@ import hashlib
 import math
 import re
 import time
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -36,32 +34,9 @@ from ..providers.executor import (
     ProviderExecutor,
     ProviderPartialResponseError,
 )
-from ..gallery.store import GenerationStore, detect_mime_type
-
-
-class _ProviderLimiter:
-    """Keep in-flight requests counted when provider settings change."""
-
-    def __init__(self, limit: int) -> None:
-        self.limit = limit
-        self.active = 0
-        self.changed = asyncio.Event()
-
-    def resize(self, limit: int) -> None:
-        self.limit = limit
-        self.changed.set()
-
-    @asynccontextmanager
-    async def slot(self) -> AsyncIterator[None]:
-        while self.active >= self.limit:
-            self.changed.clear()
-            await self.changed.wait()
-        self.active += 1
-        try:
-            yield
-        finally:
-            self.active -= 1
-            self.changed.set()
+from ..gallery.store import GenerationStore
+from ..media.images import detect_mime_type
+from .concurrency import GenerationConcurrency
 
 
 class ImageGenerationService:
@@ -73,31 +48,24 @@ class ImageGenerationService:
         settings: RuntimeSettings,
         executor: ProviderExecutor,
         store: GenerationStore,
+        concurrency: GenerationConcurrency | None = None,
     ) -> None:
         self.settings = settings
         self.executor = executor
         self.store = store
-        self._limiters: dict[str, _ProviderLimiter] = {}
-        self._model_limiters: dict[tuple[str, str], _ProviderLimiter] = {}
-        self._account_limiters: dict[str, _ProviderLimiter] = {}
+        self._owns_concurrency = concurrency is None
+        self.concurrency = (
+            concurrency if concurrency is not None else GenerationConcurrency()
+        )
         self.comfy_runtime = None
         self.update_settings(settings)
 
     def update_settings(self, settings: RuntimeSettings) -> None:
-        """Swap future-request settings after an atomic configuration save."""
+        """Swap settings; execution views never resize their borrowed slots."""
 
         self.settings = settings
-        for provider in settings.providers:
-            limiter = self._limiters.setdefault(
-                provider.id, _ProviderLimiter(provider.max_concurrent_generations)
-            )
-            limiter.resize(provider.max_concurrent_generations)
-            for model in provider.models:
-                model_limiter = self._model_limiters.setdefault(
-                    (provider.id, model.id),
-                    _ProviderLimiter(model.max_concurrent_requests),
-                )
-                model_limiter.resize(model.max_concurrent_requests)
+        if self._owns_concurrency:
+            self.concurrency.update_settings(settings)
 
     async def generate(
         self,
@@ -383,22 +351,14 @@ class ImageGenerationService:
     ) -> tuple[GeneratedImage, ...]:
         """Execute any generation-like request under its provider concurrency limit."""
 
-        limiter = self._limiters.setdefault(
-            provider.id, _ProviderLimiter(provider.max_concurrent_generations)
-        )
         model = provider.get_model(request.model)
-        model_limiter = self._model_limiters.setdefault(
-            (provider.id, model.id), _ProviderLimiter(model.max_concurrent_requests)
-        )
-        return await self._run_batch(provider, model, request, limiter, model_limiter)
+        return await self._run_batch(provider, model, request)
 
     async def _run_batch(
         self,
         provider: ImageProvider,
         model: ImageModel,
         request: GenerationRequest,
-        limiter: _ProviderLimiter,
-        model_limiter: _ProviderLimiter,
     ) -> tuple[GeneratedImage, ...]:
         if provider.kind == "comfyui":
             fixed_outputs = model.comfyui.get("execution_policy") == FIXED_OUTPUT_POLICY
@@ -423,17 +383,16 @@ class ImageGenerationService:
                 # Only child executions acquire slots. Holding a parent slot
                 # while waiting for children would deadlock a single-slot model.
                 return await managed_batch(provider, request)
-            async with model_limiter.slot():
-                async with limiter.slot():
-                    try:
-                        images = await self.executor.generate(provider, request)
-                    except ProviderPartialResponseError as exc:
-                        if not fixed_outputs:
-                            raise
-                        raise ProviderPartialResponseError(
-                            exc.images[: request.count], exc.failures
-                        ) from exc
-                    return images[: request.count] if fixed_outputs else images
+            async with self.concurrency.slot(provider, model):
+                try:
+                    images = await self.executor.generate(provider, request)
+                except ProviderPartialResponseError as exc:
+                    if not fixed_outputs:
+                        raise
+                    raise ProviderPartialResponseError(
+                        exc.images[: request.count], exc.failures
+                    ) from exc
+                return images[: request.count] if fixed_outputs else images
         count = _batch_integer(request.count, "count")
         native_size = _batch_integer(model.native_batch_size, "native_batch_size")
         request_sizes = tuple(
@@ -448,26 +407,13 @@ class ImageGenerationService:
         results: list[tuple[GeneratedImage, ...]] = [()] * len(request_sizes)
         failures: dict[int, str] = {}
         response_counts = [0] * len(request_sizes)
-        account_limiter = None
-        if provider.kind == "novelai_official":
-            account_key = hashlib.sha256(provider.api_key.strip().encode()).hexdigest()
-            account_limiter = self._account_limiters.setdefault(
-                account_key, _ProviderLimiter(1)
-            )
 
         async def worker() -> None:
             for index, size in pending:
                 chunk = replace(request, count=size, parameters=dict(parameters))
                 try:
-                    async with model_limiter.slot():
-                        async with limiter.slot():
-                            if account_limiter is None:
-                                images = await self.executor.generate(provider, chunk)
-                            else:
-                                async with account_limiter.slot():
-                                    images = await self.executor.generate(
-                                        provider, chunk
-                                    )
+                    async with self.concurrency.slot(provider, model):
+                        images = await self.executor.generate(provider, chunk)
                     if not images:
                         raise ProviderError("上游未返回可用图片")
                     results[index] = tuple(images)

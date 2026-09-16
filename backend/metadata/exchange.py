@@ -12,7 +12,7 @@ from ..config import RuntimeSettings
 from .parser import parse_parameter_text
 from ..models import MODEL_SCHEDULING_KEYS, parameter_flag
 from ..providers.novelai.catalog import model_capabilities
-from ..gallery.store import (
+from ..gallery.projection import (
     compact_comfy_request,
     has_request_value,
     project_import_metadata,

@@ -66,7 +66,7 @@ python scripts/verify.py --backend --webui comfy_workspace --browser chromium --
 
 ## 隔离、超时和结果
 
-每个浏览器场景都启动自己的 `tests/webui_harness.py`，使用系统临时目录和自动分配的 `127.0.0.1` 端口；不复用运行中的部署服务。调用方已有的 `STUDIO_TEST_URL` 会被忽略。测试服务使用假图片提供方，场景中的远程接口采用固定结果或拦截，不需要真实 API Key。
+每个浏览器场景都启动自己的 `tests/support/webui_harness.py`，使用系统临时目录和自动分配的 `127.0.0.1` 端口；不复用运行中的部署服务。调用方已有的 `STUDIO_TEST_URL` 会被忽略。测试服务使用假图片提供方，场景中的远程接口采用固定结果或拦截，不需要真实 API Key。
 
 验证结束、检查失败、超时或按 `Ctrl+C` 都会终止本次启动的测试服务及子进程，并清理测试服务的数据目录。截图、测试生成的样例及服务日志保存在 `dist/verification/` 的独立子目录中，可用 `--artifacts-dir` 指定其他位置；这些文件不会进入安装包。
 
@@ -86,7 +86,7 @@ studio_test_workdir="$(mktemp -d)"
 (
   cd "$studio_test_workdir"
   PYTHONPATH="$(dirname "$studio_repo"):${ASTRBOT_ROOT:-$(dirname "$studio_repo")/AstrBot}" \
-    python -m pytest -q "$studio_repo/tests/test_capability_search_tool.py"
+    python -m pytest -q "$studio_repo/tests/backend/test_capability_search_tool.py"
 )
 ```
 
