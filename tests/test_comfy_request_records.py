@@ -8,12 +8,12 @@ from dataclasses import replace
 
 import pytest
 
-from astrbot_plugin_image_studio.models import ImageProvider
-from astrbot_plugin_image_studio.parameter_exchange import (
+from astrbot_plugin_image_studio.backend.models import ImageProvider
+from astrbot_plugin_image_studio.backend.metadata.exchange import (
     export_parameters,
     request_snapshot,
 )
-from astrbot_plugin_image_studio.storage import compact_comfy_request
+from astrbot_plugin_image_studio.backend.gallery.store import compact_comfy_request
 from astrbot_plugin_image_studio.tests.test_comfy_runtime import (
     runtime_fixture,
     workflow,

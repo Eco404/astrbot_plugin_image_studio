@@ -8,16 +8,18 @@ from dataclasses import replace
 import pytest
 from PIL import Image
 
-from astrbot_plugin_image_studio.config import (
+from astrbot_plugin_image_studio.backend.config import (
     HistorySettings,
     RuntimeSettings,
 )
-from astrbot_plugin_image_studio.models import (
+from astrbot_plugin_image_studio.backend.models import (
     GeneratedImage,
     ImageProvider,
 )
-from astrbot_plugin_image_studio.providers import ProviderError
-from astrbot_plugin_image_studio.service import ImageGenerationService
+from astrbot_plugin_image_studio.backend.providers.executor import ProviderError
+from astrbot_plugin_image_studio.backend.generation.service import (
+    ImageGenerationService,
+)
 
 
 def image(index):

@@ -9,13 +9,16 @@ from types import SimpleNamespace
 
 import aiohttp
 import pytest
-from astrbot_plugin_image_studio.comfyui import ComfyClient, ComfyExecutionError
-from astrbot_plugin_image_studio.comfyui_workflows import (
+from astrbot_plugin_image_studio.backend.providers.comfyui.client import (
+    ComfyClient,
+    ComfyExecutionError,
+)
+from astrbot_plugin_image_studio.backend.providers.comfyui.workflows import (
     inspect_workflow,
     normalize_workflow,
     prepare_graph,
 )
-from astrbot_plugin_image_studio.models import (
+from astrbot_plugin_image_studio.backend.models import (
     GenerationRequest,
     ImageProvider,
     ReferenceImage,

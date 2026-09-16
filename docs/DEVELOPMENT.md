@@ -2,13 +2,15 @@
 
 面向维护者。使用说明见 [README](../README.md)，正式版本变化见 [CHANGELOG](../CHANGELOG.md)。
 
+代码分区和依赖边界见 [目录结构](ARCHITECTURE.md)，统一检查及隔离浏览器验证见 [测试入口](TESTING.md)。后端实现位于 `backend/`，插件注册仍在根目录 `main.py`；移动内部 Python 模块不改变配置、数据库或 Web API 格式。
+
 当前开发线为插件 `1.3.0-dev.2`，基于正式插件 `1.2.0`。ComfyUI 工作流修订与可恢复任务引入数据库 `3-dev.1`，保留正式 `user_version=2`，使用 `schema_meta(target_version=3, dev_revision=1)` 标记开发结构。旧库升级前备份，失败回滚；发布时压缩为一次正式升级。ComfyUI 已完成基础真实生图测试，覆盖范围见下方接入说明；NovelAI 官方仍需可用账户联调。
 
-官方协议构造与解析集中在 `novelai.py`，不依赖完整第三方 SDK。`GeneratedImage.effective_parameters` 通过 `generation_images.supplemental_json.effective_request` 保存经过记录策略过滤的实际参数；原始请求仍保留在生成记录上。隐写元数据解析器版本为 9，既有缓存更新沿用现有回填流程。
+官方协议构造与解析集中在 `backend/providers/novelai/protocol.py`，不依赖完整第三方 SDK。`GeneratedImage.effective_parameters` 通过 `generation_images.supplemental_json.effective_request` 保存经过记录策略过滤的实际参数；原始请求仍保留在生成记录上。隐写元数据解析器版本为 9，既有缓存更新沿用现有回填流程。
 
 官方资料、与 NAI2API 的差异和待验证项见 [NovelAI 官方接口核对](NOVELAI_API_REVIEW.md)。
 
-ComfyUI 架构、工作流绑定、任务恢复与范围见 [ComfyUI 接入](COMFYUI_IMPLEMENTATION.md)。`comfyui.py` 负责原生协议，`comfyui_workflows.py` 负责执行图和绑定，`comfyui_jobs.py` 保存修订/任务/临时文件，`comfyui_runtime.py` 接入现有生成与图库流程。运行中任务不受浏览器连接生命周期影响。
+ComfyUI 架构、工作流绑定、任务恢复与范围见 [ComfyUI 接入](COMFYUI_IMPLEMENTATION.md)。`backend/providers/comfyui/client.py` 负责原生协议，`backend/providers/comfyui/workflows.py` 负责执行图和绑定，`backend/providers/comfyui/jobs.py` 保存修订/任务/临时文件，`backend/providers/comfyui/runtime.py` 接入现有生成与图库流程。运行中任务不受浏览器连接生命周期影响。
 
 ## 1.2.0 正式基线
 
@@ -17,7 +19,7 @@ ComfyUI 架构、工作流绑定、任务恢复与范围见 [ComfyUI 接入](COM
 | 标识 | 当前值 | 含义 |
 | --- | --- | --- |
 | 插件版本 | `1.2.0` | `metadata.yaml` 与 `main.py` 注册版本相同 |
-| 数据库正式版本 | `2` | SQLite `PRAGMA user_version`，由 `database_schema.py` 管理 |
+| 数据库正式版本 | `2` | SQLite `PRAGMA user_version`，由 `backend/database/schema.py` 管理 |
 | 配置格式版本 | `2` | `studio_config.json` 的 `schema_version`，与数据库版本独立 |
 
 ## 1.1.0 正式基线（历史）
@@ -27,11 +29,11 @@ ComfyUI 架构、工作流绑定、任务恢复与范围见 [ComfyUI 接入](COM
 | 标识 | 当前值 | 含义 |
 | --- | --- | --- |
 | 插件版本 | `1.1.0` | `metadata.yaml` 与 `main.py` 注册版本相同 |
-| 数据库正式版本 | `2` | SQLite `PRAGMA user_version`，由 `database_schema.py` 管理 |
+| 数据库正式版本 | `2` | SQLite `PRAGMA user_version`，由 `backend/database/schema.py` 管理 |
 | 配置格式版本 | `2` | `studio_config.json` 的 `schema_version`，与数据库版本独立 |
 | 图片解析器版本 | `image_metadata.PARSER_VERSION` | 控制派生元数据回填，与数据库结构版本独立 |
 
-数据库结构和发布迁移集中在 `database_schema.py`。已发布的 v1 定义保持不变，v2 增加最终版本的 `external_sources`、`external_records` 及相关索引，不再先建早期开发表再逐列升级。
+数据库结构和发布迁移集中在 `backend/database/schema.py`。已发布的 v1 定义保持不变，v2 增加最终版本的 `external_sources`、`external_records` 及相关索引，不再先建早期开发表再逐列升级。
 
 `storage.GenerationStore.initialize()` 调用 `ensure_release_schema()`。尺寸、生图来源和图片元数据的派生修复，以及租约和孤立文件维护，继续在结构迁移事务外执行，失败后可重试。
 
@@ -88,21 +90,12 @@ data/plugin_data/astrbot_plugin_image_studio/backups/
 
 ## 测试与构建
 
-使用 Python 3.12+ 的 AstrBot 环境。包含 AstrBot 导入的测试在临时工作目录执行，避免宿主初始化把运行文件写入仓库。以下示例从插件根目录开始，假定 AstrBot 源码位于同级 `AstrBot` 目录，环境名为 `astrbot`：
+使用 Python 3.12+ 的 AstrBot 虚拟环境。从插件根目录运行统一入口，默认执行静态检查、全部 Python 回归和安装包构建。入口使用当前 Python 解释器，并在临时目录运行宿主相关测试，避免初始化文件写入仓库。环境准备和浏览器依赖安装见 [测试入口](TESTING.md)。
 
 ```bash
-studio_repo_dir="$(pwd)"
-studio_check_dir="$(mktemp -d)"
-cd "$studio_check_dir"
-PYTHONPATH="$studio_repo_dir/..:$studio_repo_dir/../AstrBot" conda run -n astrbot python -m pytest -q "$studio_repo_dir/tests"
-conda run -n astrbot ruff check --select F,E9 "$studio_repo_dir"
-conda run -n astrbot ruff format --check "$studio_repo_dir"
-node --check "$studio_repo_dir/pages/image-studio/app.js"
-node --check "$studio_repo_dir/pages/image-studio/library.js"
-node --check "$studio_repo_dir/pages/image-studio/appearance.js"
-node --check "$studio_repo_dir/pages/image-studio/viewer-backdrop.js"
-git -C "$studio_repo_dir" diff --check
-conda run -n astrbot python "$studio_repo_dir/scripts/build_plugin_package.py"
+python scripts/verify.py
+python scripts/verify.py --webui comfy_workspace comfy_gallery_run --browser chromium
+python scripts/verify.py --webui comfy_gallery_run --browser webkit
 ```
 
 当前开发版构建默认输出 `dist/astrbot_plugin_image_studio-v1.3.0-dev.2.zip`，实际文件名跟随元数据版本；支持 `--root` 和 `--output`。构建读取当前工作区，不要求先提交，不执行数据库转换。

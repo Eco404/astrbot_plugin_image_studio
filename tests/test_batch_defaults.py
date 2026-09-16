@@ -8,10 +8,10 @@ from dataclasses import replace
 
 import pytest
 
-from astrbot_plugin_image_studio.models import ImageProvider
-from astrbot_plugin_image_studio.parameter_exchange import export_parameters
-from astrbot_plugin_image_studio.providers import ProviderExecutor
-from astrbot_plugin_image_studio.storage import GenerationStore
+from astrbot_plugin_image_studio.backend.models import ImageProvider
+from astrbot_plugin_image_studio.backend.metadata.exchange import export_parameters
+from astrbot_plugin_image_studio.backend.providers.executor import ProviderExecutor
+from astrbot_plugin_image_studio.backend.gallery.store import GenerationStore
 from astrbot_plugin_image_studio.tests.test_model_batches import (
     BatchExecutor,
     provider,

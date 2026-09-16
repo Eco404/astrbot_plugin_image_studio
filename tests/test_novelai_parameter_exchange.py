@@ -4,10 +4,12 @@ import json
 import math
 
 import pytest
-from astrbot_plugin_image_studio.config import HistorySettings, RuntimeSettings
-from astrbot_plugin_image_studio.models import ImageProvider
-from astrbot_plugin_image_studio.novelai_inputs import prepare_advanced
-from astrbot_plugin_image_studio.parameter_exchange import resolve_parameters
+from astrbot_plugin_image_studio.backend.config import HistorySettings, RuntimeSettings
+from astrbot_plugin_image_studio.backend.models import ImageProvider
+from astrbot_plugin_image_studio.backend.providers.novelai.inputs import (
+    prepare_advanced,
+)
+from astrbot_plugin_image_studio.backend.metadata.exchange import resolve_parameters
 from astrbot_plugin_image_studio.tests.test_novelai_provider import request
 
 V45 = "nai-diffusion-4-5-full"

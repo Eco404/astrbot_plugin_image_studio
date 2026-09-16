@@ -10,13 +10,16 @@ import zipfile
 from pathlib import Path
 
 import pytest
-from astrbot_plugin_image_studio.config import HistorySettings
-from astrbot_plugin_image_studio.models import (
+from astrbot_plugin_image_studio.backend.config import HistorySettings
+from astrbot_plugin_image_studio.backend.models import (
     GeneratedImage,
     GenerationRequest,
     ImageProvider,
 )
-from astrbot_plugin_image_studio.storage import ExternalDeleteError, GenerationStore
+from astrbot_plugin_image_studio.backend.gallery.store import (
+    ExternalDeleteError,
+    GenerationStore,
+)
 from PIL import Image
 
 

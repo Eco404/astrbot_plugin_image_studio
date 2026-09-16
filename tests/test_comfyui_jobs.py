@@ -6,9 +6,12 @@ import time
 from contextlib import closing
 
 import pytest
-from astrbot_plugin_image_studio import database_schema as schema
-from astrbot_plugin_image_studio.comfyui_jobs import ComfyJobManager, ComfyJobStore
-from astrbot_plugin_image_studio.models import GeneratedImage, ReferenceImage
+from astrbot_plugin_image_studio.backend.database import schema as schema
+from astrbot_plugin_image_studio.backend.providers.comfyui.jobs import (
+    ComfyJobManager,
+    ComfyJobStore,
+)
+from astrbot_plugin_image_studio.backend.models import GeneratedImage, ReferenceImage
 from astrbot_plugin_image_studio.tests.schema_upgrade_fixtures import create_final_dev
 
 WORKFLOW = {

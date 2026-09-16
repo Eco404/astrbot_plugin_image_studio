@@ -8,13 +8,13 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
-from astrbot_plugin_image_studio.config import (
+from astrbot_plugin_image_studio.backend.config import (
     load_studio_settings,
     normalize_webui_settings,
     runtime_settings,
     save_studio_settings,
 )
-from astrbot_plugin_image_studio.models import ImageProvider
+from astrbot_plugin_image_studio.backend.models import ImageProvider
 from astrbot_plugin_image_studio.tests.webui_harness import create_app
 
 PREFIX = "/astrbot_plugin_image_studio/"

@@ -10,7 +10,7 @@ from typing import Any
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
-from .novelai_catalog import model_capabilities
+from .catalog import model_capabilities
 
 ADVANCED_KEYS = frozenset(
     {

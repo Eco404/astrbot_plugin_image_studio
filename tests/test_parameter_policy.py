@@ -9,22 +9,22 @@ from dataclasses import replace
 import pytest
 from PIL import Image, PngImagePlugin
 
-from astrbot_plugin_image_studio.config import HistorySettings, RuntimeSettings
-from astrbot_plugin_image_studio.models import (
+from astrbot_plugin_image_studio.backend.config import HistorySettings, RuntimeSettings
+from astrbot_plugin_image_studio.backend.models import (
     GeneratedImage,
     ImageProvider,
     ReferenceImage,
 )
-from astrbot_plugin_image_studio.parameter_exchange import (
+from astrbot_plugin_image_studio.backend.metadata.exchange import (
     export_parameters,
     request_snapshot,
     resolve_parameters,
 )
-from astrbot_plugin_image_studio.service import (
+from astrbot_plugin_image_studio.backend.generation.service import (
     ImageGenerationService,
     _parameters_for_model,
 )
-from astrbot_plugin_image_studio.storage import GenerationStore
+from astrbot_plugin_image_studio.backend.gallery.store import GenerationStore
 
 
 FLAGS = ("webui_visible", "record_in_history", "refill_from_history")

@@ -7,7 +7,7 @@ import pytest
 from astrbot.api.message_components import Image, Reply
 from astrbot_plugin_image_studio import main as plugin_main
 from astrbot_plugin_image_studio.main import ImageStudioPlugin, _parse_command
-from astrbot_plugin_image_studio.models import (
+from astrbot_plugin_image_studio.backend.models import (
     GeneratedImage,
     ImageProvider,
     ReferenceImage,

@@ -7,13 +7,16 @@ import zipfile
 
 import pytest
 
-from astrbot_plugin_image_studio.config import HistorySettings
-from astrbot_plugin_image_studio.models import (
+from astrbot_plugin_image_studio.backend.config import HistorySettings
+from astrbot_plugin_image_studio.backend.models import (
     GeneratedImage,
     GenerationRequest,
     ImageProvider,
 )
-from astrbot_plugin_image_studio.storage import GenerationStore, ImportDuplicateError
+from astrbot_plugin_image_studio.backend.gallery.store import (
+    GenerationStore,
+    ImportDuplicateError,
+)
 from astrbot_plugin_image_studio.tests.test_import_groups import image, stage
 
 
@@ -369,7 +372,7 @@ def test_append_enforces_total_image_limit_without_partial_addition(tmp_path):
 
 
 def test_merge_receipts_remain_internal_and_do_not_enter_search_or_exports(tmp_path):
-    from astrbot_plugin_image_studio.parameter_exchange import export_parameters
+    from astrbot_plugin_image_studio.backend.metadata.exchange import export_parameters
 
     async def run():
         store = GenerationStore(tmp_path)

@@ -1,0 +1,318 @@
+"""Public Page API route registration for the Image Studio plugin."""
+
+
+def register_web_apis(plugin, page_prefix: str) -> None:
+    """Register the public routes without changing their addresses or methods."""
+    routes = (
+        (
+            "comfy/import",
+            plugin._api_comfy_import,
+            ["POST"],
+            "Image Studio: import ComfyUI workflow",
+        ),
+        (
+            "comfy/inspect",
+            plugin._api_comfy_inspect,
+            ["POST"],
+            "Image Studio: inspect ComfyUI dependencies",
+        ),
+        (
+            "comfy/workflows",
+            plugin._api_comfy_save_workflow,
+            ["POST"],
+            "Image Studio: save ComfyUI workflow",
+        ),
+        (
+            "comfy/jobs",
+            plugin._api_comfy_submit,
+            ["POST"],
+            "Image Studio: submit ComfyUI job",
+        ),
+        (
+            "comfy/jobs",
+            plugin._api_comfy_jobs,
+            ["GET"],
+            "Image Studio: recover ComfyUI jobs",
+        ),
+        (
+            "comfy/jobs/cancel",
+            plugin._api_comfy_cancel,
+            ["POST"],
+            "Image Studio: cancel owned ComfyUI job",
+        ),
+        (
+            "comfy/jobs/resume",
+            plugin._api_comfy_resume,
+            ["POST"],
+            "Image Studio: resume checking existing ComfyUI job",
+        ),
+        (
+            "comfy/jobs/dismiss",
+            plugin._api_comfy_dismiss,
+            ["POST"],
+            "Image Studio: dismiss finished ComfyUI job from queue",
+        ),
+        (
+            "appearance",
+            plugin._api_get_appearance,
+            ["GET"],
+            "Image Studio: browser appearance",
+        ),
+        (
+            "appearance",
+            plugin._api_set_appearance,
+            ["POST"],
+            "Image Studio: save browser appearance cookie",
+        ),
+        (
+            "gallery/preferences",
+            plugin._api_get_gallery_preferences,
+            ["GET"],
+            "Image Studio: browser gallery preferences",
+        ),
+        (
+            "gallery/preferences",
+            plugin._api_set_gallery_preferences,
+            ["POST"],
+            "Image Studio: save browser gallery preferences",
+        ),
+        (
+            "imports/inspect",
+            plugin._api_import_inspect,
+            ["POST"],
+            "Image Studio: inspect image metadata",
+        ),
+        (
+            "imports/prepare",
+            plugin._api_import_prepare,
+            ["POST"],
+            "Image Studio: prepare imports",
+        ),
+        (
+            "imports/check",
+            plugin._api_import_check,
+            ["POST"],
+            "Image Studio: check import batch hashes",
+        ),
+        (
+            "imports/merge-targets",
+            plugin._api_import_merge_targets,
+            ["GET"],
+            "Image Studio: matching imported image groups",
+        ),
+        (
+            "imports/group/<group_id>/commit",
+            plugin._api_import_group_commit,
+            ["POST"],
+            "Image Studio: commit import batch",
+        ),
+        (
+            "imports/group/<group_id>/cancel",
+            plugin._api_import_group_cancel,
+            ["POST"],
+            "Image Studio: cancel import batch",
+        ),
+        (
+            "imports/upload/<upload_id>",
+            plugin._api_import_upload,
+            ["POST"],
+            "Image Studio: import image",
+        ),
+        (
+            "studio/parameters/resolve",
+            plugin._api_resolve_parameters,
+            ["POST"],
+            "Image Studio: resolve parameters",
+        ),
+        (
+            "gallery/import-edit/<generation_id>",
+            plugin._api_gallery_import_edit,
+            ["GET", "POST"],
+            "Image Studio: edit imported parameters and image order",
+        ),
+        (
+            "gallery/parameters/<generation_id>",
+            plugin._api_gallery_parameters,
+            ["GET"],
+            "Image Studio: export parameters",
+        ),
+        (
+            "gallery/favorite",
+            plugin._api_gallery_favorite,
+            ["POST"],
+            "Image Studio: favorite record",
+        ),
+        (
+            "gallery/favorite/status",
+            plugin._api_gallery_favorite_status,
+            ["POST"],
+            "Image Studio: selected favorite states",
+        ),
+        (
+            "gallery/images/delete",
+            plugin._api_gallery_delete_images,
+            ["POST"],
+            "Image Studio: delete selected images",
+        ),
+        (
+            "studio/bootstrap",
+            plugin._api_bootstrap,
+            ["GET"],
+            "Image Studio: bootstrap",
+        ),
+        (
+            "studio/provider-quota",
+            plugin._api_provider_quota,
+            ["GET"],
+            "Image Studio: provider account quota",
+        ),
+        ("studio/generate", plugin._api_generate, ["POST"], "Image Studio: generate"),
+        (
+            "studio/reference/upload",
+            plugin._api_upload_reference,
+            ["POST"],
+            "Image Studio: upload reference",
+        ),
+        (
+            "studio/reference/from-gallery",
+            plugin._api_gallery_as_reference,
+            ["POST"],
+            "Image Studio: retain a gallery original as reference",
+        ),
+        (
+            "external/status",
+            plugin._api_external_status,
+            ["GET"],
+            "Image Studio: external gallery scan status",
+        ),
+        (
+            "external/scan",
+            plugin._api_external_scan,
+            ["POST"],
+            "Image Studio: rescan external gallery",
+        ),
+        (
+            "settings/get",
+            plugin._api_get_settings,
+            ["GET"],
+            "Image Studio: get settings",
+        ),
+        (
+            "settings/save",
+            plugin._api_save_settings,
+            ["POST"],
+            "Image Studio: save settings",
+        ),
+        (
+            "storage/health",
+            plugin._api_storage_health,
+            ["GET"],
+            "Image Studio: storage health",
+        ),
+        (
+            "storage/maintenance",
+            plugin._api_storage_maintenance,
+            ["POST"],
+            "Image Studio: storage maintenance",
+        ),
+        (
+            "model/test",
+            plugin._api_test_model,
+            ["POST"],
+            "Image Studio: test model",
+        ),
+        (
+            "provider/models",
+            plugin._api_provider_models,
+            ["POST"],
+            "Image Studio: discover provider models",
+        ),
+        (
+            "gallery/list",
+            plugin._api_gallery_list,
+            ["GET"],
+            "Image Studio: list gallery",
+        ),
+        (
+            "gallery/detail/<generation_id>",
+            plugin._api_gallery_detail,
+            ["GET"],
+            "Image Studio: gallery detail",
+        ),
+        (
+            "gallery/assets/<generation_id>",
+            plugin._api_gallery_assets,
+            ["GET"],
+            "Image Studio: gallery assets",
+        ),
+        (
+            "gallery/image-sequence",
+            plugin._api_gallery_image_sequence,
+            ["GET"],
+            "Image Studio: gallery image sequence",
+        ),
+        (
+            "gallery/image/<image_id>",
+            plugin._api_gallery_image,
+            ["GET"],
+            "Image Studio: gallery image data",
+        ),
+        (
+            "gallery/image-info/<image_id>",
+            plugin._api_gallery_image_info,
+            ["GET"],
+            "Image Studio: gallery image metadata",
+        ),
+        (
+            "gallery/reference-image/<reference_id>",
+            plugin._api_gallery_reference_image,
+            ["GET"],
+            "Image Studio: gallery reference preview",
+        ),
+        (
+            "gallery/download/<image_id>",
+            plugin._api_gallery_image_download,
+            ["GET"],
+            "Image Studio: download gallery image",
+        ),
+        (
+            "gallery/reproduce/<generation_id>",
+            plugin._api_gallery_reproduce,
+            ["POST"],
+            "Image Studio: reproduce draft",
+        ),
+        (
+            "gallery/delete",
+            plugin._api_gallery_delete,
+            ["POST"],
+            "Image Studio: delete gallery records",
+        ),
+        (
+            "gallery/delete/preview",
+            plugin._api_gallery_delete_preview,
+            ["POST"],
+            "Image Studio: inspect external originals before deletion",
+        ),
+        (
+            "gallery/reference/delete",
+            plugin._api_reference_delete,
+            ["POST"],
+            "Image Studio: delete reference",
+        ),
+        (
+            "gallery/export",
+            plugin._api_gallery_export,
+            ["POST"],
+            "Image Studio: export gallery",
+        ),
+        (
+            "gallery/export/<export_id>",
+            plugin._api_download_export,
+            ["GET"],
+            "Image Studio: download export",
+        ),
+    )
+    for suffix, handler, methods, description in routes:
+        plugin.context.register_web_api(
+            f"{page_prefix}/{suffix}", handler, methods, description
+        )

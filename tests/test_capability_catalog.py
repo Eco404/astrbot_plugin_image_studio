@@ -4,12 +4,12 @@ import json
 from dataclasses import replace
 
 import pytest
-from astrbot_plugin_image_studio.capability_catalog import (
+from astrbot_plugin_image_studio.backend.tools.capability_catalog import (
     search_catalog,
     select_capability_models,
 )
-from astrbot_plugin_image_studio.config import HistorySettings, RuntimeSettings
-from astrbot_plugin_image_studio.models import ImageModel, ImageProvider
+from astrbot_plugin_image_studio.backend.config import HistorySettings, RuntimeSettings
+from astrbot_plugin_image_studio.backend.models import ImageModel, ImageProvider
 
 
 def model(

@@ -8,7 +8,7 @@ import zlib
 import httpx
 import pytest
 
-from astrbot_plugin_image_studio.gallery_preferences import (
+from astrbot_plugin_image_studio.backend.ui.gallery_preferences import (
     GALLERY_PREFERENCES_COOKIE,
     decode_gallery_preferences,
     encode_gallery_preferences,

@@ -9,8 +9,8 @@ from __future__ import annotations
 import unicodedata
 from typing import Any
 
-from .config import SUPPORTED_PROVIDER_KINDS, RuntimeSettings
-from .models import ImageModel, ImageProvider
+from ..config import SUPPORTED_PROVIDER_KINDS, RuntimeSettings
+from ..models import ImageModel, ImageProvider
 
 MODES = ("text2img", "img2img")
 CapabilitySelection = tuple[

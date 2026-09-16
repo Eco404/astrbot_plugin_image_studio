@@ -7,14 +7,17 @@ import time
 
 import pytest
 
-from astrbot_plugin_image_studio.config import HistorySettings
-from astrbot_plugin_image_studio.models import (
+from astrbot_plugin_image_studio.backend.config import HistorySettings
+from astrbot_plugin_image_studio.backend.models import (
     GeneratedImage,
     GenerationRequest,
     ImageProvider,
     ReferenceImage,
 )
-from astrbot_plugin_image_studio.storage import GenerationStore, ImportDuplicateError
+from astrbot_plugin_image_studio.backend.gallery.store import (
+    GenerationStore,
+    ImportDuplicateError,
+)
 from astrbot_plugin_image_studio.tests.test_import_groups import image, stage
 
 

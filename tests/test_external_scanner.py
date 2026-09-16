@@ -7,20 +7,20 @@ import json
 import threading
 
 import pytest
-from astrbot_plugin_image_studio import external_gallery
-from astrbot_plugin_image_studio.config import HistorySettings
-from astrbot_plugin_image_studio.external_gallery import (
+from astrbot_plugin_image_studio.backend.gallery import external as external_gallery
+from astrbot_plugin_image_studio.backend.config import HistorySettings
+from astrbot_plugin_image_studio.backend.gallery.external import (
     ExternalGalleryAdapter,
     ExternalGalleryManager,
     NAIGalleryAdapter,
 )
-from astrbot_plugin_image_studio.image_metadata import PARSER_VERSION
-from astrbot_plugin_image_studio.models import (
+from astrbot_plugin_image_studio.backend.metadata.parser import PARSER_VERSION
+from astrbot_plugin_image_studio.backend.models import (
     GeneratedImage,
     GenerationRequest,
     ImageProvider,
 )
-from astrbot_plugin_image_studio.storage import GenerationStore
+from astrbot_plugin_image_studio.backend.gallery.store import GenerationStore
 from PIL import Image, PngImagePlugin
 
 

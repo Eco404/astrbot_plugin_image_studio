@@ -4,7 +4,7 @@ import copy
 import json
 
 import pytest
-from astrbot_plugin_image_studio.image_metadata import parse_metadata_fields
+from astrbot_plugin_image_studio.backend.metadata.parser import parse_metadata_fields
 from astrbot_plugin_image_studio.tests.test_comfy_candidates import parse
 from astrbot_plugin_image_studio.tests.test_comfy_display_snapshots import (
     dynamic_graph,

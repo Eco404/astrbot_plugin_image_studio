@@ -21,8 +21,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from .database_schema import ensure_release_schema
-from .models import GeneratedImage, ReferenceImage
+from ...database.schema import ensure_release_schema
+from ...models import GeneratedImage, ReferenceImage
 
 TERMINAL_STATUSES = frozenset(
     {"succeeded", "partial", "failed", "cancelled", "unknown"}

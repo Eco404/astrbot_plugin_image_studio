@@ -9,7 +9,9 @@ from urllib.parse import urlsplit
 
 import httpx
 import pytest
-from astrbot_plugin_image_studio.comfyui_runtime import connection_fingerprint
+from astrbot_plugin_image_studio.backend.providers.comfyui.runtime import (
+    connection_fingerprint,
+)
 from astrbot_plugin_image_studio.tests.test_comfy_provider import (
     Response,
     config,

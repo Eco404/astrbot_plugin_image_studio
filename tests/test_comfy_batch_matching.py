@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from astrbot_plugin_image_studio.image_metadata import (
+from astrbot_plugin_image_studio.backend.metadata.parser import (
     parse_image_metadata,
     parse_metadata_fields,
 )

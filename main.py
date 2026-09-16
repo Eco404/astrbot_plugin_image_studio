@@ -31,41 +31,40 @@ from astrbot.core.workspace import (
 )
 from starlette.background import BackgroundTask
 
-from .appearance import (
+from .backend.ui.appearance import (
     APPEARANCE_COOKIE,
     decode_appearance_cookie,
     encode_appearance_cookie,
     normalize_appearance,
 )
-from .config import (
+from .backend.config import (
     load_studio_settings,
     normalize_webui_settings,
     runtime_settings,
     save_studio_settings,
 )
-from .capability_catalog import search_catalog, select_capability_models
-from .external_gallery import ExternalGalleryManager
-from .gallery_preferences import (
+from .backend.tools.capabilities import query_capabilities
+from .backend.api.comfyui import ComfyAPI
+from .backend.api.routes import register_web_apis
+from .backend.gallery.external import ExternalGalleryManager
+from .backend.ui.gallery_preferences import (
     GALLERY_PREFERENCES_COOKIE,
     decode_gallery_preferences,
     encode_gallery_preferences,
     merge_gallery_preferences,
 )
-from .models import (
+from .backend.models import (
     ImageProvider,
     InvocationSource,
     ReferenceImage,
-    browser_safe_integers,
     novelai_model_presets,
 )
-from .image_metadata import parse_metadata_fields
-from .parameter_exchange import export_parameters, resolve_parameters
-from .providers import ProviderError, ProviderExecutor
-from .comfyui_runtime import ComfyRuntime
-from .comfyui import ComfyExecutionError
-from .comfyui_workflows import FIXED_OUTPUT_POLICY
-from .service import ImageGenerationService
-from .storage import (
+from .backend.metadata.parser import parse_metadata_fields
+from .backend.metadata.exchange import export_parameters, resolve_parameters
+from .backend.providers.executor import ProviderError, ProviderExecutor
+from .backend.providers.comfyui.runtime import ComfyRuntime
+from .backend.generation.service import ImageGenerationService
+from .backend.gallery.store import (
     ExternalDeleteError,
     ExternalPermissionError,
     GenerationStore,
@@ -222,319 +221,7 @@ class ImageStudioPlugin(Star):
                 logger.warning("%s 定时存储维护失败: %s", LOG_TAG, type(exc).__name__)
 
     def _register_web_apis(self) -> None:
-        routes = (
-            (
-                "comfy/import",
-                self._api_comfy_import,
-                ["POST"],
-                "Image Studio: import ComfyUI workflow",
-            ),
-            (
-                "comfy/inspect",
-                self._api_comfy_inspect,
-                ["POST"],
-                "Image Studio: inspect ComfyUI dependencies",
-            ),
-            (
-                "comfy/workflows",
-                self._api_comfy_save_workflow,
-                ["POST"],
-                "Image Studio: save ComfyUI workflow",
-            ),
-            (
-                "comfy/jobs",
-                self._api_comfy_submit,
-                ["POST"],
-                "Image Studio: submit ComfyUI job",
-            ),
-            (
-                "comfy/jobs",
-                self._api_comfy_jobs,
-                ["GET"],
-                "Image Studio: recover ComfyUI jobs",
-            ),
-            (
-                "comfy/jobs/cancel",
-                self._api_comfy_cancel,
-                ["POST"],
-                "Image Studio: cancel owned ComfyUI job",
-            ),
-            (
-                "comfy/jobs/resume",
-                self._api_comfy_resume,
-                ["POST"],
-                "Image Studio: resume checking existing ComfyUI job",
-            ),
-            (
-                "comfy/jobs/dismiss",
-                self._api_comfy_dismiss,
-                ["POST"],
-                "Image Studio: dismiss finished ComfyUI job from queue",
-            ),
-            (
-                "appearance",
-                self._api_get_appearance,
-                ["GET"],
-                "Image Studio: browser appearance",
-            ),
-            (
-                "appearance",
-                self._api_set_appearance,
-                ["POST"],
-                "Image Studio: save browser appearance cookie",
-            ),
-            (
-                "gallery/preferences",
-                self._api_get_gallery_preferences,
-                ["GET"],
-                "Image Studio: browser gallery preferences",
-            ),
-            (
-                "gallery/preferences",
-                self._api_set_gallery_preferences,
-                ["POST"],
-                "Image Studio: save browser gallery preferences",
-            ),
-            (
-                "imports/inspect",
-                self._api_import_inspect,
-                ["POST"],
-                "Image Studio: inspect image metadata",
-            ),
-            (
-                "imports/prepare",
-                self._api_import_prepare,
-                ["POST"],
-                "Image Studio: prepare imports",
-            ),
-            (
-                "imports/check",
-                self._api_import_check,
-                ["POST"],
-                "Image Studio: check import batch hashes",
-            ),
-            (
-                "imports/merge-targets",
-                self._api_import_merge_targets,
-                ["GET"],
-                "Image Studio: matching imported image groups",
-            ),
-            (
-                "imports/group/<group_id>/commit",
-                self._api_import_group_commit,
-                ["POST"],
-                "Image Studio: commit import batch",
-            ),
-            (
-                "imports/group/<group_id>/cancel",
-                self._api_import_group_cancel,
-                ["POST"],
-                "Image Studio: cancel import batch",
-            ),
-            (
-                "imports/upload/<upload_id>",
-                self._api_import_upload,
-                ["POST"],
-                "Image Studio: import image",
-            ),
-            (
-                "studio/parameters/resolve",
-                self._api_resolve_parameters,
-                ["POST"],
-                "Image Studio: resolve parameters",
-            ),
-            (
-                "gallery/import-edit/<generation_id>",
-                self._api_gallery_import_edit,
-                ["GET", "POST"],
-                "Image Studio: edit imported parameters and image order",
-            ),
-            (
-                "gallery/parameters/<generation_id>",
-                self._api_gallery_parameters,
-                ["GET"],
-                "Image Studio: export parameters",
-            ),
-            (
-                "gallery/favorite",
-                self._api_gallery_favorite,
-                ["POST"],
-                "Image Studio: favorite record",
-            ),
-            (
-                "gallery/favorite/status",
-                self._api_gallery_favorite_status,
-                ["POST"],
-                "Image Studio: selected favorite states",
-            ),
-            (
-                "gallery/images/delete",
-                self._api_gallery_delete_images,
-                ["POST"],
-                "Image Studio: delete selected images",
-            ),
-            (
-                "studio/bootstrap",
-                self._api_bootstrap,
-                ["GET"],
-                "Image Studio: bootstrap",
-            ),
-            (
-                "studio/provider-quota",
-                self._api_provider_quota,
-                ["GET"],
-                "Image Studio: provider account quota",
-            ),
-            ("studio/generate", self._api_generate, ["POST"], "Image Studio: generate"),
-            (
-                "studio/reference/upload",
-                self._api_upload_reference,
-                ["POST"],
-                "Image Studio: upload reference",
-            ),
-            (
-                "studio/reference/from-gallery",
-                self._api_gallery_as_reference,
-                ["POST"],
-                "Image Studio: retain a gallery original as reference",
-            ),
-            (
-                "external/status",
-                self._api_external_status,
-                ["GET"],
-                "Image Studio: external gallery scan status",
-            ),
-            (
-                "external/scan",
-                self._api_external_scan,
-                ["POST"],
-                "Image Studio: rescan external gallery",
-            ),
-            (
-                "settings/get",
-                self._api_get_settings,
-                ["GET"],
-                "Image Studio: get settings",
-            ),
-            (
-                "settings/save",
-                self._api_save_settings,
-                ["POST"],
-                "Image Studio: save settings",
-            ),
-            (
-                "storage/health",
-                self._api_storage_health,
-                ["GET"],
-                "Image Studio: storage health",
-            ),
-            (
-                "storage/maintenance",
-                self._api_storage_maintenance,
-                ["POST"],
-                "Image Studio: storage maintenance",
-            ),
-            (
-                "model/test",
-                self._api_test_model,
-                ["POST"],
-                "Image Studio: test model",
-            ),
-            (
-                "provider/models",
-                self._api_provider_models,
-                ["POST"],
-                "Image Studio: discover provider models",
-            ),
-            (
-                "gallery/list",
-                self._api_gallery_list,
-                ["GET"],
-                "Image Studio: list gallery",
-            ),
-            (
-                "gallery/detail/<generation_id>",
-                self._api_gallery_detail,
-                ["GET"],
-                "Image Studio: gallery detail",
-            ),
-            (
-                "gallery/assets/<generation_id>",
-                self._api_gallery_assets,
-                ["GET"],
-                "Image Studio: gallery assets",
-            ),
-            (
-                "gallery/image-sequence",
-                self._api_gallery_image_sequence,
-                ["GET"],
-                "Image Studio: gallery image sequence",
-            ),
-            (
-                "gallery/image/<image_id>",
-                self._api_gallery_image,
-                ["GET"],
-                "Image Studio: gallery image data",
-            ),
-            (
-                "gallery/image-info/<image_id>",
-                self._api_gallery_image_info,
-                ["GET"],
-                "Image Studio: gallery image metadata",
-            ),
-            (
-                "gallery/reference-image/<reference_id>",
-                self._api_gallery_reference_image,
-                ["GET"],
-                "Image Studio: gallery reference preview",
-            ),
-            (
-                "gallery/download/<image_id>",
-                self._api_gallery_image_download,
-                ["GET"],
-                "Image Studio: download gallery image",
-            ),
-            (
-                "gallery/reproduce/<generation_id>",
-                self._api_gallery_reproduce,
-                ["POST"],
-                "Image Studio: reproduce draft",
-            ),
-            (
-                "gallery/delete",
-                self._api_gallery_delete,
-                ["POST"],
-                "Image Studio: delete gallery records",
-            ),
-            (
-                "gallery/delete/preview",
-                self._api_gallery_delete_preview,
-                ["POST"],
-                "Image Studio: inspect external originals before deletion",
-            ),
-            (
-                "gallery/reference/delete",
-                self._api_reference_delete,
-                ["POST"],
-                "Image Studio: delete reference",
-            ),
-            (
-                "gallery/export",
-                self._api_gallery_export,
-                ["POST"],
-                "Image Studio: export gallery",
-            ),
-            (
-                "gallery/export/<export_id>",
-                self._api_download_export,
-                ["GET"],
-                "Image Studio: download export",
-            ),
-        )
-        for suffix, handler, methods, description in routes:
-            self.context.register_web_api(
-                f"{PAGE_PREFIX}/{suffix}", handler, methods, description
-            )
+        register_web_apis(self, PAGE_PREFIX)
 
     def _service_or_raise(self) -> ImageGenerationService:
         if self._service is None:
@@ -547,269 +234,36 @@ class ImageStudioPlugin(Star):
             self._service_or_raise().comfy_runtime = self._comfy
         return self._comfy
 
-    def _comfy_provider(self, body):
-        if not isinstance(body, dict):
-            raise ValueError("请求体必须是对象")
-        provider = (
-            ImageProvider.from_mapping(body["provider"])
-            if isinstance(body.get("provider"), dict)
-            else self._settings.provider(
-                str(
-                    body.get("provider_id")
-                    or str(body.get("model_ref", "")).split(":")[0]
-                )
-            )
+    def _comfy_api(self):
+        """Build a stateless API controller around current plugin services."""
+        return ComfyAPI(
+            get_settings=lambda: self._settings,
+            store=self.store,
+            get_service=self._service_or_raise,
+            get_runtime=self._comfy_or_raise,
+            serialize_result=_result_payload,
         )
-        if provider is None or provider.kind != "comfyui":
-            raise ValueError("请选择 ComfyUI 服务商")
-        return provider
-
-    def _saved_comfy_provider(self, body):
-        provider_id = str(
-            body.get("provider_id") or str(body.get("model_ref") or "").split(":")[0]
-        )
-        provider = self._settings.provider(provider_id)
-        if provider is None or provider.kind != "comfyui" or not provider.base_url:
-            raise ValueError("请选择已保存并启用的 ComfyUI 服务商")
-        return provider
-
-    def _temporary_comfy_model(self, provider, value):
-        if not isinstance(value, dict):
-            raise ValueError("临时工作流配置必须是对象")
-        raw = copy.deepcopy(value)
-        model_id = str(raw.get("id") or "")
-        if not re.fullmatch(r"temporary_[0-9a-f]{32}", model_id) or any(
-            item.id == model_id for item in provider.models
-        ):
-            model_id = "temporary_" + uuid.uuid4().hex
-        raw.update(id=model_id, name=str(raw.get("name") or "临时工作流"))
-        if not raw.get("comfyui"):
-            raise ValueError("临时工作流缺少可执行的 API 图")
-        temporary_provider = ImageProvider.from_mapping(
-            {**provider.public_dict(), "models": [raw], "discovered_models": []}
-        )
-        model = temporary_provider.models[0]
-        if not model.comfyui.get("outputs"):
-            raise ValueError("请为临时工作流选择至少一个结果节点")
-        return model
-
-    async def _gallery_comfy_import(self, body):
-        from .comfyui_workflows import normalize_workflow
-        from .comfyui_support import import_result
-
-        providers = [
-            item
-            for item in self._settings.providers
-            if item.enabled and item.kind == "comfyui" and item.base_url
-        ]
-        if not providers:
-            raise ValueError(
-                "没有已保存并启用的 ComfyUI 服务商，请先在设置中添加或启用服务商"
-            )
-        generation_id = str(body.get("generation_id") or "")
-        image_id = str(body.get("image_id") or "")
-        if generation_id:
-            context = await self.store.generation_image_context(generation_id, image_id)
-            if not context or not context.get("images"):
-                raise ValueError("图库记录或所选图片不存在")
-            image = context["images"][0]
-        else:
-            info = await self.store.gallery_image_info(image_id, include_preview=False)
-            if not info:
-                raise ValueError("图库图片不存在")
-            image, context = info["image"], info["detail_fields"]
-            generation_id = image["generation_id"]
-        if image.get("allowed_actions", {}).get("reference") is False:
-            raise ValueError("此外部图库未允许复用图片中的工作流")
-        snapshot = (image.get("supplemental") or {}).get("comfyui")
-        metadata = image.get("metadata") or {}
-        config, historical, errors = None, False, []
-        for candidate, is_snapshot in ((snapshot, True), (metadata.get("raw"), False)):
-            if not candidate:
-                continue
-            try:
-                config = normalize_workflow(candidate)
-                historical = is_snapshot
-                break
-            except ValueError as exc:
-                errors.append(str(exc))
-        if config is None:
-            try:
-                raw = await self.store.read_workflow_image(image["id"])
-            except (ValueError, OSError) as exc:
-                if any("界面" in message for message in errors):
-                    raise ValueError(
-                        "图片仅包含界面工作流，缺少可执行的 ComfyUI API 图；请在 ComfyUI 中导出 API 格式"
-                    ) from exc
-                raise ValueError(
-                    "没有可用的工作流快照，且原图无法读取：" + str(exc)
-                ) from exc
-            try:
-                config = await asyncio.to_thread(import_result, raw)
-            except ValueError as exc:
-                raise ValueError("图片中的工作流无法用于执行：" + str(exc)) from exc
-        matched_provider = (
-            next(
-                (item for item in providers if item.id == context.get("provider_id")),
-                None,
-            )
-            if context.get("provider_kind") == "comfyui"
-            else None
-        )
-        matched = (
-            next(
-                (
-                    item
-                    for item in matched_provider.models
-                    if item.id == context.get("model") and item.comfyui.get("api_graph")
-                ),
-                None,
-            )
-            if matched_provider
-            else None
-        )
-        reference_inputs = [
-            item
-            for item in config.get("bindings", {}).values()
-            if item.get("source") == "reference"
-        ]
-        references, warnings = [], []
-        if historical and reference_inputs and not matched:
-            references = await self.store.stage_generation_references(
-                generation_id, strict=True
-            )
-            required_count = (
-                max(int(item.get("reference_index", 0)) for item in reference_inputs)
-                + 1
-            )
-            if len(references) != required_count:
-                references = []
-                warnings.append(
-                    "历史参考图或蒙版未完整保留，请按工作流输入顺序重新补充。"
-                )
-        raw_model = (
-            matched.public_dict()
-            if matched
-            else {
-                "id": "gallery_workflow",
-                "name": str(
-                    (
-                        snapshot.get("workflow_name")
-                        if isinstance(snapshot, dict)
-                        else None
-                    )
-                    or "图库工作流"
-                ),
-                "native_batch_size": 1,
-                "max_concurrent_requests": 8,
-            }
-        )
-        raw_model.update(
-            comfyui=config,
-            parameters=config.get("parameters_schema")
-            or raw_model.get("parameters")
-            or {},
-        )
-        return config, {
-            "model": raw_model,
-            "historical_snapshot": historical,
-            "matched_model_ref": f"{matched_provider.id}:{matched.id}"
-            if matched
-            else "",
-            "providers": [
-                {"id": item.id, "name": item.name or item.id} for item in providers
-            ],
-            "references": references,
-            "warnings": warnings,
-        }
 
     async def _api_comfy_import(self):
-        from .comfyui import normalize_workflow
-        from .comfyui_support import import_result
-        from .comfyui_workflows import migrate_fixed_outputs
-
-        try:
-            parameters = tool = None
-            historical = False
-            extra = {}
-            files = await web_request.files()
-            if files:
-                upload = files.get("file") or next(iter(files.values()))
-                raw = await upload.read(30 * 1024 * 1024 + 1)
-                if len(raw) > 30 * 1024 * 1024:
-                    raise ValueError("工作流图片或 JSON 不得超过 30 MiB")
-                config = await asyncio.to_thread(import_result, raw)
-            else:
-                body = await web_request.json(default={})
-                if not isinstance(body, dict):
-                    raise ValueError("请求体必须是对象")
-                if "temporary_model" in body:
-                    provider = self._saved_comfy_provider(body)
-                    model = self._temporary_comfy_model(
-                        provider, body["temporary_model"]
-                    )
-                    config, parameters, tool = (
-                        model.comfyui,
-                        model.parameters,
-                        model.tool,
-                    )
-                    extra = {
-                        "model": model.public_dict(),
-                        "model_ref": f"{provider.id}:{model.id}",
-                        "temporary": True,
-                    }
-                elif body.get("image_id") or body.get("generation_id"):
-                    config, extra = await self._gallery_comfy_import(body)
-                    historical = extra["historical_snapshot"]
-                    parameters, tool = (
-                        extra["model"].get("parameters"),
-                        extra["model"].get("tool"),
-                    )
-                else:
-                    config = body.get("content", body.get("comfyui", body))
-                    parameters, tool = body.get("parameters"), body.get("tool")
-                config = normalize_workflow(config)
-            migrated = migrate_fixed_outputs(
-                config, parameters, tool, prefer_graph_values=historical
-            )
-            result = import_result(
-                migrated["comfyui"], parameters=migrated["parameters"]
-            )
-            if extra.get("model"):
-                extra["model"].update(
-                    comfyui=migrated["comfyui"],
-                    parameters=browser_safe_integers(migrated["parameters"]),
-                    tool=browser_safe_integers(migrated["tool"]),
-                )
-                if not extra.get("temporary"):
-                    extra["model"].update(result["capabilities"])
-            result.update(extra)
-            result.update(
-                parameters=browser_safe_integers(migrated["parameters"]),
-                tool=browser_safe_integers(migrated["tool"]),
-            )
-            return json_response(result)
-        except (ValueError, OSError) as exc:
-            return error_response(str(exc), status_code=400)
+        return await self._comfy_api()._api_comfy_import()
 
     async def _api_comfy_inspect(self):
-        from .comfyui import ComfyClient, ComfyExecutionError
+        return await self._comfy_api()._api_comfy_inspect()
 
-        try:
-            body = await web_request.json(default={})
-            provider = self._comfy_provider(body)
-            config = (
-                body.get("comfyui")
-                or provider.get_model(
-                    str(body.get("model_ref", "")).split(":")[-1]
-                ).comfyui
-            )
-            result = await ComfyClient(
-                self._service_or_raise().executor.session
-            ).inspect(provider, config)
-            return json_response(result)
-        except (ValueError, ComfyExecutionError) as exc:
-            return error_response(str(exc), status_code=400)
+    async def _api_comfy_submit(self):
+        return await self._comfy_api()._api_comfy_submit()
+
+    async def _api_comfy_jobs(self):
+        return await self._comfy_api()._api_comfy_jobs()
+
+    async def _api_comfy_cancel(self):
+        return await self._comfy_api()._api_comfy_cancel()
+
+    async def _api_comfy_resume(self):
+        return await self._comfy_api()._api_comfy_resume()
+
+    async def _api_comfy_dismiss(self):
+        return await self._comfy_api()._api_comfy_dismiss()
 
     async def _api_comfy_save_workflow(self):
         try:
@@ -858,135 +312,6 @@ class ImageStudioPlugin(Star):
                     "settings_revision": candidate["revision"],
                 }
             )
-        except ValueError as exc:
-            return error_response(str(exc), status_code=400)
-
-    async def _api_comfy_submit(self):
-        from .comfyui import normalize_workflow
-
-        try:
-            body = await web_request.json(default={})
-            if not isinstance(body, dict):
-                raise ValueError("请求体必须是对象")
-            provider = self._saved_comfy_provider(body)
-            temporary = "temporary_model" in body
-            if temporary:
-                model = self._temporary_comfy_model(provider, body["temporary_model"])
-                config = model.comfyui
-            else:
-                model_id = str(
-                    body.get("model_ref") or body.get("model") or provider.model
-                ).split(":")[-1]
-                model = next(
-                    (item for item in provider.models if item.id == model_id), None
-                )
-                if model is None:
-                    raise ValueError(
-                        "ComfyUI 工作流不存在，可从图库选择临时使用或添加工作流"
-                    )
-                config = normalize_workflow(body.get("comfyui") or model.comfyui)
-            # Historical bindings define the required input slots even if the
-            # current template has changed mode or reference count since then.
-            effective_model = ImageProvider.from_mapping(
-                {
-                    **provider.public_dict(),
-                    "models": [{**model.public_dict(), "comfyui": config}],
-                }
-            ).models[0]
-            mode = str(body.get("mode") or "text2img")
-            if mode not in {"text2img", "img2img"} or not effective_model.supports(
-                mode
-            ):
-                raise ValueError("所选工作流的输入绑定不支持当前生图模式")
-            reference_ids = body.get("reference_ids") or []
-            if isinstance(reference_ids, str):
-                reference_ids = [reference_ids]
-            if not isinstance(reference_ids, list):
-                raise ValueError("参考图编号必须是数组")
-            if reference_ids and not effective_model.img2img:
-                raise ValueError("所选工作流没有参考图输入绑定")
-            references = await self.store.load_staged_references(
-                [str(item or "") for item in reference_ids],
-                max_images=effective_model.max_reference_images,
-                reject_excess=True,
-            )
-            job = await self._comfy_or_raise().submit(
-                provider=provider,
-                model=model,
-                temporary=temporary,
-                references=references,
-                comfyui=config,
-                mode=mode,
-                prompt=str(body.get("prompt") or ""),
-                negative_prompt=str(body.get("negative_prompt") or ""),
-                size=str(body.get("size") or ""),
-                count=body.get("count"),
-                parameters=body.get("parameters") or {},
-                source="webui",
-            )
-            return json_response({"job": self._comfy_or_raise().public_job(job)})
-        except (ValueError, ProviderError) as exc:
-            return error_response(str(exc), status_code=400)
-
-    async def _api_comfy_jobs(self):
-        runtime = self._comfy_or_raise()
-        job_id = str(web_request.query.get("id") or "")
-        if not job_id:
-            return json_response(
-                {
-                    "jobs": [
-                        runtime.public_job(job)
-                        for job in await runtime.store.list_jobs(
-                            include_children=False, queue_only=True
-                        )
-                    ]
-                }
-            )
-        job = await runtime.store.get_job(job_id)
-        if not job:
-            return error_response("ComfyUI 任务不存在", status_code=404)
-        public = runtime.public_job(job)
-        if job["status"] in {"succeeded", "partial"}:
-            try:
-                result = await runtime.result(job)
-                detail = (
-                    await self.store.generation_detail(
-                        result.generation_id, include_assets=False
-                    )
-                    if result.generation_id
-                    else None
-                )
-                public["result"] = _result_payload(result, download_detail=detail)
-            except (ValueError, ProviderError, OSError) as exc:
-                public["error"] = str(exc)
-        return json_response({"job": public})
-
-    async def _api_comfy_cancel(self):
-        try:
-            body = await web_request.json(default={})
-            runtime = self._comfy_or_raise()
-            job = await runtime.cancel(str(body.get("id") or ""))
-            return json_response({"job": runtime.public_job(job)})
-        except (ValueError, ProviderError, ComfyExecutionError) as exc:
-            return error_response(str(exc), status_code=400)
-
-    async def _api_comfy_resume(self):
-        try:
-            body = await web_request.json(default={})
-            runtime = self._comfy_or_raise()
-            job = await runtime.manager.resume(str(body.get("id") or ""))
-            return json_response({"job": runtime.public_job(job)})
-        except (ValueError, ProviderError) as exc:
-            return error_response(str(exc), status_code=400)
-
-    async def _api_comfy_dismiss(self):
-        try:
-            body = await web_request.json(default={})
-            if not isinstance(body, dict):
-                raise ValueError("请求体必须是 JSON 对象")
-            runtime = self._comfy_or_raise()
-            job = await runtime.store.dismiss_job(str(body.get("id") or ""))
-            return json_response({"job": runtime.public_job(job)})
         except ValueError as exc:
             return error_response(str(exc), status_code=400)
 
@@ -1916,7 +1241,7 @@ class ImageStudioPlugin(Star):
         return response
 
     def _test_request(self, provider: ImageProvider, model_id: str):
-        from .models import GenerationRequest
+        from .backend.models import GenerationRequest
 
         model = provider.get_model(model_id)
         size = "竖图" if provider.kind == "nai_direct" else "1024x1024"
@@ -2503,211 +1828,26 @@ class ImageStudioPlugin(Star):
             offset(number): search/providers 起始位置，非负整数，默认 0
         """
 
-        if not self._settings.enable_llm_tool:
-            return _tool_error("Image Studio 的 LLM 生图工具已关闭。")
-        if not isinstance(mode, str):
-            return _tool_error("mode 仅支持 text2img 或 img2img。")
-        normalized_mode = mode.strip().lower()
-        if normalized_mode not in {"", "text2img", "img2img"}:
-            return _tool_error("mode 仅支持 text2img 或 img2img。")
-        if not isinstance(query_type, str):
-            return _tool_error(
-                "query_type 仅支持 all、default、model、providers 或 search。"
-            )
-        normalized_query_type = query_type.strip().lower() or "default"
-        if normalized_query_type not in {
-            "all",
-            "default",
-            "model",
-            "providers",
-            "search",
-        }:
-            return _tool_error(
-                "query_type 仅支持 all、default、model、providers 或 search。"
-            )
-        if model_refs is not None:
-            if normalized_query_type == "default":
-                normalized_query_type = "model"
-            elif normalized_query_type != "model":
-                return _tool_error("model_refs 仅用于 query_type=model 查询。")
         try:
-            if normalized_query_type in {"providers", "search"}:
-                payload = search_catalog(
-                    self._settings,
-                    query_type=normalized_query_type,
-                    mode=normalized_mode,
-                    query=query,
-                    provider_id=provider_id,
-                    provider_kind=provider_kind,
-                    limit=limit,
-                    offset=offset,
-                )
-                return _tool_json(payload)
-            if query != "" or limit != 10 or offset != 0:
-                raise ValueError(
-                    "query、limit 和 offset 仅用于 search/providers 查询。"
-                )
-            selected, capability_errors = select_capability_models(
+            payload = query_capabilities(
                 self._settings,
-                query_type=normalized_query_type,
-                mode=normalized_mode,
+                query_type=query_type,
+                mode=mode,
                 model_refs=model_refs,
+                query=query,
                 provider_id=provider_id,
                 provider_kind=provider_kind,
+                limit=limit,
+                offset=offset,
             )
         except ValueError as exc:
             return _tool_error(str(exc))
-
-        entries: list[dict[str, Any]] = []
-        for (
-            provider,
-            model,
-            query_modes,
-            default_for_modes,
-            input_index,
-            requested_ref,
-        ) in selected:
-            ref = f"{provider.id}:{model.id}"
-            modes = [
-                candidate
-                for candidate in ("text2img", "img2img")
-                if model.supports(candidate)
-            ]
-            tool = model.tool
-            exposed_parameters: dict[str, Any] = {}
-            configured_parameters = tool.get("parameters")
-            exposed_parameter_names = model.llm_exposed_parameter_names
-            for name, descriptor in model.parameters.items():
-                # This dedicated field uses tool policy, not model schema.
-                if name == "negative_prompt":
-                    continue
-                if name not in exposed_parameter_names:
-                    continue
-                request_key = str(descriptor.get("request_key") or name)
-                if (
-                    provider.kind == "comfyui"
-                    and request_key in {"count", "n", "size"}
-                    and (
-                        request_key == "size"
-                        or model.comfyui.get("execution_policy") != FIXED_OUTPUT_POLICY
-                    )
-                ):
-                    source = (
-                        "count"
-                        if str(descriptor.get("request_key") or name) in {"count", "n"}
-                        else "width"
-                    )
-                    if not any(
-                        item["source"] == source
-                        for item in model.comfyui.get("bindings", {}).values()
-                    ):
-                        continue
-                policy = (
-                    configured_parameters.get(name)
-                    if isinstance(configured_parameters, dict)
-                    else None
-                )
-                policy = policy if isinstance(policy, dict) else {}
-                visible = _llm_parameter_descriptor(descriptor, policy)
-                if "default_override" in policy:
-                    visible["default"] = policy["default_override"]
-                exposed_parameters[name] = visible
-            if model.llm_negative_prompt_enabled:
-                exposed_parameters["negative_prompt"] = _llm_parameter_descriptor(
-                    {
-                        "type": "string",
-                        "description": (
-                            "专用反向提示词，只填写不希望出现在画面中的内容；"
-                            "省略时使用此处的默认值。"
-                        ),
-                        "default": model.llm_negative_prompt_default,
-                    },
-                    model.llm_negative_prompt_policy,
-                )
-            prompt_profile = tool.get("prompt_profile", "natural_language")
-            prompt_instructions = tool.get("prompt_instructions", "")
-            entry = {
-                "model_ref": ref,
-                "provider_name": provider.name,
-                "model_name": model.name,
-                "modes": modes,
-                "query_modes": query_modes,
-                "max_reference_images": model.llm_max_reference_images,
-                "selection_description": tool.get("selection_description", ""),
-                "prompt_contract": {
-                    "format": prompt_profile,
-                    "instruction": prompt_instructions,
-                    "negative_prompt": (
-                        "仅在 parameters 返回该字段时使用。"
-                        if model.llm_negative_prompt_enabled
-                        else "不要传入 negative_prompt。"
-                    ),
-                },
-                "parameters": exposed_parameters,
-                **(
-                    {"novelai_capabilities": model.novelai_capabilities}
-                    if model.novelai_capabilities
-                    else {}
-                ),
-            }
-            if default_for_modes:
-                entry["default_for_modes"] = default_for_modes
-            if provider.kind == "comfyui":
-                entry["comfyui_capabilities"] = model.comfyui_capabilities
-                entry["prompt_contract"]["required"] = model.comfyui_capabilities[
-                    "prompt_required"
-                ]
-                if not model.comfyui_capabilities["prompt_required"]:
-                    entry["prompt_contract"]["instruction"] = (
-                        "此工作流没有主提示词入口，可省略 prompt；仅通过已开放 parameters 调整工作流输入。"
-                    )
-            if normalized_query_type == "model":
-                entry.update(input_index=input_index, requested_ref=requested_ref)
-            entries.append(entry)
-        if entries:
-            _remember_capability_query(event, self._settings.revision, entries)
-            _activate_image_workflow(event)
-        if normalized_query_type == "default":
-            next_action = (
-                "按请求模式选择 default_for_modes；普通画面描述不是能力缺口。满足明确能力则直接生成，"
-                "否则使用相同 mode 的 search 查找模型，再用 model_refs 查询完整参数。"
-                if not normalized_mode
-                else "普通画面描述不是能力缺口；满足明确能力则直接生成，否则 search 查找模型，再用 model_refs 查询完整参数。"
+        if payload["query_type"] in {"default", "all", "model"} and payload["models"]:
+            _remember_capability_query(
+                event, self._settings.revision, payload["models"]
             )
-        elif normalized_query_type == "all":
-            next_action = "选择满足要求的模型直接生成，无需再次 model 查询。"
-        elif not entries:
-            next_action = "没有成功查询的模型；根据 errors 修正 model_refs，或使用 search 查找可用模型后重新查询。"
-        elif capability_errors:
-            next_action = "仅 models 中的成功项已查询完整能力，可按 prompt_contract 和 parameters 生成；errors 中的项需修正 model_refs 后重新查询。"
-        else:
-            next_action = "按 prompt_contract 和 parameters 直接生成。"
-        return _tool_json(
-            {
-                "query_type": normalized_query_type,
-                "next_action": next_action,
-                "asset_policy": {
-                    "return_mode": self._settings.llm_image_return_mode,
-                    "preview_max_edge": self._settings.asset_preview_max_edge,
-                    "private_asset_handle": "asset_id",
-                    "reuse": "仅使用工具返回的 asset_id；原图仍存在时可以继续复用",
-                    "view_tool": "image_studio_view_asset",
-                    "delivery_tool": "image_studio_send_output",
-                },
-                "default_model_refs": {
-                    "text2img": self._settings.default_model_ref(
-                        "text2img", "llm_tool"
-                    ),
-                    "img2img": self._settings.default_model_ref("img2img", "llm_tool"),
-                },
-                "models": entries,
-                **(
-                    {"errors": capability_errors}
-                    if normalized_query_type == "model"
-                    else {}
-                ),
-            }
-        )
+            _activate_image_workflow(event)
+        return _tool_json(payload)
 
     @filter.llm_tool(name="image_studio_generate")
     async def image_studio_generate(
@@ -3554,44 +2694,6 @@ def _result_payload(
             for image_index, image in enumerate(result.images, start=1)
         ],
     }
-
-
-def _llm_parameter_descriptor(
-    descriptor: dict[str, Any], policy: dict[str, Any]
-) -> dict[str, Any]:
-    visible = {
-        key: descriptor[key]
-        for key in ("type", "default", "min", "max", "step")
-        if key in descriptor
-    }
-    description = str(
-        policy.get("description")
-        or descriptor.get("description")
-        or descriptor.get("label")
-        or ""
-    )
-    if description:
-        visible["description"] = description
-    choices = descriptor.get("choices")
-    choice_descriptions = policy.get("choice_descriptions")
-    if isinstance(choices, list):
-        visible_choices: list[dict[str, Any]] = []
-        for choice in choices:
-            value = choice.get("value") if isinstance(choice, dict) else choice
-            label = choice.get("label", value) if isinstance(choice, dict) else value
-            choice_description = (
-                choice_descriptions.get(str(value), "")
-                if isinstance(choice_descriptions, dict)
-                else ""
-            )
-            visible_choice = {"value": value}
-            if label != value:
-                visible_choice["label"] = label
-            if choice_description:
-                visible_choice["description"] = choice_description
-            visible_choices.append(visible_choice)
-        visible["choices"] = visible_choices
-    return visible
 
 
 _QUOTED_ATTACHMENT_IMAGE_URL_RE = re.compile(

@@ -15,20 +15,20 @@ from urllib.parse import quote
 
 import aiohttp
 
-from .models import (
+from ..models import (
     GeneratedImage,
     GenerationRequest,
     ImageProvider,
     positive_batch_size,
 )
-from .novelai import (
+from .novelai.protocol import (
     MAX_RESPONSE_BYTES,
     prepare_generation_payload,
     parse_generation_response,
     parse_subscription,
 )
-from .novelai_inpaint import composite_inpaint_results
-from .storage import detect_mime_type, image_data_url
+from .novelai.inpaint import composite_inpaint_results
+from ..gallery.store import detect_mime_type, image_data_url
 
 
 class ProviderError(RuntimeError):
@@ -226,7 +226,7 @@ class ProviderExecutor:
         if provider.kind == "custom_json":
             return await self._custom_json(provider, request)
         if provider.kind == "comfyui":
-            from .comfyui import ComfyClient, ComfyExecutionError
+            from .comfyui.client import ComfyClient, ComfyExecutionError
 
             try:
                 return await ComfyClient(self.session).execute(provider, request)

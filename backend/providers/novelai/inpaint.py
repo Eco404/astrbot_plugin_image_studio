@@ -12,10 +12,10 @@ from typing import TYPE_CHECKING, Any
 
 from PIL import Image, PngImagePlugin
 
-from .image_metadata import MAX_IMAGE_BYTES, MAX_PIXELS, parse_image_metadata
+from ...metadata.parser import MAX_IMAGE_BYTES, MAX_PIXELS, parse_image_metadata
 
 if TYPE_CHECKING:
-    from .models import GeneratedImage
+    from ...models import GeneratedImage
 
 
 def _load_image(data: bytes, label: str) -> Image.Image:

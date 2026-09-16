@@ -6,7 +6,7 @@
 
 ## 当前实现状态
 
-- `novelai.py` / `novelai_inputs.py` / `providers.py`：Bearer 鉴权，JSON 优先、ZIP 兼容的完整原图接收，单底图、逐图角色/风格参考、Vibe 编码、多角色、局部重绘及订阅查询。
+- `backend/providers/novelai/protocol.py` / `backend/providers/novelai/inputs.py` / `backend/providers/executor.py`：Bearer 鉴权，JSON 优先、ZIP 兼容的完整原图接收，单底图、逐图角色/风格参考、Vibe 编码、多角色、局部重绘及订阅查询。
 - `models.py` / `service.py`：四款内置模型的基础参数、按模式过滤参数、基础图生图默认开启且最多一张底图、同 Token 跨 Provider 共享串行限制。
 - `storage.py` / `parameter_exchange.py`：逐图实际参数写入已有补充字段；按记录策略过滤，详情与复现跟随所选图片；官方与第三方同属 NovelAI 来源但各自映射参数。
 - `image_metadata.py`：常规元数据与 alpha 隐写元数据合并，保留冲突来源；解析器 9，数据库仍为 v2。
@@ -33,11 +33,11 @@
 
 文档仍写 V5 最多 22 个角色，当前官网能力表为 32；本实现跟随当前代码。V5 Curated 的 API 枚举虽出现原生 Inpaint ID，官网实际映射回 V4.5；插件跟随该映射并在生成前提示、结果警告和实际参数中标出目标模型，不宣称原生 V5 Curated Inpaint 已验证。
 
-`novelai_catalog.py` 提供模型能力和新增 schema，后端经 `novelai_models` 将统一预设交给 WebUI。仍使用插件的 text2img/img2img 两个工作区；img2img 内由 `reference_mode` 选择用途，`reference_settings` 数组按输入顺序标出 base/mask/character/style/character_style/vibe 及数值。普通底图只允许一张，蒙版只允许一张；支持底图+精准、底图+Vibe、底图+蒙版+精准，拒绝精准+Vibe与蒙版+Vibe。角色参考不等于多角色提示词。
+`backend/providers/novelai/catalog.py` 提供模型能力和新增 schema，后端经 `novelai_models` 将统一预设交给 WebUI。仍使用插件的 text2img/img2img 两个工作区；img2img 内由 `reference_mode` 选择用途，`reference_settings` 数组按输入顺序标出 base/mask/character/style/character_style/vibe 及数值。普通底图只允许一张，蒙版只允许一张；支持底图+精准、底图+Vibe、底图+蒙版+精准，拒绝精准+Vibe与蒙版+Vibe。角色参考不等于多角色提示词。
 
 精准图片按最接近的官方大画幅保持比例、居中黑色填边，保存无损 PNG；Fidelity 映射为 `secondary_strength=1-fidelity`。Vibe 在生成前通过 `/ai/encode-vibe` 取得二进制编码，将其 Base64 放入 `reference_image_multiple`；归一化在客户端执行。运行期缓存按账号、地址、模型、图像内容、提取量隔离，并用并发锁避免成功编码重复计费，最大 32 项/64 MiB。缓存不落盘，重启或淘汰后重新编码；本插件图片输入总上限 8 张（V5 为 2），低于官网 Vibe 的 16 张上限。
 
-局部重绘使用 `action=infill` 与重绘模型；蒙版按亮度解释，透明铺黑、缩到目标尺寸的1/8并阈值化后恢复全幅。独立控制项 `inpaint_strength` 默认 1；小于 1 时通过嵌套 `img2img.strength` 与 `color_correct` 增加对蒙版内原有内容的约束。普通图生图仍使用 `strength`，默认 0.7。旧历史和原始官方参数的重绘强度在复现时映射到新控制项。`novelai_inpaint.py` 在收到图片后合成原始底图未遮罩区域，保留元数据和透明像素；个别返回尺寸异常时保留上游结果并明确报告合成失败。
+局部重绘使用 `action=infill` 与重绘模型；蒙版按亮度解释，透明铺黑、缩到目标尺寸的1/8并阈值化后恢复全幅。独立控制项 `inpaint_strength` 默认 1；小于 1 时通过嵌套 `img2img.strength` 与 `color_correct` 增加对蒙版内原有内容的约束。普通图生图仍使用 `strength`，默认 0.7。旧历史和原始官方参数的重绘强度在复现时映射到新控制项。`backend/providers/novelai/inpaint.py` 在收到图片后合成原始底图未遮罩区域，保留元数据和透明像素；个别返回尺寸异常时保留上游结果并明确报告合成失败。
 
 2026-09-14 再次核对并修正的协议与输入边界：
 

@@ -8,11 +8,15 @@ import math
 import re
 from typing import Any
 
-from .config import RuntimeSettings
-from .image_metadata import parse_parameter_text
-from .models import MODEL_SCHEDULING_KEYS, parameter_flag
-from .novelai_catalog import model_capabilities
-from .storage import compact_comfy_request, has_request_value, project_import_metadata
+from ..config import RuntimeSettings
+from .parser import parse_parameter_text
+from ..models import MODEL_SCHEDULING_KEYS, parameter_flag
+from ..providers.novelai.catalog import model_capabilities
+from ..gallery.store import (
+    compact_comfy_request,
+    has_request_value,
+    project_import_metadata,
+)
 
 _NOVELAI_IMAGE_FIELDS = frozenset(
     {
@@ -750,7 +754,7 @@ def resolve_parameters(
         else None
     )
     if source_format == "comfyui" and comfy_snapshot:
-        from .comfyui_workflows import migrate_fixed_outputs
+        from ..providers.comfyui.workflows import migrate_fixed_outputs
 
         comfy_snapshot = migrate_fixed_outputs(
             comfy_snapshot, prefer_graph_values=True

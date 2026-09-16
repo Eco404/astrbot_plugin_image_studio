@@ -5,14 +5,14 @@ from __future__ import annotations
 import copy
 
 import pytest
-from astrbot_plugin_image_studio.comfyui_workflows import (
+from astrbot_plugin_image_studio.backend.providers.comfyui.workflows import (
     FIXED_OUTPUT_POLICY,
     inspect_workflow,
     migrate_fixed_outputs,
     normalize_workflow,
     prepare_graph,
 )
-from astrbot_plugin_image_studio.models import GenerationRequest, ImageProvider
+from astrbot_plugin_image_studio.backend.models import GenerationRequest, ImageProvider
 
 
 def definition(key="count", *, source="count", value=4):

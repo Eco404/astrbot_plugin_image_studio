@@ -118,16 +118,22 @@ def test_allowlist_includes_worktree_changes_but_not_runtime_residue(source_tree
         "docs/images/private.sqlite3",
         "docs/images/generate.webp",
         "docs/images/gallery.webp",
+        "backend/private.json",
+        "backend/data/private.py",
+        "backend/__pycache__/private.pyc",
+        "backend/tests/private.py",
     ):
         target = source_tree / name
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("private", encoding="utf-8")
-    (source_tree / "providers.py").write_text("uncommitted content", encoding="utf-8")
+    (source_tree / "backend/providers/executor.py").write_text(
+        "uncommitted content", encoding="utf-8"
+    )
     output = builder.build_package(source_tree)
     with zipfile.ZipFile(output) as archive:
         assert len(archive.namelist()) == len(builder.REQUIRED_ARCHIVE_FILES)
         assert (
-            archive.read("astrbot_plugin_image_studio/providers.py")
+            archive.read("astrbot_plugin_image_studio/backend/providers/executor.py")
             == b"uncommitted content"
         )
 
@@ -139,9 +145,9 @@ def test_mismatched_version_missing_module_and_symlink_fail(source_tree, tmp_pat
     with pytest.raises(ValueError, match="不一致"):
         builder.build_package(source_tree)
     metadata.write_text(original, encoding="utf-8")
-    module = source_tree / "parameter_exchange.py"
+    module = source_tree / "backend/metadata/exchange.py"
     module.unlink()
-    with pytest.raises(ValueError, match="parameter_exchange.py"):
+    with pytest.raises(ValueError, match="backend/metadata/exchange.py"):
         builder.build_package(source_tree)
     module.symlink_to(tmp_path / "external.py")
     with pytest.raises(ValueError, match="符号链接"):
@@ -164,6 +170,26 @@ def test_invalid_archive_does_not_replace_previous_output(
     assert not list(tmp_path.glob(".previous-*.tmp"))
 
 
-def test_output_cannot_be_written_into_runtime_directory(source_tree):
+@pytest.mark.parametrize("directory", ["backend", "pages"])
+def test_output_cannot_be_written_into_runtime_directory(source_tree, directory):
     with pytest.raises(ValueError, match="运行文件目录"):
-        builder.build_package(source_tree, source_tree / "pages" / "package.zip")
+        builder.build_package(source_tree, source_tree / directory / "package.zip")
+
+
+def test_backend_package_collects_new_modules_and_rejects_nested_symlinks(
+    source_tree, tmp_path
+):
+    module = source_tree / "backend/providers/comfyui/future.py"
+    module.write_text('"""Future runtime module."""\n', encoding="utf-8")
+    assert module in builder.collect_runtime_files(source_tree)
+    linked = source_tree / "backend/providers/comfyui/linked"
+    linked.symlink_to(tmp_path, target_is_directory=True)
+    with pytest.raises(ValueError, match="符号链接"):
+        builder.collect_runtime_files(source_tree)
+
+
+@pytest.mark.parametrize("name", builder.REQUIRED_BACKEND_FILES)
+def test_every_required_backend_module_is_checked_for_omission(source_tree, name):
+    (source_tree / name).unlink()
+    with pytest.raises(ValueError, match=re.escape(name)):
+        builder.collect_runtime_files(source_tree)

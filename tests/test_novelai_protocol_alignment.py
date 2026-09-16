@@ -12,8 +12,10 @@ import io
 import pytest
 from PIL import Image
 
-from astrbot_plugin_image_studio.novelai import NOVELAI_MODEL_IDS
-from astrbot_plugin_image_studio.providers import ProviderExecutor
+from astrbot_plugin_image_studio.backend.providers.novelai.protocol import (
+    NOVELAI_MODEL_IDS,
+)
+from astrbot_plugin_image_studio.backend.providers.executor import ProviderExecutor
 from astrbot_plugin_image_studio.tests.test_novelai_advanced import prepare, reference
 from astrbot_plugin_image_studio.tests.test_novelai_provider import (
     Response,

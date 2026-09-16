@@ -17,14 +17,16 @@ from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageDraw, PngImagePlugin
 
 from astrbot.api.web import PluginRequest, bind_request_context
-from astrbot_plugin_image_studio.config import (
+from astrbot_plugin_image_studio.backend.config import (
     normalize_webui_settings,
     runtime_settings,
 )
 from astrbot_plugin_image_studio.main import ImageStudioPlugin, PLUGIN_NAME
-from astrbot_plugin_image_studio.models import GeneratedImage, GenerationRequest
-from astrbot_plugin_image_studio.service import ImageGenerationService
-from astrbot_plugin_image_studio.storage import GenerationStore
+from astrbot_plugin_image_studio.backend.models import GeneratedImage, GenerationRequest
+from astrbot_plugin_image_studio.backend.generation.service import (
+    ImageGenerationService,
+)
+from astrbot_plugin_image_studio.backend.gallery.store import GenerationStore
 
 
 def fixture_image(index: int = 0, *, novelai: bool = False) -> bytes:
@@ -365,7 +367,9 @@ async def create_app(data_dir: Path, seed: bool = True) -> FastAPI:
         plugin.config, plugin._studio_settings
     )
     plugin._settings_lock = asyncio.Lock()
-    from astrbot_plugin_image_studio.external_gallery import ExternalGalleryManager
+    from astrbot_plugin_image_studio.backend.gallery.external import (
+        ExternalGalleryManager,
+    )
 
     plugin._external_gallery = ExternalGalleryManager(plugin.store, data_dir)
     await plugin._configure_external_gallery()

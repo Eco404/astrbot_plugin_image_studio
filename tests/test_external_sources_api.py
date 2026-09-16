@@ -5,7 +5,7 @@ import os
 
 import httpx
 
-from astrbot_plugin_image_studio.config import normalize_webui_settings
+from astrbot_plugin_image_studio.backend.config import normalize_webui_settings
 from astrbot_plugin_image_studio.tests.webui_harness import create_app, fixture_image
 
 PREFIX = "/astrbot_plugin_image_studio/"
@@ -95,7 +95,9 @@ def test_action_preflight_preserves_existing_favorite_selection_limit(tmp_path):
 def test_custom_plain_gallery_crud_and_permissions_preserve_files(
     tmp_path, monkeypatch
 ):
-    from astrbot_plugin_image_studio import external_timestamps
+    from astrbot_plugin_image_studio.backend.gallery import (
+        timestamps as external_timestamps,
+    )
 
     monkeypatch.setattr(
         external_timestamps, "filesystem_birthtime", lambda *_args: None

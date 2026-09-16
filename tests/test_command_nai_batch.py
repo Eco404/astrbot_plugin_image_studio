@@ -5,13 +5,16 @@ import asyncio
 import aiohttp
 import pytest
 
-from astrbot_plugin_image_studio.models import (
+from astrbot_plugin_image_studio.backend.models import (
     GeneratedImage,
     GenerationRequest,
     ImageProvider,
 )
-from astrbot_plugin_image_studio.providers import ProviderError, ProviderExecutor
-from astrbot_plugin_image_studio.providers import _nai_query
+from astrbot_plugin_image_studio.backend.providers.executor import (
+    ProviderError,
+    ProviderExecutor,
+)
+from astrbot_plugin_image_studio.backend.providers.executor import _nai_query
 
 
 class Response:

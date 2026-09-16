@@ -6,7 +6,10 @@ import asyncio
 
 import pytest
 
-from astrbot_plugin_image_studio.comfyui import ComfyClient, ComfyExecutionError
+from astrbot_plugin_image_studio.backend.providers.comfyui.client import (
+    ComfyClient,
+    ComfyExecutionError,
+)
 from astrbot_plugin_image_studio.tests.test_comfy_batches import fixture, submit
 from astrbot_plugin_image_studio.tests.test_comfy_provider import (
     Response,

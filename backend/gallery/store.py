@@ -21,9 +21,9 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
-from .config import HistorySettings
-from .database_schema import DATABASE_VERSION, ensure_release_schema
-from .models import (
+from ..config import HistorySettings
+from ..database.schema import DATABASE_VERSION, ensure_release_schema
+from ..models import (
     GeneratedImage,
     GenerationRequest,
     ImageProvider,
@@ -1100,7 +1100,7 @@ class GenerationStore:
     def _metadata_for_asset_sync(
         self, asset_id: str, data: bytes, *, strict: bool = False
     ) -> dict[str, Any]:
-        from .image_metadata import PARSER_VERSION, parse_image_metadata
+        from ..metadata.parser import PARSER_VERSION, parse_image_metadata
 
         with self._connect() as conn:
             row = conn.execute(
@@ -1148,7 +1148,7 @@ class GenerationStore:
     def _backfill_metadata_sync(self) -> None:
         """Parse old asset metadata outside the schema migration transaction."""
 
-        from .image_metadata import PARSER_VERSION
+        from ..metadata.parser import PARSER_VERSION
 
         with self._connect() as conn:
             rows = conn.execute(
@@ -4917,7 +4917,7 @@ def _favorite_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
 def _validate_import_content(data: bytes) -> None:
     from PIL import Image
 
-    from .image_metadata import MAX_PIXELS
+    from ..metadata.parser import MAX_PIXELS
 
     if not data or len(data) > 30 * 1024 * 1024:
         raise ValueError("导入图片不能为空且不能超过 30 MB")
@@ -5062,7 +5062,7 @@ def project_import_metadata(
         return metadata
     if metadata.get("format") != "comfyui":
         raise ValueError("仅 ComfyUI 图片支持选择输出节点")
-    from .image_metadata import PARSER_VERSION, parse_metadata_fields
+    from ..metadata.parser import PARSER_VERSION, parse_metadata_fields
 
     raw = metadata.get("raw")
     if not isinstance(raw, dict):

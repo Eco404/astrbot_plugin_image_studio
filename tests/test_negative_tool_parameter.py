@@ -7,16 +7,18 @@ from types import SimpleNamespace
 
 import pytest
 
-from astrbot_plugin_image_studio.config import HistorySettings, RuntimeSettings
+from astrbot_plugin_image_studio.backend.config import HistorySettings, RuntimeSettings
 from astrbot_plugin_image_studio.main import ImageStudioPlugin
-from astrbot_plugin_image_studio.models import (
+from astrbot_plugin_image_studio.backend.models import (
     GeneratedImage,
     GenerationResult,
     ImageProvider,
     WorkflowImageAsset,
 )
-from astrbot_plugin_image_studio.service import ImageGenerationService
-from astrbot_plugin_image_studio.storage import GenerationStore
+from astrbot_plugin_image_studio.backend.generation.service import (
+    ImageGenerationService,
+)
+from astrbot_plugin_image_studio.backend.gallery.store import GenerationStore
 
 
 PNG = base64.b64decode(

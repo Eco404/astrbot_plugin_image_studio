@@ -9,12 +9,16 @@ from types import SimpleNamespace
 import pytest
 from astrbot.api.message_components import Image
 from astrbot_plugin_image_studio import main as plugin_main
-from astrbot_plugin_image_studio.config import HistorySettings, RuntimeSettings
+from astrbot_plugin_image_studio.backend.config import HistorySettings, RuntimeSettings
 from astrbot_plugin_image_studio.main import ImageStudioPlugin
-from astrbot_plugin_image_studio.models import GeneratedImage, ImageProvider
-from astrbot_plugin_image_studio.novelai import prepare_generation_payload
-from astrbot_plugin_image_studio.service import ImageGenerationService
-from astrbot_plugin_image_studio.storage import GenerationStore
+from astrbot_plugin_image_studio.backend.models import GeneratedImage, ImageProvider
+from astrbot_plugin_image_studio.backend.providers.novelai.protocol import (
+    prepare_generation_payload,
+)
+from astrbot_plugin_image_studio.backend.generation.service import (
+    ImageGenerationService,
+)
+from astrbot_plugin_image_studio.backend.gallery.store import GenerationStore
 from astrbot_plugin_image_studio.tests.test_novelai_advanced import reference
 from astrbot_plugin_image_studio.tests.test_service_and_tool import ToolEvent
 

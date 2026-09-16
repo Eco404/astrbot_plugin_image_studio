@@ -14,7 +14,7 @@ from urllib.parse import quote, urlsplit, urlunsplit
 import aiohttp
 from PIL import Image, ImageOps
 
-from .comfyui_workflows import (
+from .workflows import (
     FIXED_OUTPUT_POLICY,
     clear_execution_cache_markers,
     graph_fingerprint,
@@ -23,7 +23,7 @@ from .comfyui_workflows import (
     normalize_workflow,
     prepare_graph,
 )
-from .models import GeneratedImage
+from ...models import GeneratedImage
 
 MAX_JSON_BYTES = 32 * 1024 * 1024
 MAX_IMAGE_BYTES = 64 * 1024 * 1024

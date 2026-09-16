@@ -6,15 +6,15 @@ from pathlib import Path
 
 import pytest
 
-from astrbot_plugin_image_studio.image_metadata import (
+from astrbot_plugin_image_studio.backend.metadata.parser import (
     parse_image_metadata,
     parse_metadata_fields,
 )
-from astrbot_plugin_image_studio.parameter_exchange import (
+from astrbot_plugin_image_studio.backend.metadata.exchange import (
     export_parameters,
     resolve_parameters,
 )
-from astrbot_plugin_image_studio.storage import GenerationStore
+from astrbot_plugin_image_studio.backend.gallery.store import GenerationStore
 from astrbot_plugin_image_studio.tests.test_comfy_candidates import parse
 from astrbot_plugin_image_studio.tests.test_image_metadata import (
     api_graph,

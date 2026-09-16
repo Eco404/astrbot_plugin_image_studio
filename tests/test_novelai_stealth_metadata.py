@@ -6,7 +6,7 @@ import json
 import math
 
 import pytest
-from astrbot_plugin_image_studio import image_metadata
+from astrbot_plugin_image_studio.backend.metadata import parser as image_metadata
 from PIL import Image, PngImagePlugin
 
 MAGIC = b"stealth_pngcomp"

@@ -6,8 +6,8 @@ import asyncio
 from pathlib import Path
 
 import pytest
-from astrbot_plugin_image_studio.external_gallery import ExternalGalleryManager
-from astrbot_plugin_image_studio.storage import ExternalDeleteError
+from astrbot_plugin_image_studio.backend.gallery.external import ExternalGalleryManager
+from astrbot_plugin_image_studio.backend.gallery.store import ExternalDeleteError
 from astrbot_plugin_image_studio.tests.test_external_storage import (
     add,
     fingerprint,

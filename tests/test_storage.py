@@ -11,15 +11,15 @@ import zipfile
 from pathlib import Path
 
 import pytest
-from astrbot_plugin_image_studio.config import HistorySettings
-from astrbot_plugin_image_studio.models import (
+from astrbot_plugin_image_studio.backend.config import HistorySettings
+from astrbot_plugin_image_studio.backend.models import (
     GeneratedImage,
     GenerationRequest,
     ImageProvider,
     InvocationSource,
     ReferenceImage,
 )
-from astrbot_plugin_image_studio.storage import GenerationStore
+from astrbot_plugin_image_studio.backend.gallery.store import GenerationStore
 
 PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9JZq4AAAAASUVORK5CYII="

@@ -6,9 +6,11 @@ import io
 import json
 
 import pytest
-from astrbot_plugin_image_studio.image_metadata import parse_image_metadata
-from astrbot_plugin_image_studio.models import GeneratedImage
-from astrbot_plugin_image_studio.novelai_inpaint import composite_inpaint_results
+from astrbot_plugin_image_studio.backend.metadata.parser import parse_image_metadata
+from astrbot_plugin_image_studio.backend.models import GeneratedImage
+from astrbot_plugin_image_studio.backend.providers.novelai.inpaint import (
+    composite_inpaint_results,
+)
 from PIL import Image, PngImagePlugin
 
 

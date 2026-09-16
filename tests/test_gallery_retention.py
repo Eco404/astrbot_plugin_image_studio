@@ -10,15 +10,15 @@ import zipfile
 import pytest
 from PIL import Image, PngImagePlugin
 
-from astrbot_plugin_image_studio.config import HistorySettings
-from astrbot_plugin_image_studio.database_schema import DATABASE_VERSION
-from astrbot_plugin_image_studio.models import (
+from astrbot_plugin_image_studio.backend.config import HistorySettings
+from astrbot_plugin_image_studio.backend.database.schema import DATABASE_VERSION
+from astrbot_plugin_image_studio.backend.models import (
     GeneratedImage,
     GenerationRequest,
     ImageProvider,
     ReferenceImage,
 )
-from astrbot_plugin_image_studio.storage import GenerationStore
+from astrbot_plugin_image_studio.backend.gallery.store import GenerationStore
 
 
 def picture(color: str = "red", metadata: dict | None = None) -> bytes:
@@ -496,7 +496,7 @@ def test_capacity_cleanup_excludes_leases_and_protected_reference_shares(tmp_pat
 
 
 def test_schema_transaction_rolls_back_before_version_stamp(tmp_path, monkeypatch):
-    import astrbot_plugin_image_studio.database_schema as schema_module
+    import astrbot_plugin_image_studio.backend.database.schema as schema_module
 
     def fail_stamp(conn):
         raise RuntimeError("simulated migration failure")
@@ -547,7 +547,7 @@ def test_import_rejects_unsupported_actual_format_even_with_png_filename(
 def test_import_pixel_limit_is_checked_even_when_metadata_is_cached(
     tmp_path, monkeypatch
 ):
-    import astrbot_plugin_image_studio.image_metadata as metadata_module
+    import astrbot_plugin_image_studio.backend.metadata.parser as metadata_module
 
     async def run():
         store = GenerationStore(tmp_path)
@@ -568,7 +568,7 @@ def test_import_pixel_limit_is_checked_even_when_metadata_is_cached(
 def test_metadata_parser_upgrade_refreshes_cache_without_losing_import(
     tmp_path, monkeypatch
 ):
-    import astrbot_plugin_image_studio.image_metadata as metadata_module
+    import astrbot_plugin_image_studio.backend.metadata.parser as metadata_module
 
     async def run():
         store = GenerationStore(tmp_path)
@@ -634,7 +634,7 @@ def test_metadata_parser_upgrade_refreshes_cache_without_losing_import(
 
 
 def test_metadata_upgrade_and_import_projection_commit_together(tmp_path, monkeypatch):
-    import astrbot_plugin_image_studio.image_metadata as metadata_module
+    import astrbot_plugin_image_studio.backend.metadata.parser as metadata_module
 
     async def run():
         store = GenerationStore(tmp_path)
@@ -678,7 +678,7 @@ def test_metadata_upgrade_and_import_projection_commit_together(tmp_path, monkey
 def test_metadata_upgrade_refreshes_import_projection_but_preserves_request_and_manual_values(
     tmp_path, monkeypatch
 ):
-    import astrbot_plugin_image_studio.image_metadata as metadata_module
+    import astrbot_plugin_image_studio.backend.metadata.parser as metadata_module
 
     async def run():
         original_version = metadata_module.PARSER_VERSION

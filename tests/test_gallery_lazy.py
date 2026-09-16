@@ -8,8 +8,12 @@ from pathlib import Path
 import httpx
 import pytest
 
-from astrbot_plugin_image_studio import image_metadata, storage
-from astrbot_plugin_image_studio.storage import GenerationStore, ImportEditConflictError
+from astrbot_plugin_image_studio.backend.metadata import parser as image_metadata
+from astrbot_plugin_image_studio.backend.gallery import store as storage
+from astrbot_plugin_image_studio.backend.gallery.store import (
+    GenerationStore,
+    ImportEditConflictError,
+)
 from astrbot_plugin_image_studio.tests.test_gallery_api import PREFIX
 from astrbot_plugin_image_studio.tests.test_import_groups import (
     comfy_multi_output_image,

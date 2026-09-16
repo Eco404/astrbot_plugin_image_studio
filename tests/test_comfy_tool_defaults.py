@@ -8,14 +8,14 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from astrbot_plugin_image_studio.config import (
+from astrbot_plugin_image_studio.backend.config import (
     HistorySettings,
     RuntimeSettings,
     load_studio_settings,
     save_studio_settings,
 )
 from astrbot_plugin_image_studio.main import ImageStudioPlugin
-from astrbot_plugin_image_studio.models import ImageProvider
+from astrbot_plugin_image_studio.backend.models import ImageProvider
 
 LEGACY = {
     "selection_description": "适合一般自然语言生图需求。",

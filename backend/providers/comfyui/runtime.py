@@ -9,18 +9,18 @@ import json
 import uuid
 from dataclasses import replace
 
-from .comfyui import ComfyClient, ComfyExecutionError, normalize_workflow
-from .comfyui_jobs import ComfyJobManager, ComfyJobStore
-from .comfyui_workflows import FIXED_OUTPUT_POLICY, migrate_fixed_outputs
-from .models import (
+from .client import ComfyClient, ComfyExecutionError, normalize_workflow
+from .jobs import ComfyJobManager, ComfyJobStore
+from .workflows import FIXED_OUTPUT_POLICY, migrate_fixed_outputs
+from ...models import (
     PARAMETER_POLICY_FIELDS,
     GenerationRequest,
     GenerationResult,
     ImageProvider,
     InvocationSource,
 )
-from .providers import ProviderError, ProviderPartialResponseError
-from .service import ImageGenerationService
+from ..executor import ProviderError, ProviderPartialResponseError
+from ...generation.service import ImageGenerationService
 
 
 def connection_fingerprint(provider: ImageProvider) -> str:
@@ -188,7 +188,7 @@ class ComfyRuntime:
                 remote_id = saved.get("remote_id", "")
                 graph = (saved.get("result") or {}).get("api_graph")
                 if not remote_id:
-                    from .comfyui import prepare_graph
+                    from .client import prepare_graph
 
                     placeholders = [
                         f"reference-{index}.png"
@@ -673,7 +673,7 @@ class ComfyRuntime:
                 raise
             images = ()
         if terminal and not images:
-            from .models import GeneratedImage
+            from ...models import GeneratedImage
 
             generation_id = str(
                 details.get("generation_id") or job.get("generation_id") or ""

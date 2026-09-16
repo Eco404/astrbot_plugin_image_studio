@@ -8,11 +8,14 @@ from pathlib import Path
 import httpx
 import pytest
 
-from astrbot_plugin_image_studio import storage
-from astrbot_plugin_image_studio.config import HistorySettings
-from astrbot_plugin_image_studio.models import ReferenceImage
-from astrbot_plugin_image_studio.parameter_exchange import export_parameters
-from astrbot_plugin_image_studio.storage import GenerationStore, ImportEditConflictError
+from astrbot_plugin_image_studio.backend.gallery import store as storage
+from astrbot_plugin_image_studio.backend.config import HistorySettings
+from astrbot_plugin_image_studio.backend.models import ReferenceImage
+from astrbot_plugin_image_studio.backend.metadata.exchange import export_parameters
+from astrbot_plugin_image_studio.backend.gallery.store import (
+    GenerationStore,
+    ImportEditConflictError,
+)
 from astrbot_plugin_image_studio.tests.test_gallery_retention import picture, record
 from astrbot_plugin_image_studio.tests.test_import_groups import (
     comfy_multi_output_image,

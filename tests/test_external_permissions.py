@@ -5,7 +5,7 @@ import json
 import threading
 
 import pytest
-from astrbot_plugin_image_studio.storage import ExternalPermissionError
+from astrbot_plugin_image_studio.backend.gallery.store import ExternalPermissionError
 from astrbot_plugin_image_studio.tests.test_external_storage import (
     add,
     image_bytes,

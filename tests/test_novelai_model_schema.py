@@ -3,8 +3,11 @@ from __future__ import annotations
 import copy
 
 import pytest
-from astrbot_plugin_image_studio.models import ImageProvider
-from astrbot_plugin_image_studio.novelai_catalog import MODEL_NAMES, model_capabilities
+from astrbot_plugin_image_studio.backend.models import ImageProvider
+from astrbot_plugin_image_studio.backend.providers.novelai.catalog import (
+    MODEL_NAMES,
+    model_capabilities,
+)
 
 
 def model(model_id, parameters=None):

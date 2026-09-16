@@ -8,15 +8,15 @@ from contextlib import closing
 
 import pytest
 
-from astrbot_plugin_image_studio import database_schema as schema
-from astrbot_plugin_image_studio.config import HistorySettings
-from astrbot_plugin_image_studio.models import (
+from astrbot_plugin_image_studio.backend.database import schema as schema
+from astrbot_plugin_image_studio.backend.config import HistorySettings
+from astrbot_plugin_image_studio.backend.models import (
     GeneratedImage,
     GenerationRequest,
     ImageProvider,
     ReferenceImage,
 )
-from astrbot_plugin_image_studio.storage import GenerationStore
+from astrbot_plugin_image_studio.backend.gallery.store import GenerationStore
 from astrbot_plugin_image_studio.tests.schema_upgrade_fixtures import create_v1
 from astrbot_plugin_image_studio.tests.test_import_groups import image
 

@@ -6,8 +6,8 @@ import os
 from datetime import datetime, timezone
 
 import pytest
-from astrbot_plugin_image_studio import external_timestamps as times
-from astrbot_plugin_image_studio.external_gallery import file_fingerprint
+from astrbot_plugin_image_studio.backend.gallery import timestamps as times
+from astrbot_plugin_image_studio.backend.gallery.external import file_fingerprint
 from PIL import Image, PngImagePlugin
 
 

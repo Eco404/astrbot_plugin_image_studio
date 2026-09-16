@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
-from .novelai_catalog import (
+from .providers.novelai.catalog import (
     MODEL_NAMES,
     SAMPLERS,
     advanced_parameters,
@@ -981,7 +981,10 @@ def _model_from_mapping(
     model_id = _text(value.get("id"), 160)
     comfy = {}
     if kind == "comfyui" and value.get("comfyui"):
-        from .comfyui_workflows import migrate_fixed_outputs, normalize_workflow
+        from .providers.comfyui.workflows import (
+            migrate_fixed_outputs,
+            normalize_workflow,
+        )
 
         comfy = normalize_workflow(value["comfyui"])
         if migrate_comfyui:
@@ -1053,7 +1056,7 @@ def _model_from_mapping(
                 # retains the node's original nonnegative execution bounds.
                 descriptor["min"] = -1
     if kind == "comfyui" and (migrate_comfyui or comfy.get("execution_policy")):
-        from .comfyui_workflows import FIXED_OUTPUT_COUNT_DESCRIPTION
+        from .providers.comfyui.workflows import FIXED_OUTPUT_COUNT_DESCRIPTION
 
         old_description = BATCH_PARAMETERS["count"]["description"]
         for name, descriptor in parameters.items():

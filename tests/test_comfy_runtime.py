@@ -11,19 +11,25 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
-from astrbot_plugin_image_studio import comfyui_runtime
-from astrbot_plugin_image_studio.comfyui import ComfyExecutionError
-from astrbot_plugin_image_studio.comfyui_runtime import ComfyRuntime
-from astrbot_plugin_image_studio.config import HistorySettings, RuntimeSettings
-from astrbot_plugin_image_studio.models import (
+from astrbot_plugin_image_studio.backend.providers.comfyui import (
+    runtime as comfyui_runtime,
+)
+from astrbot_plugin_image_studio.backend.providers.comfyui.client import (
+    ComfyExecutionError,
+)
+from astrbot_plugin_image_studio.backend.providers.comfyui.runtime import ComfyRuntime
+from astrbot_plugin_image_studio.backend.config import HistorySettings, RuntimeSettings
+from astrbot_plugin_image_studio.backend.models import (
     GeneratedImage,
     ImageProvider,
     InvocationSource,
     ReferenceImage,
 )
-from astrbot_plugin_image_studio.providers import ProviderError
-from astrbot_plugin_image_studio.service import ImageGenerationService
-from astrbot_plugin_image_studio.storage import GenerationStore
+from astrbot_plugin_image_studio.backend.providers.executor import ProviderError
+from astrbot_plugin_image_studio.backend.generation.service import (
+    ImageGenerationService,
+)
+from astrbot_plugin_image_studio.backend.gallery.store import GenerationStore
 from PIL import Image
 
 

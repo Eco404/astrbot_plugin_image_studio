@@ -9,20 +9,27 @@ from dataclasses import replace
 
 import aiohttp
 import pytest
-from astrbot_plugin_image_studio.config import HistorySettings, RuntimeSettings
-from astrbot_plugin_image_studio.models import ImageProvider, ReferenceImage
-from astrbot_plugin_image_studio.novelai import (
+from astrbot_plugin_image_studio.backend.config import HistorySettings, RuntimeSettings
+from astrbot_plugin_image_studio.backend.models import ImageProvider, ReferenceImage
+from astrbot_plugin_image_studio.backend.providers.novelai.protocol import (
     NOVELAI_MODEL_IDS,
     prepare_generation_payload,
 )
-from astrbot_plugin_image_studio.parameter_exchange import (
+from astrbot_plugin_image_studio.backend.metadata.exchange import (
     export_parameters,
     resolve_parameters,
 )
-from astrbot_plugin_image_studio.providers import ProviderError, ProviderExecutor
-from astrbot_plugin_image_studio.providers import ProviderPartialResponseError
-from astrbot_plugin_image_studio.service import ImageGenerationService
-from astrbot_plugin_image_studio.storage import GenerationStore
+from astrbot_plugin_image_studio.backend.providers.executor import (
+    ProviderError,
+    ProviderExecutor,
+)
+from astrbot_plugin_image_studio.backend.providers.executor import (
+    ProviderPartialResponseError,
+)
+from astrbot_plugin_image_studio.backend.generation.service import (
+    ImageGenerationService,
+)
+from astrbot_plugin_image_studio.backend.gallery.store import GenerationStore
 from astrbot_plugin_image_studio.tests.test_novelai_provider import (
     SECRET,
     Response,
@@ -650,7 +657,7 @@ def test_failed_encoding_is_not_repeated_by_other_batch_chunks(monkeypatch):
         executor = ProviderExecutor(session)
         current_time = [100.0]
         monkeypatch.setattr(
-            "astrbot_plugin_image_studio.providers.time.monotonic",
+            "astrbot_plugin_image_studio.backend.providers.executor.time.monotonic",
             lambda: current_time[0],
         )
         configured = provider(model=V45)

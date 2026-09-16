@@ -10,8 +10,11 @@ import zipfile
 import pytest
 from PIL import Image, PngImagePlugin
 
-from astrbot_plugin_image_studio.config import HistorySettings
-from astrbot_plugin_image_studio.storage import GenerationStore, ImportDuplicateError
+from astrbot_plugin_image_studio.backend.config import HistorySettings
+from astrbot_plugin_image_studio.backend.gallery.store import (
+    GenerationStore,
+    ImportDuplicateError,
+)
 
 
 def image(color="red", *, prompt="embedded", model="embedded-model", seed=1):
@@ -159,7 +162,7 @@ def test_comfy_output_selection_is_required_and_link_scoped(tmp_path):
 def test_legacy_multisave_import_survives_parser_upgrade_without_automatic_branch_choice(
     tmp_path, monkeypatch
 ):
-    import astrbot_plugin_image_studio.image_metadata as metadata_module
+    import astrbot_plugin_image_studio.backend.metadata.parser as metadata_module
 
     async def run():
         data, raw = comfy_multi_output_image()
@@ -620,7 +623,7 @@ def test_distinct_generation_engines_remain_mixed_after_alias_normalization(tmp_
 def test_metadata_upgrade_refreshes_group_projection_and_keeps_manifest_and_manual_overrides(
     tmp_path, monkeypatch
 ):
-    import astrbot_plugin_image_studio.image_metadata as metadata_module
+    import astrbot_plugin_image_studio.backend.metadata.parser as metadata_module
 
     async def run():
         store = GenerationStore(tmp_path)

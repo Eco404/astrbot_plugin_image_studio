@@ -10,18 +10,21 @@ import pytest
 from aiohttp import web
 from PIL import Image
 
-from astrbot_plugin_image_studio.config import (
+from astrbot_plugin_image_studio.backend.config import (
     load_studio_settings,
     normalize_webui_settings,
     runtime_settings,
     save_studio_settings,
 )
-from astrbot_plugin_image_studio.models import (
+from astrbot_plugin_image_studio.backend.models import (
     GenerationRequest,
     ImageProvider,
     ReferenceImage,
 )
-from astrbot_plugin_image_studio.providers import ProviderError, ProviderExecutor
+from astrbot_plugin_image_studio.backend.providers.executor import (
+    ProviderError,
+    ProviderExecutor,
+)
 
 
 def provider(kind="openai_images", **changes):

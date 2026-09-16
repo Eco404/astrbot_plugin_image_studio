@@ -7,10 +7,13 @@ import io
 import json
 
 import pytest
-from astrbot_plugin_image_studio.comfyui_support import import_result
-from astrbot_plugin_image_studio.comfyui_workflows import prepare_graph, seed_warnings
-from astrbot_plugin_image_studio.models import GenerationRequest, ImageProvider
-from astrbot_plugin_image_studio.service import _parameters_for_model
+from astrbot_plugin_image_studio.backend.providers.comfyui.imports import import_result
+from astrbot_plugin_image_studio.backend.providers.comfyui.workflows import (
+    prepare_graph,
+    seed_warnings,
+)
+from astrbot_plugin_image_studio.backend.models import GenerationRequest, ImageProvider
+from astrbot_plugin_image_studio.backend.generation.service import _parameters_for_model
 from PIL import Image, PngImagePlugin
 
 
@@ -249,7 +252,7 @@ def test_seed_binding_schema_allows_random_sentinel_without_changing_node_bounds
     assert model.parameters["friendly_seed"]["default"] == 17
     assert model.comfyui["bindings"]["seed_input"]["min"] == 0
     monkeypatch.setattr(
-        "astrbot_plugin_image_studio.comfyui_workflows.secrets.randbelow",
+        "astrbot_plugin_image_studio.backend.providers.comfyui.workflows.secrets.randbelow",
         lambda width: width - 1,
     )
     parameters = _parameters_for_model({"friendly_seed": -1}, model)
@@ -274,7 +277,8 @@ def test_random_seed_uses_declared_nonnegative_integer_range(
         return width - 1
 
     monkeypatch.setattr(
-        "astrbot_plugin_image_studio.comfyui_workflows.secrets.randbelow", last
+        "astrbot_plugin_image_studio.backend.providers.comfyui.workflows.secrets.randbelow",
+        last,
     )
     request = GenerationRequest(
         mode="text2img", provider_id="comfy", prompt="", parameters={"seed_input": -1}
@@ -291,7 +295,7 @@ def test_rgthree_seed_binding_without_declared_bounds_respects_known_node_limit(
 ):
     value = bind(definition(17, kind="Seed (rgthree)"), default=-1)
     monkeypatch.setattr(
-        "astrbot_plugin_image_studio.comfyui_workflows.secrets.randbelow",
+        "astrbot_plugin_image_studio.backend.providers.comfyui.workflows.secrets.randbelow",
         lambda width: width - 1,
     )
     request = GenerationRequest(
@@ -314,7 +318,7 @@ def test_random_seed_intersects_all_known_target_limits(monkeypatch):
         ],
     }
     monkeypatch.setattr(
-        "astrbot_plugin_image_studio.comfyui_workflows.secrets.randbelow",
+        "astrbot_plugin_image_studio.backend.providers.comfyui.workflows.secrets.randbelow",
         lambda width: width - 1,
     )
     request = GenerationRequest(
@@ -329,7 +333,7 @@ def test_default_plugin_random_range_stays_63_bits_and_invalid_range_is_actionab
 ):
     value = bind(definition(17), default=-1)
     monkeypatch.setattr(
-        "astrbot_plugin_image_studio.comfyui_workflows.secrets.randbelow",
+        "astrbot_plugin_image_studio.backend.providers.comfyui.workflows.secrets.randbelow",
         lambda width: width - 1,
     )
     request = GenerationRequest(

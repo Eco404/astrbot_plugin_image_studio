@@ -15,12 +15,12 @@ from typing import Any
 
 import yaml
 
-from .external_timestamps import (
+from .timestamps import (
     TIME_POLICY_VERSION,
     external_image_times,
     nai_filename_timestamp,
 )
-from .image_metadata import MAX_IMAGE_BYTES
+from ..metadata.parser import MAX_IMAGE_BYTES
 
 MAX_SIDECAR_BYTES = 1024 * 1024
 MAX_SIDECAR_NODES = 4096
@@ -649,7 +649,7 @@ class ExternalGalleryManager:
         )
 
     async def _scan(self, source_id: str, epoch: int) -> None:
-        from .image_metadata import PARSER_VERSION
+        from ..metadata.parser import PARSER_VERSION
 
         adapter = self.adapters[source_id]
         root = adapter.resolve_root(self.data_dir)

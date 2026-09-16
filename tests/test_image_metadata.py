@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from PIL import Image, PngImagePlugin
 
-from astrbot_plugin_image_studio.image_metadata import (
+from astrbot_plugin_image_studio.backend.metadata.parser import (
     MAX_METADATA_BYTES,
     PARSER_VERSION,
     parse_image_metadata,

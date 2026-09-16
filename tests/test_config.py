@@ -3,14 +3,17 @@ from __future__ import annotations
 import asyncio
 import json
 
-from astrbot_plugin_image_studio.config import (
+from astrbot_plugin_image_studio.backend.config import (
     load_studio_settings,
     normalize_webui_settings,
     runtime_settings,
     save_studio_settings,
 )
-from astrbot_plugin_image_studio.models import GenerationRequest, ImageProvider
-from astrbot_plugin_image_studio.providers import _nai_query, _openai_payload
+from astrbot_plugin_image_studio.backend.models import GenerationRequest, ImageProvider
+from astrbot_plugin_image_studio.backend.providers.executor import (
+    _nai_query,
+    _openai_payload,
+)
 
 
 def test_webui_settings_normalize_provider_and_history() -> None:

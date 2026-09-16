@@ -18,9 +18,9 @@ import aiohttp
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 from astrbot.core.utils.media_utils import MediaResolver, file_uri_to_path, is_file_uri
 
-from .config import RuntimeSettings
-from .comfyui_workflows import FIXED_OUTPUT_POLICY
-from .models import (
+from ..config import RuntimeSettings
+from ..providers.comfyui.workflows import FIXED_OUTPUT_POLICY
+from ..models import (
     MODEL_SCHEDULING_KEYS,
     GeneratedImage,
     GenerationRequest,
@@ -30,13 +30,13 @@ from .models import (
     InvocationSource,
     ReferenceImage,
 )
-from .providers import (
+from ..providers.executor import (
     ProviderBatchError,
     ProviderError,
     ProviderExecutor,
     ProviderPartialResponseError,
 )
-from .storage import GenerationStore, detect_mime_type
+from ..gallery.store import GenerationStore, detect_mime_type
 
 
 class _ProviderLimiter:
@@ -646,8 +646,8 @@ class ImageGenerationService:
     ) -> dict[str, Any]:
         """Return a reproducible draft and stage retained references when available."""
 
-        from .parameter_exchange import export_parameters, resolve_parameters
-        from .comfyui_workflows import migrate_fixed_outputs
+        from ..metadata.exchange import export_parameters, resolve_parameters
+        from ..providers.comfyui.workflows import migrate_fixed_outputs
 
         detail = await self.store.generation_image_context(generation_id, image_id)
         if detail is None:

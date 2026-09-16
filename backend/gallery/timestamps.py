@@ -13,7 +13,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from .image_metadata import MAX_METADATA_BYTES, _creation_timestamp, _decode_comment
+from ..metadata.parser import MAX_METADATA_BYTES, _creation_timestamp, _decode_comment
 
 TIME_POLICY_VERSION = 1
 

@@ -38,15 +38,15 @@ async function addInput(frame, name) {
   await frame.locator('button[data-select-id="comfyAddBinding"]').click();
   await frame.locator('.studio-select-menu[data-select-id="comfyAddBinding"]').getByRole("option", { name, exact: true }).click();
 }
-async function assertSeedNotice(frame, selector) {
+async function assertSeedNotice(frame, selector, expectedCount = 2) {
   const notice = frame.locator(`${selector} .comfy-seed-notice`);
   await notice.waitFor();
   assert.equal(await notice.locator("strong").first().textContent(), "种子设置提示");
   assert.equal(await notice.locator("button").count(), 0, "seed guidance stays visible while a warning applies");
   const rows = await notice.locator("li").allTextContents();
-  assert.equal(rows.length, 2, "each locked seed has a separate row");
+  assert.equal(rows.length, expectedCount, "only unresolved locked seeds have a row");
   assert.match(rows[0], new RegExp(`节点 #3 · seed = (42|${lockedSeed})\\s*种子已锁定`));
-  assert.match(rows[1], /节点 #9 · seed = (42|43)\s*种子已锁定/);
+  if (expectedCount > 1) assert.match(rows[1], /节点 #9 · seed = (42|43)\s*种子已锁定/);
   assert.equal((await notice.textContent()).split("如需恢复随机").length - 1, 1, "shared guidance appears once even with multiple locked seeds");
 }
 async function captureThemes(page, frame, width, label, selector) {
@@ -216,11 +216,11 @@ async function verify(browser, width) {
     assert.equal(await frame.locator('[data-model-parameter="count"]').inputValue(), "1");
     assert.equal(await frame.evaluate(() => window.__galleryState.models.some(item => item.temporary)), false, "temporary models are kept outside global configured models");
     assert.equal((await api(page, "get", "settings/get")).webui.providers.find(item => item.id === provider.id).models.length, 0);
-    await assertSeedNotice(frame, "#comfyTemporaryInfo");
+    await assertSeedNotice(frame, "#comfyTemporaryInfo", 1);
     await captureThemes(page, frame, width, "temporary-seed", "#comfyTemporaryInfo");
     await choose(frame, "#modelChoice", "natural:studio-image");
     await choose(frame, "#modelChoice", `@comfy:${provider.id}`); await choose(frame, "#comfyWorkflowChoice", temporaryRef);
-    await assertSeedNotice(frame, "#comfyTemporaryInfo");
+    await assertSeedNotice(frame, "#comfyTemporaryInfo", 1);
     await frame.locator("#generateButton").click();
     await frame.waitForFunction(() => !document.getElementById("generateButton").disabled);
     assert.equal(submitted.length, 1); assert.equal(submitted[0].provider_id, provider.id);

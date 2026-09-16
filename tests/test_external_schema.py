@@ -5,7 +5,7 @@ from contextlib import closing
 
 import pytest
 
-from astrbot_plugin_image_studio import database_schema as schema
+from astrbot_plugin_image_studio.backend.database import schema as schema
 from astrbot_plugin_image_studio.tests.schema_upgrade_fixtures import (
     V1_STATEMENTS,
     create_final_dev,

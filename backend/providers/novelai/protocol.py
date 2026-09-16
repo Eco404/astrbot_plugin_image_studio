@@ -20,11 +20,11 @@ from typing import TYPE_CHECKING, Any
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
-from .novelai_catalog import model_capabilities
-from .novelai_inputs import ADVANCED_KEYS, prepare_advanced
+from .catalog import model_capabilities
+from .inputs import ADVANCED_KEYS, prepare_advanced
 
 if TYPE_CHECKING:
-    from .models import GeneratedImage, GenerationRequest
+    from ...models import GeneratedImage, GenerationRequest
 
 NOVELAI_MODEL_IDS = (
     "nai-diffusion-4-5-full",
@@ -261,7 +261,7 @@ def parse_generation_response(
 ) -> tuple[tuple[GeneratedImage, ...], tuple[tuple[int, str], ...]]:
     """Decode all images, retaining positional errors alongside successful ones."""
 
-    from .models import GeneratedImage
+    from ...models import GeneratedImage
 
     if not raw or len(raw) > MAX_RESPONSE_BYTES:
         raise ValueError("NovelAI 响应为空或超过 128 MB 上限")
@@ -367,7 +367,7 @@ def parse_subscription(payload: Any) -> dict[str, Any]:
 def _parse_zip(
     raw: bytes, effective: dict[str, Any], *, expected_count: int | None = None
 ):
-    from .models import GeneratedImage
+    from ...models import GeneratedImage
 
     images: list[GeneratedImage] = []
     failures: list[tuple[int, str]] = []

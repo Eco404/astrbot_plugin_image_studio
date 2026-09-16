@@ -12,7 +12,7 @@ import mcp
 import pytest
 from astrbot.api.message_components import Image, Reply
 from astrbot.core.provider.register import llm_tools
-from astrbot_plugin_image_studio.config import HistorySettings, RuntimeSettings
+from astrbot_plugin_image_studio.backend.config import HistorySettings, RuntimeSettings
 from astrbot_plugin_image_studio.main import (
     AGENT_WORKFLOW_PROMPT_MARKER,
     CAPABILITY_QUERY_EXTRA_KEY,
@@ -21,11 +21,10 @@ from astrbot_plugin_image_studio.main import (
     ImageStudioPlugin,
     _invocation_source,
     _iter_event_images,
-    _llm_parameter_descriptor,
     _parse_command,
     _provider_request_image_refs,
 )
-from astrbot_plugin_image_studio.models import (
+from astrbot_plugin_image_studio.backend.models import (
     GeneratedImage,
     GenerationRequest,
     GenerationResult,
@@ -34,14 +33,20 @@ from astrbot_plugin_image_studio.models import (
     WorkflowImageAsset,
     WorkflowImageLoadResult,
 )
-from astrbot_plugin_image_studio.providers import ProviderError, ProviderExecutor
-from astrbot_plugin_image_studio.service import (
+from astrbot_plugin_image_studio.backend.providers.executor import (
+    ProviderError,
+    ProviderExecutor,
+)
+from astrbot_plugin_image_studio.backend.generation.service import (
     ImageGenerationService,
     _control_parameter_value,
     _parameters_for_model,
     _size,
 )
-from astrbot_plugin_image_studio.storage import GenerationStore
+from astrbot_plugin_image_studio.backend.gallery.store import GenerationStore
+from astrbot_plugin_image_studio.backend.tools.capabilities import (
+    _llm_parameter_descriptor,
+)
 from fastapi.responses import FileResponse
 
 PNG = base64.b64decode(
@@ -1840,7 +1845,7 @@ def test_safe_reference_path_rejects_astrbot_tool_image_cache(
             settings=settings(), executor=FakeExecutor(), store=store
         )
         monkeypatch.setattr(
-            "astrbot_plugin_image_studio.service.get_astrbot_temp_path",
+            "astrbot_plugin_image_studio.backend.generation.service.get_astrbot_temp_path",
             lambda: str(astrbot_temp),
         )
 

@@ -8,11 +8,15 @@ from collections import Counter
 from dataclasses import replace
 
 import pytest
-from astrbot_plugin_image_studio import comfyui_runtime
-from astrbot_plugin_image_studio.comfyui import ComfyExecutionError
-from astrbot_plugin_image_studio.comfyui_runtime import ComfyRuntime
-from astrbot_plugin_image_studio.models import ImageProvider, ReferenceImage
-from astrbot_plugin_image_studio.providers import ProviderError
+from astrbot_plugin_image_studio.backend.providers.comfyui import (
+    runtime as comfyui_runtime,
+)
+from astrbot_plugin_image_studio.backend.providers.comfyui.client import (
+    ComfyExecutionError,
+)
+from astrbot_plugin_image_studio.backend.providers.comfyui.runtime import ComfyRuntime
+from astrbot_plugin_image_studio.backend.models import ImageProvider, ReferenceImage
+from astrbot_plugin_image_studio.backend.providers.executor import ProviderError
 from astrbot_plugin_image_studio.tests.test_comfy_runtime import (
     FakeComfyClient,
     image,

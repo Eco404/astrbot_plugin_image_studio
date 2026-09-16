@@ -6,7 +6,7 @@ import json
 import httpx
 import pytest
 
-from astrbot_plugin_image_studio.appearance import (
+from astrbot_plugin_image_studio.backend.ui.appearance import (
     APPEARANCE_COOKIE,
     APPEARANCE_DEFAULTS,
     decode_appearance_cookie,

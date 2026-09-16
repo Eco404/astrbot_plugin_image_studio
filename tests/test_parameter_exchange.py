@@ -6,13 +6,13 @@ from dataclasses import replace
 
 import pytest
 
-from astrbot_plugin_image_studio.config import HistorySettings, RuntimeSettings
-from astrbot_plugin_image_studio.image_metadata import (
+from astrbot_plugin_image_studio.backend.config import HistorySettings, RuntimeSettings
+from astrbot_plugin_image_studio.backend.metadata.parser import (
     parse_metadata_fields,
     parse_parameter_text,
 )
-from astrbot_plugin_image_studio.models import ImageProvider
-from astrbot_plugin_image_studio.parameter_exchange import (
+from astrbot_plugin_image_studio.backend.models import ImageProvider
+from astrbot_plugin_image_studio.backend.metadata.exchange import (
     export_parameters,
     resolve_parameters,
 )
@@ -53,7 +53,7 @@ def test_comfyui_import_copy_keeps_condition_structure_and_summary_warning():
 
 
 def test_comfy_output_copy_and_resolve_preserve_branch_without_auto_adopting_candidates():
-    from astrbot_plugin_image_studio.storage import _import_supplemental
+    from astrbot_plugin_image_studio.backend.gallery.store import _import_supplemental
     from astrbot_plugin_image_studio.tests.test_import_groups import (
         comfy_multi_output_image,
     )

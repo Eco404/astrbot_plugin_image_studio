@@ -8,19 +8,23 @@ from dataclasses import replace
 
 import httpx
 import pytest
-from astrbot_plugin_image_studio.config import (
+from astrbot_plugin_image_studio.backend.config import (
     HistorySettings,
     RuntimeSettings,
     normalize_webui_settings,
 )
-from astrbot_plugin_image_studio.models import GeneratedImage, ImageProvider
-from astrbot_plugin_image_studio.parameter_exchange import (
+from astrbot_plugin_image_studio.backend.models import GeneratedImage, ImageProvider
+from astrbot_plugin_image_studio.backend.metadata.exchange import (
     export_parameters,
     resolve_parameters,
 )
-from astrbot_plugin_image_studio.providers import ProviderPartialResponseError
-from astrbot_plugin_image_studio.service import ImageGenerationService
-from astrbot_plugin_image_studio.storage import GenerationStore
+from astrbot_plugin_image_studio.backend.providers.executor import (
+    ProviderPartialResponseError,
+)
+from astrbot_plugin_image_studio.backend.generation.service import (
+    ImageGenerationService,
+)
+from astrbot_plugin_image_studio.backend.gallery.store import GenerationStore
 from PIL import Image, PngImagePlugin
 
 MODEL = "nai-diffusion-4-5-full"

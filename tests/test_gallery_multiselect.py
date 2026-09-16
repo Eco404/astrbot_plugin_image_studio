@@ -6,7 +6,7 @@ import json
 
 import httpx
 import pytest
-from astrbot_plugin_image_studio.models import GeneratedImage, GenerationRequest
+from astrbot_plugin_image_studio.backend.models import GeneratedImage, GenerationRequest
 from astrbot_plugin_image_studio.tests.webui_harness import create_app
 
 PREFIX = "/astrbot_plugin_image_studio/"

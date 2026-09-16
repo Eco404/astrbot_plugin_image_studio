@@ -9,14 +9,17 @@ from dataclasses import replace
 
 import pytest
 
-from astrbot_plugin_image_studio.config import normalize_webui_settings
-from astrbot_plugin_image_studio.models import (
+from astrbot_plugin_image_studio.backend.config import normalize_webui_settings
+from astrbot_plugin_image_studio.backend.models import (
     GenerationRequest,
     ImageProvider,
     ReferenceImage,
 )
-from astrbot_plugin_image_studio.providers import ProviderError, ProviderExecutor
-from astrbot_plugin_image_studio.storage import GenerationStore
+from astrbot_plugin_image_studio.backend.providers.executor import (
+    ProviderError,
+    ProviderExecutor,
+)
+from astrbot_plugin_image_studio.backend.gallery.store import GenerationStore
 from astrbot_plugin_image_studio.tests.test_nai_batches import (
     Executor,
     batch_parameters,

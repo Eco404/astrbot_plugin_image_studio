@@ -9,13 +9,13 @@ from dataclasses import replace
 
 import aiohttp
 import pytest
-from astrbot_plugin_image_studio import novelai
-from astrbot_plugin_image_studio.models import (
+from astrbot_plugin_image_studio.backend.providers.novelai import protocol as novelai
+from astrbot_plugin_image_studio.backend.models import (
     GenerationRequest,
     ImageProvider,
     ReferenceImage,
 )
-from astrbot_plugin_image_studio.providers import (
+from astrbot_plugin_image_studio.backend.providers.executor import (
     ProviderError,
     ProviderExecutor,
     ProviderPartialResponseError,
@@ -460,7 +460,7 @@ def test_http_declared_response_limit_is_checked_before_read():
 
 
 def test_http_stream_limit_applies_without_content_length(monkeypatch):
-    from astrbot_plugin_image_studio import providers
+    from astrbot_plugin_image_studio.backend.providers import executor as providers
 
     monkeypatch.setattr(providers, "MAX_RESPONSE_BYTES", 10)
     response = Response(raw=b"A" * 100)

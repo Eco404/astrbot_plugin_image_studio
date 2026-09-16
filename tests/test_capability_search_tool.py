@@ -9,13 +9,13 @@ from types import SimpleNamespace
 import pytest
 from astrbot.core.astr_agent_tool_exec import FunctionToolExecutor
 from astrbot.core.provider.register import llm_tools
-from astrbot_plugin_image_studio.config import HistorySettings, RuntimeSettings
+from astrbot_plugin_image_studio.backend.config import HistorySettings, RuntimeSettings
 from astrbot_plugin_image_studio.main import (
     CAPABILITY_QUERY_EXTRA_KEY,
     IMAGE_WORKFLOW_STATE_EXTRA_KEY,
     ImageStudioPlugin,
 )
-from astrbot_plugin_image_studio.models import (
+from astrbot_plugin_image_studio.backend.models import (
     GeneratedImage,
     GenerationResult,
     ImageProvider,
