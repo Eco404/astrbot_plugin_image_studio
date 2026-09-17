@@ -103,7 +103,7 @@ async function horizontal(inner, { alreadyDown = false, id = 71 } = {}) {
     const viewer = window.__menuViewer;
     const item = viewer.options.dataSource[viewer.currIndex];
     const backdrop = viewer.element.querySelector("canvas.image-studio-viewer-backdrop");
-    return !!item.originalSrc && backdrop?.dataset.backdropState === "idle"
+    return !!item.displaySrc && viewer.currSlide.content.element?.src === item.displaySrc && backdrop?.dataset.backdropState === "idle"
       && backdrop.width > 1 && backdrop.height > 1 && backdrop.dataset.previewSource === item.previewSrc;
   });
 }
@@ -122,7 +122,11 @@ async function resetView(inner) {
   try {
     const page = await browser.newPage({ viewport: { width: 390, height: 844 }, hasTouch: true });
     page.setDefaultTimeout(12000);
-    const errors = []; page.on("pageerror", error => errors.push(error.message));
+    const errors = [], originalRequests = []; page.on("pageerror", error => errors.push(error.message));
+    page.on("request", request => {
+      const url = new URL(request.url());
+      if (url.pathname.includes("/gallery/image/") && url.searchParams.get("detail") === "original") originalRequests.push(url.pathname);
+    });
     await page.goto(base);
     const frame = page.frameLocator("#studio");
     await frame.locator("#modelChoice:not(:disabled)").waitFor();
@@ -139,6 +143,7 @@ async function resetView(inner) {
     await contextMenu(inner);
     await assertUnchanged(inner, idle, "native menu interruption");
     await horizontal(inner, { id: 72 });
+    assert.equal(originalRequests.length, 0, "menu recovery and a normal swipe must remain independent of original-image loading");
 
     // Some iOS callout paths do not emit contextmenu either. A new primary
     // contact is the recovery boundary, including reuse of the old pointer ID.
@@ -246,6 +251,12 @@ async function resetView(inner) {
     await settled(inner);
     assert.ok(await inner.evaluate(zoom => window.__menuViewer.currSlide.currZoomLevel > zoom, beforeDoubleTap.zoom));
     assert.equal(await inner.evaluate(() => window.__menuTapActions), beforeDoubleTap.taps + 1);
+    await inner.waitForFunction(() => {
+      const slide = window.__menuViewer.currSlide;
+      return slide.data.originalSrc?.startsWith("blob:") && slide.content.element?.src === slide.data.originalSrc
+        && slide.content.element.complete && slide.content.element.naturalWidth > 1;
+    });
+    assert.ok(originalRequests.length > 0, "intentional zoom must still request the original after native-menu recovery");
     assert.deepEqual(errors, []);
     await page.close();
     console.log(`${browserName}: native menu, lost/reused contacts, pinch/double tap, preserved zoom, interrupted drags, window cancellation, image queue recovery and reopen passed`);

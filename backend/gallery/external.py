@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import math
 import os
 import stat
@@ -14,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from astrbot.api import logger
 
 from .timestamps import (
     TIME_POLICY_VERSION,
@@ -26,7 +26,6 @@ MAX_SIDECAR_BYTES = 1024 * 1024
 MAX_SIDECAR_NODES = 4096
 MAX_SIDECAR_DEPTH = 20
 _MAX_REPORTED_ERRORS = 20
-_LOGGER = logging.getLogger(__name__)
 
 
 def file_fingerprint(value: os.stat_result) -> dict[str, int]:
@@ -313,7 +312,7 @@ async def _settle_mutation(awaitable: Any) -> Any:
         try:
             await asyncio.shield(task)
         except Exception:
-            _LOGGER.exception("External gallery mutation failed during cancellation")
+            logger.exception("External gallery mutation failed during cancellation")
         raise
 
 
@@ -775,7 +774,7 @@ class ExternalGalleryManager:
                 last_scan_at=time.time(),
             )
         except Exception as exc:
-            _LOGGER.exception("External gallery scan failed for %s", source_id)
+            logger.exception("External gallery scan failed for %s", source_id)
             report.update(
                 status="error",
                 error=f"扫描失败：{exc}"[:500],
@@ -788,6 +787,6 @@ class ExternalGalleryManager:
                     self.store.set_external_status(source_id, dict(report))
                 )
             except Exception:
-                _LOGGER.exception(
+                logger.exception(
                     "Could not persist external gallery scan status for %s", source_id
                 )

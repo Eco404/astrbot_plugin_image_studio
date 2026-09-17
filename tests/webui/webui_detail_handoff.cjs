@@ -68,7 +68,9 @@ async function installProbe(inner, target) {
     const canvas = document.createElement("canvas"); canvas.width = 1; canvas.height = 1; const context = canvas.getContext("2d", { willReadFrequently: true });
     const sample = () => {
       if (!window.__handoff.observing) return;
-      if (window.__handoff.pending) {
+      // During settling the outgoing pane is still legitimately crossing the
+      // center. Inspect the landed foreground from handoff onward instead.
+      if (window.__handoff.pending && ["handoff", "idle"].includes(frame.dataset.detailSwipeState || "idle")) {
         const rect = frame.getBoundingClientRect(); const center = rect.x + rect.width / 2;
         const overlay = frame.querySelector(".detail-swipe-overlay");
         const incoming = Array.from(frame.querySelectorAll(".detail-swipe-pane img")).find((image) => { const box = image.getBoundingClientRect(); return box.left <= center && box.right > center; });
@@ -101,6 +103,7 @@ async function run(engine) {
     await installProbe(inner, target.images[0].thumbnail_data_url);
     await touch(inner, "touchstart", 0); await touch(inner, "touchmove", -90); await touch(inner, "touchmove", -150); await touch(inner, "touchend", -150);
     await inner.waitForFunction(() => window.__handoff.pending);
+    await inner.waitForFunction(() => document.querySelector(".detail-image-frame")?.dataset.detailSwipeState === "handoff");
     await frames(inner, 6);
     const held = await inner.evaluate(() => window.__handoff);
     assert.ok(held.samples.length >= 4);

@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
-import logging
 import sqlite3
 import threading
 import time
@@ -14,8 +13,11 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from astrbot.api import logger
+
 from ..config import HistorySettings
 from ..database.schema import ensure_release_schema
+from ..media.display import DisplayImageCache, display_file_version, display_max_edge
 from ..media.files import (
     _atomic_write,
     _is_within,
@@ -44,6 +46,7 @@ from .constants import (
 )
 from .context import GalleryContext
 from .external_records import ExternalRecords, ExternalServices
+from .errors import _ExternalFileChangedError
 from .imports import ImportRepository, ImportServices
 from .maintenance import GalleryMaintenance, MaintenanceServices
 from .metadata_records import MetadataRecords, MetadataServices
@@ -59,8 +62,6 @@ from .projection import (
 )
 from .queries import GalleryQueries, QueryServices
 from .records import GenerationRecords, RecordServices
-
-_LOGGER = logging.getLogger(__name__)
 
 
 class GenerationStore:
@@ -78,6 +79,7 @@ class GenerationStore:
         self.delivery_dir = self._context.delivery_dir
         self.db_path = self._context.db_path
         self._lock = asyncio.Lock()
+        self._display_cache = DisplayImageCache()
         self._revision_lock = threading.Lock()
         self._revision_connection: sqlite3.Connection | None = None
         self._revision_identity: tuple[int, int] | None = None
@@ -175,6 +177,9 @@ class GenerationStore:
                 ),
                 resolve_image_asset=lambda *args, **kwargs: (
                     self.external_records.resolve_image_asset(*args, **kwargs)
+                ),
+                report_external_failure=lambda *args, **kwargs: (
+                    self.external_records.report_external_failure(*args, **kwargs)
                 ),
             ),
         )
@@ -282,6 +287,7 @@ class GenerationStore:
 
     async def close(self) -> None:
         """Release the read-only database observer used by gallery caches."""
+        await self._display_cache.close()
         await asyncio.to_thread(self._close_revision_connection_sync)
 
     def set_external_issue_handler(
@@ -439,7 +445,7 @@ class GenerationStore:
                 try:
                     await task
                 except Exception:
-                    _LOGGER.exception(
+                    logger.exception(
                         "External gallery mutation failed while cancellation was pending"
                     )
                 raise
@@ -1071,15 +1077,79 @@ class GenerationStore:
         return await asyncio.to_thread(self.queries.gallery_image_sequence, filters)
 
     async def gallery_image_data(
-        self, image_id: str, *, detail: str
+        self, image_id: str, *, detail: str, max_edge: object = 1536
     ) -> dict[str, Any] | None:
-        """Load one gallery result as a preview or original data URL."""
+        """Load one gallery result without decoding originals on the event loop."""
 
+        edge = display_max_edge(max_edge) if detail == "display" else 0
         if not _SAFE_ID_RE.fullmatch(image_id):
             return None
+        if detail == "display":
+            return await self._gallery_display_data(image_id, edge)
         return await asyncio.to_thread(
             self.queries.gallery_image_data, image_id, detail
         )
+
+    async def _gallery_display_data(
+        self, image_id: str, max_edge: int
+    ) -> dict[str, Any] | None:
+        source = await asyncio.to_thread(self.queries.gallery_display_source, image_id)
+        if source is None:
+            return None
+        item, path, version = source
+        key = (str(path), version, max_edge)
+
+        def read_source() -> bytes:
+            # An encode may wait for a slot: source settings and identity can
+            # change meanwhile. Resolve again before opening source bytes.
+            current = self.queries.gallery_display_source(image_id)
+            if current is None or current[1:] != source[1:]:
+                raise FileNotFoundError("生成图片已不可读取")
+            content = self.external_records.read_gallery_file(image_id, path)
+            try:
+                if display_file_version(path.stat()) != version:
+                    raise _ExternalFileChangedError("图片在读取时发生变化")
+            except (OSError, _ExternalFileChangedError) as exc:
+                self.external_records.report_external_failure(
+                    str(item["generation_id"]), exc
+                )
+                raise
+            return content
+
+        try:
+            display = await self._display_cache.get(key, read_source, max_edge)
+        except (OSError, _ExternalFileChangedError):
+            return None
+        current = await asyncio.to_thread(self.queries.gallery_display_source, image_id)
+        if (
+            current is None
+            or current[1:] != source[1:]
+            or current[0]["sha256"] != item["sha256"]
+        ):
+            return None
+        actions, data_url = await asyncio.gather(
+            asyncio.to_thread(
+                self.external_records.allowed_actions_for_generation,
+                str(item["generation_id"]),
+            ),
+            asyncio.to_thread(image_data_url, display.data, "image/webp"),
+        )
+        return {
+            "image_id": str(item["image_id"]),
+            "allowed_actions": actions,
+            "sha256": str(item["sha256"]),
+            "thumbnail_revision": str(item["thumbnail_revision"]),
+            "generation_id": str(item["generation_id"]),
+            "image_index": int(item["image_index"]),
+            "mime_type": "image/webp",
+            "size_bytes": len(display.data),
+            "width": max(1, int(item.get("width") or 1)),
+            "height": max(1, int(item.get("height") or 1)),
+            "display_width": display.width,
+            "display_height": display.height,
+            "max_edge": max_edge,
+            "data_url": data_url,
+        }
 
     async def gallery_image_file(self, image_id: str) -> tuple[Path, str, str] | None:
         """Resolve one generated image for an authenticated download."""

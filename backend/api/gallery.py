@@ -16,6 +16,7 @@ from ..gallery.errors import (
     ExternalDeleteError,
     ExternalPermissionError,
 )
+from ..media.display import DisplayImageError
 
 LOG_TAG = "[ImageStudio]"
 
@@ -238,11 +239,23 @@ class GalleryAPI:
 
     async def _api_gallery_image(self, image_id: str) -> Any:
         detail = str(web_request.query.get("detail", "preview")).strip().lower()
-        if detail not in {"preview", "original"}:
+        if detail not in {"preview", "display", "original"}:
             return error_response(
-                "图片读取方式仅支持 preview 或 original", status_code=400
+                "图片读取方式仅支持 preview、display 或 original", status_code=400
             )
-        image = await self.store.gallery_image_data(image_id, detail=detail)
+        try:
+            options = (
+                {"max_edge": web_request.query.get("max_edge", 1536)}
+                if detail == "display"
+                else {}
+            )
+            image = await self.store.gallery_image_data(
+                image_id, detail=detail, **options
+            )
+        except DisplayImageError as exc:
+            return error_response(str(exc), status_code=422)
+        except ValueError as exc:
+            return error_response(str(exc), status_code=400)
         if image is None:
             return error_response("生成图片不存在", status_code=404)
         return json_response(image)

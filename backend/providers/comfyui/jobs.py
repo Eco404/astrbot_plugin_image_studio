@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import logging
 import re
 import shutil
 import sqlite3
@@ -20,6 +19,8 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
+
+from astrbot.api import logger
 
 from ...database.schema import ensure_release_schema
 from ...models import GeneratedImage, ReferenceImage
@@ -50,7 +51,6 @@ _SECRET_KEYS = frozenset(
         "auth_headers",
     }
 )
-_LOGGER = logging.getLogger(__name__)
 
 
 def _json_snapshot(value: Any) -> str:
@@ -674,7 +674,7 @@ class ComfyJobManager:
         if self._tasks.get(job_id) is task:
             self._tasks.pop(job_id)
         if not task.cancelled() and (error := task.exception()) is not None:
-            _LOGGER.error(
+            logger.error(
                 "Could not persist ComfyUI task %s outcome",
                 job_id,
                 exc_info=(type(error), error, error.__traceback__),

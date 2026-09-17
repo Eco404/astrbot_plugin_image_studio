@@ -52,6 +52,121 @@ async function tapImage(page, frame) {
 async function ready(frame) {
   await frame.waitForFunction(() => window.__filmViewer?.opener.isOpen && window.__filmViewer.currSlide.content.element?.naturalWidth > 1);
 }
+async function selectionAfterFrames(frame, count = 2) {
+  return await frame.evaluate(count => new Promise(resolve => {
+    const tick = () => {
+      if (--count > 0) { requestAnimationFrame(tick); return; }
+      const viewer = window.__filmViewer, strip = document.querySelector(".image-studio-viewer-filmstrip");
+      const selected = strip.querySelector('[aria-current="true"]');
+      const rect = selected?.getBoundingClientRect(), bounds = strip.getBoundingClientRect();
+      resolve({
+        current: viewer.currIndex, target: viewer.potentialIndex,
+        selected: selected ? Number(selected.dataset.viewerIndex) : null,
+        group: strip.dataset.generationId,
+        targetGroup: String(viewer.options.dataSource[viewer.potentialIndex].generation_id),
+        visible: !strip.hidden && getComputedStyle(strip).opacity === "1",
+        enabled: !strip.inert && strip.getAttribute("aria-busy") !== "true",
+        inView: !!rect && rect.left >= bounds.left - 1 && rect.right <= bounds.right + 1,
+        moving: viewer.mainScroll.isShifted() && viewer.animations.activeAnimations.some(item => item.props.isMainScroll),
+      });
+    };
+    requestAnimationFrame(tick);
+  }), count);
+}
+async function continuousSwipes(page, frame, engine, firstIndex) {
+  // Feed the actual browser gesture handlers, including pointer release and the
+  // PhotoSwipe spring. goTo() alone bypasses the target/current-index interval.
+  const cdp = engine === "chromium" ? await page.context().newCDPSession(page) : null;
+  const width = page.viewportSize().width, y = page.viewportSize().height * .4;
+  const pointer = async (type, x) => {
+    if (cdp) {
+      await cdp.send("Input.dispatchTouchEvent", { type: ({ pointerdown: "touchStart", pointermove: "touchMove", pointerup: "touchEnd" })[type], touchPoints: type === "pointerup" ? [] : [{ x, y, id: 74 }] });
+    } else {
+      await frame.evaluate(({ type, x, y }) => {
+        const viewer = window.__filmViewer, target = type === "pointerdown" ? viewer.scrollWrap : window;
+        target.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, pointerId: 74, pointerType: "touch", isPrimary: true, button: 0, buttons: type === "pointerup" ? 0 : 1, clientX: x, clientY: y }));
+      }, { type, x, y });
+    }
+  };
+  let unsettled = 0, previousTarget = firstIndex, accepted = 0, downloadChecked = false;
+  try {
+    for (let index = 1; index <= 4; index++) {
+      const from = width * .08, to = width * .92;
+      await pointer("pointerdown", from);
+      for (let step = 1; step <= 6; step++) {
+        await pointer("pointermove", from + (to - from) * step / 6);
+        await frames(frame, 1);
+      }
+      await pointer("pointerup", to);
+      const state = await selectionAfterFrames(frame);
+      // Interrupting a spring changes the remaining drag distance, so the
+      // viewer may reject one gesture. The strip must follow every accepted
+      // target (and keep the target for a rejected gesture), without waiting.
+      assert.ok(state.target === previousTarget || state.target === previousTarget - 1, "a forward drag cannot skip or reverse the accepted navigation target");
+      if (state.target !== previousTarget) accepted++;
+      previousTarget = state.target;
+      assert.equal(state.selected, state.target, "filmstrip must follow the accepted swipe target within two frames");
+      assert.equal(state.group, state.targetGroup, "cross-group swipes must replace the thumbnail content immediately");
+      assert.ok(state.visible && state.enabled && state.inView, "the selected thumbnail stays visible and centered during the spring");
+      if (state.moving && state.current !== state.target) unsettled++;
+      if (state.moving && state.current !== state.target && !downloadChecked) {
+        const downloadState = await frame.evaluate(async () => {
+          const viewer = window.__filmViewer, item = viewer.options.dataSource[viewer.potentialIndex];
+          const button = document.querySelector(".pswp__button--image-studio-download");
+          const expected = `gallery/download/${item.image_id}`, current = viewer.currIndex, target = viewer.potentialIndex;
+          window.__filmDownload = null; button.click();
+          await new Promise(resolve => setTimeout(resolve, 0));
+          const endpoint = window.__filmDownload?.endpoint;
+          const actions = item.allowed_actions || (item.allowed_actions = {}), previous = actions.download;
+          let denied;
+          try {
+            actions.download = false;
+            viewer.dispatch("moveMainScroll", { x: viewer.mainScroll.x, dragging: false });
+            denied = button.hidden;
+          } finally {
+            if (previous === undefined) delete actions.download; else actions.download = previous;
+            viewer.dispatch("moveMainScroll", { x: viewer.mainScroll.x, dragging: false });
+          }
+          return { expected, endpoint, current, target, denied, restored: !button.hidden };
+        });
+        assert.notEqual(downloadState.current, downloadState.target, "download identity must be tested while the committed slide still lags behind the target");
+        assert.equal(downloadState.endpoint, downloadState.expected, "download follows the same accepted image as the filmstrip during a spring");
+        assert.ok(downloadState.denied && downloadState.restored, "target download permission immediately controls the button even before slide commit");
+        downloadChecked = true;
+      }
+      // Leave the browser two additional frames to finish native touch-end
+      // dispatch; the PhotoSwipe spring is still deliberately not awaited.
+      await frames(frame, 2);
+    }
+    assert.ok(accepted >= 3 && previousTarget < firstIndex - 2, "continuous input must exercise several accepted targets and cross the group boundary");
+    assert.ok(unsettled > 0, "the regression must exercise a real unfinished spring with currIndex behind potentialIndex");
+    assert.ok(downloadChecked, "verify download identity in at least one unfinished spring");
+    try { await frame.waitForFunction(() => !window.__filmViewer.mainScroll.isShifted()); }
+    catch (error) {
+      console.log("Unsettled gesture", engine, width, await frame.evaluate(() => {
+        const viewer = window.__filmViewer;
+        return { current: viewer.currIndex, target: viewer.potentialIndex, x: viewer.mainScroll.x, destination: viewer.mainScroll.getCurrSlideX(), dragging: viewer.gestures.isDragging, points: viewer.gestures.F, animations: viewer.animations.activeAnimations.map(item => item.props.name) };
+      }));
+      throw error;
+    }
+    const original = await selectionAfterFrames(frame);
+    // A short drag that returns to its origin cancels, so navigation state and
+    // the selected thumbnail must remain on the same image throughout.
+    const from = width * .45;
+    await pointer("pointerdown", from);
+    await pointer("pointermove", from + 24); await frames(frame, 2);
+    await pointer("pointermove", from); await frames(frame, 4);
+    const held = await selectionAfterFrames(frame);
+    assert.equal(held.target, original.target); assert.equal(held.selected, original.selected);
+    await pointer("pointerup", from);
+    const cancelled = await selectionAfterFrames(frame);
+    assert.equal(cancelled.target, original.target, "a cancelled short drag must not change the filmstrip target");
+    assert.equal(cancelled.selected, original.selected);
+    await frame.waitForFunction(() => !window.__filmViewer.mainScroll.isShifted());
+  } finally {
+    if (cdp) await cdp.detach();
+  }
+}
 
 async function run(browser, engine, viewport, groups, manifests) {
   const page = await browser.newPage({ viewport, hasTouch: true });
@@ -115,6 +230,12 @@ async function run(browser, engine, viewport, groups, manifests) {
     await frame.waitForFunction(previous => document.querySelector(".image-studio-viewer-filmstrip").scrollLeft > previous + 10, originalScroll);
     assert.equal(await frame.evaluate(() => window.__filmViewer.currIndex), startIndex, "scrolling the strip must not page the main image");
     assert.equal(await strip.isVisible(), true);
+    await frame.evaluate(index => window.__filmViewer.goTo(index), startIndex + 7);
+    const pendingSelection = await selectionAfterFrames(frame);
+    assert.equal(pendingSelection.selected, startIndex + 7, "a blocked thumbnail request must not delay selection");
+    assert.ok(pendingSelection.visible && pendingSelection.inView);
+    assert.equal(await strip.locator('[aria-current="true"] img').count(), 0, "the delayed selected thumbnail must still be an empty placeholder");
+    assert.equal(await strip.locator('[aria-current="true"] .detail-filmstrip-placeholder').isVisible(), true);
     await strip.evaluate(element => { element.scrollLeft = element.scrollWidth; });
     const last = strip.locator("[data-viewer-index]").last();
     await last.click();
@@ -127,14 +248,19 @@ async function run(browser, engine, viewport, groups, manifests) {
     pending.release(); await ready(frame);
     const farReads = requests.filter(item => item.id === far && item.detail === "preview").length;
     assert.equal(farReads, 1, "filmstrip and viewer must share the pending preview");
+    await last.focus(); await last.press("ArrowLeft");
+    assert.equal((await selectionAfterFrames(frame)).selected, startIndex + 38, "thumbnail keyboard navigation selects the previous image");
+    await strip.locator(`[data-viewer-index="${startIndex + 38}"]`).press("ArrowRight");
+    assert.equal((await selectionAfterFrames(frame)).selected, startIndex + 39);
 
     await tapImage(page, frame); await strip.waitFor({ state: "hidden" }); assert.equal(await download.isVisible(), false);
     await tapImage(page, frame); await strip.waitFor();
     assert.equal(requests.filter(item => item.id === far && item.detail === "preview").length, farReads, "toggling controls must reuse previews");
     await page.screenshot({ path: path.join(output, `${engine}-${viewport.width}-group.png`) });
 
-    // Hold the main viewer's idle gate: switching groups must not hide and
-    // recreate the glass surface while the new thumbnail content waits.
+    // Hold the main viewer's idle gate: navigation updates cannot wait on it.
+    // The same glass node stays visible while new group placeholders replace
+    // the old buttons immediately, independently of their image requests.
     const beforeHandoff = await strip.boundingBox();
     const duringHandoff = await frame.evaluate(id => {
       const viewer = window.__filmViewer;
@@ -142,15 +268,19 @@ async function run(browser, engine, viewport, groups, manifests) {
       viewer.dispatch("pointerDown", { originalEvent: { pointerId: 93, pointerType: "touch", isPrimary: true } });
       viewer.goTo(viewer.options.dataSource.findIndex(item => item.generation_id === id));
       const strip = document.querySelector(".image-studio-viewer-filmstrip");
-      const index = viewer.currIndex;
-      strip.querySelector("[data-viewer-index]").click();
-      return { same: strip === original, hidden: strip.hidden, inert: strip.inert, pending: strip.hasAttribute("data-group-pending"), stayedOnTarget: index === viewer.currIndex };
+      window.__filmstripGlass = original;
+      return { same: strip === original, hidden: strip.hidden };
     }, groups.small);
-    assert.deepEqual(duringHandoff, { same: true, hidden: false, inert: true, pending: true, stayedOnTarget: true });
+    assert.deepEqual(duringHandoff, { same: true, hidden: false });
+    const heldSelection = await selectionAfterFrames(frame);
+    assert.equal(heldSelection.selected, heldSelection.target);
+    assert.equal(heldSelection.group, groups.small);
+    assert.ok(heldSelection.visible && heldSelection.enabled && heldSelection.inView);
+    assert.equal(await strip.locator("[data-viewer-index]").count(), 3);
     await frames(frame, 12);
-    assert.equal(await strip.isVisible(), true, "glass must stay visible even while content rendering is delayed");
-    const delayedHandoff = await strip.evaluate(element => ({ opacity: getComputedStyle(element).opacity, content: getComputedStyle(element.firstElementChild).visibility, busy: element.getAttribute("aria-busy") }));
-    assert.deepEqual(delayedHandoff, { opacity: "1", content: "hidden", busy: "true" });
+    assert.equal(await strip.isVisible(), true, "glass must stay visible while the idle queue is held");
+    const delayedHandoff = await strip.evaluate(element => ({ same: element === window.__filmstripGlass, opacity: getComputedStyle(element).opacity, content: getComputedStyle(element.firstElementChild).visibility, busy: element.getAttribute("aria-busy") }));
+    assert.deepEqual(delayedHandoff, { same: true, opacity: "1", content: "visible", busy: "false" });
     const afterHandoff = await strip.boundingBox();
     for (const key of ["x", "y", "width", "height"]) assert.ok(Math.abs(beforeHandoff[key] - afterHandoff[key]) < 1, `glass ${key} changed during handoff`);
     await frame.evaluate(() => window.__filmViewer.dispatch("pointerUp", { originalEvent: { pointerId: 93, pointerType: "touch", type: "pointerup" } }));
@@ -171,6 +301,10 @@ async function run(browser, engine, viewport, groups, manifests) {
         assert.equal(await strip.locator('[aria-current="true"]').count(), 1);
       }
     }
+    await frame.evaluate(index => window.__filmViewer.goTo(index), startIndex + 2);
+    await frames(frame, 2);
+    assert.equal(await frame.evaluate(index => window.__filmViewer.options.dataSource[index - 1].generation_id, startIndex), groups.small, "fixture must put a multi-image group immediately before the large group");
+    await continuousSwipes(page, frame, engine, startIndex + 2);
     // Returning via a single-image group reuses the large group's DOM. An old
     // pending response must still fill its thumbnail under the new visibility epoch.
     await frame.evaluate(id => window.__filmViewer.goTo(window.__filmViewer.options.dataSource.findIndex(item => item.generation_id === id)), groups.single);
@@ -183,7 +317,7 @@ async function run(browser, engine, viewport, groups, manifests) {
     await frame.evaluate(() => window.__filmViewer.close()); await frame.locator(".pswp--open").waitFor({ state: "detached" });
     assert.equal(await strip.count(), 0);
     assert.deepEqual(errors, []);
-    console.log(`${engine}-${viewport.width}: toggle, group-only thumbnails, native strip scrolling, pending/cache reuse, selection, download positioning/identity and cleanup passed`);
+    console.log(`${engine}-${viewport.width}: continuous swipe targets before spring completion, cancelled short drags, persistent glass, pending placeholders, toggle, native strip scrolling, cache reuse, download identity and cleanup passed`);
   } finally { pending.release(); delayedPreview.release(); await page.close(); }
 }
 
