@@ -6,7 +6,7 @@
 
 插件运行模块统一使用 `from astrbot.api import logger` 输出日志，以接入宿主日志管理；不自行通过 Python `logging.getLogger()` 创建日志器。
 
-当前开发版本为插件 `1.3.2-dev.1`，基于正式版 `1.3.1`、数据库 **v3** 继续开发。本次版本切换不增加数据库迁移，沿用既有 `v2 → v3` 升级路径，正式库不保留开发标记。ComfyUI 已完成基础真实生图测试，覆盖范围见下方接入说明；NovelAI 官方仍需可用账户完成成功生图验证。
+当前正式基线为插件 `1.3.2`、数据库 **v3**。本版优化触屏图片浏览并统一日志接口，不增加数据库迁移，沿用既有 `v2 → v3` 升级路径，正式库不保留开发标记。ComfyUI 已完成基础真实生图测试，覆盖范围见下方接入说明；NovelAI 官方仍需可用账户完成成功生图验证。
 
 官方协议构造与解析集中在 `backend/providers/novelai/protocol.py`，不依赖完整第三方 SDK。`GeneratedImage.effective_parameters` 通过 `generation_images.supplemental_json.effective_request` 保存经过记录策略过滤的实际参数；原始请求仍保留在生成记录上。隐写元数据解析器版本为 9，既有缓存更新沿用现有回填流程。
 
@@ -14,11 +14,11 @@
 
 ComfyUI 架构、工作流绑定、任务恢复与范围见 [ComfyUI 接入](COMFYUI_IMPLEMENTATION.md)。`backend/providers/comfyui/client.py` 负责原生协议，`backend/providers/comfyui/workflows.py` 负责执行图和绑定，`backend/providers/comfyui/jobs.py` 保存修订/任务/临时文件，`backend/providers/comfyui/runtime.py` 接入现有生成与图库流程。运行中任务不受浏览器连接生命周期影响。
 
-## 当前开发版本与正式基线
+## 1.3.2 正式基线
 
 | 标识 | 当前值 | 含义 |
 | --- | --- | --- |
-| 插件版本 | `1.3.2-dev.1` | `metadata.yaml` 与 `main.py` 注册版本相同，正式基线为 `1.3.1` |
+| 插件版本 | `1.3.2` | `metadata.yaml` 与 `main.py` 注册版本相同 |
 | 数据库正式版本 | `3` | SQLite `PRAGMA user_version`，由 `backend/database/schema.py` 管理 |
 | 配置格式版本 | `2` | `studio_config.json` 的 `schema_version`，与数据库版本独立 |
 | 图片解析器版本 | `9` | 控制派生元数据回填，与数据库结构版本独立 |
@@ -27,16 +27,16 @@ ComfyUI 架构、工作流绑定、任务恢复与范围见 [ComfyUI 接入](COM
 
 `backend/gallery/store.py` 的 `GenerationStore.initialize()` 调用 `ensure_release_schema()`，ComfyUI 任务存储也使用同一迁移入口，启动先后顺序不改变结果。尺寸、生图来源和图片元数据的派生修复，以及租约和孤立文件维护，继续在结构迁移事务外执行，失败后可重试。
 
-历史版本对应关系：插件 1.0.0 使用数据库 v1，1.1.0 和 1.2.0 使用数据库 v2；1.3.0 开发后期使用 `3-dev.1`，1.3.1 正式版将其转换为 v3，当前开发版沿用该结构和转换路径。插件版本、数据库版本、配置格式版本和解析器版本分别维护。
+历史版本对应关系：插件 1.0.0 使用数据库 v1，1.1.0 和 1.2.0 使用数据库 v2；1.3.0 开发后期使用 `3-dev.1`，1.3.1 正式版将其转换为 v3，1.3.2 及其开发版沿用该结构和转换路径。插件版本、数据库版本、配置格式版本和解析器版本分别维护。
 
 ## 升级与开发库转换
 
-| 当前数据库 | 当前版本的处理（沿用 1.3.1） |
+| 当前数据库 | 1.3.2 的处理 |
 | --- | --- |
 | 空库 | 直接创建正式 v3，不备份空库 |
 | 正式 v1（1.0.0） | 核验、备份，在一个事务中执行 `v1 → v2 → v3` |
 | 正式 v2（1.1.0／1.2.0） | 核验、备份，执行一次 `v2 → v3` |
-| 正式 v3 | 只校验结构，不重复备份和迁移 |
+| 正式 v3（含 1.3.2 开发版） | 只校验结构，不重复备份和迁移 |
 | `user_version=2`、`schema_meta(3,1)` | 核验最终 `3-dev.1` 布局、备份，移除开发标记并转为 v3，不重建业务表 |
 | `user_version=1`、`schema_meta(2,2)` | 核验最终 `2-dev.2` 布局、备份，移除开发标记并执行 `v2 → v3` |
 | `user_version=0`、`schema_meta(1,3)` | 保留历史兼容：核验最终 `1-dev.3` 布局、备份，在一个事务中转换并升级为 v3 |
@@ -74,9 +74,9 @@ data/plugin_data/astrbot_plugin_image_studio/backups/
 
 ## 后续开发版本
 
-1. 当前 `1.3.2-dev.1` 从 `1.3.1` 和数据库正式 v3 基线继续开发，不修改已发布结构的版本含义。
+1. 从 `1.3.2` 和数据库正式 v3 基线继续开发，不修改已发布结构的版本含义。
 2. 普通 UI、指令或 Provider 修改可继续使用数据库 v3。只有结构变化时才启用下一个数据库目标版本。
-3. 若下一次结构目标为 v4，开发库保留 `user_version=3`，另以 `schema_meta(target_version=4, dev_revision=1,2,...)` 标识 `4-dev.1` 等修订；结构和开发标记在同一事务内提交。当前开发版不预先创建这些标记。
+3. 若下一次结构目标为 v4，开发库保留 `user_version=3`，另以 `schema_meta(target_version=4, dev_revision=1,2,...)` 标识 `4-dev.1` 等修订；结构和开发标记在同一事务内提交。当前正式版不预先创建这些标记。
 4. 后续插件开发版本使用 `下一版本-dev.N` 名称，与数据库版本独立。开发测试使用临时目录或独立数据副本，不与正式部署共用数据目录。
 5. 正式版只接纳明确支持的正式基线和最终开发布局，拒绝其他未发布标记；不能通过“缺列就补”绕过结构校验。
 6. 下次发布前将当期开发修订压缩为一次正式迁移，同时保留最终开发库到正式库的受控转换入口。
@@ -92,7 +92,7 @@ python scripts/verify.py --webui comfy_workspace comfy_gallery_run --browser chr
 python scripts/verify.py --webui comfy_gallery_run --browser webkit
 ```
 
-当前开发版构建默认输出 `dist/astrbot_plugin_image_studio-v1.3.2-dev.1.zip`，实际文件名跟随元数据版本；支持 `--root` 和 `--output`。构建读取当前工作区，不要求先提交，不执行数据库转换。
+当前正式版构建默认输出 `dist/astrbot_plugin_image_studio-v1.3.2.zip`，实际文件名跟随元数据版本；支持 `--root` 和 `--output`。构建读取当前工作区，不要求先提交，不执行数据库转换。
 
 安装包只包含运行模块、WebUI、使用说明和指定的演示截图，不包含真实数据、日志、开发数据库、测试或维护文档。新增运行模块或 README 图片时，同步更新构建白名单和测试；第三方静态资源的许可证随包保留。
 
