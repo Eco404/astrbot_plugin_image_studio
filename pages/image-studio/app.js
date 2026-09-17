@@ -4,7 +4,7 @@
   window.__imageStudioAppLoaded = true;
 
   const state = {
-    view: "generate", mode: "text2img", providers: [], models: [], comfyuiTemporaryModel: null, selectedProviderId: "", selectedModelRef: "", defaultModelRefs: { text2img: "", img2img: "" }, parameterValues: {}, parameterCarry: {}, negativePromptCarry: "", hasNegativePromptCarry: false, references: [],
+    view: "generate", mode: "text2img", providers: [], models: [], comfyuiTemporaryModel: null, selectedProviderId: "", selectedModelRef: "", generationSelections: null, parameterValues: {}, parameterCarry: {}, negativePromptCarry: "", hasNegativePromptCarry: false, references: [],
     resultImages: [], galleryItems: [], galleryPage: 0, galleryLimit: 24, galleryTotal: 0, selectedIds: new Set(), detailId: "", detailData: null, detailFallbackThumbnail: "", detailImageIndex: 0, detailRequestedImageIndex: 0, detailAssetsLoaded: false, detailNavigating: false, imagePreviewItems: [], imagePreviewIndex: 0, imagePreviewTitle: "图片预览", imagePreviewDownloadFilename: "", imagePreviewContext: null, imagePreviewNavigating: false, imagePreviewSwipeAt: 0,
   };
   let activeConfirmation = null;
@@ -410,6 +410,7 @@
     const model = selectedModel();
     if (model) state.selectedProviderId = model.provider_id;
     else if (!comfyProviders.has(state.selectedProviderId)) state.selectedProviderId = "";
+    if (state.generationSelections) state.generationSelections[state.mode] = { modelRef: state.selectedModelRef, providerId: state.selectedProviderId };
     const listed = new Set();
     const options = available.map(item => {
       if (item.provider_kind !== "comfyui") return `<option value="${escape(item.model_ref)}">${escape(item.name)} · ${escape(item.provider_name)}</option>`;
@@ -562,9 +563,13 @@
     state.providers = Array.isArray(payload.providers) ? payload.providers : [];
     state.models = Array.isArray(payload.models) ? payload.models : [];
     state.parameterValues = {}; state.parameterCarry = {}; state.negativePromptCarry = ""; state.hasNegativePromptCarry = false;
-    state.defaultModelRefs = { text2img: payload.defaults?.text2img_model_ref || "", img2img: payload.defaults?.img2img_model_ref || "" };
-    state.selectedModelRef = state.defaultModelRefs[state.mode] || "";
-    state.selectedProviderId = selectedModel()?.provider_id || "";
+    // Seed both modes once. Settings refreshes must not overwrite this page's
+    // choices; renderModelChoices still clears unavailable models/providers.
+    if (!state.generationSelections) {
+      state.generationSelections = Object.fromEntries(["text2img", "img2img"].map(mode => [mode, { modelRef: payload.defaults?.[`${mode}_model_ref`] || "", providerId: "" }]));
+      state.selectedModelRef = state.generationSelections[state.mode].modelRef;
+    }
+    state.selectedProviderId = selectedModel()?.provider_id || state.selectedProviderId;
     state.parameterValues = parameterValuesForModel(selectedModel(), {});
     els.negativePrompt.value = selectedModel()?.negative_prompt_default || "";
     if (selectedModel()?.supports_negative_prompt) { state.negativePromptCarry = els.negativePrompt.value; state.hasNegativePromptCarry = true; }
@@ -3024,7 +3029,12 @@
     els.galleryGrid.addEventListener("click", (event) => { const card = event.target.closest("[data-gallery-id]"); if (card && !event.target.closest(".gallery-selection")) void openDetail(card.dataset.galleryId); });
     els.galleryGrid.addEventListener("change", (event) => { const input = event.target.closest("[data-select-id]"); if (!input) return; input.checked ? state.selectedIds.add(input.dataset.selectId) : state.selectedIds.delete(input.dataset.selectId); updateSelection(); });
     document.querySelectorAll(".nav-item").forEach((button) => button.addEventListener("click", () => switchView(button.dataset.view)));
-    document.querySelectorAll(".segment").forEach((button) => button.addEventListener("click", () => applyGenerationSelection(button.dataset.mode, state.defaultModelRefs[button.dataset.mode] || "")));
+    document.querySelectorAll(".segment").forEach((button) => button.addEventListener("click", () => {
+      const mode = button.dataset.mode;
+      if (mode === state.mode) return;
+      const selection = state.generationSelections?.[mode];
+      applyGenerationSelection(mode, selection?.modelRef || "", selection?.providerId || "");
+    }));
     els.modelChoice.addEventListener("change", () => {
       const value = els.modelChoice.value;
       if (value.startsWith("@comfy:")) applyGenerationSelection(state.mode, "", value.slice(7));
