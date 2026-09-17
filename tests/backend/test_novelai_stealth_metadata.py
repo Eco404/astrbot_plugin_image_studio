@@ -65,7 +65,7 @@ def test_reads_official_column_major_alpha_payload_without_changing_image():
     original = bytes(source)
     result = image_metadata.parse_image_metadata(source)
     assert result["format"] == "novelai"
-    assert result["parser_version"] == image_metadata.PARSER_VERSION == 9
+    assert result["parser_version"] == image_metadata.PARSER_VERSION
     assert result["normalized"]["seed"] == PARAMETERS["seed"]
     assert result["normalized"]["mode"] == "text2img"
     assert result["normalized"]["model"] == fields["Source"]

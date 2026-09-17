@@ -50,6 +50,9 @@ python scripts/verify.py --webui comfy_gallery_run --browser webkit
 # 触屏显示图、实际双击缩放、迟到响应和资源回收
 python scripts/verify.py --webui mobile_display media_objects
 
+# ComfyUI 显示快照批量匹配：上游变化、下游约束、导入与图组编辑
+python scripts/verify.py --webui import_snapshot_matching
+
 # 可同时执行后端、选定的浏览器场景和打包
 python scripts/verify.py --backend --webui comfy_workspace --browser chromium --package
 ```

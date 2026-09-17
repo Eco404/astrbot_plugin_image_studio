@@ -644,6 +644,49 @@ def _comfyui(fields: dict, result: dict, *, output_node_id: str = "") -> None:
         snapshots = _comfy_display_snapshots(
             graph, workflow, text_usages, selected_root, resolve
         )
+        downstream: dict[str, list[tuple[int, str, str]]] = {}
+        if snapshots:
+            for consumer in order:
+                for name, value in inputs(consumer).items():
+                    ref = reference(value)
+                    if ref:
+                        downstream.setdefault(ref[0], []).append(
+                            (ref[1], consumer, name)
+                        )
+        snapshot_branch_keys: dict[str, str] = {}
+
+        def snapshot_branch_key(source_ref: str) -> str:
+            """Match a displayed output's route to this save, not its ingredients."""
+            if source_ref in snapshot_branch_keys:
+                return snapshot_branch_keys[source_ref]
+            producer, port = source_ref.rsplit(":", 1)
+            nodes = {producer}
+            edges = []
+            pending = [producer]
+            while pending:
+                identifier = pending.pop()
+                for output_port, consumer, name in downstream.get(identifier, ()):
+                    if identifier == producer and output_port != int(port):
+                        continue
+                    edges.append((identifier, output_port, consumer, name))
+                    if consumer not in nodes:
+                        nodes.add(consumer)
+                        pending.append(consumer)
+            # All edges are scoped to the selected save's ancestors. Keep IDs,
+            # types and ports through that save, excluding other input branches
+            # and observers that only display the text.
+            key = match_digest(
+                [
+                    "comfy-display-branch-v1",
+                    selected_root,
+                    source_ref,
+                    [[node, graph[node].get("class_type")] for node in sorted(nodes)],
+                    sorted(edges),
+                ]
+            )
+            snapshot_branch_keys[source_ref] = key
+            return key
+
         if snapshots:
             _warning(
                 result,
@@ -657,6 +700,7 @@ def _comfyui(fields: dict, result: dict, *, output_node_id: str = "") -> None:
                     f"输出 {source_ref} 的显示快照存在不同文本，请选择一份，不要合并冲突结果",
                 )
         for candidate in candidates + snapshots:
+            display = candidate["status"] == "display_snapshot"
             identity = (
                 [
                     "display",
@@ -666,7 +710,7 @@ def _comfyui(fields: dict, result: dict, *, output_node_id: str = "") -> None:
                         for item in candidate["consumers"]
                     ),
                 ]
-                if candidate["status"] == "display_snapshot"
+                if display
                 else [
                     "field",
                     candidate["node_id"],
@@ -676,8 +720,10 @@ def _comfyui(fields: dict, result: dict, *, output_node_id: str = "") -> None:
             )
             candidate["match_key"] = match_digest(
                 [
-                    "comfy-candidate-v1",
-                    branch_keys[selected_root],
+                    "comfy-display-candidate-v2" if display else "comfy-candidate-v1",
+                    snapshot_branch_key(candidate["source_ref"])
+                    if display
+                    else branch_keys[selected_root],
                     identity,
                     candidate["role"],
                     candidate["output_ports"],

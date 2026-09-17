@@ -215,6 +215,93 @@ def test_display_snapshots_match_across_random_text_and_origin_merging() -> None
     assert output_keys(first) == output_keys(second)
 
 
+@pytest.mark.parametrize("change", ["disconnect", "replace", "extend"])
+def test_display_snapshot_matching_allows_upstream_prompt_rewiring(change: str) -> None:
+    source = dynamic_graph()
+    target = copy.deepcopy(source)
+    if change == "disconnect":
+        target["9"]["inputs"].pop("text_b")
+        target["9"]["inputs"]["text_a"] = ["8", 0]
+    elif change == "replace":
+        target["20"] = {"class_type": "OtherRandomText", "inputs": {"text": "new"}}
+        target["9"]["inputs"]["text_b"] = ["20", 0]
+    else:
+        target["20"] = {"class_type": "TextInput_", "inputs": {"text": "extra"}}
+        target["9"]["inputs"]["text_c"] = ["20", 0]
+    first = parse(source, workflow=observer_workflow(["first generated snapshot"]))
+    second = parse(target, workflow=observer_workflow(["second generated snapshot"]))
+    a, b = snapshots(first)[0], snapshots(second)[0]
+    assert a["match_key"] == b["match_key"]
+    assert a["observations"] == b["observations"]
+    assert a["text"] != b["text"]
+    # Output selection and ordinary candidates retain full-branch validation.
+    assert output_keys(first) != output_keys(second)
+    assert candidate_keys(first)["3:text"] != candidate_keys(second)["3:text"]
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "producer_type",
+        "consumer_id",
+        "consumer_type",
+        "decoder_port",
+        "decoder_type",
+        "save_id",
+        "save_input",
+        "extra_consumer",
+    ],
+)
+def test_display_snapshot_matching_preserves_downstream_identity(change: str) -> None:
+    source = dynamic_graph()
+    target = copy.deepcopy(source)
+    if change == "producer_type":
+        target["9"]["class_type"] = "OtherTextConcatenate"
+    elif change == "consumer_id":
+        target["20"] = target.pop("2")
+        target["5"]["inputs"]["positive"] = ["20", 0]
+    elif change == "consumer_type":
+        target["5"]["class_type"] = "KSamplerAdvanced"
+    elif change == "decoder_port":
+        target["6"]["inputs"]["samples"] = ["5", 1]
+    elif change == "decoder_type":
+        target["6"]["class_type"] = "VAEDecodeTiled"
+    elif change == "save_id":
+        target["20"] = target.pop("7")
+    elif change == "save_input":
+        target["7"]["inputs"]["other_image"] = target["7"]["inputs"].pop("images")
+    else:
+        target["6"]["inputs"]["extra_text"] = ["9", 0]
+    first, second = snapshots(parse(source))[0], snapshots(parse(target))[0]
+    assert first["match_key"] != second["match_key"]
+
+
+def test_display_snapshot_downstream_matching_ignores_other_output_ports() -> None:
+    source = dynamic_graph()
+    target = copy.deepcopy(source)
+    target["6"]["inputs"]["extra_data"] = ["9", 1]
+    first, second = snapshots(parse(source))[0], snapshots(parse(target))[0]
+    assert first["match_key"] == second["match_key"]
+
+
+def test_display_snapshot_downstream_matching_is_order_independent_and_branch_scoped() -> (
+    None
+):
+    source = dynamic_graph()
+    source["20"] = {"class_type": "SaveImage", "inputs": {"images": ["6", 0]}}
+    target = {
+        key: {**node, "inputs": dict(reversed(list(node["inputs"].items())))}
+        for key, node in reversed(list(source.items()))
+    }
+    target["21"] = {"class_type": "ExtraConsumer", "inputs": {"text": ["9", 0]}}
+    target["20"]["inputs"]["images"] = ["21", 0]
+    first = snapshots(parse(source, output_node_id="7"))[0]
+    second = snapshots(parse(target, output_node_id="7"))[0]
+    assert first["match_key"] == second["match_key"]
+    other = snapshots(parse(source, output_node_id="20"))[0]
+    assert first["match_key"] != other["match_key"]
+
+
 def test_conflicting_snapshots_share_structure_key_but_keep_distinct_provenance() -> (
     None
 ):
