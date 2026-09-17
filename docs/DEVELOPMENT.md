@@ -4,6 +4,8 @@
 
 代码分区和依赖边界见 [目录结构](ARCHITECTURE.md)，统一检查及隔离浏览器验证见 [测试入口](TESTING.md)。后端实现位于 `backend/`，插件注册仍在根目录 `main.py`；移动内部 Python 模块不改变配置、数据库或 Web API 格式。
 
+插件运行模块统一使用 `from astrbot.api import logger` 输出日志，以接入宿主日志管理；不自行通过 Python `logging.getLogger()` 创建日志器。
+
 当前开发版本为插件 `1.3.2-dev.1`，基于正式版 `1.3.1`、数据库 **v3** 继续开发。本次版本切换不增加数据库迁移，沿用既有 `v2 → v3` 升级路径，正式库不保留开发标记。ComfyUI 已完成基础真实生图测试，覆盖范围见下方接入说明；NovelAI 官方仍需可用账户完成成功生图验证。
 
 官方协议构造与解析集中在 `backend/providers/novelai/protocol.py`，不依赖完整第三方 SDK。`GeneratedImage.effective_parameters` 通过 `generation_images.supplemental_json.effective_request` 保存经过记录策略过滤的实际参数；原始请求仍保留在生成记录上。隐写元数据解析器版本为 9，既有缓存更新沿用现有回填流程。

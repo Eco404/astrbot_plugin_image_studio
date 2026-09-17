@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
-import logging
 import sqlite3
 import threading
 import time
@@ -13,6 +12,8 @@ import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+
+from astrbot.api import logger
 
 from ..config import HistorySettings
 from ..database.schema import ensure_release_schema
@@ -61,8 +62,6 @@ from .projection import (
 )
 from .queries import GalleryQueries, QueryServices
 from .records import GenerationRecords, RecordServices
-
-_LOGGER = logging.getLogger(__name__)
 
 
 class GenerationStore:
@@ -446,7 +445,7 @@ class GenerationStore:
                 try:
                     await task
                 except Exception:
-                    _LOGGER.exception(
+                    logger.exception(
                         "External gallery mutation failed while cancellation was pending"
                     )
                 raise
