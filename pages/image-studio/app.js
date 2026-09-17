@@ -1447,7 +1447,9 @@
     if (changed) {
       // Never leave the previous group's foreground under a new cursor. A
       // missing/undecoded source gets a navigable placeholder instead.
-      if (!preview || !decodedDisplayImages.get(preview)?.ready) image.removeAttribute("src");
+      if (!preview || !decodedDisplayImages.get(preview)?.ready) {
+        image.removeAttribute("src"); delete image.dataset.paintedImageKey;
+      }
       frame.setAttribute("aria-busy", "true");
     }
     if (!image.getAttribute("src")) showDetailImagePending(frame, changed || !!item?.data_url);
@@ -1455,21 +1457,26 @@
     const current = () => frame.isConnected && image.dataset.imageKey === imageKey && frame.dataset.generationId === String(state.detailId) && revision === detailImagePaintRevision && (!mobileViewerSession?.active || mobileViewerSession.preparingDetail);
     const publish = async (source) => {
       if (!current()) return false;
-      const previousSource = image.getAttribute("src");
-      if (previousSource && previousSource !== source && touchImageDisplay() && !mobileViewerSession?.preparingDetail) {
+      // The requested identity is set before publishing. Only a source already
+      // painted for this same image may defer a quality upgrade until idle.
+      // Changing images must replace the old foreground beneath the swipe pane.
+      if (image.dataset.paintedImageKey === imageKey && image.getAttribute("src") !== source
+        && touchImageDisplay() && !mobileViewerSession?.preparingDetail) {
         if (!await waitDetailDisplayIdle(frame, current)) return false;
       }
-      if (previousSource !== source) image.src = source;
+      const previousSource = image.getAttribute("src"), previousKey = image.dataset.paintedImageKey;
+      if (previousSource !== source) { image.src = source; delete image.dataset.paintedImageKey; }
       // A decoded candidate does not guarantee Safari has selected it on the mounted image.
       try { await image.decode(); }
       catch (error) {
         if (current() && image.getAttribute("src") === source) {
-          if (previousSource && !changed) image.src = previousSource;
-          else image.removeAttribute("src");
+          if (previousSource && previousKey === imageKey) { image.src = previousSource; image.dataset.paintedImageKey = previousKey; }
+          else { image.removeAttribute("src"); delete image.dataset.paintedImageKey; }
         }
         throw error;
       }
       if (!current()) return false;
+      image.dataset.paintedImageKey = imageKey;
       image.dataset.detailImage = String(index); image.alt = `生成结果 ${index + 1}`;
       frame.querySelector(".detail-image-pending")?.remove(); frame.removeAttribute("aria-busy");
       transitionDetailBackdrop(frame); return true;
@@ -1516,6 +1523,13 @@
       },
       prepareNeighbor: (direction) => current() ? prepareDetailNeighbor(direction) : null,
       navigate: (direction, target) => current() ? navigateDetail(direction, target) : false,
+      canHandoff: () => {
+        const image = frame.querySelector("[data-detail-image]");
+        // A cold target may hand off to its explicit placeholder. A mounted
+        // image must finish decoding for the requested identity before its
+        // already-landed swipe pane is removed.
+        return !image?.getAttribute("src") || image.dataset.paintedImageKey === image.dataset.imageKey && image.complete && image.naturalWidth > 0;
+      },
     });
     frame.addEventListener("detail-swipe-start", () => {
       window.ImageStudioBackdrop.pause(frame.querySelector(".detail-image-backdrop:not(.detail-backdrop-previous)"));
@@ -1855,6 +1869,12 @@
 
   function isCurrentMobileSession(session, index, item) {
     return !!session?.active && !session.viewer.isDestroying && mobileViewerSession === session && mobileImageViewer === session.viewer && (!item || session.items[index] === item);
+  }
+
+  function mobileControlIndex(session = mobileViewerSession) {
+    const viewer = session?.viewer;
+    if (!viewer) return -1;
+    return Number.isInteger(viewer.potentialIndex) && session.items[viewer.potentialIndex] ? viewer.potentialIndex : viewer.currIndex;
   }
 
   function mobileViewerBusy(session) {
@@ -2259,7 +2279,7 @@
   }
 
   async function downloadMobileImage() {
-    const item = mobileImageSequence[mobileImageViewer?.currIndex ?? -1];
+    const item = mobileImageSequence[mobileControlIndex()];
     if (!item || item.allowed_actions?.download === false) return;
     try {
       const client = await bridge();
@@ -2289,9 +2309,12 @@
       if (!groups.has(id)) groups.set(id, []);
       groups.get(id).push(index);
     });
-    let visible = false, generation = "", revision = 0, frame = 0, active = 0;
+    let visible = false, generation = "", revision = 0, frame = 0, active = 0, selectedIndex = -1;
     let observer = null, queue = [];
-    const currentGroup = () => String(session.items[viewer.currIndex]?.generation_id || "");
+    // PhotoSwipe confirms potentialIndex on release, before its spring updates
+    // currIndex. Follow that target without changing the main viewer's cursor.
+    const targetIndex = () => mobileControlIndex(session);
+    const currentGroup = () => String(session.items[targetIndex()]?.generation_id || "");
     const current = token => visible && token === revision && isCurrentMobileSession(session) && generation === currentGroup();
 
     function paint(button, source, token) {
@@ -2319,8 +2342,12 @@
         // promote a far-away PhotoSwipe slide or touch the main blur compositor.
         void loadImageMedia(session.items[index], "preview").then(source => paint(button, source, token))
           .catch(() => { if (current(token) && button.isConnected) delete button.dataset.previewQueued; })
-          .finally(() => { active--; pump(); });
+          .finally(() => { active--; schedulePreviews(); });
       }
+    }
+
+    function schedulePreviews() {
+      if (visible && queue.length && isCurrentMobileSession(session)) void queueMobileWork(session, "filmstrip-previews", pump);
     }
 
     function load(button) {
@@ -2330,7 +2357,7 @@
       if (source) { paint(button, source, revision); return; }
       if (button.dataset.previewQueued) return;
       button.dataset.previewQueued = "true";
-      queue.push({ button, index, token: revision }); pump();
+      queue.push({ button, index, token: revision }); schedulePreviews();
     }
 
     function render() {
@@ -2343,11 +2370,10 @@
         strip.dataset.generationId = id;
         strip.innerHTML = `<div class="detail-filmstrip-track">${indices.map(index => `<button class="detail-filmstrip-thumb" data-viewer-index="${index}" type="button" aria-label="查看本组第 ${Number(session.items[index].image_index) + 1} 张图片"><span class="detail-filmstrip-preview"><span class="detail-filmstrip-placeholder" aria-hidden="true">${Number(session.items[index].image_index) + 1}</span></span></button>`).join("")}</div>`;
       }
-      delete strip.dataset.groupPending;
       strip.inert = false; strip.setAttribute("aria-busy", "false");
       const buttons = [...strip.querySelectorAll("[data-viewer-index]")];
       buttons.forEach(button => {
-        const selected = Number(button.dataset.viewerIndex) === viewer.currIndex;
+        const selected = Number(button.dataset.viewerIndex) === selectedIndex;
         button.classList.toggle("is-active", selected); button.setAttribute("aria-current", String(selected)); button.tabIndex = selected ? 0 : -1;
       });
       cancelAnimationFrame(frame);
@@ -2355,31 +2381,36 @@
         if (!visible || generation !== currentGroup() || !isCurrentMobileSession(session)) return;
         const selected = strip.querySelector('[aria-current="true"]');
         if (selected) strip.scrollLeft = selected.offsetLeft + selected.offsetWidth / 2 - strip.clientWidth / 2;
+        // Cached neighbors can paint immediately; uncached reads use their own
+        // bounded idle queue and never hold up selection or centering.
+        buttons.filter(button => Math.abs(Number(button.dataset.viewerIndex) - selectedIndex) <= 1).forEach(load);
         observer?.disconnect();
         if (typeof IntersectionObserver === "function") {
           observer = new IntersectionObserver(entries => { for (const entry of entries) if (entry.isIntersecting) load(entry.target); }, { root: strip, rootMargin: "0px 120px" });
           buttons.forEach(button => observer.observe(button));
-        } else buttons.filter(button => Math.abs(Number(button.dataset.viewerIndex) - viewer.currIndex) <= 2).forEach(load);
+        } else buttons.filter(button => Math.abs(Number(button.dataset.viewerIndex) - selectedIndex) <= 2).forEach(load);
       });
     }
 
-    function sync() {
-      const indices = groups.get(currentGroup()) || [];
+    function sync(force = false) {
+      const index = targetIndex(), id = currentGroup();
+      const indices = groups.get(id) || [];
       const hasFilmstrip = indices.length > 1;
-      const pending = hasFilmstrip && generation !== currentGroup();
+      const changed = selectedIndex !== index || generation !== id;
+      const download = viewer.element.querySelector(".pswp__button--image-studio-download");
+      if (download) download.hidden = session.items[index]?.allowed_actions?.download === false;
       viewer.element.classList.toggle("has-viewer-filmstrip", hasFilmstrip);
-      // Keep the glass surface mounted and visible between multi-image groups.
-      // Only the old thumbnail content waits for the gesture's idle handoff.
+      // Keep the glass surface mounted across groups. Navigation state is
+      // immediate even while image processing is paused by an active gesture.
       strip.hidden = !hasFilmstrip;
-      strip.toggleAttribute("data-group-pending", pending);
-      strip.inert = !visible || pending || !hasFilmstrip;
-      strip.setAttribute("aria-busy", String(visible && pending));
-      if (generation !== currentGroup() || indices.length <= 1) {
+      strip.inert = !visible || !hasFilmstrip;
+      strip.setAttribute("aria-busy", "false");
+      if (changed && (generation !== id || !hasFilmstrip)) {
         observer?.disconnect(); queue = []; revision++;
         strip.querySelectorAll("[data-preview-queued]").forEach(button => delete button.dataset.previewQueued);
       }
-      // Defer DOM rebuilding and centering until the main image finishes moving.
-      if (visible) void queueMobileWork(session, "filmstrip", render);
+      selectedIndex = index;
+      if (visible && hasFilmstrip && (changed || force)) render();
     }
 
     strip.addEventListener("click", event => {
@@ -2410,7 +2441,7 @@
       setVisible(value) {
         if (!value && strip.contains(document.activeElement)) viewer.element.focus({ preventScroll: true });
         visible = value; strip.inert = !value; strip.setAttribute("aria-hidden", String(!value));
-        if (value) sync();
+        if (value) sync(true);
         else { observer?.disconnect(); queue = []; revision++; strip.querySelectorAll("[data-preview-queued]").forEach(button => delete button.dataset.previewQueued); }
       },
       destroy() { visible = false; revision++; cancelAnimationFrame(frame); observer?.disconnect(); queue = []; strip.remove(); },
@@ -2591,10 +2622,15 @@
       });
       pswp.on("moveMainScroll", (event) => {
         if (event.dragging && pswp.gestures.dragAxis === "x") restoreMobileViewerBackground(session);
+        session.filmstrip?.sync();
       });
-      pswp.on("resize", () => { if (isCurrentMobileSession(session)) { window.ImageStudioViewerBackdrop.resize(session.backdrop); session.filmstrip?.sync(); syncMobileResolution(session); } });
+      pswp.on("resize", () => { if (isCurrentMobileSession(session)) { window.ImageStudioViewerBackdrop.resize(session.backdrop); session.filmstrip?.sync(true); syncMobileResolution(session); } });
       pswp.on("pointerDown", (event) => trackMobilePointer(session, event, true));
-      pswp.on("pointerUp", (event) => trackMobilePointer(session, event, false));
+      pswp.on("pointerUp", (event) => {
+        trackMobilePointer(session, event, false);
+        // pointerUp is dispatched before PhotoSwipe decides commit/rebound.
+        queueMicrotask(() => { if (isCurrentMobileSession(session)) session.filmstrip?.sync(); });
+      });
       pswp.on("verticalDrag", () => { void prepareMobileDetail(session); });
       pswp.on("close", () => {
         cancelMobileWork(session);

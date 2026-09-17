@@ -253,7 +253,6 @@ html.modal-open { overflow: hidden; overscroll-behavior: none; }
   transition: opacity var(--motion-fast) ease, transform var(--motion-base) var(--motion-ease);
 }
 .image-studio-controls-visible .image-studio-viewer-filmstrip { opacity: 1; visibility: visible; pointer-events: auto; transform: translate(-50%, 0); }
-.image-studio-viewer-filmstrip[data-group-pending] > .detail-filmstrip-track { visibility: hidden; }
 .image-studio-viewer-filmstrip .detail-filmstrip-thumb { touch-action: pan-x; }
 @media (prefers-reduced-motion: reduce) { .image-studio-viewer-filmstrip { transition: none; } }
 

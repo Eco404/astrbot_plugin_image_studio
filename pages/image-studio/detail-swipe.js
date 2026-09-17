@@ -281,13 +281,20 @@
       if (commit && !active.committed) { stopAnimation(); animation = animateTo(0, 180); }
       await animation;
       if (disposed || gesture !== active || !frame.isConnected) return;
-      if (!active.committed || !touchInteraction.matches) { finish(); return; }
+      if (!touchInteraction.matches) { finish(); return; }
       setPhase("handoff");
+      // Keep the incoming pane visible if the browser has not selected the new
+      // mounted image yet. A subsequent touch can still take over this gesture;
+      // no network/decode promise is awaited by touchStart or navigation.
+      while (!disposed && gesture === active && frame.isConnected && hooks?.canHandoff && !hooks.canHandoff()) {
+        await new Promise(resolve => requestAnimationFrame(resolve));
+      }
+      if (disposed || gesture !== active || !frame.isConnected) return;
       // Rasterize the new main image beneath the landed pane before exposing its layer.
       frame.classList.add("is-detail-handoff");
       await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
       suppressClick();
-      if (!disposed && gesture === active) finish(true, direction);
+      if (!disposed && gesture === active) finish(!!active.committed, active.committed ? direction : 0);
     }
 
     function cancel(immediate = false) {
@@ -298,6 +305,10 @@
         void settle(false, 0);
         return;
       }
+      // Cancellation does not make the mounted target ready. Let an accepted
+      // swipe or a rebound complete its existing handoff rather than exposing
+      // the old foreground when a second touch is cancelled.
+      if (!immediate && overlay && (phase === "settling" || phase === "handoff")) return;
       if (phase !== "tracking") suppressClick();
       finish();
     }
