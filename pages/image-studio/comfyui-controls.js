@@ -47,11 +47,15 @@
         return [{ ...warning, node_id, input_name, value, code: "fixed_seed", action: String(node.class_type).toLowerCase() === "seed (rgthree)" ? "set_fixed_random" : "bind_seed_source" }];
       }));
     }
-    function seedNoticeMarkup(warnings, definition, bindings) {
+    function seedNoticeMarkup(warnings, definition, bindings, interactive = false) {
       warnings = pendingSeedWarnings(warnings, definition, bindings);
       if (!warnings?.length) return "";
       const needsBinding = warnings.some(item => item.action === "bind_seed_source");
-      return `<div class="comfy-seed-notice" role="status"><strong>种子设置提示</strong><ul>${warnings.map(item => `<li><span>${escape(`节点 #${item.node_id} · ${item.input_name} = ${item.value}`)}</span><span class="comfy-seed-status">种子已锁定</span></li>`).join("")}</ul><p class="comfy-seed-guidance">如需恢复随机，可将种子的固定值改为 -1。${needsBinding ? " 若节点不直接支持 -1，请将对应输入绑定为“种子”来源，并将参数默认值设为 -1。" : ""}</p></div>`;
+      const items = warnings.map(item => {
+        const content = `<span>${escape(`节点 #${item.node_id} · ${item.input_name} = ${item.value}`)}</span><span class="comfy-seed-status">种子已锁定</span>`;
+        return `<li>${interactive ? `<button type="button" class="comfy-seed-link" data-seed-node="${escape(item.node_id)}" data-seed-input="${escape(item.input_name)}" aria-label="${escape(`编辑节点 #${item.node_id} 的 ${item.input_name}，当前值 ${item.value}，种子已锁定`)}">${content}</button>` : content}</li>`;
+      }).join("");
+      return `<div class="comfy-seed-notice" role="status"><strong>种子设置提示</strong><ul>${items}</ul><p class="comfy-seed-guidance">如需恢复随机，可将种子的固定值改为 -1。${needsBinding ? " 若节点不直接支持 -1，请将对应输入绑定为“种子”来源，并将参数默认值设为 -1。" : ""}</p></div>`;
     }
     function temporaryModel(model) {
       const { provider_id, provider_name, provider_kind, model_ref, temporary, seed_warnings, ...config } = model;
@@ -147,6 +151,7 @@
       let parameters = totalParameters(structuredClone(imported?.parameters || original.parameters || {}));
       let info = {}, report = null, busy = false, revision = 0, alive = true, dragEvents = null;
       let seedWarnings = imported?.seed_warnings || [], seedTimer = 0, seedRevision = 0;
+      let seedWarningsMarkup = "";
       const hasWorkflow = () => Object.keys(definition.api_graph || {}).length > 0;
       const syncEditorState = () => {
         $("comfyWorkflowEditing").hidden = !hasWorkflow();
@@ -268,7 +273,11 @@
       };
       const renderSeedWarnings = () => {
         const host = $("comfySeedWarnings"); if (!host) return;
-        host.innerHTML = seedNoticeMarkup(seedWarnings, definition, rows);
+        const markup = seedNoticeMarkup(seedWarnings, definition, rows, true);
+        // A blur/change or late parse must not replace a button mid-click.
+        if (markup === seedWarningsMarkup) return;
+        host.innerHTML = markup;
+        seedWarningsMarkup = markup;
       };
       const scheduleSeedWarnings = () => {
         renderSeedWarnings();
@@ -367,6 +376,7 @@
           identificationRevision++; identifying = false; candidates = suggestedRows(payload.suggestions); rows = [];
           $("comfyImportStatus").textContent = "已读取，可按需添加输入，并确认结果节点后保存。";
           render();
+          $("comfyEditor").querySelector(".comfy-import").open = false;
         } catch (error) { if (alive) $("comfyImportStatus").textContent = errorText(error); }
         finally { busy = false; if (alive) syncEditorState(); }
       };
@@ -406,6 +416,19 @@
         while (importSection.nextElementSibling) editing.appendChild(importSection.nextElementSibling);
         $("comfyEditor").appendChild(editing);
         render();
+        $("comfySeedWarnings").addEventListener("click", event => {
+          const button = event.target.closest("[data-seed-node]");
+          if (!button || busy) return;
+          const fixedInputs = $("comfyFixedInputs");
+          const input = Array.from(fixedInputs.querySelectorAll("[data-fixed-input]")).find(input => input.dataset.fixedNode === button.dataset.seedNode && input.dataset.fixedInput === button.dataset.seedInput);
+          if (!input) return;
+          fixedInputs.closest("details").open = true;
+          input.closest("details").open = true;
+          const target = input.closest(".studio-select")?.querySelector(".studio-select-trigger") || input;
+          // Focus within the click gesture so iOS can activate the keyboard.
+          target.focus({ preventScroll: true });
+          target.scrollIntoView({ block: "center", behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth" });
+        });
         if (!imported?.suggestions) void identifyInputs();
         const modal = $("studioModal");
         dragEvents = new AbortController();

@@ -10,7 +10,12 @@
 .comfy-seed-notice strong { color: var(--text); }
 .comfy-seed-notice ul { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; color: var(--warning); }
 .comfy-seed-notice li { display: flex; flex-wrap: wrap; gap: 0 8px; min-width: 0; }
-.comfy-seed-notice li > span { min-width: 0; }
+.comfy-seed-notice li > span, .comfy-seed-link > span { min-width: 0; }
+.comfy-seed-link { display: flex; flex: 1; flex-wrap: wrap; gap: 0 8px; min-width: 0; min-height: 32px; padding: 2px 4px; border: 0; border-radius: 6px; background: transparent; color: inherit; text-align: left; line-height: inherit; overflow-wrap: anywhere; box-shadow: none; }
+.comfy-seed-link:focus-visible { outline-color: var(--warning); background: var(--surface-hover); }
+@media (hover: hover) {
+  .comfy-seed-link:hover { background: var(--surface-hover); }
+}
 .comfy-seed-status { white-space: nowrap; }
 .comfy-seed-guidance { margin: 0; }
 .comfy-workflow-editing { display: grid; gap: inherit; min-width: 0; }
