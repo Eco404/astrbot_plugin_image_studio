@@ -40,6 +40,7 @@ from .projection import (
     _validate_import_hashes,
     _validate_import_overrides,
     project_import_metadata,
+    refresh_import_supplemental,
 )
 
 
@@ -196,9 +197,12 @@ class ImportRepository:
 
     @staticmethod
     def import_edit_revision(record: sqlite3.Row, rows: list[sqlite3.Row]) -> str:
+        from ..metadata.node_rules import get_rules
+
         # Include stored JSON, not its display projection, so concurrent edits,
         # metadata repairs, appends and deletions cannot silently replace changes.
         snapshot = [
+            get_rules().fingerprint,
             record["id"],
             record["supplemental_json"],
             [
@@ -237,7 +241,10 @@ class ImportRepository:
 
     @staticmethod
     def import_edit_item_revision(record: sqlite3.Row, row: sqlite3.Row) -> str:
+        from ..metadata.node_rules import get_rules
+
         snapshot = [
+            get_rules().fingerprint,
             record["id"],
             [
                 row[key]
@@ -310,6 +317,7 @@ class ImportRepository:
             metadata = _load_json(row["metadata_json"])
             overrides = _import_edit_existing_overrides(previous, metadata)
             metadata = project_import_metadata(metadata, overrides)
+            previous = refresh_import_supplemental(previous, metadata)
             fields = _import_edit_fields(previous, metadata, overrides)
             items.append(
                 {

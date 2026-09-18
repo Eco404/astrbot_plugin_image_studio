@@ -6,6 +6,7 @@ import re
 from collections.abc import Callable
 from typing import Any
 from .common import MAX_DEPTH, MAX_NODES
+from .node_rules import get_rules, matching_rule
 
 
 def _display_text(value: Any) -> str | None:
@@ -33,7 +34,23 @@ def _comfy_display_snapshots(
 
     # Each adapter declares the observed input and the saved-text field. Generic
     # names such as 'debug' or 'preview' are not evidence of a text observer.
-    adapters = {"easy showAnything": ("anything", "text")}
+    rules = get_rules()
+    adapters = rules.catalog["observers"]
+
+    def adapter(identifier: str, kind: str) -> dict | None:
+        builtin = adapters.get(kind)
+        if builtin:
+            return builtin
+        declared = matching_rule(graph, workflow, identifier, rules)
+        if declared and declared["operation"] == "observer":
+            return {
+                "input": declared["inputs"][0],
+                "api_field": "",
+                "widget_index": declared["widget_index"],
+                "rule_id": declared["id"],
+            }
+        return None
+
     nodes = workflow.get("nodes", [])
     ui_nodes = {}
     duplicate_ids = set()
@@ -242,33 +259,49 @@ def _comfy_display_snapshots(
     preferred_observers = set()
     for identifier, node in ui_nodes.items():
         kind = node.get("type")
-        if kind not in adapters or (
+        spec = adapter(identifier, kind)
+        if not spec or (
             identifier in graph and graph[identifier].get("class_type") != kind
         ):
             continue
-        input_name, _ = adapters[kind]
+        input_name = spec["input"]
         ref = canonical_ui(ui_ref(node, input_name))
         if identifier in graph:
             data = graph[identifier].get("inputs", {})
             if not isinstance(data, dict) or api_ref(data.get(input_name)) != ref:
                 continue
+        widgets = node.get("widgets_values")
+        widget_index = spec.get("widget_index")
+        if widget_index is not None:
+            widgets = (
+                widgets[widget_index]
+                if isinstance(widgets, list) and 0 <= widget_index < len(widgets)
+                else None
+            )
+        provenance = (
+            {"input_name": input_name, "origin": "user", "rule_id": spec["rule_id"]}
+            if spec.get("rule_id")
+            else {}
+        )
         if collect(
             ref,
-            node.get("widgets_values"),
+            widgets,
             {
                 "node_id": identifier,
                 "node_type": kind,
                 "source": "workflow",
                 "field": "widgets_values",
+                **provenance,
             },
         ):
             preferred_observers.add((identifier, ref))
 
     for identifier, node in graph.items():
         kind = node.get("class_type")
-        if kind not in adapters:
+        spec = adapter(identifier, kind)
+        if not spec or not spec.get("api_field"):
             continue
-        input_name, field = adapters[kind]
+        input_name, field = spec["input"], spec["api_field"]
         data = node.get("inputs", {})
         if not isinstance(data, dict):
             continue

@@ -8,12 +8,13 @@ def summarize_conditioning(
     encoded_fields: dict,
     key: str | None,
     *,
+    encoded_sources: dict,
     stage_id: str,
     role: str,
     target: str,
     verified_inputs: set[tuple[str, str]],
     verified_save_paths: set[str],
-    snapshots: dict[str, dict],
+    resolve_observed_text,
 ) -> tuple[list[str], str, list[dict]]:
     """Only supplement encoder inputs reached through verified known operations.
 
@@ -44,28 +45,34 @@ def summarize_conditioning(
             complete = True
             for name, original in fields.items():
                 value = original
-                candidate = snapshots.get(refs.get(name, ""))
                 if (
                     not isinstance(value, str)
                     and trusted
                     and (node_id, name) in verified_inputs
-                    and candidate
+                    and name in refs
                 ):
-                    value = candidate["text"]
-                    sources.append(
-                        {
-                            "kind": "display_snapshot",
-                            "candidate_id": candidate["id"],
-                            "source_ref": candidate["source_ref"],
-                            "observations": candidate["observations"],
-                            "conditioning_node_id": node_id,
-                            "input_name": name,
-                            "stage_id": stage_id,
-                            "target": target,
-                            "freshness": "unverified",
-                        }
-                    )
+                    value, observed_sources = resolve_observed_text(refs[name])
+                    for source in observed_sources:
+                        sources.append(
+                            {
+                                **source,
+                                "conditioning_node_id": node_id,
+                                "input_name": name,
+                                "stage_id": stage_id,
+                                "target": target,
+                            }
+                        )
                 if isinstance(value, str):
+                    for source in encoded_sources.get(current, {}).get(name, []):
+                        sources.append(
+                            {
+                                **source,
+                                "conditioning_node_id": node_id,
+                                "input_name": name,
+                                "stage_id": stage_id,
+                                "target": target,
+                            }
+                        )
                     if value and value not in texts:
                         texts.append(value)
                 else:
@@ -78,6 +85,8 @@ def summarize_conditioning(
                 else "summary"
                 if record["operation"] == "encode_sdxl"
                 else "snapshot"
+                if any(source["kind"] == "display_snapshot" for source in sources)
+                else "declared"
                 if sources
                 else "exact"
             )

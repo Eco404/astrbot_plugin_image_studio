@@ -10,6 +10,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,7 @@ from ..media.images import (
     detect_mime_type,
     image_data_url,
 )
+from ..metadata.node_rules import get_rules, load_rules, use_rules
 from ..models import (
     GeneratedImage,
     GenerationRequest,
@@ -62,6 +64,18 @@ from .projection import (
 )
 from .queries import GalleryQueries, QueryServices
 from .records import GenerationRecords, RecordServices
+
+
+def _with_node_rules(function):
+    """Carry this store's immutable rules into worker threads, never global state."""
+
+    @wraps(function)
+    async def wrapped(self, *args, **kwargs):
+        rules = await asyncio.to_thread(load_rules, self.data_dir)
+        with use_rules(rules):
+            return await function(self, *args, **kwargs)
+
+    return wrapped
 
 
 class GenerationStore:
@@ -101,7 +115,9 @@ class GenerationStore:
             self._context,
             ExternalServices(
                 metadata_for_asset=lambda *args, **kwargs: (
-                    self.metadata_records.metadata_for_asset(*args, **kwargs)
+                    self.metadata_records.metadata_for_asset(
+                        *args, rules=get_rules(), **kwargs
+                    )
                 ),
                 prepare_thumbnail=lambda *args, **kwargs: self.assets.prepare_thumbnail(
                     *args, **kwargs
@@ -130,7 +146,9 @@ class GenerationStore:
                     self.maintenance.cleanup_orphaned_thumbnails(*args, **kwargs)
                 ),
                 metadata_for_asset=lambda *args, **kwargs: (
-                    self.metadata_records.metadata_for_asset(*args, **kwargs)
+                    self.metadata_records.metadata_for_asset(
+                        *args, rules=get_rules(), **kwargs
+                    )
                 ),
                 prepare_asset=lambda *args, **kwargs: self.assets.prepare_asset(
                     *args, **kwargs
@@ -188,7 +206,9 @@ class GenerationStore:
             self._context,
             MaintenanceServices(
                 backfill_metadata=lambda *args, **kwargs: (
-                    self.metadata_records.backfill_metadata(*args, **kwargs)
+                    self.metadata_records.backfill_metadata(
+                        *args, rules=get_rules(), **kwargs
+                    )
                 ),
                 delete_expired_import_batches=lambda *args, **kwargs: (
                     self.imports.delete_expired_import_batches(*args, **kwargs)
@@ -240,7 +260,9 @@ class GenerationStore:
                     self.queries.generation_detail(*args, **kwargs)
                 ),
                 metadata_for_asset=lambda *args, **kwargs: (
-                    self.metadata_records.metadata_for_asset(*args, **kwargs)
+                    self.metadata_records.metadata_for_asset(
+                        *args, rules=get_rules(), **kwargs
+                    )
                 ),
                 prepare_asset=lambda *args, **kwargs: self.assets.prepare_asset(
                     *args, **kwargs
@@ -280,6 +302,7 @@ class GenerationStore:
             ),
         )
 
+    @_with_node_rules
     async def initialize(self) -> None:
         """Create directories and database tables."""
 
@@ -324,7 +347,8 @@ class GenerationStore:
             version = self._revision_connection.execute(
                 "PRAGMA data_version"
             ).fetchone()[0]
-            return f"{self._revision_instance}:{version}"
+            rules_revision = load_rules(self.data_dir).fingerprint
+            return f"{self._revision_instance}:{version}:{rules_revision}"
 
     def _initialize_sync(self) -> None:
         for directory in (
@@ -349,7 +373,7 @@ class GenerationStore:
                 (WORKFLOW_ASSET_RETENTION_SECONDS,) * 3,
             )
         self._repair_derived_fields_sync()
-        self.metadata_records.backfill_metadata()
+        self.metadata_records.backfill_metadata(rules=get_rules())
         self.assets.expire_asset_retention(time.time())
         self.imports.delete_expired_import_batches(time.time())
         self.maintenance.purge_unreferenced_assets()
@@ -469,6 +493,7 @@ class GenerationStore:
     async def external_sources_status(self) -> list[dict[str, Any]]:
         return await asyncio.to_thread(self.external_records.external_sources_status)
 
+    @_with_node_rules
     async def upsert_external_image(
         self,
         source_id: str,
@@ -583,6 +608,7 @@ class GenerationStore:
             (_search_projection(values), generation_id),
         )
 
+    @_with_node_rules
     async def run_maintenance(
         self,
         history: HistorySettings,
@@ -740,6 +766,7 @@ class GenerationStore:
                 preview_quality,
             )
 
+    @_with_node_rules
     async def record_success(
         self,
         *,
@@ -776,6 +803,7 @@ class GenerationStore:
             await asyncio.to_thread(self.maintenance.cleanup, history)
         return generation_id
 
+    @_with_node_rules
     async def import_edit_snapshot(
         self,
         generation_id: str,
@@ -802,6 +830,7 @@ class GenerationStore:
             include_preview,
         )
 
+    @_with_node_rules
     async def project_import_edit_image(
         self, generation_id: str, image_id: str, item_revision: str, output_node_id: str
     ) -> dict[str, Any]:
@@ -822,6 +851,7 @@ class GenerationStore:
             output_node_id,
         )
 
+    @_with_node_rules
     async def edit_import(
         self, generation_id: str, revision: str, items: list[dict[str, Any]]
     ) -> dict[str, Any]:
@@ -850,6 +880,7 @@ class GenerationStore:
                 self.imports.edit_import, generation_id, revision, items
             )
 
+    @_with_node_rules
     async def import_image(
         self,
         data: bytes,
@@ -875,12 +906,14 @@ class GenerationStore:
                 preview_quality,
             )
 
+    @_with_node_rules
     async def stage_import_file(self, path: Path, data: bytes) -> None:
         """Validate and stage an import while excluding concurrent maintenance."""
 
         async with self._lock:
             await asyncio.to_thread(self.imports.stage_import_file, path, data)
 
+    @_with_node_rules
     async def import_group(
         self,
         entries: list[dict[str, Any]],
@@ -933,6 +966,7 @@ class GenerationStore:
                 },
             )
 
+    @_with_node_rules
     async def append_import_group(
         self,
         entries: list[dict[str, Any]],
@@ -974,6 +1008,7 @@ class GenerationStore:
         async with self._lock:
             return await asyncio.to_thread(self.imports.check_import_hashes, hashes)
 
+    @_with_node_rules
     async def commit_import_batch(
         self,
         entries: list[dict[str, Any]],
@@ -1024,6 +1059,7 @@ class GenerationStore:
 
         return await asyncio.to_thread(self.queries.list_generations, filters)
 
+    @_with_node_rules
     async def generation_detail(
         self, generation_id: str, *, include_assets: bool = True, light: bool = False
     ) -> dict[str, Any] | None:
@@ -1037,6 +1073,7 @@ class GenerationStore:
             self.queries.generation_detail, generation_id, include_assets
         )
 
+    @_with_node_rules
     async def gallery_image_info(
         self, image_id: str, *, include_preview: bool = True
     ) -> dict[str, Any] | None:
@@ -1046,6 +1083,7 @@ class GenerationStore:
             self.queries.gallery_image_info, image_id, include_preview
         )
 
+    @_with_node_rules
     async def generation_image_context(
         self, generation_id: str, image_id: str = ""
     ) -> dict[str, Any] | None:
@@ -1248,6 +1286,7 @@ class GenerationStore:
         async with self._lock:
             return await asyncio.to_thread(self.records.delete_reference, reference_id)
 
+    @_with_node_rules
     async def export_generations(self, generation_ids: list[str]) -> Path:
         """Build a flat ZIP containing each result and its own metadata JSON."""
 

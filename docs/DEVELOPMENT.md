@@ -8,7 +8,7 @@
 
 当前开发版本为插件 `1.4.0-dev.1`，基于正式版 `1.3.2`、数据库 **v3** 继续开发。本次版本切换不增加数据库迁移，沿用既有 `v2 → v3` 升级路径，正式库不保留开发标记。ComfyUI 已完成基础真实生图测试，覆盖范围见下方接入说明；NovelAI 官方仍需可用账户完成成功生图验证。
 
-官方协议构造与解析集中在 `backend/providers/novelai/protocol.py`，不依赖完整第三方 SDK。`GeneratedImage.effective_parameters` 通过 `generation_images.supplemental_json.effective_request` 保存经过记录策略过滤的实际参数；原始请求仍保留在生成记录上。图片元数据解析器版本为 11，本次更新 ComfyUI 显示快照匹配与自动识别规则，既有缓存更新沿用现有回填流程。
+官方协议构造与解析集中在 `backend/providers/novelai/protocol.py`，不依赖完整第三方 SDK。`GeneratedImage.effective_parameters` 通过 `generation_images.supplemental_json.effective_request` 保存经过记录策略过滤的实际参数；原始请求仍保留在生成记录上。图片元数据解析器版本为 12；ComfyUI 内置与用户规则的指纹独立于解析器版本，参与元数据缓存和导入编辑版本校验。
 
 官方资料、与 NAI2API 的差异和待验证项见 [NovelAI 官方接口核对](NOVELAI_API_REVIEW.md)。
 
@@ -21,7 +21,8 @@ ComfyUI 架构、工作流绑定、任务恢复与范围见 [ComfyUI 接入](COM
 | 插件版本 | `1.4.0-dev.1` | `metadata.yaml` 与 `main.py` 注册版本相同，正式基线为 `1.3.2` |
 | 数据库正式版本 | `3` | SQLite `PRAGMA user_version`，由 `backend/database/schema.py` 管理 |
 | 配置格式版本 | `2` | `studio_config.json` 的 `schema_version`，与数据库版本独立 |
-| 图片解析器版本 | `11` | 控制派生元数据回填，与数据库结构版本独立 |
+| 图片解析器版本 | `12` | 控制派生元数据回填，与数据库结构版本独立 |
+| 文本节点用户规则格式 | `1` | 独立的 `comfyui_parser_rules.json`，内置与用户规则共同计算指纹 |
 
 数据库结构和发布迁移集中在 `backend/database/schema.py`。已发布的 v1 定义与 `v1 → v2` 迁移保持不变：v2 增加外部图库登记，v3 一次性增加最终版本的 `comfy_workflow_revisions`、`comfy_jobs` 及相关索引。新库直接创建完整 v3，不回放开发中的中间结构。
 
@@ -73,6 +74,10 @@ data/plugin_data/astrbot_plugin_image_studio/backups/
 外部时间依次选择 NAI 文件名时间戳、图片元数据创建时间、btime、mtime，自定义目录跳过文件名。排序时间写入 `generations.created_at`；只有 NAI 文件名或图片元数据时间用于 `generated_at`，btime/mtime 仅作排序依据。文件变化或时间规则版本更新时重新解析，不把普通扫描时间当作生成时间。
 
 ## 后续开发版本
+
+ComfyUI 节点声明位于 `backend/metadata/rules/comfyui_nodes.json`，用户声明保存在插件数据目录的 `comfyui_parser_rules.json`（`version: 1` 与 `rules` 数组）。规则只允许有限文本操作，不接受执行代码、正反向标签或未知用途。工作流范围同时绑定工作流结构和节点；同类节点范围绑定端口签名及非选中控制项。每个匹配位置保留一条声明，不维护不同控制项组合的规则矩阵。
+
+`node_rules.py` 负责规范化、端口核验和不可变规则集；使用 ContextVar 在每次仓储操作及 worker 线程中固定规则快照，不依赖全局可变用户配置。规则保存原子写入且检查请求 revision；同解析器版本的不同规则指纹也会使缓存过期。详情即时投影、后台维护持久化派生数据，不改写原图或人工覆盖。新增内置规则需提供来源依据与回归样例，不能仅根据一次显示值猜测复杂节点逻辑。
 
 1. 当前 `1.4.0-dev.1` 从 `1.3.2` 和数据库正式 v3 基线继续开发，不修改已发布结构的版本含义。
 2. 普通 UI、指令或 Provider 修改可继续使用数据库 v3。只有结构变化时才启用下一个数据库目标版本。

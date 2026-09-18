@@ -11,6 +11,7 @@ from typing import Any
 from ..media.files import (
     _is_within,
 )
+from ..metadata.node_rules import get_rules, load_rules, use_rules
 from .context import GalleryContext
 from .projection import (
     _load_json,
@@ -31,6 +32,14 @@ class MetadataRecords:
         self.services = services
 
     def metadata_for_asset(
+        self, asset_id: str, data: bytes, *, strict: bool = False, rules=None
+    ) -> dict[str, Any]:
+        with use_rules(
+            rules if rules is not None else load_rules(self.context.data_dir)
+        ):
+            return self._metadata_for_asset(asset_id, data, strict=strict)
+
+    def _metadata_for_asset(
         self, asset_id: str, data: bytes, *, strict: bool = False
     ) -> dict[str, Any]:
         from ..metadata.parser import PARSER_VERSION, parse_image_metadata
@@ -42,7 +51,10 @@ class MetadataRecords:
             ).fetchone()
         if row is not None:
             cached = _load_json(str(row["metadata_json"]))
-            if int(cached.get("parser_version", 0)) >= PARSER_VERSION:
+            if int(cached.get("parser_version", 0)) >= PARSER_VERSION and (
+                cached.get("format") != "comfyui"
+                or cached.get("rules_fingerprint") == get_rules().fingerprint
+            ):
                 return cached
         try:
             return parse_image_metadata(data)
@@ -66,7 +78,10 @@ class MetadataRecords:
             "VALUES (?, ?, ?, ?) ON CONFLICT(asset_id) DO UPDATE SET "
             "format=excluded.format, parser_version=excluded.parser_version, "
             "metadata_json=excluded.metadata_json "
-            "WHERE image_metadata.parser_version < excluded.parser_version",
+            "WHERE image_metadata.parser_version < excluded.parser_version OR "
+            "(image_metadata.parser_version = excluded.parser_version AND "
+            "COALESCE(json_extract(image_metadata.metadata_json, '$.rules_fingerprint'), '') "
+            "!= COALESCE(json_extract(excluded.metadata_json, '$.rules_fingerprint'), ''))",
             [
                 (
                     asset_id,
@@ -78,23 +93,32 @@ class MetadataRecords:
             ],
         )
 
-    def backfill_metadata(self) -> None:
+    def backfill_metadata(self, *, rules=None) -> None:
         """Parse old asset metadata outside the schema migration transaction."""
+
+        with use_rules(
+            rules if rules is not None else load_rules(self.context.data_dir)
+        ):
+            self._backfill_metadata()
+
+    def _backfill_metadata(self) -> None:
 
         from ..metadata.parser import PARSER_VERSION
 
         with self.context.connect() as conn:
             rows = conn.execute(
                 "SELECT a.id, a.path FROM image_assets a LEFT JOIN image_metadata m "
-                "ON m.asset_id = a.id WHERE m.asset_id IS NULL OR m.parser_version < ?",
-                (PARSER_VERSION,),
+                "ON m.asset_id = a.id WHERE m.asset_id IS NULL OR m.parser_version < ? "
+                "OR (m.format = 'comfyui' AND "
+                "COALESCE(json_extract(m.metadata_json, '$.rules_fingerprint'), '') != ?)",
+                (PARSER_VERSION, get_rules().fingerprint),
             ).fetchall()
         for row in rows:
             path = self.context.data_dir / str(row["path"])
             if not _is_within(path, self.context.assets_dir) or not path.is_file():
                 continue
             try:
-                metadata = self.metadata_for_asset(str(row["id"]), path.read_bytes())
+                metadata = self._metadata_for_asset(str(row["id"]), path.read_bytes())
             except (OSError, ValueError):
                 continue
             with self.context.connect() as conn:

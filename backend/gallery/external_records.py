@@ -196,7 +196,8 @@ class ExternalRecords:
     def external_scan_snapshot(self, source_id):
         with self.context.connect() as conn:
             rows = conn.execute(
-                "SELECT e.*,t.path AS thumbnail_path,t.max_edge AS thumbnail_max_edge,t.quality AS thumbnail_quality,m.parser_version "
+                "SELECT e.*,t.path AS thumbnail_path,t.max_edge AS thumbnail_max_edge,t.quality AS thumbnail_quality,m.parser_version, "
+                "m.format AS metadata_format, json_extract(m.metadata_json, '$.rules_fingerprint') AS rules_fingerprint "
                 "FROM external_records e LEFT JOIN image_thumbnails t ON t.asset_id=e.asset_id "
                 "LEFT JOIN image_metadata m ON m.asset_id=e.asset_id WHERE e.source_id=?",
                 (source_id,),

@@ -39,6 +39,7 @@
   <link rel="stylesheet" href="./controls.css?v=1.4.0-dev.1" />
   <link rel="stylesheet" href="./novelai-controls.css?v=1.4.0-dev.1" />
   <link rel="stylesheet" href="./comfyui-controls.css?v=1.4.0-dev.1" />
+  <link rel="stylesheet" href="./node-rules.css?v=1.4.0-dev.1" />
   <link rel="stylesheet" href="./tooltip.css?v=1.4.0-dev.1" />
 </head>
 <body>
@@ -130,6 +131,7 @@
         <div class="import-toolbar">
           <span id="importSummary" role="status">尚未选择图片</span>
           <div class="import-options">
+            <button class="quiet-button" id="importNodeRulesButton" type="button">文本节点规则</button>
             <div class="import-group-option is-hidden" id="importGroupOption"><span id="importGroupLabel">作为图组导入</span><label class="toggle-control"><input id="importAsGroup" type="checkbox" aria-labelledby="importGroupLabel" /><span aria-hidden="true"></span></label></div>
             <div class="import-group-option is-hidden" id="importMergeOption"><span id="importMergeLabel">合并到已有图组</span><label class="toggle-control"><input id="importMergeExisting" type="checkbox" aria-labelledby="importMergeLabel" /><span aria-hidden="true"></span></label></div>
           </div>
@@ -291,6 +293,7 @@
   <script src="./components/modal.js?v=1.4.0-dev.1" onerror="window.__reportImageStudioPageError(true)"></script>
   <script src="./gallery/metadata.js?v=1.4.0-dev.1" onerror="window.__reportImageStudioPageError(true)"></script>
   <script src="./gallery/metadata-markup.js?v=1.4.0-dev.1" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./node-rules.js?v=1.4.0-dev.1" onerror="window.__reportImageStudioPageError(true)"></script>
   <script src="./gallery/imports.js?v=1.4.0-dev.1" onerror="window.__reportImageStudioPageError(true)"></script>
   <script src="./library.js?v=1.4.0-dev.1" onerror="window.__reportImageStudioPageError(true)"></script>
   <script src="./detail-swipe.js?v=1.4.0-dev.1" onerror="window.__reportImageStudioPageError(true)"></script>

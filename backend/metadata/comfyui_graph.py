@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 from .common import MAX_NODES, _warning
+from .node_rules import get_rules
 
 
 def _workflow_graph(workflow: dict, result: dict) -> dict:
@@ -15,65 +16,7 @@ def _workflow_graph(workflow: dict, result: dict) -> dict:
     for link in workflow_links:
         if isinstance(link, list) and len(link) >= 6:
             links[str(link[0])] = [str(link[1]), link[2]]
-    widget_names = {
-        "KSampler": (
-            "seed",
-            "control_after_generate",
-            "steps",
-            "cfg",
-            "sampler_name",
-            "scheduler",
-            "denoise",
-        ),
-        "KSamplerAdvanced": (
-            "add_noise",
-            "noise_seed",
-            "control_after_generate",
-            "steps",
-            "cfg",
-            "sampler_name",
-            "scheduler",
-            "start_at_step",
-            "end_at_step",
-            "return_with_leftover_noise",
-        ),
-        "CLIPTextEncode": ("text",),
-        "CLIPTextEncodeSDXL": (
-            "width",
-            "height",
-            "crop_w",
-            "crop_h",
-            "target_width",
-            "target_height",
-            "text_g",
-            "text_l",
-        ),
-        "CLIPTextEncodeSDXLRefiner": ("ascore", "width", "height", "text"),
-        "ConditioningAverage": ("conditioning_to_strength",),
-        "ConditioningSetArea": ("width", "height", "x", "y", "strength"),
-        "ConditioningSetAreaPercentage": ("width", "height", "x", "y", "strength"),
-        "ConditioningSetMask": ("strength", "set_cond_area"),
-        "ConditioningSetTimestepRange": ("start", "end"),
-        "ConditioningSetAreaStrength": ("strength",),
-        "CheckpointLoaderSimple": ("ckpt_name",),
-        "UNETLoader": ("unet_name", "weight_dtype"),
-        "LoraLoader": ("lora_name", "strength_model", "strength_clip"),
-        "LoraLoaderModelOnly": ("lora_name", "strength_model"),
-        "EmptyLatentImage": ("width", "height", "batch_size"),
-        "EmptySD3LatentImage": ("width", "height", "batch_size"),
-        "LatentUpscaleBy": ("upscale_method", "scale_by"),
-        "LatentUpscale": ("upscale_method", "width", "height", "crop"),
-        "ImageScaleBy": ("upscale_method", "scale_by"),
-        "ImageScale": ("upscale_method", "width", "height", "crop"),
-        "SaveImage": ("filename_prefix",),
-        "Seed (rgthree)": ("seed", "control_after_generate"),
-        "PrimitiveString": ("value",),
-        "PrimitiveInt": ("value",),
-        "TextInput_": ("text",),
-        "TextInput": ("text",),
-        "String": ("text",),
-        "VAELoader": ("vae_name",),
-    }
+    widget_names = get_rules().catalog["widgets"]
     graph = {}
     for node in nodes:
         if not isinstance(node, dict) or "id" not in node:

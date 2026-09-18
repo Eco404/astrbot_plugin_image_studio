@@ -319,6 +319,18 @@ class ImageStudioPlugin(Star):
     async def _api_import_inspect(self) -> Any:
         return await self._import_api()._api_import_inspect()
 
+    async def _api_import_node_rules(self) -> Any:
+        return await self._import_api()._api_import_node_rules()
+
+    async def _api_import_node_rule_preview(self) -> Any:
+        return await self._import_api()._api_import_node_rule_preview()
+
+    async def _api_import_node_rule_save(self) -> Any:
+        return await self._import_api()._api_import_node_rule_save()
+
+    async def _api_import_node_rule_delete(self) -> Any:
+        return await self._import_api()._api_import_node_rule_delete()
+
     async def _api_import_check(self) -> Any:
         return await self._import_api()._api_import_check()
 

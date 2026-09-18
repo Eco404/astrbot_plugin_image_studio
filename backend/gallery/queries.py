@@ -35,6 +35,7 @@ from .projection import (
     _canonical_supplemental,
     _load_json,
     project_import_metadata,
+    refresh_import_supplemental,
 )
 
 
@@ -810,6 +811,7 @@ class GalleryQueries:
             metadata = project_import_metadata(
                 metadata, supplemental.get("overrides") or {}
             )
+            supplemental = refresh_import_supplemental(supplemental, metadata)
         except ValueError as exc:
             metadata = {
                 **metadata,

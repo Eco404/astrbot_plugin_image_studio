@@ -56,6 +56,9 @@ python scripts/verify.py --webui import_snapshot_matching
 # 有证据的显示快照自动识别、手动内容保护、详情与编辑器来源
 python scripts/verify.py --webui display_snapshots
 
+# 手动文本节点绑定、预览失效、规则保存删除与手工字段保护
+python scripts/verify.py --webui node_rules
+
 # 可同时执行后端、选定的浏览器场景和打包
 python scripts/verify.py --backend --webui comfy_workspace --browser chromium --package
 ```

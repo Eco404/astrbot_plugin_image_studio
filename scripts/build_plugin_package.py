@@ -22,6 +22,7 @@ RUNTIME_FILES = (
     "requirements.txt",
     "README.md",
     "docs/images/generate.png",
+    "backend/metadata/rules/comfyui_nodes.json",
 )
 REQUIRED_BACKEND_FILES = (
     "backend/__init__.py",
@@ -66,6 +67,7 @@ REQUIRED_BACKEND_FILES = (
     "backend/metadata/comfyui_graph.py",
     "backend/metadata/comfyui_candidates.py",
     "backend/metadata/comfyui_evidence.py",
+    "backend/metadata/node_rules.py",
     "backend/media/__init__.py",
     "backend/media/files.py",
     "backend/media/display.py",
@@ -100,6 +102,8 @@ REQUIRED_ARCHIVE_FILES = (
     + REQUIRED_BACKEND_FILES
     + (
         "pages/image-studio/index.html",
+        "pages/image-studio/node-rules.js",
+        "pages/image-studio/node-rules.css",
         "pages/image-studio/app.js",
         "pages/image-studio/app.css",
         "pages/image-studio/novelai-controls.js",

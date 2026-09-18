@@ -9,9 +9,13 @@ from .common import MAX_DEPTH, MAX_NODES, _json, _is_api_graph, _warning
 from .comfyui_graph import _workflow_graph
 from .comfyui_candidates import _comfy_display_snapshots, _deduplicate_comfy_candidates
 from .comfyui_evidence import summarize_conditioning
+from .node_rules import get_rules, matching_rule, evaluate_text_rule, describe_nodes
 
 
 def _comfyui(fields: dict, result: dict, *, output_node_id: str = "") -> None:
+    rules = get_rules()
+    catalog = rules.catalog
+    workflow = _json(fields.get("workflow")) or {}
     graph = _json(fields.get("prompt"))
     has_api_graph = _is_api_graph(graph)
     if not has_api_graph:
@@ -48,12 +52,7 @@ def _comfyui(fields: dict, result: dict, *, output_node_id: str = "") -> None:
         value = graph[identifier].get("inputs", {})
         return value if isinstance(value, dict) else {}
 
-    save_types = {
-        "SaveImage",
-        "SaveAnimatedWEBP",
-        "SaveAnimatedPNG",
-        "SaveImageWebsocket",
-    }
+    save_types = set(catalog["save_types"])
     roots = [
         key
         for key, node in graph.items()
@@ -145,7 +144,15 @@ def _comfyui(fields: dict, result: dict, *, output_node_id: str = "") -> None:
     elif not saves and len(roots) > 1:
         _warning(result, "工作流仅有多个预览输出，无法确定本图对应哪一个预览分支")
 
-    def resolve(value: Any, active: frozenset[str] = frozenset()) -> Any:
+    manual_rules = {
+        identifier: rule
+        for identifier in order
+        if (rule := matching_rule(graph, workflow, identifier, rules)) is not None
+    }
+
+    def resolve(
+        value: Any, active: frozenset[str] = frozenset(), evidence: list | None = None
+    ) -> Any:
         ref = reference(value)
         if ref is None:
             return value if not isinstance(value, (dict, list)) else None
@@ -156,27 +163,46 @@ def _comfyui(fields: dict, result: dict, *, output_node_id: str = "") -> None:
         kind = node.get("class_type", "")
         data = inputs(identifier)
         active = active | {identifier}
+        rule = manual_rules.get(identifier)
+        if rule and rule["operation"] != "observer":
+            resolved = evaluate_text_rule(
+                rule, data, port, lambda child: resolve(child, active, evidence)
+            )
+            if isinstance(resolved, str) and evidence is not None:
+                entry = {
+                    "kind": "user_rule",
+                    "rule_id": rule["id"],
+                    "node_id": identifier,
+                    "node_type": kind,
+                    "operation": rule["operation"],
+                    "scope": rule["scope"],
+                    "origin": "user",
+                }
+                if entry not in evidence:
+                    evidence.append(entry)
+            return resolved
         if port != 0:
             _warning(
                 result,
                 f"节点 {identifier}（{kind}）输出端口 {port} 的值无法静态解析，已保留引用",
             )
             return None
-        if kind in {
-            "TextInput_",
-            "TextInput",
-            "String",
-            "PrimitiveString",
-        }:
-            return resolve(data.get("text", data.get("value")), active)
+        if source := catalog["text_sources"].get(kind):
+            return resolve(
+                next((data[name] for name in source["fields"] if name in data), None),
+                active,
+                evidence,
+            )
         if kind in {"Seed (rgthree)", "PrimitiveInt", "INT", "Float", "PrimitiveNode"}:
             return resolve(data.get("seed", data.get("value")), active)
-        if kind in {"Text Concatenate", "TextConcatenate"}:
+        if concat := catalog["concatenators"].get(kind):
             fragments = [
-                resolve(v, active) for k, v in data.items() if k.startswith("text_")
+                resolve(v, active, evidence)
+                for k, v in data.items()
+                if k.startswith(concat["input_prefix"])
             ]
             if fragments and all(isinstance(v, str) for v in fragments):
-                return str(data.get("delimiter", "")).join(fragments)
+                return str(data.get(concat["delimiter_field"], "")).join(fragments)
         _warning(
             result, f"节点 {identifier}（{kind}）的动态值无法静态解析，已保留完整工作流"
         )
@@ -184,19 +210,14 @@ def _comfyui(fields: dict, result: dict, *, output_node_id: str = "") -> None:
 
     conditions: dict[str, dict] = {}
     encoded_fields: dict[str, dict] = {}
+    encoded_sources: dict[str, dict] = {}
     verified_inputs: set[tuple[str, str]] = set()
     snapshot_texts: dict[str, dict] = {}
     snapshot_records: dict[str, dict] = {}
+    text_source_refs: set[tuple[str, int]] = set()
     condition_spec = {
-        "ConditioningCombine": ("combine", ("conditioning_1", "conditioning_2")),
-        "ConditioningConcat": ("concat", ("conditioning_to", "conditioning_from")),
-        "ConditioningAverage": ("average", ("conditioning_to", "conditioning_from")),
-        "ConditioningSetArea": ("set_area", ("conditioning",)),
-        "ConditioningSetAreaPercentage": ("set_area_percentage", ("conditioning",)),
-        "ConditioningSetMask": ("set_mask", ("conditioning",)),
-        "ConditioningSetTimestepRange": ("set_timestep_range", ("conditioning",)),
-        "ConditioningSetAreaStrength": ("set_area_strength", ("conditioning",)),
-        "ConditioningZeroOut": ("zero_out", ("conditioning",)),
+        kind: (entry["operation"], entry["inputs"])
+        for kind, entry in catalog["condition_nodes"].items()
     }
 
     def conditioning(value: Any, active: frozenset[str] = frozenset()) -> str | None:
@@ -229,20 +250,18 @@ def _comfyui(fields: dict, result: dict, *, output_node_id: str = "") -> None:
             )
             return key
         active = active | {key}
-        if kind in {
-            "CLIPTextEncode",
-            "CLIPTextEncodeSDXL",
-            "CLIPTextEncodeSDXLRefiner",
-        }:
-            text_keys = (
-                ("text_g", "text_l") if kind == "CLIPTextEncodeSDXL" else ("text",)
-            )
-            texts = [resolve(data.get(name)) for name in text_keys]
+        if encoder := catalog["text_encoders"].get(kind):
+            text_keys = encoder["fields"]
+            traces = {name: [] for name in text_keys}
+            texts = [
+                resolve(data.get(name), evidence=traces[name]) for name in text_keys
+            ]
             encoded_fields[key] = dict(zip(text_keys, texts))
+            encoded_sources[key] = traces
             record["texts"] = list(
                 dict.fromkeys(text for text in texts if isinstance(text, str))
             )
-            record["operation"] = "encode_sdxl" if len(text_keys) > 1 else "encode"
+            record["operation"] = encoder["operation"]
             exact = all(isinstance(text, str) for text in texts)
             record["status"] = "supported" if exact else "partial"
             record["summary_status"] = (
@@ -431,18 +450,10 @@ def _comfyui(fields: dict, result: dict, *, output_node_id: str = "") -> None:
         for identifier in duplicate_ids:
             ui_nodes.pop(identifier)
         text_fields = {
-            "CLIPTextEncode": {"text"},
-            "CLIPTextEncodeSDXL": {"text_g", "text_l"},
-            "CLIPTextEncodeSDXLRefiner": {"text"},
-            "TextInput_": {"text"},
-            "TextInput": {"text"},
-            "String": {"text", "value"},
-            "PrimitiveString": {"value", "text"},
-            "Text Concatenate": {"text_a", "text_b", "text_c", "text_d"},
-            "TextConcatenate": {"text_a", "text_b", "text_c", "text_d"},
+            kind: set(names) for kind, names in catalog["text_fields"].items()
         }
-        detail_types = {"FaceDetailer", "FaceDetailerPipe", "DetailerForEach"}
-        sampler_types = {"KSampler", "KSamplerAdvanced", *detail_types}
+        detail_types = set(catalog["detail_types"])
+        sampler_types = set(catalog["sampler_types"])
         static_paths = {
             *text_fields,
             *condition_spec,
@@ -472,6 +483,7 @@ def _comfyui(fields: dict, result: dict, *, output_node_id: str = "") -> None:
                 if depth > MAX_DEPTH:
                     raise ValueError("ComfyUI 文本候选依赖层数过多")
                 if text_path:
+                    text_source_refs.add(ref)
                     usage = text_usages.setdefault(
                         ref, {"roles": set(), "stage_ids": {}, "consumers": []}
                     )
@@ -485,7 +497,17 @@ def _comfyui(fields: dict, result: dict, *, output_node_id: str = "") -> None:
                     continue
                 visited.add(identity)
                 kind = graph[identifier].get("class_type", "")
-                unknown_path = unknown_path or kind not in static_paths or port != 0
+                declared = manual_rules.get(identifier)
+                declared_text = (
+                    declared
+                    and declared["operation"] != "observer"
+                    and port == declared.get("output_port")
+                )
+                unknown_path = (
+                    unknown_path
+                    or not declared_text
+                    and (kind not in static_paths or port != 0)
+                )
                 usage = usages.setdefault(
                     identifier,
                     {
@@ -500,6 +522,8 @@ def _comfyui(fields: dict, result: dict, *, output_node_id: str = "") -> None:
                 usage["ports"].add(port)
                 usage["unknown_path"] |= unknown_path
                 for name, child in inputs(identifier).items():
+                    if declared_text and name not in declared["inputs"]:
+                        continue
                     if name in {
                         "clip",
                         "model",
@@ -511,15 +535,13 @@ def _comfyui(fields: dict, result: dict, *, output_node_id: str = "") -> None:
                         "filename_prefix",
                     }:
                         continue
-                    child_role = (
-                        "negative"
-                        if name in {"negative", "negative_prompt"}
-                        else "positive"
-                        if name in {"positive", "positive_prompt"}
-                        else incoming_role
-                    )
+                    child_role = incoming_role
                     if reference(child):
-                        child_text_path = text_path or name in text_fields.get(kind, ())
+                        child_text_path = (
+                            text_path
+                            or bool(declared_text)
+                            or name in text_fields.get(kind, ())
+                        )
                         pending.append(
                             (
                                 child,
@@ -544,11 +566,16 @@ def _comfyui(fields: dict, result: dict, *, output_node_id: str = "") -> None:
         candidates = []
         for identifier in order:
             kind, data = graph[identifier].get("class_type", ""), inputs(identifier)
+            declared = manual_rules.get(identifier)
             if kind == "Raffle" or re.search(
                 r"showanything|debug|preview|saveimage", kind, re.I
             ):
                 continue
-            known_fields = text_fields.get(kind, set())
+            known_fields = (
+                set(declared["inputs"])
+                if declared and declared["operation"] != "observer"
+                else text_fields.get(kind, set())
+            )
             eligible = set(known_fields)
             if kind in detail_types:
                 eligible.add("wildcard")
@@ -582,8 +609,8 @@ def _comfyui(fields: dict, result: dict, *, output_node_id: str = "") -> None:
                     continue
                 usage = usages.get(identifier, {})
                 roles = set(usage.get("roles", set()))
-                if field in {"negative_prompt", "positive_prompt", "wildcard"}:
-                    roles = {"negative" if field == "negative_prompt" else "positive"}
+                if field == "wildcard" and kind in detail_types:
+                    roles = {"positive"}
                 role = "mixed" if len(roles) > 1 else next(iter(roles), "unknown")
                 stage_ids = sorted(
                     usage.get("stage_ids")
@@ -627,7 +654,8 @@ def _comfyui(fields: dict, result: dict, *, output_node_id: str = "") -> None:
                 and not candidate["conflicting"]
                 and any(
                     origin["source"] == "workflow"
-                    and (origin["node_id"], "anything") in verified_inputs
+                    and (origin["node_id"], origin.get("input_name", "anything"))
+                    in verified_inputs
                     for origin in candidate["observations"]
                 )
             ):
@@ -720,6 +748,70 @@ def _comfyui(fields: dict, result: dict, *, output_node_id: str = "") -> None:
     # Find observations before summarizing conditioning, without feeding them
     # into the general value resolver or executing unknown text transforms.
     normalized["prompt_candidates"] = prompt_candidates()
+
+    def resolve_observed_text(source_ref: str, active: frozenset[str] = frozenset()):
+        """Follow only declared finite text operations to a saved observation."""
+        if source_ref in active or len(active) > MAX_DEPTH:
+            return None, []
+        identifier, port = source_ref.rsplit(":", 1)
+        if identifier not in graph:
+            return None, []
+        evidence = []
+        static = resolve([identifier, int(port)], evidence=evidence)
+        if isinstance(static, str):
+            return static, evidence
+        candidate = snapshot_texts.get(source_ref)
+        if candidate:
+            return candidate["text"], [
+                {
+                    "kind": "display_snapshot",
+                    "candidate_id": candidate["id"],
+                    "source_ref": source_ref,
+                    "observations": candidate["observations"],
+                    "freshness": "unverified",
+                }
+            ]
+        rule = manual_rules.get(identifier)
+        if (
+            not rule
+            or rule["operation"] not in {"passthrough", "concat"}
+            or int(port) != rule["output_port"]
+        ):
+            return None, []
+        data = inputs(identifier)
+        fragments, evidence = [], []
+        for name in rule["inputs"]:
+            ref = reference(data.get(name))
+            if ref:
+                if (identifier, name) not in verified_inputs:
+                    return None, []
+                value, origins = resolve_observed_text(
+                    f"{ref[0]}:{ref[1]}", active | {source_ref}
+                )
+                evidence.extend(origin for origin in origins if origin not in evidence)
+            else:
+                value = data.get(name)
+            if not isinstance(value, str):
+                return None, []
+            fragments.append(value)
+        evidence.append(
+            {
+                "kind": "user_rule",
+                "rule_id": rule["id"],
+                "node_id": identifier,
+                "node_type": graph[identifier]["class_type"],
+                "operation": rule["operation"],
+                "scope": rule["scope"],
+                "origin": "user",
+            }
+        )
+        text = (
+            rule["delimiter"].join(fragments)
+            if rule["operation"] == "concat"
+            else fragments[0]
+        )
+        return text.strip() if rule["strip"] else text, evidence
+
     downstream_inputs: dict[str, list[tuple[str, str]]] = {}
     for consumer in order:
         for name, value in inputs(consumer).items():
@@ -780,13 +872,7 @@ def _comfyui(fields: dict, result: dict, *, output_node_id: str = "") -> None:
                                 ),
                             }
                         )
-        if kind not in {
-            "KSampler",
-            "KSamplerAdvanced",
-            "FaceDetailer",
-            "DetailerForEach",
-            "FaceDetailerPipe",
-        }:
+        if kind not in catalog["sampler_types"]:
             continue
         stage = {"node_id": identifier, "type": kind}
         for source, destination in {
@@ -815,12 +901,13 @@ def _comfyui(fields: dict, result: dict, *, output_node_id: str = "") -> None:
                 conditions,
                 encoded_fields,
                 condition_key,
+                encoded_sources=encoded_sources,
                 stage_id=identifier,
                 role=name,
                 target=prompt_key,
                 verified_inputs=verified_inputs,
                 verified_save_paths=verified_save_paths,
-                snapshots=snapshot_texts,
+                resolve_observed_text=resolve_observed_text,
             )
             stage_texts[identifier, prompt_key] = texts
             text = "\n\n".join(texts)
@@ -828,12 +915,14 @@ def _comfyui(fields: dict, result: dict, *, output_node_id: str = "") -> None:
             if sources:
                 stage[f"{prompt_key}_sources"] = sources
                 for source in sources:
+                    if source["kind"] != "display_snapshot":
+                        continue
                     candidate = snapshot_records[source["candidate_id"]]
                     usage = {"stage_id": identifier, "target": prompt_key}
                     applied = candidate.setdefault("auto_applied_to", [])
                     if usage not in applied:
                         applied.append(usage)
-            if text or status in {"exact", "summary", "snapshot"}:
+            if text or status in {"exact", "summary", "snapshot", "declared"}:
                 stage[prompt_key] = text
         stage.update(latent(data.get("latent_image")))
         stages.append(stage)
@@ -889,11 +978,17 @@ def _comfyui(fields: dict, result: dict, *, output_node_id: str = "") -> None:
                 if len(summaries) <= 1 and all(value == "exact" for value in statuses)
                 else "snapshot"
                 if len(summaries) <= 1
-                and all(value in {"exact", "snapshot"} for value in statuses)
+                and all(
+                    value in {"exact", "snapshot", "declared"} for value in statuses
+                )
+                and "snapshot" in statuses
+                else "declared"
+                if len(summaries) <= 1
+                and all(value in {"exact", "declared"} for value in statuses)
                 else "summary"
             )
             normalized[f"{prompt_key}_status"] = status
-            if leaves or status in {"exact", "summary", "snapshot"}:
+            if leaves or status in {"exact", "summary", "snapshot", "declared"}:
                 normalized[prompt_key] = "\n\n".join(leaves)
         if len(stages) == 1:
             normalized.update(
@@ -918,6 +1013,27 @@ def _comfyui(fields: dict, result: dict, *, output_node_id: str = "") -> None:
                 "提示词摘要仅汇集条件链路引用文本；已排除清零条件，但未按权重、区域或时间范围计算实际贡献，不能等同于直接拼接提示词，请保留条件结构",
             )
     normalized["condition_nodes"] = conditions
+    active_nodes = set(order)
+    # Attached display nodes may be outside the image-producing ancestors.
+    active_nodes.update(
+        identifier
+        for identifier in graph
+        if any(
+            reference(value) in text_source_refs
+            for value in inputs(identifier).values()
+        )
+    )
+    normalized["node_rule_candidates"] = describe_nodes(
+        graph, workflow, active_nodes, rules
+    )
+    if any(
+        source.get("kind") == "user_rule"
+        for key in ("prompt_sources", "negative_prompt_sources")
+        for source in normalized.get(key, [])
+    ):
+        _warning(
+            result, "部分提示词按用户声明的文本节点规则识别，节点用途仍由当前管线判断"
+        )
     if snapshot_records:
         if any(
             candidate.get("auto_applied_to") for candidate in snapshot_records.values()
@@ -938,13 +1054,7 @@ def _comfyui(fields: dict, result: dict, *, output_node_id: str = "") -> None:
     if normalized["requires_output_selection"]:
         normalized["stages"] = []
     normalized["output_nodes"] = roots
-    sampler_types = {
-        "KSampler",
-        "KSamplerAdvanced",
-        "FaceDetailer",
-        "DetailerForEach",
-        "FaceDetailerPipe",
-    }
+    sampler_types = set(catalog["sampler_types"])
     normalized["outputs"] = [
         {
             "node_id": root,

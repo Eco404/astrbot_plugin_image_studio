@@ -855,12 +855,17 @@ def resolve_parameters(
                     f"ComfyUI {label}提示词是组合或多阶段条件的文本摘要，"
                     "不等价于原始条件；完整结构保留在采样阶段与条件信息中。"
                 )
-        if normalized.get("prompt_sources") or normalized.get(
-            "negative_prompt_sources"
-        ):
+        sources = [
+            source
+            for field in ("prompt_sources", "negative_prompt_sources")
+            for source in normalized.get(field, [])
+        ]
+        if any(source.get("kind") == "display_snapshot" for source in sources):
             warnings.append(
                 "部分提示词由显示节点快照识别，来源已保留；快照未与本次执行独立校验。"
             )
+        if any(source.get("kind") == "user_rule" for source in sources):
+            warnings.append("部分提示词按用户声明的文本节点规则识别，来源已保留。")
     if not explicit_mode:
         warnings.append("元数据未确定生成模式，暂按文生图准备草稿，请核对。")
     if selection_reason == "source_unique":

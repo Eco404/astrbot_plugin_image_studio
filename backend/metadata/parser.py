@@ -27,6 +27,7 @@ from .comfyui import _comfyui
 from .novelai import _merge_novelai_stealth, _novelai
 from .readers import read_image_metadata
 from .stable_diffusion import _a1111_parameters, _parse_infotext
+from .node_rules import get_rules
 
 
 def parse_image_metadata(data: bytes) -> dict:
@@ -70,6 +71,7 @@ def parse_metadata_fields(
     result = {
         "format": "unknown",
         "parser_version": PARSER_VERSION,
+        "rules_fingerprint": get_rules().fingerprint,
         "raw": raw,
         "normalized": {"mode": "unknown"},
         "warnings": [],
