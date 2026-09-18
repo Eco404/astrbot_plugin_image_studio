@@ -65,6 +65,7 @@ REQUIRED_BACKEND_FILES = (
     "backend/metadata/comfyui.py",
     "backend/metadata/comfyui_graph.py",
     "backend/metadata/comfyui_candidates.py",
+    "backend/metadata/comfyui_evidence.py",
     "backend/media/__init__.py",
     "backend/media/files.py",
     "backend/media/display.py",

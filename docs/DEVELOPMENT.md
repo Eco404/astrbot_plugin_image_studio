@@ -8,7 +8,7 @@
 
 当前开发版本为插件 `1.4.0-dev.1`，基于正式版 `1.3.2`、数据库 **v3** 继续开发。本次版本切换不增加数据库迁移，沿用既有 `v2 → v3` 升级路径，正式库不保留开发标记。ComfyUI 已完成基础真实生图测试，覆盖范围见下方接入说明；NovelAI 官方仍需可用账户完成成功生图验证。
 
-官方协议构造与解析集中在 `backend/providers/novelai/protocol.py`，不依赖完整第三方 SDK。`GeneratedImage.effective_parameters` 通过 `generation_images.supplemental_json.effective_request` 保存经过记录策略过滤的实际参数；原始请求仍保留在生成记录上。图片元数据解析器版本为 10，本次更新 ComfyUI 显示快照匹配规则，既有缓存更新沿用现有回填流程。
+官方协议构造与解析集中在 `backend/providers/novelai/protocol.py`，不依赖完整第三方 SDK。`GeneratedImage.effective_parameters` 通过 `generation_images.supplemental_json.effective_request` 保存经过记录策略过滤的实际参数；原始请求仍保留在生成记录上。图片元数据解析器版本为 11，本次更新 ComfyUI 显示快照匹配与自动识别规则，既有缓存更新沿用现有回填流程。
 
 官方资料、与 NAI2API 的差异和待验证项见 [NovelAI 官方接口核对](NOVELAI_API_REVIEW.md)。
 
@@ -21,7 +21,7 @@ ComfyUI 架构、工作流绑定、任务恢复与范围见 [ComfyUI 接入](COM
 | 插件版本 | `1.4.0-dev.1` | `metadata.yaml` 与 `main.py` 注册版本相同，正式基线为 `1.3.2` |
 | 数据库正式版本 | `3` | SQLite `PRAGMA user_version`，由 `backend/database/schema.py` 管理 |
 | 配置格式版本 | `2` | `studio_config.json` 的 `schema_version`，与数据库版本独立 |
-| 图片解析器版本 | `10` | 控制派生元数据回填，与数据库结构版本独立 |
+| 图片解析器版本 | `11` | 控制派生元数据回填，与数据库结构版本独立 |
 
 数据库结构和发布迁移集中在 `backend/database/schema.py`。已发布的 v1 定义与 `v1 → v2` 迁移保持不变：v2 增加外部图库登记，v3 一次性增加最终版本的 `comfy_workflow_revisions`、`comfy_jobs` 及相关索引。新库直接创建完整 v3，不回放开发中的中间结构。
 

@@ -7,7 +7,7 @@
     const { escape, apiGet, apiPost, bridge, showNotice, errorMessage, formatDate, formatBytes, getGallerySort, openModal } = hooks;
     const { ENGINES, own, serial, icon, renderIcons, modeLabel, engineLabel, engineOf, setCommandLabel } = window.ImageStudioPresentation;
     const { extractMetadata } = window.ImageStudioMetadata;
-    const { promptStatusMarkup, comfyDetailsMarkup } = window.ImageStudioMetadataMarkup({ escape });
+    const { promptStatusMarkup, comfyDetailsMarkup, comfyStageFields } = window.ImageStudioMetadataMarkup({ escape });
     const $ = id => document.getElementById(id);
     let bound = false;
     let imports = [];
@@ -133,7 +133,10 @@
       if (candidate.status !== "display_snapshot") return "";
       const sources = [...new Set((candidate.observations || []).map((observation) => `${({ prompt: "API 备用显示值", workflow: "工作流执行回写" })[observation.source] || "图片元数据"} · ${observation.node_type} #${observation.node_id}`))];
       const kind = candidate.snapshot_kind === "api_fallback" ? "API 备用显示值，可能来自上一次运行。" : candidate.snapshot_kind === "workflow" ? "工作流执行回写候选。" : "";
-      return `<div class="prompt-candidate-meta">关联输出 ${escape(candidate.source_ref)}${sources.length ? `<br>${sources.map(escape).join("<br>")}` : ""}</div><p class="prompt-candidate-snapshot-note">${kind}未验证是否为本次结果${candidate.conflicting ? "。同一输出存在不同快照，请核对并选择其中一份。" : "，请核对后再填入。"}</p>`;
+      const applied = [...new Set((candidate.auto_applied_to || []).map((entry) => ({ prompt: "正向", negative_prompt: "反向" })[entry.target]).filter(Boolean))];
+      const adoption = applied.length ? `已按明确链路用于${applied.join("、")}提示词识别。` : "";
+      const advice = candidate.conflicting ? "。同一输出存在不同快照，请核对并选择其中一份。" : applied.length ? "，请核对识别内容。" : "，请核对后再填入。";
+      return `<div class="prompt-candidate-meta">关联输出 ${escape(candidate.source_ref)}${sources.length ? `<br>${sources.map(escape).join("<br>")}` : ""}</div><p class="prompt-candidate-snapshot-note">${kind}${adoption}未验证是否为本次结果${advice}</p>`;
     }
 
     // Keep track of the exact block inserted by a snapshot, including subsequent
@@ -439,8 +442,7 @@
         delete section.dataset.importDeferred;
         if (kind === "parameters") section.insertAdjacentHTML("beforeend", `<textarea data-import-field="parameters" rows="5" spellcheck="false" aria-label="补充参数 JSON">${escape(item.fields.parameters)}</textarea>`);
         else if (kind === "stage" || kind === "conditions") {
-          const value = kind === "stage" ? { ...(item.parsed.normalized.stages || [])[Number(section.dataset.stageIndex)] } : { condition_nodes: item.parsed.normalized.condition_nodes };
-          delete value.node_id; delete value.type;
+          const value = kind === "stage" ? comfyStageFields((item.parsed.normalized.stages || [])[Number(section.dataset.stageIndex)]) : { condition_nodes: item.parsed.normalized.condition_nodes };
           section.insertAdjacentHTML("beforeend", `<div class="detail-parameter-grid">${Object.entries(value).map(([key, value]) => `<div class="detail-parameter-row"><div class="detail-parameter-label"><span>${escape(key)}</span></div><pre>${escape(serial(value))}</pre></div>`).join("")}</div>`);
         }
         else {

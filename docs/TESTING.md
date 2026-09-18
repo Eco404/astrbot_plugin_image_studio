@@ -53,6 +53,9 @@ python scripts/verify.py --webui mobile_display media_objects
 # ComfyUI 显示快照批量匹配：上游变化、下游约束、导入与图组编辑
 python scripts/verify.py --webui import_snapshot_matching
 
+# 有证据的显示快照自动识别、手动内容保护、详情与编辑器来源
+python scripts/verify.py --webui display_snapshots
+
 # 可同时执行后端、选定的浏览器场景和打包
 python scripts/verify.py --backend --webui comfy_workspace --browser chromium --package
 ```

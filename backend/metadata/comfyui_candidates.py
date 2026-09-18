@@ -26,6 +26,8 @@ def _comfy_display_snapshots(
     text_usages: dict,
     selected_root: str,
     resolve: Callable[[Any], Any],
+    *,
+    verified_inputs: set[tuple[str, str]] | None = None,
 ) -> list[dict]:
     """Attach unverified display caches only to unresolved main-chain text ports."""
 
@@ -104,13 +106,18 @@ def _comfy_display_snapshots(
             setters.setdefault(widgets[0], []).append(identifier)
 
     def canonical_ui(
-        ref: tuple[str, int] | None, visited: frozenset = frozenset()
+        ref: tuple[str, int] | None,
+        visited: frozenset = frozenset(),
+        *,
+        require_active: bool = False,
     ) -> tuple[str, int] | None:
         if ref is None or ref in visited or len(visited) >= MAX_DEPTH:
             return None
         identifier, port = ref
         node = ui_nodes.get(identifier, {})
         kind = node.get("type")
+        if require_active and node.get("mode", 0) != 0:
+            return None
         if identifier in graph and graph[identifier].get("class_type") != kind:
             return None
         if port == 0 and kind == "GetNode":
@@ -124,12 +131,16 @@ def _comfy_display_snapshots(
                 else []
             )
             return (
-                canonical_ui((matches[0], 0), visited | {ref})
+                canonical_ui(
+                    (matches[0], 0), visited | {ref}, require_active=require_active
+                )
                 if len(matches) == 1
                 else None
             )
         if port == 0 and kind in {"SetNode", "Reroute"}:
-            source = canonical_ui(ui_ref(node), visited | {ref})
+            source = canonical_ui(
+                ui_ref(node), visited | {ref}, require_active=require_active
+            )
             if identifier in graph:
                 data = graph[identifier].get("inputs", {})
                 sources = (
@@ -144,6 +155,31 @@ def _comfy_display_snapshots(
         if identifier in graph and graph[identifier].get("class_type") == kind:
             return ref
         return None
+
+    if verified_inputs is not None:
+        for identifier, node in ui_nodes.items():
+            api_node = graph.get(identifier, {})
+            if (
+                node.get("type") != api_node.get("class_type")
+                or node.get("mode", 0) != 0
+            ):
+                continue
+            data = api_node.get("inputs", {})
+            entries = node.get("inputs", [])
+            if not isinstance(data, dict) or not isinstance(entries, list):
+                continue
+            for name, value in data.items():
+                if (
+                    sum(
+                        isinstance(entry, dict) and entry.get("name") == name
+                        for entry in entries
+                    )
+                    != 1
+                ):
+                    continue
+                ref = api_ref(value)
+                if ref and canonical_ui(ui_ref(node, name), require_active=True) == ref:
+                    verified_inputs.add((identifier, name))
 
     observations: dict[tuple[str, int], dict[str, list[dict]]] = {}
     unresolved = {}

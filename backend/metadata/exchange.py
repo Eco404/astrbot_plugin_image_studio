@@ -838,7 +838,7 @@ def resolve_parameters(
         )
     if source_format == "comfyui":
         warnings.append(
-            "ComfyUI 文本候选仅供静态检查和人工采用，不会将全部候选自动加入提示词。"
+            "ComfyUI 仅自动识别证据明确的提示词；其余文本候选保留供人工采用，不会全部加入提示词。"
         )
         if isinstance(envelope, dict) and envelope.get("has_request_snapshot") is False:
             warnings.extend(
@@ -855,6 +855,12 @@ def resolve_parameters(
                     f"ComfyUI {label}提示词是组合或多阶段条件的文本摘要，"
                     "不等价于原始条件；完整结构保留在采样阶段与条件信息中。"
                 )
+        if normalized.get("prompt_sources") or normalized.get(
+            "negative_prompt_sources"
+        ):
+            warnings.append(
+                "部分提示词由显示节点快照识别，来源已保留；快照未与本次执行独立校验。"
+            )
     if not explicit_mode:
         warnings.append("元数据未确定生成模式，暂按文生图准备草稿，请核对。")
     if selection_reason == "source_unique":
@@ -1224,6 +1230,8 @@ def resolve_parameters(
         "condition_nodes",
         "outputs",
         "prompt_candidates",
+        "prompt_sources",
+        "negative_prompt_sources",
         "selected_output_node",
         "requires_output_selection",
         "characters",

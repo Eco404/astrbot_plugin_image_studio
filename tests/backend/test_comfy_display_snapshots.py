@@ -427,4 +427,6 @@ def test_available_raffle_sample_prefers_current_workflow_snapshot(output: str) 
         "120:text",
     }
     assert selected["raw"] == metadata["raw"]
-    assert not selected["normalized"].get("prompt")
+    assert selected["normalized"]["prompt"] == values[0]["text"]
+    assert selected["normalized"]["prompt_status"] == "snapshot"
+    assert selected["normalized"]["prompt_sources"]

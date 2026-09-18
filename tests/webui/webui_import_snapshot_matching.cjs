@@ -21,6 +21,8 @@ for index,kind in enumerate(json.loads(sys.argv[3])):
  port=1 if kind=="producer-port" else 0
  save="189" if kind=="save" else "188"
  observers=("145",) if kind=="observer" else ("143","144")
+ # Unknown processing between the snapshot and CLIP deliberately requires a
+ # manual choice; topology matching must still preserve its downstream guards.
  graph={
   "1":{"class_type":"CheckpointLoaderSimple","inputs":{"ckpt_name":"landscape-model.safetensors"}},
   "4":{"class_type":"CLIPTextEncode","inputs":{"clip":["1",1],"text":"blur, watermark"}},
@@ -30,7 +32,8 @@ for index,kind in enumerate(json.loads(sys.argv[3])):
   "236":{"class_type":"TextInput","inputs":{"text":"alternative landscape description"}},
   "231":{"class_type":"CustomPromptJoin","inputs":{"text_a":["234",0],"text_b":["236" if kind=="rewired" else "235",0]}},
   "137":{"class_type":"CustomPromptAssembler","inputs":{"text":["231",0]}},
-  "138":{"class_type":"CLIPTextEncode","inputs":{"clip":["1",1],"text":["137",port]}},
+  "139":{"class_type":"UnknownPostDisplayTransform","inputs":{"text":["137",port]}},
+  "138":{"class_type":"CLIPTextEncode","inputs":{"clip":["1",1],"text":["139",0]}},
   "19":{"class_type":"KSamplerAdvanced" if kind=="downstream-type" else "KSampler","inputs":{"model":["1",0],"positive":["138",0],"negative":["4",0],"latent_image":["6",0],"seed":42+index,"steps":24,"cfg":6,"sampler_name":"euler","scheduler":"normal","denoise":1}},
   "20":{"class_type":"VAEDecode","inputs":{"samples":["19",1 if kind=="downstream-port" else 0],"vae":["1",2]}},
   save:{"class_type":"SaveImage","inputs":{"images":["20",0],"filename_prefix":f"landscape-{kind}"}}

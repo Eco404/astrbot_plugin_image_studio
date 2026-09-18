@@ -8,11 +8,13 @@ from typing import Any
 from .common import MAX_DEPTH, MAX_NODES, _json, _is_api_graph, _warning
 from .comfyui_graph import _workflow_graph
 from .comfyui_candidates import _comfy_display_snapshots, _deduplicate_comfy_candidates
+from .comfyui_evidence import summarize_conditioning
 
 
 def _comfyui(fields: dict, result: dict, *, output_node_id: str = "") -> None:
     graph = _json(fields.get("prompt"))
-    if not _is_api_graph(graph):
+    has_api_graph = _is_api_graph(graph)
+    if not has_api_graph:
         workflow = _json(fields.get("workflow"))
         if workflow is None:
             _warning(result, "ComfyUI 工作流不是可解析的 JSON")
@@ -181,6 +183,10 @@ def _comfyui(fields: dict, result: dict, *, output_node_id: str = "") -> None:
         return None
 
     conditions: dict[str, dict] = {}
+    encoded_fields: dict[str, dict] = {}
+    verified_inputs: set[tuple[str, str]] = set()
+    snapshot_texts: dict[str, dict] = {}
+    snapshot_records: dict[str, dict] = {}
     condition_spec = {
         "ConditioningCombine": ("combine", ("conditioning_1", "conditioning_2")),
         "ConditioningConcat": ("concat", ("conditioning_to", "conditioning_from")),
@@ -232,6 +238,7 @@ def _comfyui(fields: dict, result: dict, *, output_node_id: str = "") -> None:
                 ("text_g", "text_l") if kind == "CLIPTextEncodeSDXL" else ("text",)
             )
             texts = [resolve(data.get(name)) for name in text_keys]
+            encoded_fields[key] = dict(zip(text_keys, texts))
             record["texts"] = list(
                 dict.fromkeys(text for text in texts if isinstance(text, str))
             )
@@ -297,42 +304,6 @@ def _comfyui(fields: dict, result: dict, *, output_node_id: str = "") -> None:
             f"条件节点 {identifier}（{kind}）暂不支持静态解析，未推测其输出提示词",
         )
         return key
-
-    def condition_summary(key: str | None) -> tuple[str, str]:
-        if not key:
-            return "", "missing"
-        texts: list[str] = []
-        pending, visited = [key], set()
-        incomplete = False
-        while pending:
-            current = pending.pop()
-            if current in visited:
-                continue
-            visited.add(current)
-            record = conditions[current]
-            incomplete = incomplete or record["status"] != "supported"
-            if record.get("zeroed_embedding"):
-                continue
-            for text in record.get("texts", []):
-                if text and text not in texts:
-                    texts.append(text)
-            pending.extend(
-                reversed(
-                    [
-                        item["ref"]
-                        for item in record["inputs"]
-                        if item.get("kind") == "conditioning"
-                    ]
-                )
-            )
-        status = (
-            "partial"
-            if incomplete and texts
-            else "missing"
-            if incomplete
-            else conditions[key]["summary_status"]
-        )
-        return "\n\n".join(texts), status
 
     def latent(value: Any, active: frozenset[str] = frozenset()) -> dict:
         ref = reference(value)
@@ -642,8 +613,25 @@ def _comfyui(fields: dict, result: dict, *, output_node_id: str = "") -> None:
                     }
                 )
         snapshots = _comfy_display_snapshots(
-            graph, workflow, text_usages, selected_root, resolve
+            graph,
+            workflow,
+            text_usages,
+            selected_root,
+            resolve,
+            verified_inputs=verified_inputs if has_api_graph else None,
         )
+        for candidate in snapshots:
+            snapshot_records[candidate["id"]] = candidate
+            if (
+                candidate["snapshot_kind"] == "workflow"
+                and not candidate["conflicting"]
+                and any(
+                    origin["source"] == "workflow"
+                    and (origin["node_id"], "anything") in verified_inputs
+                    for origin in candidate["observations"]
+                )
+            ):
+                snapshot_texts[candidate["source_ref"]] = candidate
         downstream: dict[str, list[tuple[int, str, str]]] = {}
         if snapshots:
             for consumer in order:
@@ -688,10 +676,6 @@ def _comfyui(fields: dict, result: dict, *, output_node_id: str = "") -> None:
             return key
 
         if snapshots:
-            _warning(
-                result,
-                "发现主链路同一输出端口的关联显示快照；未验证是否为本次执行结果，请核对后手动采用",
-            )
             for source_ref in dict.fromkeys(
                 item["source_ref"] for item in snapshots if item["conflicting"]
             ):
@@ -733,7 +717,27 @@ def _comfyui(fields: dict, result: dict, *, output_node_id: str = "") -> None:
             candidates + snapshots, graph, text_fields, ui_nodes, text_usages
         )
 
+    # Find observations before summarizing conditioning, without feeding them
+    # into the general value resolver or executing unknown text transforms.
+    normalized["prompt_candidates"] = prompt_candidates()
+    downstream_inputs: dict[str, list[tuple[str, str]]] = {}
+    for consumer in order:
+        for name, value in inputs(consumer).items():
+            ref = reference(value)
+            if ref:
+                downstream_inputs.setdefault(ref[0], []).append((consumer, name))
+    verified_save_paths: set[str] = set()
+    if selected_root in saves:
+        verified_save_paths.add(selected_root)
+        for identifier in reversed(order):
+            edges = downstream_inputs.get(identifier, [])
+            if edges and all(
+                edge in verified_inputs and edge[0] in verified_save_paths
+                for edge in edges
+            ):
+                verified_save_paths.add(identifier)
     stages, loras, models = [], [], []
+    stage_texts: dict[tuple[str, str], list[str]] = {}
     for identifier in order:
         node = graph[identifier]
         kind, data = node.get("class_type", ""), inputs(identifier)
@@ -807,9 +811,29 @@ def _comfyui(fields: dict, result: dict, *, output_node_id: str = "") -> None:
             condition_key = conditioning(data.get(name))
             if condition_key:
                 stage[f"{name}_conditioning"] = condition_key
-            text, status = condition_summary(condition_key)
+            texts, status, sources = summarize_conditioning(
+                conditions,
+                encoded_fields,
+                condition_key,
+                stage_id=identifier,
+                role=name,
+                target=prompt_key,
+                verified_inputs=verified_inputs,
+                verified_save_paths=verified_save_paths,
+                snapshots=snapshot_texts,
+            )
+            stage_texts[identifier, prompt_key] = texts
+            text = "\n\n".join(texts)
             stage[f"{prompt_key}_status"] = status
-            if text or status in {"exact", "summary"}:
+            if sources:
+                stage[f"{prompt_key}_sources"] = sources
+                for source in sources:
+                    candidate = snapshot_records[source["candidate_id"]]
+                    usage = {"stage_id": identifier, "target": prompt_key}
+                    applied = candidate.setdefault("auto_applied_to", [])
+                    if usage not in applied:
+                        applied.append(usage)
+            if text or status in {"exact", "summary", "snapshot"}:
                 stage[prompt_key] = text
         stage.update(latent(data.get("latent_image")))
         stages.append(stage)
@@ -832,42 +856,26 @@ def _comfyui(fields: dict, result: dict, *, output_node_id: str = "") -> None:
                 value == values[0] for value in values
             ):
                 normalized[key] = values[0]
-        for prompt_key, condition_key in (
-            ("prompt", "positive_conditioning"),
-            ("negative_prompt", "negative_conditioning"),
-        ):
+        for prompt_key in ("prompt", "negative_prompt"):
             summaries = list(
                 dict.fromkeys(
-                    stage[prompt_key] for stage in stages if stage.get(prompt_key)
+                    stage[prompt_key] for stage in stages if prompt_key in stage
                 )
             )
-            leaves: list[str] = []
-            visited = set()
-            pending = [
-                stage[condition_key]
-                for stage in reversed(stages)
-                if condition_key in stage
-            ]
-            while pending:
-                key = pending.pop()
-                if key in visited:
-                    continue
-                visited.add(key)
-                record = conditions[key]
-                if record.get("zeroed_embedding"):
-                    continue
-                for text in record.get("texts", []):
-                    if text and text not in leaves:
-                        leaves.append(text)
-                pending.extend(
-                    reversed(
-                        [
-                            entry["ref"]
-                            for entry in record["inputs"]
-                            if entry.get("kind") == "conditioning"
-                        ]
-                    )
+            leaves = list(
+                dict.fromkeys(
+                    text
+                    for stage in stages
+                    for text in stage_texts[stage["node_id"], prompt_key]
                 )
+            )
+            sources = [
+                source
+                for stage in stages
+                for source in stage.get(f"{prompt_key}_sources", [])
+            ]
+            if sources:
+                normalized[f"{prompt_key}_sources"] = sources
             statuses = [
                 stage.get(f"{prompt_key}_status", "missing") for stage in stages
             ]
@@ -879,10 +887,13 @@ def _comfyui(fields: dict, result: dict, *, output_node_id: str = "") -> None:
                 and any(value in {"partial", "missing"} for value in statuses)
                 else "exact"
                 if len(summaries) <= 1 and all(value == "exact" for value in statuses)
+                else "snapshot"
+                if len(summaries) <= 1
+                and all(value in {"exact", "snapshot"} for value in statuses)
                 else "summary"
             )
             normalized[f"{prompt_key}_status"] = status
-            if leaves or status in {"exact", "summary"}:
+            if leaves or status in {"exact", "summary", "snapshot"}:
                 normalized[prompt_key] = "\n\n".join(leaves)
         if len(stages) == 1:
             normalized.update(
@@ -907,7 +918,22 @@ def _comfyui(fields: dict, result: dict, *, output_node_id: str = "") -> None:
                 "提示词摘要仅汇集条件链路引用文本；已排除清零条件，但未按权重、区域或时间范围计算实际贡献，不能等同于直接拼接提示词，请保留条件结构",
             )
     normalized["condition_nodes"] = conditions
-    normalized["prompt_candidates"] = prompt_candidates()
+    if snapshot_records:
+        if any(
+            candidate.get("auto_applied_to") for candidate in snapshot_records.values()
+        ):
+            _warning(
+                result,
+                "部分提示词已根据显示节点的工作流回写自动识别，来源已保留；快照未与本次执行独立校验",
+            )
+        if any(
+            not candidate.get("auto_applied_to")
+            for candidate in snapshot_records.values()
+        ):
+            _warning(
+                result,
+                "其余关联显示快照的链路或来源尚未满足自动识别条件，请核对后手动采用",
+            )
     normalized["requires_output_selection"] = len(saves) > 1 and not selected_root
     if normalized["requires_output_selection"]:
         normalized["stages"] = []

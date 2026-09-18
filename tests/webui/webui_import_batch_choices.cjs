@@ -15,12 +15,15 @@ from pathlib import Path
 from PIL import Image,ImageDraw,PngImagePlugin
 folder=Path(sys.argv[1]);run=sys.argv[2];files={}
 for index,kind in enumerate(("source","target","conflict","origins","mismatch","failure","later","removed","edited","cancelled")):
+ # A transform after the observed output keeps these candidates manual so the
+ # bulk-choice tests exercise adoption rather than automatic prompt completion.
  graph={
   "1":{"class_type":"CheckpointLoaderSimple","inputs":{"ckpt_name":f"landscape-{kind}.safetensors"}},
   "2":{"class_type":"TextInput","inputs":{"text":f"static-{kind}"}},
   "3":{"class_type":"CustomTextTransform","inputs":{"text":["2",0],"operation":"runtime_transform"}},
   "4":{"class_type":"CLIPTextEncode","inputs":{"clip":["1",1],"text":"blur, watermark"}},
-  "5":{"class_type":"CLIPTextEncode","inputs":{"clip":["1",1],"text":["3",1 if kind=="mismatch" else 0]}},
+  "30":{"class_type":"UnknownPostDisplayTransform","inputs":{"text":["3",1 if kind=="mismatch" else 0]}},
+  "5":{"class_type":"CLIPTextEncode","inputs":{"clip":["1",1],"text":["30",0]}},
   "6":{"class_type":"EmptyLatentImage","inputs":{"width":640,"height":480,"batch_size":1}},
   "7":{"class_type":"KSampler","inputs":{"model":["1",0],"positive":["5",0],"negative":["4",0],"latent_image":["6",0],"seed":41+index,"steps":24,"cfg":6,"sampler_name":"euler","scheduler":"normal","denoise":1}},
   "8":{"class_type":"VAEDecode","inputs":{"samples":["7",0],"vae":["1",2]}},

@@ -7,6 +7,7 @@ const { execFileSync } = require("node:child_process");
 const { chromium, webkit } = require(process.env.STUDIO_PLAYWRIGHT || "playwright");
 const base = process.env.STUDIO_TEST_URL;
 if (!base) throw new Error("Set STUDIO_TEST_URL to a fresh isolated WebUI harness.");
+const root = `${base.replace(/\/$/, "")}/astrbot_plugin_image_studio/`;
 const python = process.env.STUDIO_PYTHON || "/home/coder/apps/miniconda3/envs/astrbot/bin/python";
 const output = fs.mkdtempSync(path.join(os.tmpdir(), "image-studio-display-snapshots-"));
 const fixtureScript = String.raw`
@@ -34,6 +35,8 @@ graph={
 }
 if scenario=="fallback":
  for key in ("90","93","94"): graph[key]["inputs"]["text"]=snap_b
+if scenario=="branches":
+ graph["19"]={"class_type":"SaveImage","inputs":{"images":["8",0],"filename_prefix":"second_output"}}
 nodes=[];links=[]
 for key,node in graph.items():
  inputs=[]
@@ -41,7 +44,7 @@ for key,node in graph.items():
   if isinstance(value,list):
    link_id=len(links)+1;links.append([link_id,int(value[0]),value[1],int(key),len(inputs),"STRING"])
    inputs.append({"name":field,"type":"STRING","link":link_id})
- widgets=([snap_b] if scenario=="preferred" or key=="90" else [snap_a]) if key in ("90","93","94") and scenario!="fallback" else []
+ widgets=([snap_b] if scenario in ("preferred","branches") or key=="90" else [snap_a]) if key in ("90","93","94") and scenario!="fallback" else []
  nodes.append({"id":int(key),"type":node["class_type"],"inputs":inputs,"widgets_values":widgets,"pos":[0,0],"size":[200,100],**({"outputs":[{"name":"text","type":"STRING"}]} if key=="3" else {})})
 workflow={"nodes":nodes,"links":links,"groups":[],"version":0.4,"extra":{"test":name}}
 metadata=PngImagePlugin.PngInfo();metadata.add_text("prompt",json.dumps(graph));metadata.add_text("workflow",json.dumps(workflow))
@@ -52,6 +55,35 @@ print(json.dumps({"file":str(target),"a":snap_a,"b":snap_b}))
 
 const button = (card, candidate, target = "prompt") => card.locator(`[data-candidate-id="${candidate.id}"][data-candidate-target="${target}"]`);
 async function dismissNotice(frame) { if (await frame.locator("#appNoticeClose").isVisible()) await frame.locator("#appNoticeClose").click(); }
+async function chooseOutput(page, card, value) {
+  const frame = page.frameLocator("#studio"), select = card.locator("[data-import-output]");
+  const index = await select.evaluate((node, target) => Array.from(node.options).findIndex((option) => option.value === target), value);
+  const response = page.waitForResponse((item) => item.url().endsWith("/imports/inspect") && item.request().postDataJSON()?.output_node_id === value);
+  await card.locator(".import-output-choice .studio-select-trigger").click();
+  await frame.locator(`.studio-select-menu [data-option-index="${index}"]`).click();
+  const body = await (await response).json();
+  await frame.locator("#confirmImportButton:not(:disabled)").waitFor();
+  assert.equal(await select.inputValue(), value);
+  return (body.data || body).normalized;
+}
+async function get(page, endpoint) {
+  const response = await page.request.get(root + endpoint);
+  assert.ok(response.ok(), await response.text());
+  return response.json();
+}
+async function assertStageSources(card, sourceRef, selector = ".comfy-stage") {
+  const workflow = card.locator(".comfy-workflow-info");
+  if (!await workflow.evaluate((node) => node.open)) await workflow.locator(":scope > summary").click();
+  const stage = card.locator(selector).first();
+  if (!await stage.evaluate((node) => node.open)) await stage.locator(":scope > summary").click();
+  await stage.locator(".detail-parameter-row").first().waitFor({ state: "attached" });
+  assert.match(await stage.textContent(), /由显示快照识别/);
+  // The shared markup keeps the full JSON evidence copyable in details and readable in imports.
+  const rows = await stage.locator(".detail-parameter-row").evaluateAll((nodes) => Object.fromEntries(nodes.map((node) => [node.querySelector(".detail-parameter-label span")?.textContent, node.querySelector("pre")?.textContent])));
+  const sources = JSON.parse(rows.prompt_sources);
+  assert.ok(sources.some((entry) => entry.source_ref === sourceRef && entry.freshness === "unverified"));
+  assert.match(await workflow.textContent(), /未验证是否为本次执行结果/);
+}
 async function editRange(input, start, end, replacement) {
   await input.evaluate((element, edit) => {
     element.setSelectionRange(edit.start, edit.end);
@@ -63,6 +95,9 @@ async function editRange(input, start, end, replacement) {
 async function verify(browser, name, width) {
   const fixture = JSON.parse(execFileSync(python, ["-c", fixtureScript, output, name], { encoding: "utf8" }));
   const page = await browser.newPage({ viewport: { width, height: width < 600 ? 844 : 1000 }, hasTouch: width < 600 });
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async (content) => { window.__copiedField = content; } } });
+  });
   page.setDefaultTimeout(15000);
   const errors = []; page.on("pageerror", (error) => errors.push(error.message));
   try {
@@ -118,23 +153,79 @@ async function verify(browser, name, width) {
     const dimensions = await inner.evaluate(() => ({ viewport: document.documentElement.clientWidth, page: document.documentElement.scrollWidth }));
     assert.ok(dimensions.page <= dimensions.viewport + 1, `${name}: horizontal overflow`);
     await page.screenshot({ path: path.join(output, `${name}.png`) });
-    for (const scenario of ["preferred", "fallback"]) {
+    for (const scenario of ["preferred", "fallback", "branches"]) {
       await dismissNotice(frame); await frame.locator("#cancelImportButton").click();
       const next = JSON.parse(execFileSync(python, ["-c", fixtureScript, output, `${name}-${scenario}`, scenario], { encoding: "utf8" }));
       const response = page.waitForResponse((item) => item.url().includes("/imports/inspect"));
       await frame.locator("#importFiles").setInputFiles(next.file);
       const body = await (await response).json(); const normalized = (body.data || body).normalized;
       await frame.locator(".import-card-status").filter({ hasText: "已识别" }).waitFor();
+      if (scenario === "branches") {
+        assert.equal(await prompt.inputValue(), "", "multiple saves must wait for an output choice");
+        assert.ok(normalized.requires_output_selection);
+        const chosen = await chooseOutput(page, card, "9");
+        assert.equal(chosen.prompt_status, "snapshot");
+        assert.equal(await prompt.inputValue(), next.b, "selecting a save branch adopts only its supported snapshot");
+        assert.match(await prompt.locator("..").textContent(), /由显示快照识别/);
+        const manual = `manual-${path.basename(output)}-${name}`;
+        await prompt.fill(manual);
+        assert.doesNotMatch(await prompt.locator("..").textContent(), /由显示快照识别/, "manual input no longer carries the automatic status");
+        await chooseOutput(page, card, "19");
+        assert.equal(await prompt.inputValue(), manual, "automatic reparse must preserve manual edits");
+        await assertStageSources(card, "3:0");
+        await frame.locator("#confirmImportButton").click();
+        await card.waitFor({ state: "detached" });
+        const listing = await get(page, "gallery/list?source=import&query=" + encodeURIComponent(manual));
+        assert.equal(listing.total, 1);
+        const id = listing.items[0].id;
+        const persisted = await get(page, `gallery/import-edit/${id}`);
+        assert.equal(persisted.items[0].fields.prompt, manual);
+        await frame.locator('[data-view="gallery"]').click();
+        await frame.locator("#gallerySearch").fill(manual);
+        await frame.locator("#gallerySearch").press("Enter");
+        await frame.locator("#galleryRefresh").click();
+        await frame.locator(`[data-gallery-id="${id}"] .gallery-info`).click();
+        await frame.locator("#detailImportEdit:not(:disabled)").waitFor();
+        const detailWorkflow = frame.locator(".comfy-workflow-info").filter({ visible: true });
+        await detailWorkflow.locator(":scope > summary").click();
+        const detailStage = frame.locator("[data-comfy-stage]").filter({ visible: true }).first();
+        await detailStage.locator(":scope > summary").click();
+        await detailStage.locator(".detail-parameter-row").first().waitFor();
+        assert.match(await detailStage.textContent(), /由显示快照识别/);
+        assert.match(await detailStage.textContent(), /prompt_sources/);
+        assert.match(await detailStage.textContent(), /unverified/);
+        await detailStage.locator('[aria-label="复制 prompt_sources"]').click();
+        const copied = JSON.parse(await inner.evaluate(() => window.__copiedField));
+        assert.ok(copied.some((source) => source.source_ref === "3:0" && source.freshness === "unverified" && source.observations?.some((observation) => observation.node_id === "90")));
+        await dismissNotice(frame);
+        await frame.locator("#detailImportEdit").click();
+        const editorCard = frame.locator("#importEditGrid .import-card").first();
+        await editorCard.locator('[data-import-field="prompt"]').waitFor({ state: "attached" });
+        assert.equal(await editorCard.locator('[data-import-field="prompt"]').inputValue(), manual);
+        await assertStageSources(editorCard, "3:0");
+        await frame.locator("#importEditCancel").click();
+        await frame.locator("#closeDrawer").click();
+        await frame.locator('[data-view="import"]').click();
+        continue;
+      }
       const rows = normalized.prompt_candidates, displays = rows.filter((candidate) => candidate.status === "display_snapshot");
       assert.equal(displays.length, 1); assert.equal(displays[0].text, next.b); assert.equal(displays[0].freshness, "unverified");
       assert.equal(displays[0].snapshot_kind, scenario === "preferred" ? "workflow" : "api_fallback");
-      assert.ok(!displays[0].conflicting); assert.equal(await prompt.inputValue(), "", "neither preferred workflow nor API fallback auto-fills");
+      assert.ok(!displays[0].conflicting);
+      assert.equal(await prompt.inputValue(), scenario === "preferred" ? next.b : "", "only a unique workflow snapshot on a known direct path auto-fills");
       await card.locator(".import-prompt-candidates > summary").click();
       const visible = await card.locator(".import-prompt-candidates").textContent();
       if (scenario === "preferred") {
         assert.ok(rows.every((candidate) => candidate.id !== "2:text"), "contained upstream text is omitted from candidates");
         assert.deepEqual(displays[0].covered_candidates, [{ id: "2:text", node_id: "2", node_type: "TextInput", field: "text" }]);
         assert.match(visible, /已包含上游 TextInput #2 · text/); assert.match(visible, /工作流执行回写候选/);
+        assert.equal(normalized.prompt_status, "snapshot");
+        assert.ok(displays[0].auto_applied_to?.some((entry) => entry.target === "prompt"));
+        assert.match(visible, /已按明确链路用于正向提示词识别/);
+        assert.match(await prompt.locator("..").textContent(), /由显示快照识别/);
+        assert.match(visible, /未验证是否为本次结果/);
+        assert.equal(await button(card, displays[0]).isDisabled(), true, "automatic adoption disables duplicate insertion");
+        await assertStageSources(card, "3:0");
         assert.doesNotMatch(visible, /PREVIOUS_RUN_API_DISPLAY|API 备用显示值/);
       } else {
         assert.ok(rows.some((candidate) => candidate.id === "2:text"), "API fallback must not suppress upstream text");
@@ -146,7 +237,7 @@ async function verify(browser, name, width) {
       assert.ok(geometry.page <= geometry.viewport + 1, `${name}-${scenario}: horizontal overflow`);
       await page.screenshot({ path: path.join(output, `${name}-${scenario}.png`) });
     }
-    assert.deepEqual(errors, []); console.log(`${name}: workflow priority, API fallback, covered upstream text, conflicts, block replacement and user edits passed`);
+    assert.deepEqual(errors, []); console.log(`${name}: automatic snapshots, branch/manual protection, persisted detail/editor sources, API fallback, conflicts and user edits passed`);
   } finally { await page.close(); }
 }
 
