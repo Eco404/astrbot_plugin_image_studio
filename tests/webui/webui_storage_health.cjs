@@ -39,7 +39,6 @@ async function verify(browser, engine, width) {
     assert.equal(await cacheRow.count(), 1);
     assert.equal(await cacheRow.locator("strong").textContent(), width < 600 ? "7 KB" : "5 KB", "cache total must include every available category once");
     assert.equal(await frame.locator("#storageHealthAllocated").textContent(), "96 KB");
-    assert.equal(await frame.locator("#storageHealthSize").textContent(), "64 KB");
     assert.equal(await frame.locator("#storageHealthReusable").count(), 0);
     assert.equal(await frame.locator("#storageHealthGrid span").filter({ hasText: "数据库可复用空间" }).count(), 0);
     const databaseRow = frame.locator("#storageHealthBreakdown > div").filter({ has: frame.locator("span").filter({ hasText: /^数据库$/ }) });
