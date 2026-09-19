@@ -42,7 +42,7 @@ async def run_image_command(
             selected_provider.kind != "comfyui"
             or selected_model.comfyui_capabilities["prompt_required"]
         ):
-            raise ValueError("请填写提示词；使用 /image_gen --help 查看指令帮助")
+            raise ValueError("请填写提示词；使用 /istudio --help 查看指令帮助")
         references = (
             await resolve_references(
                 event,

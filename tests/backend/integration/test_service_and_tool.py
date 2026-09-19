@@ -1701,7 +1701,7 @@ def test_llm_parameters_apply_defaults_expand_presets_and_ignore_hidden() -> Non
 
 def test_command_parser_accepts_multiple_references_and_tracks_explicit_mode() -> None:
     parsed = _parse_command(
-        "/img repaint --ref /tmp/one.png --ref=/tmp/two.png --mode img2img"
+        "/istudio repaint --ref /tmp/one.png --ref=/tmp/two.png --mode img2img"
     )
 
     assert parsed["reference_paths"] == ["/tmp/one.png", "/tmp/two.png"]

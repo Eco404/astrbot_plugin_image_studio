@@ -240,13 +240,13 @@ AstrBot 可能在附图旁显示 `[Image from tool ..., path='...']`；其中 `p
 
 ### 聊天指令
 
-指令会直接调用生图服务，不经过 LLM。主指令是 `/image_gen`，也可以简写为 `/img`。
+指令会直接调用生图服务，不经过 LLM。唯一的生图指令是 `/istudio`，不注册其他别名。
 
 ```text
-/img --help
-/img 清晨的山间湖泊，水彩画，柔和光线
-/img 重绘这张图，保留主体和构图 --mode img2img
-/img 白底产品摄影 --provider my-openai --model gpt-image-2 --n 2
+/istudio --help
+/istudio 清晨的山间湖泊，水彩画，柔和光线
+/istudio 重绘这张图，保留主体和构图 --mode img2img
+/istudio 白底产品摄影 --provider my-openai --model gpt-image-2 --n 2
 ```
 
 示例中的服务商和模型 ID 需要替换为自己的配置。第三条可配合附图或引用含图消息使用。

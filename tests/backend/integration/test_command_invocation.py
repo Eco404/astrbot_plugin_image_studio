@@ -5,6 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 from astrbot.api.message_components import Image, Reply
+from astrbot.core.star.filter.command import CommandFilter
+from astrbot.core.star.star_handler import star_handlers_registry
 from astrbot_plugin_image_studio import main as plugin_main
 from astrbot_plugin_image_studio.main import ImageStudioPlugin
 from astrbot_plugin_image_studio.backend.commands.parser import (
@@ -127,21 +129,43 @@ def invoke(instance, event):
     return asyncio.run(run())
 
 
+def test_registered_command_routes_only_istudio_to_plugin_help():
+    command_filters = [
+        event_filter
+        for handler in star_handlers_registry.get_handlers_by_module_name(
+            ImageStudioPlugin.__module__
+        )
+        for event_filter in handler.event_filters
+        if isinstance(event_filter, CommandFilter)
+    ]
+    assert len(command_filters) == 1
+    command_filter = command_filters[0]
+    # AstrBot removes the configured wake prefix before command filtering.
+    for name, expected in (("istudio", True), ("img", False), ("image_gen", False)):
+        event = CommandEvent(f"{name} --help")
+        event.is_at_or_wake_command = True
+        event.get_message_str = lambda: event.message_str
+        assert command_filter.filter(event, {}) is expected
+        if expected:
+            result = invoke(plugin(), event)
+            assert "/istudio <提示词>" in result[0]["text"]
+            assert "/img" not in result[0]["text"]
+            assert "/image_gen" not in result[0]["text"]
+
+
 def test_command_parser_preserves_model_defaults_and_quoted_strings():
     options = _parse_command(
-        '/img "blue sky" --param-steps 24 --param-cfg=0.3 --param-style "soft light"'
+        '/istudio "blue sky" --param-steps 24 --param-cfg=0.3 --param-style "soft light"'
     )
     assert options["prompt"] == "blue sky"
     assert options["count"] is None
     assert options["negative_prompt"] is None
     assert options["parameters"] == {"steps": "24", "cfg": "0.3", "style": "soft light"}
     assert options["mode_explicit"] is False
-    assert _parse_command("/img sky --negative ''")["negative_prompt"] == ""
+    assert _parse_command("/istudio sky --negative ''")["negative_prompt"] == ""
 
 
-@pytest.mark.parametrize(
-    "text", ["/img --help", "image_gen --help", "/image_gen --help"]
-)
+@pytest.mark.parametrize("text", ["/istudio --help", "istudio --help"])
 def test_help_requires_no_service_reference_or_upstream_io(text, references):
     options = _parse_command(text)
     assert options["help"] is True
@@ -153,7 +177,12 @@ def test_help_requires_no_service_reference_or_upstream_io(text, references):
 
 
 @pytest.mark.parametrize(
-    "text", ["/img --help sky --n 2", "/img sky --n 2 --help", "/img sky --help --n=2"]
+    "text",
+    [
+        "/istudio --help sky --n 2",
+        "/istudio sky --n 2 --help",
+        "/istudio sky --help --n=2",
+    ],
 )
 def test_mixed_help_token_is_ignored_without_consuming_following_argument(text):
     options = _parse_command(text)
@@ -166,18 +195,18 @@ def test_mixed_help_token_is_ignored_without_consuming_following_argument(text):
 @pytest.mark.parametrize("suffix", ["", " ''", "=", " --size 512x512"])
 def test_explicit_known_option_missing_or_empty_value_rejected(key, suffix):
     with pytest.raises(ValueError):
-        _parse_command(f"/img sky --{key}{suffix}")
+        _parse_command(f"/istudio sky --{key}{suffix}")
 
 
 @pytest.mark.parametrize("value", ["nonsense", "1.5", "0", "-2", "NaN"])
 def test_invalid_explicit_count_rejected_instead_of_becoming_one(value):
     with pytest.raises(ValueError):
-        _parse_command(f"/img sky --n={value}")
+        _parse_command(f"/istudio sky --n={value}")
 
 
 def test_command_no_images_keeps_text_mode_and_forwards_none_defaults(references):
     service = CommandService()
-    result = invoke(plugin(service), CommandEvent("/img blue sky"))
+    result = invoke(plugin(service), CommandEvent("/istudio blue sky"))
     assert "chain" in result[0]
     request = service.generated[0]
     assert request["mode"] == "text2img"
@@ -202,7 +231,7 @@ def test_direct_before_earlier_reply_then_quoted_core_request_and_explicit_refer
     paths = ["direct.png", "quoted.png", "core.png", "request.png", "explicit.png"]
     service = CommandService({path: PNG + path.encode() for path in paths}, limit=limit)
     event = CommandEvent(
-        "/img repaint --ref explicit.png",
+        "/istudio repaint --ref explicit.png",
         [Reply(id="quote", chain=[Image(file="quoted.png")]), Image(file="direct.png")],
         request_refs=["request.png"],
     )
@@ -226,7 +255,7 @@ def test_content_duplicates_do_not_consume_reference_slots(references):
         limit=3,
     )
     event = CommandEvent(
-        "/img edit",
+        "/istudio edit",
         [
             Image(file="first.png"),
             Image(file="same-other-path.png"),
@@ -250,7 +279,7 @@ def test_command_sources_keep_direct_reply_core_request_and_required_order(refer
         quote = Image(file="quoted.png")
         references[1].append("core.png")
         event = CommandEvent(
-            "/img repaint",
+            "/istudio repaint",
             [Reply(id="quoted", chain=[quote]), first],
             request_refs=["request.png"],
         )
@@ -270,7 +299,7 @@ def test_command_sources_keep_direct_reply_core_request_and_required_order(refer
 def test_unreadable_direct_can_use_valid_quoted_input_without_changing_mode(references):
     service = CommandService({"quoted.png": PNG}, limit=1)
     event = CommandEvent(
-        "/img repaint",
+        "/istudio repaint",
         [
             Image(file="broken-direct.png"),
             Reply(id="quoted", chain=[Image(file="quoted.png")]),
@@ -295,7 +324,9 @@ def test_unreadable_automatic_input_never_silently_falls_back_to_text_mode(
     references, path, value
 ):
     service = CommandService({path: value})
-    result = invoke(plugin(service), CommandEvent("/img repaint", [Image(file=path)]))
+    result = invoke(
+        plugin(service), CommandEvent("/istudio repaint", [Image(file=path)])
+    )
     assert "参考图" in result[0]["text"]
     assert service.selected[0]["mode"] == "img2img"
     assert all(request["mode"] == "img2img" for request in service.generated)
@@ -304,14 +335,18 @@ def test_unreadable_automatic_input_never_silently_falls_back_to_text_mode(
 @pytest.mark.parametrize("reference", ["missing.png", "blocked.png"])
 def test_explicit_bad_reference_reports_error(references, reference):
     service = CommandService({"blocked.png": ValueError("outside workspace")})
-    result = invoke(plugin(service), CommandEvent(f"/img repaint --ref {reference}"))
+    result = invoke(
+        plugin(service), CommandEvent(f"/istudio repaint --ref {reference}")
+    )
     assert "显式参考图" in result[0]["text"]
     assert not service.generated
 
 
 def test_explicit_bad_reference_is_not_hidden_by_other_valid_input(references):
     service = CommandService({"direct.png": PNG}, limit=3)
-    event = CommandEvent("/img repaint --ref missing.png", [Image(file="direct.png")])
+    event = CommandEvent(
+        "/istudio repaint --ref missing.png", [Image(file="direct.png")]
+    )
     result = invoke(plugin(service), event)
     assert "显式参考图" in result[0]["text"]
     assert service.reads == ["direct.png", "missing.png"]
@@ -323,7 +358,7 @@ def test_explicit_text_mode_skips_message_quoted_workspace_and_explicit_referenc
 ):
     service = CommandService()
     event = CommandEvent(
-        "/img sky --mode text2img --ref missing.png",
+        "/istudio sky --mode text2img --ref missing.png",
         [
             Image(file="broken-direct.png"),
             Reply(id="quoted", chain=[Image(file="broken-quote.png")]),
@@ -339,14 +374,14 @@ def test_explicit_text_mode_skips_message_quoted_workspace_and_explicit_referenc
 
 def test_explicit_img2img_without_any_input_reports_no_reference(references):
     service = CommandService()
-    result = invoke(plugin(service), CommandEvent("/img repaint --mode img2img"))
+    result = invoke(plugin(service), CommandEvent("/istudio repaint --mode img2img"))
     assert "参考图" in result[0]["text"]
     assert all(request["mode"] == "img2img" for request in service.generated)
 
 
 def test_model_validation_precedes_image_materialization(references):
     service = CommandService(selection_error="指定模型不存在")
-    event = CommandEvent("/img repaint --model unknown", [Image(file="direct.png")])
+    event = CommandEvent("/istudio repaint --model unknown", [Image(file="direct.png")])
     result = invoke(plugin(service), event)
     assert "指定模型不存在" in result[0]["text"]
     assert not service.reads and not references[0]["images"]

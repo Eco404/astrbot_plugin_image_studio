@@ -425,7 +425,7 @@ class ImageStudioPlugin(Star):
     async def _api_download_export(self, export_id: str) -> Any:
         return await self._gallery_api()._api_download_export(export_id)
 
-    @filter.command("image_gen", alias={"img"})
+    @filter.command("istudio")
     async def image_gen(self, event: AstrMessageEvent):
         """Generate one or more images through the configured default provider."""
 
