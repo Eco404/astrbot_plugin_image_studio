@@ -825,7 +825,7 @@ def test_expired_terminal_outputs_use_gallery_originals_with_exact_metadata(
             assert restored.images == result.images
             assert restored.generation_id == result.generation_id
             assert restored.request.references == ()
-            assert not restored.warning
+            assert restored.warning == result.warning
             assert len(client.calls) == calls_before
         finally:
             await runtime.close()

@@ -325,6 +325,22 @@ class ImageGenerationService:
                     ],
                 )
             )
+        if provider.kind == "comfyui":
+            sync_warnings = []
+            for image in images:
+                snapshot = image.effective_parameters.get("_comfyui")
+                if not isinstance(snapshot, dict):
+                    continue
+                messages = snapshot.get("workflow_sync_warnings", [])
+                if isinstance(messages, list):
+                    sync_warnings.extend(
+                        message for message in messages if isinstance(message, str)
+                    )
+            warning = "；".join(
+                dict.fromkeys(
+                    message for message in [warning, *sync_warnings] if message
+                )
+            )
         elapsed_ms = round((time.perf_counter() - started) * 1000)
         generation_id = await self.store.record_success(
             provider=provider,

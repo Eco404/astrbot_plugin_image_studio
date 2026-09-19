@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import inspect
 import io
 import json
 import time
 import uuid
+from dataclasses import replace
 from typing import Any
 from urllib.parse import quote, urlsplit, urlunsplit
 
 import aiohttp
 from PIL import Image, ImageOps
 
+from ...models import GeneratedImage
+from .ui_sync import synchronize_workflow
 from .workflows import (
     FIXED_OUTPUT_POLICY,
     clear_execution_cache_markers,
@@ -23,13 +27,124 @@ from .workflows import (
     normalize_workflow,
     prepare_graph,
 )
-from ...models import GeneratedImage
 
 MAX_JSON_BYTES = 32 * 1024 * 1024
 MAX_IMAGE_BYTES = 64 * 1024 * 1024
 MAX_BATCH_BYTES = 256 * 1024 * 1024
 MAX_OUTPUT_IMAGES = 256
 MAX_IMAGE_PIXELS = 64_000_000
+
+
+def image_workflow_snapshot(image: GeneratedImage, submitted: dict) -> dict:
+    """Keep a per-image snapshot, accepting only narrowly verified writebacks.
+
+    rgthree resolves its negative seed sentinels inside ComfyUI and saves the
+    chosen seed to PNG prompt metadata. Arbitrary graph changes, including stale
+    prompts with matching topology, must not replace the submitted execution.
+    """
+    snapshot = copy.deepcopy(submitted)
+    original_graph = snapshot["api_graph"]
+    random_targets = {
+        (str(node_id), "seed")
+        for node_id, node in original_graph.items()
+        if str(node.get("class_type", "")).casefold() == "seed (rgthree)"
+        and node.get("inputs", {}).get("seed") in (-1, -2, -3)
+    }
+    recovered = set()
+    try:
+        with Image.open(io.BytesIO(image.data)) as source:
+            fields = source.text if source.format == "PNG" else {}
+            raw_prompt = fields.get("prompt", "")
+            raw_workflow = fields.get("workflow", "")
+        if len(raw_prompt.encode()) + len(raw_workflow.encode()) > 4 * 1024 * 1024:
+            raise ValueError("oversized metadata")
+        returned = json.loads(raw_prompt)
+        if not isinstance(returned, dict) or returned.keys() != original_graph.keys():
+            raise ValueError("different nodes")
+        clear_execution_cache_markers(returned)
+        expected = copy.deepcopy(original_graph)
+        for node_id, field in random_targets:
+            value = returned[node_id].get("inputs", {}).get(field)
+            if (
+                isinstance(value, int)
+                and not isinstance(value, bool)
+                and 0 <= value < 2**64
+            ):
+                expected[node_id]["inputs"][field] = value
+                recovered.add((node_id, field))
+        if returned != expected:
+            raise ValueError("unverified execution change")
+        if recovered:
+            synchronized = synchronize_workflow(snapshot, returned, targets=recovered)
+            snapshot.update(
+                api_graph=returned,
+                api_graph_json=json.dumps(returned, ensure_ascii=False),
+                workflow=synchronized["workflow"],
+                workflow_sync_warnings=list(
+                    dict.fromkeys(
+                        snapshot.get("workflow_sync_warnings", [])
+                        + synchronized["warnings"]
+                    )
+                ),
+            )
+        # Known display nodes update their UI text after executing. Preserve
+        # those snapshots only when the remainder of the returned UI matches
+        # the synchronized submission exactly, including every connection.
+        if raw_workflow and snapshot.get("workflow") is not None:
+            try:
+                returned_ui = json.loads(raw_workflow)
+                comparison = copy.deepcopy(returned_ui)
+                expected_ui = snapshot["workflow"]
+                if isinstance(comparison, dict) and isinstance(
+                    comparison.get("nodes"), list
+                ):
+                    originals = {
+                        str(node.get("id")): node
+                        for node in expected_ui.get("nodes", [])
+                    }
+                    for node in comparison["nodes"]:
+                        previous = originals.get(str(node.get("id")), {})
+                        widgets = node.get("widgets_values")
+                        if (
+                            node.get("type")
+                            == previous.get("type")
+                            == "easy showAnything"
+                            and isinstance(widgets, list)
+                            and all(
+                                isinstance(value, str)
+                                or (
+                                    isinstance(value, list)
+                                    and all(isinstance(text, str) for text in value)
+                                )
+                                for value in widgets
+                            )
+                        ):
+                            if "widgets_values" in previous:
+                                node["widgets_values"] = copy.deepcopy(
+                                    previous["widgets_values"]
+                                )
+                            else:
+                                node.pop("widgets_values", None)
+                    if comparison == expected_ui:
+                        snapshot["workflow"] = returned_ui
+            except (ValueError, TypeError, AttributeError, RecursionError):
+                pass
+    except (ValueError, TypeError, AttributeError, OSError, RecursionError):
+        recovered.clear()
+    if random_targets - recovered:
+        warning = (
+            "图片未提供可核实的实际随机种子回写；执行记录保留提交值，"
+            "再次运行工作流可能重新随机。"
+        )
+        snapshot["workflow_sync_warnings"] = list(
+            dict.fromkeys(snapshot.get("workflow_sync_warnings", []) + [warning])
+        )
+    snapshot["workflow_json"] = (
+        json.dumps(snapshot["workflow"], ensure_ascii=False)
+        if snapshot.get("workflow") is not None
+        else None
+    )
+    return snapshot
 
 
 class ComfyExecutionError(RuntimeError):
@@ -582,6 +697,25 @@ class ComfyClient:
                         if key in definition[1]
                     }
                 )
+        synchronized = synchronize_workflow(
+            config,
+            graph,
+            targets={
+                (target["node_id"], target["input_name"])
+                for binding in config["bindings"].values()
+                for target in binding["targets"]
+            },
+        )
+        issues.extend(
+            {
+                "code": "workflow_sync_unverified",
+                "node_id": "",
+                "input_name": "",
+                "severity": "warning",
+                "message": warning,
+            }
+            for warning in synchronized["warnings"]
+        )
         return {
             **local,
             "outputs": output_ids,
@@ -989,12 +1123,26 @@ class ComfyClient:
         client_id: str = "",
         prompt_id: str = "",
     ) -> tuple[GeneratedImage, ...]:
-        config = normalize_workflow(
+        supplied_config = (
             config if config is not None else provider.get_model(request.model).comfyui
         )
+        config = normalize_workflow(supplied_config)
         client_id = client_id or "image-studio-" + uuid.uuid4().hex
         node_errors = {}
+        prepared_snapshot = config
         if resume_id:
+            warnings = (
+                supplied_config.get("workflow_sync_warnings", [])
+                if isinstance(supplied_config, dict)
+                else []
+            )
+            if isinstance(warnings, list):
+                prepared_snapshot = {
+                    **config,
+                    "workflow_sync_warnings": [
+                        warning for warning in warnings if isinstance(warning, str)
+                    ],
+                }
             remote_id = resume_id
         else:
             pending_references = [
@@ -1030,14 +1178,31 @@ class ComfyClient:
             references = await self.upload_references(
                 provider, request.references, config=config
             )
-            graph = prepare_graph(config, request, references)
+            written_inputs = set()
+            graph = prepare_graph(
+                config, request, references, written_inputs=written_inputs
+            )
+            synchronized = synchronize_workflow(config, graph, targets=written_inputs)
+            prepared_snapshot = {
+                **config,
+                "api_graph": graph,
+                "api_graph_json": json.dumps(graph, ensure_ascii=False),
+                "workflow": synchronized["workflow"],
+                "workflow_json": json.dumps(
+                    synchronized["workflow"], ensure_ascii=False
+                )
+                if synchronized["workflow"] is not None
+                else None,
+                "workflow_sync_warnings": synchronized["warnings"],
+            }
             await _callback(
                 on_prepared,
                 {
                     "api_graph": graph,
                     "api_graph_json": json.dumps(graph, ensure_ascii=False),
-                    "workflow": config["workflow"],
-                    "workflow_json": config["workflow_json"],
+                    "workflow": prepared_snapshot["workflow"],
+                    "workflow_json": prepared_snapshot["workflow_json"],
+                    "workflow_sync_warnings": synchronized["warnings"],
                     "uploaded_references": references,
                     "outputs": config["outputs"],
                     "fingerprint": graph_fingerprint(graph),
@@ -1046,7 +1211,7 @@ class ComfyClient:
             response = await self.submit(
                 provider,
                 graph,
-                config["workflow"],
+                synchronized["workflow"],
                 client_id=client_id,
                 prompt_id=prompt_id,
             )
@@ -1083,12 +1248,17 @@ class ComfyClient:
             )
         except ComfyExecutionError as exc:
             exc.prompt_id = remote_id
+            if exc.images:
+                exc.images = await self._images_with_workflow_snapshot(
+                    exc.images, prepared_snapshot
+                )
             if execution_error:
                 exc.args = (str(execution_error) + "；" + str(exc),)
             if node_errors:
                 exc.node_errors = node_errors
                 exc.args = (str(exc) + "；" + _errors_text(node_errors),)
             raise
+        images = await self._images_with_workflow_snapshot(images, prepared_snapshot)
         if execution_error or node_errors:
             raise ComfyExecutionError(
                 str(execution_error)
@@ -1100,3 +1270,18 @@ class ComfyClient:
                 node_errors=node_errors,
             )
         return images
+
+    async def _images_with_workflow_snapshot(self, images, snapshot):
+        snapshots = await asyncio.to_thread(
+            lambda: [image_workflow_snapshot(image, snapshot) for image in images]
+        )
+        return tuple(
+            replace(
+                image,
+                effective_parameters={
+                    **image.effective_parameters,
+                    "_comfyui": image_snapshot,
+                },
+            )
+            for image, image_snapshot in zip(images, snapshots)
+        )

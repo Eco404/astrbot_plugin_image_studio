@@ -81,6 +81,7 @@ REQUIRED_BACKEND_FILES = (
     "backend/providers/comfyui/imports.py",
     "backend/providers/comfyui/jobs.py",
     "backend/providers/comfyui/runtime.py",
+    "backend/providers/comfyui/ui_sync.py",
     "backend/providers/comfyui/workflows.py",
     "backend/providers/executor.py",
     "backend/providers/novelai/__init__.py",

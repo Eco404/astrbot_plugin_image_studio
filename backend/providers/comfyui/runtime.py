@@ -9,9 +9,7 @@ import json
 import uuid
 from dataclasses import replace
 
-from .client import ComfyClient, ComfyExecutionError, normalize_workflow
-from .jobs import ComfyJobManager, ComfyJobStore
-from .workflows import FIXED_OUTPUT_POLICY, migrate_fixed_outputs
+from ...generation.service import ImageGenerationService
 from ...models import (
     PARAMETER_POLICY_FIELDS,
     GenerationRequest,
@@ -20,7 +18,15 @@ from ...models import (
     InvocationSource,
 )
 from ..executor import ProviderError, ProviderPartialResponseError
-from ...generation.service import ImageGenerationService
+from .client import (
+    ComfyClient,
+    ComfyExecutionError,
+    image_workflow_snapshot,
+    normalize_workflow,
+)
+from .jobs import ComfyJobManager, ComfyJobStore
+from .ui_sync import synchronize_workflow
+from .workflows import FIXED_OUTPUT_POLICY, migrate_fixed_outputs
 
 
 def connection_fingerprint(provider: ImageProvider) -> str:
@@ -236,25 +242,39 @@ class ComfyRuntime:
                     uploaded = await client.upload_references(
                         selected_provider, request.references, config=config
                     )
-                    graph = prepare_graph(config, request, uploaded)
+                    written_inputs = set()
+                    graph = prepare_graph(
+                        config, request, uploaded, written_inputs=written_inputs
+                    )
+                    synchronized = synchronize_workflow(
+                        config, graph, targets=written_inputs
+                    )
                     if (await runtime.store.get_job(job["id"]))[
                         "status"
                     ] == "cancelled":
                         raise asyncio.CancelledError
                     prepared_state = await runtime.store.get_job(job["id"])
+                    submitted_result = {
+                        **(prepared_state.get("result") or {}),
+                        "api_graph": graph,
+                        "workflow": synchronized["workflow"],
+                        "workflow_json": json.dumps(
+                            synchronized["workflow"], ensure_ascii=False
+                        )
+                        if synchronized["workflow"] is not None
+                        else None,
+                        "workflow_sync_warnings": synchronized["warnings"],
+                    }
                     await runtime.store.update_job(
                         job["id"],
                         status="submitting",
-                        result={
-                            **(prepared_state.get("result") or {}),
-                            "api_graph": graph,
-                        },
+                        result=submitted_result,
                     )
                     try:
                         submitted = await client.submit(
                             selected_provider,
                             graph,
-                            config.get("workflow"),
+                            synchronized["workflow"],
                             client_id=job["id"],
                         )
                     except ComfyExecutionError as exc:
@@ -273,8 +293,7 @@ class ComfyRuntime:
                         status="submitted",
                         remote_id=remote_id,
                         result={
-                            **(prepared_state.get("result") or {}),
-                            "api_graph": graph,
+                            **submitted_result,
                             "node_errors": submitted.get("node_errors", {}),
                         },
                     )
@@ -332,10 +351,23 @@ class ComfyRuntime:
                 if not images:
                     raise ProviderError("ComfyUI 本轮未取得可用图片，未追加执行")
                 actual_graph = graph or config["api_graph"]
+                execution_state = (await runtime.store.get_job(job["id"])).get(
+                    "result"
+                ) or {}
+                submitted_workflow = execution_state.get(
+                    "workflow", config.get("workflow")
+                )
                 snapshot = {
                     **config,
                     "api_graph": actual_graph,
                     "api_graph_json": json.dumps(actual_graph, ensure_ascii=False),
+                    "workflow": copy.deepcopy(submitted_workflow),
+                    "workflow_json": json.dumps(submitted_workflow, ensure_ascii=False)
+                    if submitted_workflow is not None
+                    else None,
+                    "workflow_sync_warnings": execution_state.get(
+                        "workflow_sync_warnings", []
+                    ),
                     "parameters_schema": copy.deepcopy(
                         selected_provider.get_model(request.model).parameters
                     ),
@@ -352,16 +384,21 @@ class ComfyRuntime:
                 }
                 if (await runtime.store.get_job(job["id"]))["status"] == "cancelled":
                     raise asyncio.CancelledError
+                snapshots = await asyncio.to_thread(
+                    lambda: [
+                        image_workflow_snapshot(image, snapshot) for image in images
+                    ]
+                )
                 images = tuple(
                     replace(
                         image,
                         effective_parameters={
                             **image.effective_parameters,
-                            "_comfyui": snapshot,
+                            "_comfyui": image_snapshot,
                             "comfy_job_id": job["id"],
                         },
                     )
-                    for image in images
+                    for image, image_snapshot in zip(images, snapshots)
                 )
                 await runtime.store.save_outputs(job["id"], images)
                 if failure:
@@ -392,10 +429,27 @@ class ComfyRuntime:
             _comfy_child_count=values.get("count") if is_child else None,
         )
         persisted = (await self.store.get_job(job["id"])).get("result") or {}
+        sync_notice = "；".join(
+            dict.fromkeys(
+                message
+                for image in result.images
+                for message in image.effective_parameters.get("_comfyui", {}).get(
+                    "workflow_sync_warnings", []
+                )
+                if isinstance(message, str) and message
+            )
+        )
         return {
             **{
                 key: persisted[key]
-                for key in ("batch_plan", "collection_limit")
+                for key in (
+                    "batch_plan",
+                    "collection_limit",
+                    "api_graph",
+                    "workflow",
+                    "workflow_json",
+                    "workflow_sync_warnings",
+                )
                 if key in persisted
             },
             **(
@@ -422,7 +476,11 @@ class ComfyRuntime:
             "provider_name": provider.name,
             "model": job["model_id"],
             "status": "partial"
-            if (persisted.get("partial_warning") if fixed_outputs else result.warning)
+            if (
+                persisted.get("partial_warning")
+                if fixed_outputs
+                else result.warning and result.warning != sync_notice
+            )
             else "succeeded",
         }
 

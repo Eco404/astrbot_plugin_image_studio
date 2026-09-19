@@ -379,6 +379,9 @@ def test_preflight_deferred_reference_does_not_require_old_server_image():
         "inputs": {"image": "deleted.png"},
     }
     value["bindings"]["ref"] = binding("8", "image", kind="image")
+    value["workflow"]["nodes"] = [
+        {"id": 8, "type": "LoadImage", "widgets_values": ["deleted.png", "image"]}
+    ]
     report = asyncio.run(
         ComfyClient(Session([Response(definitions())])).inspect(provider(), value)
     )

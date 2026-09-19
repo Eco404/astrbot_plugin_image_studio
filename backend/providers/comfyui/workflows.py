@@ -151,6 +151,31 @@ def normalize_workflow(value: Any) -> dict[str, Any]:
         raise ValueError("ComfyUI API 图必须是有效 JSON 数据") from exc
     graph = {str(key): node for key, node in graph.items()}
     owner = value if not is_api_graph(value) else {}
+    sync_targets = owner.get("workflow_sync_targets", [])
+    if not isinstance(sync_targets, list):
+        raise ValueError("界面工作流同步目标必须是数组")
+    pending_sync = {}
+    for target in sync_targets:
+        if not isinstance(target, dict):
+            raise ValueError("界面工作流同步目标需要节点和字段")
+        node_id, name = (
+            str(target.get("node_id", "")),
+            str(target.get("input_name", "")),
+        )
+        node = graph.get(node_id)
+        if (
+            not node
+            or name not in node["inputs"]
+            or is_link(node["inputs"][name], graph)
+        ):
+            raise ValueError(f"界面工作流同步目标无效：节点 #{node_id} 的 {name}")
+        if target.get("class_type") not in (None, "", node["class_type"]):
+            raise ValueError(f"界面工作流同步目标的节点 #{node_id} 类型已改变")
+        pending_sync[(node_id, name)] = {
+            "node_id": node_id,
+            "input_name": name,
+            "class_type": node["class_type"],
+        }
     overrides = owner.get("input_overrides", [])
     if not isinstance(overrides, list):
         raise ValueError("工作流输入修改必须是数组")
@@ -174,6 +199,14 @@ def normalize_workflow(value: Any) -> dict[str, Any]:
         ):
             replacement = int(replacement)
         graph[node_id]["inputs"][name] = replacement
+        # Keep only the target identity: the final API graph is authoritative.
+        # Overrides themselves are consumed here and must not replay old values
+        # over per-request bindings or server-generated history seeds later.
+        pending_sync[(node_id, name)] = {
+            "node_id": node_id,
+            "input_name": name,
+            "class_type": graph[node_id]["class_type"],
+        }
     # Keep the exact JSON text alongside the browser preview. JavaScript's
     # Number cannot round-trip uint64 sampler seeds and node integer inputs.
     raw = json.dumps(graph, ensure_ascii=False, allow_nan=False)
@@ -291,6 +324,11 @@ def normalize_workflow(value: Any) -> dict[str, Any]:
         "bindings": bindings,
         "outputs": outputs,
         "fingerprint": graph_fingerprint(graph),
+        **(
+            {"workflow_sync_targets": list(pending_sync.values())}
+            if pending_sync
+            else {}
+        ),
         **({"execution_policy": policy} if policy else {}),
         **(
             {"parameters_schema": copy.deepcopy(owner["parameters_schema"])}
@@ -869,7 +907,11 @@ def clear_execution_cache_markers(graph: dict) -> None:
 
 
 def prepare_graph(
-    config: Any, request: Any, uploadedrefs: list[str] | tuple[str, ...] = ()
+    config: Any,
+    request: Any,
+    uploadedrefs: list[str] | tuple[str, ...] = (),
+    *,
+    written_inputs: set[tuple[str, str]] | None = None,
 ) -> dict:
     config = normalize_workflow(config)
     if config.get("execution_policy") == FIXED_OUTPUT_POLICY and any(
@@ -885,6 +927,7 @@ def prepare_graph(
     clear_execution_cache_markers(graph)
     references = list(uploadedrefs)
     used_reference_indices = set()
+    written = set()
     for key, binding in config["bindings"].items():
         present, value = _parameter_value(key, binding, request, references)
         if not present:
@@ -913,11 +956,26 @@ def prepare_graph(
                     inputs[name] = (
                         str(inputs[name]) + str(binding.get("separator", "\n")) + value
                     )
+                    written.add((target["node_id"], name))
             else:
                 inputs[name] = value
+                written.add((target["node_id"], name))
     unused = set(range(len(references))) - used_reference_indices
     if unused:
         raise ValueError(
             "工作流没有绑定这些参考图：" + "、".join(str(i + 1) for i in sorted(unused))
         )
+    # rgthree's server-side random mode rewrites only matching sentinel widgets.
+    # Declare this exact writeback target even for older fixed-seed templates
+    # whose editor provenance was lost. Do not infer other edits from UI values.
+    for node_id, node in graph.items():
+        seed = node["inputs"].get("seed")
+        if (
+            node["class_type"] == "Seed (rgthree)"
+            and isinstance(seed, int)
+            and seed in {-1, -2, -3}
+        ):
+            written.add((node_id, "seed"))
+    if written_inputs is not None:
+        written_inputs.update(written)
     return graph
