@@ -2,7 +2,7 @@
   "use strict";
   const root = document.documentElement;
   const storageKey = "image-studio:appearance:v1";
-  const defaults = Object.freeze({ preference: "system", accentHue: 168, accentSaturation: 38, accentLightness: 50, glassOpacity: 0.68 });
+  const defaults = Object.freeze({ preference: "system", accentHue: 168, accentSaturation: 38, accentLightness: 50, glassOpacity: 0.68, galleryCardInfo: true });
   const modes = [["system", "跟随系统"], ["light", "浅色"], ["dark", "深色"]];
   const swatches = [[168, "青绿"], [130, "叶绿"], [195, "湖蓝"], [216, "雾蓝"], [345, "蔷薇"], [35, "麦金"]];
   const scheme = matchMedia("(prefers-color-scheme: dark)");
@@ -30,6 +30,7 @@
       accentSaturation: clamp("accentSaturation", 0, 100),
       accentLightness: clamp("accentLightness", 0, 100),
       glassOpacity: clamp("glassOpacity", 0.2, 1),
+      galleryCardInfo: typeof source.galleryCardInfo === "boolean" ? source.galleryCardInfo : defaults.galleryCardInfo,
     };
   }
 
@@ -102,6 +103,7 @@
     const resolved = settings.preference === "system" ? (scheme.matches ? "dark" : "light") : settings.preference;
     if (root.dataset.theme !== resolved) root.dataset.theme = resolved;
     root.dataset.themePreference = settings.preference;
+    root.dataset.galleryCardInfo = String(settings.galleryCardInfo);
     root.style.colorScheme = resolved;
     root.style.setProperty("--accent-h", String(settings.accentHue));
     root.style.setProperty("--accent-s", `${settings.accentSaturation}%`);
@@ -153,6 +155,7 @@
     if (!panel) return;
     panel.querySelectorAll('[name="appearanceMode"]').forEach((input) => { input.checked = input.value === settings.preference; });
     panel.querySelectorAll('[name="appearanceAccent"]').forEach((input) => { input.checked = Number(input.value) === settings.accentHue && settings.accentLightness === 50; });
+    panel.querySelector("#galleryCardInfo").checked = settings.galleryCardInfo;
     const hex = currentColor();
     panel.querySelector("#appearanceColor").value = hex;
     const hexInput = panel.querySelector("#appearanceHex");
@@ -345,9 +348,11 @@
       <label class="appearance-range"><span>玻璃不透明度<output data-appearance-value="glassOpacity"></output></span><input type="range" min="20" max="100" step="1" data-appearance-field="glassOpacity" aria-label="玻璃不透明度"></label>
       <div id="appearanceResetConfirmation" class="appearance-reset-confirmation" role="group" aria-label="恢复默认主题" hidden><span>恢复默认主题？</span><div><button type="button" class="quiet-button" data-appearance-reset="cancel">取消</button><button type="button" class="quiet-button" data-appearance-reset="confirm">恢复</button></div></div>
       <p class="appearance-status" role="status" aria-live="polite"></p>
-      <div class="field appearance-gallery-sort"><label for="gallerySort">画廊排序方式</label><select id="gallerySort"><option value="created">按创建时间</option><option value="latest_content">按最新内容</option></select><p class="field-hint">按最新内容时，以图组中最新的图片时间排序。</p></div>`;
+      <div class="field appearance-gallery-sort"><label for="gallerySort">画廊排序方式</label><select id="gallerySort"><option value="created">按创建时间</option><option value="latest_content">按最新内容</option></select></div>
+      <div class="toggle-row"><label for="galleryCardInfo">画廊卡片信息显示</label><label class="toggle-control"><input id="galleryCardInfo" type="checkbox" /><span aria-hidden="true"></span></label></div>`;
     window.dispatchEvent(new CustomEvent("image-studio-display-settings-ready"));
     panel.querySelectorAll('[name="appearanceMode"]').forEach((input) => input.addEventListener("change", () => update({ preference: input.value })));
+    panel.querySelector("#galleryCardInfo").addEventListener("change", event => update({ galleryCardInfo: event.target.checked }));
     panel.querySelectorAll('[name="appearanceAccent"]').forEach((input) => input.addEventListener("change", () => update({ accentHue: Number(input.value), accentLightness: 50 })));
     const colorInput = panel.querySelector("#appearanceColor"), hexInput = panel.querySelector("#appearanceHex");
     colorInput.addEventListener("input", () => update(readColor(colorInput.value)));
@@ -401,7 +406,7 @@
       if (!confirmation.hidden) confirmation.querySelector("button").focus();
     });
     panel.querySelector('[data-appearance-reset="cancel"]').addEventListener("click", () => closeConfirmation(true));
-    panel.querySelector('[data-appearance-reset="confirm"]').addEventListener("click", () => { update(defaults); closeConfirmation(true); });
+    panel.querySelector('[data-appearance-reset="confirm"]').addEventListener("click", () => { update({ ...defaults, galleryCardInfo: settings.galleryCardInfo }); closeConfirmation(true); });
     document.addEventListener("pointerdown", (event) => { if (!confirmation.hidden && !confirmation.contains(event.target) && !reset.contains(event.target)) closeConfirmation(); });
     document.addEventListener("keydown", (event) => { if (event.key === "Escape" && !confirmation.hidden) { event.preventDefault(); closeConfirmation(true); } });
     syncControls();

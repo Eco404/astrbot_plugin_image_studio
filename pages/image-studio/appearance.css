@@ -65,12 +65,14 @@
 }
 /* Reuse the enclosing glass layer; nested surfaces add only a small tint. */
 .detail-footer, .studio-modal > footer, .image-preview__actions,
-.confirm-dialog__actions, .parameter-dialog__actions,
+.parameter-dialog__actions,
 .studio-modal.is-import-editor .import-card {
   background: var(--detail-footer-tint);
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
 }
+/* Compact confirmations have no separate footer surface. */
+.confirm-dialog__actions { background: transparent; }
 .quiet-glass-background { background-color: var(--page); background-image: linear-gradient(136deg, hsl(var(--accent-h) 20% 92%), hsl(216 24% 93%) 38%, hsl(26 22% 94%) 70%, hsl(188 20% 90%)); }
 :root[data-theme="dark"] .quiet-glass-background { background-color: var(--page); background-image: linear-gradient(136deg, hsl(var(--accent-h) 9% 14%), hsl(32 8% 11%) 42%, hsl(216 11% 15%) 72%, hsl(188 9% 12%)); }
 .app-notice.is-success, .health-status[data-status="healthy"] { color: var(--success); }

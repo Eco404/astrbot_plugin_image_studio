@@ -2,7 +2,7 @@
 const assert = require("node:assert/strict");
 const path = require("node:path");
 const { chromium, webkit } = require(process.env.STUDIO_PLAYWRIGHT || "playwright");
-const source = path.resolve(__dirname, "../../pages/image-studio/gallery-preferences.js");
+const source = require("../support/webui_paths.cjs").pagePath("gallery-preferences.js");
 
 async function create(page) {
   await page.setContent("<!doctype html><meta charset=utf-8><title>Opaque preference transport</title>");

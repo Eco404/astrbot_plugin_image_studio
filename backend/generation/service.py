@@ -325,6 +325,22 @@ class ImageGenerationService:
                     ],
                 )
             )
+        if provider.kind == "comfyui":
+            sync_warnings = []
+            for image in images:
+                snapshot = image.effective_parameters.get("_comfyui")
+                if not isinstance(snapshot, dict):
+                    continue
+                messages = snapshot.get("workflow_sync_warnings", [])
+                if isinstance(messages, list):
+                    sync_warnings.extend(
+                        message for message in messages if isinstance(message, str)
+                    )
+            warning = "；".join(
+                dict.fromkeys(
+                    message for message in [warning, *sync_warnings] if message
+                )
+            )
         elapsed_ms = round((time.perf_counter() - started) * 1000)
         generation_id = await self.store.record_success(
             provider=provider,
@@ -592,7 +608,8 @@ class ImageGenerationService:
     ) -> dict[str, Any]:
         """Return a reproducible draft and stage retained references when available."""
 
-        from ..metadata.exchange import export_parameters, resolve_parameters
+        from ..parameters.exchange import export_parameters, resolve_parameters
+        from ..metadata.comfyui.user_rules import load_rules, use_rules
         from ..providers.comfyui.workflows import migrate_fixed_outputs
 
         detail = await self.store.generation_image_context(generation_id, image_id)
@@ -609,7 +626,9 @@ class ImageGenerationService:
             )
         ):
             raise ValueError("这张外部图片没有可恢复的生成参数，可直接用作参考图")
-        copied = export_parameters(detail, image_id)
+        rules = await asyncio.to_thread(load_rules, self.store.data_dir)
+        with use_rules(rules):
+            copied = export_parameters(detail, image_id)
         reproduction_settings = self.settings
         snapshot_model = None
         if detail.get("provider_kind") == "comfyui":
@@ -674,9 +693,10 @@ class ImageGenerationService:
                             for item in self.settings.providers
                         ),
                     )
-        resolved = resolve_parameters(
-            copied["content"], reproduction_settings, for_reproduction=True
-        )
+        with use_rules(rules):
+            resolved = resolve_parameters(
+                copied["content"], reproduction_settings, for_reproduction=True
+            )
         imported = detail.get("source") in {"import", "external"}
         staged = (
             await self.store.stage_generation_references(

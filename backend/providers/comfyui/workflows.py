@@ -14,6 +14,8 @@ import re
 import secrets
 from typing import Any
 
+from ...comfyui.catalog import seed_policy
+
 MAX_GRAPH_BYTES = 16 * 1024 * 1024
 MAX_NODES = 10000
 FIXED_OUTPUT_POLICY = "fixed_outputs_v1"
@@ -151,6 +153,31 @@ def normalize_workflow(value: Any) -> dict[str, Any]:
         raise ValueError("ComfyUI API 图必须是有效 JSON 数据") from exc
     graph = {str(key): node for key, node in graph.items()}
     owner = value if not is_api_graph(value) else {}
+    sync_targets = owner.get("workflow_sync_targets", [])
+    if not isinstance(sync_targets, list):
+        raise ValueError("界面工作流同步目标必须是数组")
+    pending_sync = {}
+    for target in sync_targets:
+        if not isinstance(target, dict):
+            raise ValueError("界面工作流同步目标需要节点和字段")
+        node_id, name = (
+            str(target.get("node_id", "")),
+            str(target.get("input_name", "")),
+        )
+        node = graph.get(node_id)
+        if (
+            not node
+            or name not in node["inputs"]
+            or is_link(node["inputs"][name], graph)
+        ):
+            raise ValueError(f"界面工作流同步目标无效：节点 #{node_id} 的 {name}")
+        if target.get("class_type") not in (None, "", node["class_type"]):
+            raise ValueError(f"界面工作流同步目标的节点 #{node_id} 类型已改变")
+        pending_sync[(node_id, name)] = {
+            "node_id": node_id,
+            "input_name": name,
+            "class_type": node["class_type"],
+        }
     overrides = owner.get("input_overrides", [])
     if not isinstance(overrides, list):
         raise ValueError("工作流输入修改必须是数组")
@@ -174,6 +201,14 @@ def normalize_workflow(value: Any) -> dict[str, Any]:
         ):
             replacement = int(replacement)
         graph[node_id]["inputs"][name] = replacement
+        # Keep only the target identity: the final API graph is authoritative.
+        # Overrides themselves are consumed here and must not replay old values
+        # over per-request bindings or server-generated history seeds later.
+        pending_sync[(node_id, name)] = {
+            "node_id": node_id,
+            "input_name": name,
+            "class_type": graph[node_id]["class_type"],
+        }
     # Keep the exact JSON text alongside the browser preview. JavaScript's
     # Number cannot round-trip uint64 sampler seeds and node integer inputs.
     raw = json.dumps(graph, ensure_ascii=False, allow_nan=False)
@@ -291,6 +326,11 @@ def normalize_workflow(value: Any) -> dict[str, Any]:
         "bindings": bindings,
         "outputs": outputs,
         "fingerprint": graph_fingerprint(graph),
+        **(
+            {"workflow_sync_targets": list(pending_sync.values())}
+            if pending_sync
+            else {}
+        ),
         **({"execution_policy": policy} if policy else {}),
         **(
             {"parameters_schema": copy.deepcopy(owner["parameters_schema"])}
@@ -632,7 +672,6 @@ def seed_warnings(config: Any, parameters: Any = None) -> list[dict[str, Any]]:
         for target in binding["targets"]
     }
     known_fields = {"seed", "noise_seed", "random_seed"}
-    native_nonnegative = {"KSampler", "KSamplerAdvanced", "RandomNoise"}
     warnings = []
 
     def integer(value):
@@ -653,7 +692,7 @@ def seed_warnings(config: Any, parameters: Any = None) -> list[dict[str, Any]]:
         if node_id not in active:
             continue
         kind = node["class_type"]
-        rgthree = kind.casefold() == "seed (rgthree)"
+        policy = seed_policy(kind)
         for name, literal in node["inputs"].items():
             if is_link(literal, graph):
                 continue
@@ -691,14 +730,16 @@ def seed_warnings(config: Any, parameters: Any = None) -> list[dict[str, Any]]:
             if numeric is None:
                 continue
             seed_bound = binding.get("source") == "seed"
+            field_policy = policy if policy.get("field") == name else {}
+            sentinels = field_policy.get("negative_sentinels", [])
+            nonnegative = field_policy.get("min", -1) >= 0
             if seed_bound and numeric == -1:
                 continue
-            # rgthree owns all three negative sentinels. They mean random,
-            # increment and decrement, not locked nonnegative seed values.
-            if rgthree and numeric in {-1, -2, -3}:
+            # Only verified node contracts can assign meaning to negative values.
+            if numeric in sentinels:
                 continue
             if numeric < 0:
-                if numeric != -1 or seed_bound or kind not in native_nonnegative:
+                if numeric != -1 or seed_bound or not nonnegative:
                     continue
                 code = "seed_requires_binding"
                 action = "bind_seed_source"
@@ -711,7 +752,7 @@ def seed_warnings(config: Any, parameters: Any = None) -> list[dict[str, Any]]:
                 if seed_bound:
                     action = "set_parameter_random"
                     guidance = f"如需恢复随机，请将参数“{label}”的默认值改为 -1。"
-                elif rgthree:
+                elif -1 in sentinels:
                     action = "set_parameter_random" if binding else "set_fixed_random"
                     guidance = (
                         f"如需恢复随机，可将参数“{label}”的默认值改为 -1。"
@@ -721,7 +762,7 @@ def seed_warnings(config: Any, parameters: Any = None) -> list[dict[str, Any]]:
                 else:
                     action = "bind_seed_source"
                     guidance = "如需恢复随机，请将此输入绑定为“种子”来源，并把参数默认值设为 -1。"
-                    if kind in native_nonnegative:
+                    if nonnegative:
                         guidance += f"{kind} 的原始 {name} 字段不接受 -1。"
                 message = f"检测到随机种子已锁定：节点 #{node_id} · {name} = {numeric}。{guidance}"
             warnings.append(
@@ -803,10 +844,12 @@ def _random_seed(key: str, binding: dict) -> int:
     )
     for target in binding.get("targets", []):
         kind = str(target.get("class_type", ""))
-        if kind.casefold() == "seed (rgthree)":
-            upper = min(upper, 1 << 50)
-        elif kind in {"KSampler", "KSamplerAdvanced", "RandomNoise"}:
-            upper = min(upper, (1 << 64) - 1)
+        policy = seed_policy(kind)
+        if policy.get("field") == target.get("input_name"):
+            if isinstance(policy.get("max"), int):
+                upper = min(upper, policy["max"])
+            if isinstance(policy.get("min"), int):
+                lower = max(lower, policy["min"])
     if lower > upper:
         raise ValueError(f"参数 {key} 没有可用的非负随机种子范围")
     return secrets.randbelow(upper - lower + 1) + lower
@@ -869,7 +912,11 @@ def clear_execution_cache_markers(graph: dict) -> None:
 
 
 def prepare_graph(
-    config: Any, request: Any, uploadedrefs: list[str] | tuple[str, ...] = ()
+    config: Any,
+    request: Any,
+    uploadedrefs: list[str] | tuple[str, ...] = (),
+    *,
+    written_inputs: set[tuple[str, str]] | None = None,
 ) -> dict:
     config = normalize_workflow(config)
     if config.get("execution_policy") == FIXED_OUTPUT_POLICY and any(
@@ -885,6 +932,7 @@ def prepare_graph(
     clear_execution_cache_markers(graph)
     references = list(uploadedrefs)
     used_reference_indices = set()
+    written = set()
     for key, binding in config["bindings"].items():
         present, value = _parameter_value(key, binding, request, references)
         if not present:
@@ -913,11 +961,27 @@ def prepare_graph(
                     inputs[name] = (
                         str(inputs[name]) + str(binding.get("separator", "\n")) + value
                     )
+                    written.add((target["node_id"], name))
             else:
                 inputs[name] = value
+                written.add((target["node_id"], name))
     unused = set(range(len(references))) - used_reference_indices
     if unused:
         raise ValueError(
             "工作流没有绑定这些参考图：" + "、".join(str(i + 1) for i in sorted(unused))
         )
+    # Known server-side seed modes rewrite matching sentinel widgets. Retain
+    # their exact target even when older templates lost editor provenance.
+    for node_id, node in graph.items():
+        policy = seed_policy(node["class_type"])
+        field = policy.get("field")
+        seed = node["inputs"].get(field)
+        if (
+            policy.get("writeback") not in {None, "none"}
+            and type(seed) is int
+            and seed in policy.get("negative_sentinels", [])
+        ):
+            written.add((node_id, field))
+    if written_inputs is not None:
+        written_inputs.update(written)
     return graph

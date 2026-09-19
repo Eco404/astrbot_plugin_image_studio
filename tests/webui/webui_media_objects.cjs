@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const playwright = require(process.env.STUDIO_PLAYWRIGHT || "playwright");
-const script = fs.readFileSync(path.resolve(__dirname, "../../pages/image-studio/media-objects.js"), "utf8");
+const script = fs.readFileSync(require("../support/webui_paths.cjs").pagePath("media-objects.js"), "utf8");
 const engines = process.env.STUDIO_BROWSER ? [process.env.STUDIO_BROWSER] : ["chromium", "webkit"];
 
 async function fixture(page, mode) {

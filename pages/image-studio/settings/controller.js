@@ -6,8 +6,9 @@
   window.ImageStudioSettings = function (hooks) {
     const { escape, apiGet, apiPost, showNotice, errorMessage, formatDate, formatBytes, setError, confirmAction, syncPageScrollLock, schemaParameterTitle, schemaParameterLabel, configuredReferenceLimit, referenceLimitForModel, effectiveModelParameters, modelParameterMatches, bootstrap, closeDetail, switchView, library } = hooks;
     const $ = id => document.getElementById(id);
+    const { icon, positionBalancedGrid } = window.ImageStudioPresentation;
     const state = { settings: null, selectedSettingsProviderId: "", selectedSettingsModelId: "", modelEditorTab: "model", editingToolParameter: "", editingToolDefaultChoices: [] };
-    const els = Object.fromEntries(["addModelButton", "addProviderButton", "agentImageReturnMode", "agentPreviewMaxEdge", "agentPreviewQuality", "filter", "find", "flatMap", "historyEnabled", "historyMegabytes", "historyRecords", "length", "map", "modelForm", "newModelChoice", "newModelChoices", "parameterDialog", "providerForm", "push", "recordInvocationIdentity", "retainReferences", "runDeepMaintenanceButton", "runMaintenanceButton", "saveSettingsButton", "settingPageDefaultImageModel", "settingPageDefaultTextModel", "settingTool", "settingToolDefaultImageModel", "settingToolDefaultTextModel", "settingsError", "settingsModelList", "settingsProviderList", "some", "storageHealthAssets", "storageHealthCheckedAt", "storageHealthDuration", "storageHealthErrors", "storageHealthGenerations", "storageHealthLeases", "storageHealthSize", "storageHealthStatus", "toolParameterChoices", "toolParameterDefault", "toolParameterDefaultChoice", "toolParameterDefaultHint", "toolParameterDescription", "toolParameterExposed"].map(id => [id, $(id)]));
+    const els = Object.fromEntries(["addModelButton", "addProviderButton", "agentImageReturnMode", "agentPreviewMaxEdge", "agentPreviewQuality", "filter", "find", "flatMap", "historyEnabled", "historyMegabytes", "historyRecords", "length", "map", "modelForm", "newModelChoice", "newModelChoices", "parameterDialog", "providerForm", "push", "recordInvocationIdentity", "retainReferences", "runDeepMaintenanceButton", "runMaintenanceButton", "saveSettingsButton", "settingPageDefaultImageModel", "settingPageDefaultTextModel", "settingTool", "settingToolDefaultImageModel", "settingToolDefaultTextModel", "settingsError", "settingsModelList", "settingsProviderList", "some", "storageHealthAssets", "storageHealthCheckedAt", "storageHealthDuration", "storageHealthErrors", "storageHealthGenerations", "storageHealthLeases", "storageHealthStatus", "toolParameterChoices", "toolParameterDefault", "toolParameterDefaultChoice", "toolParameterDefaultHint", "toolParameterDescription", "toolParameterExposed"].map(id => [id, $(id)]));
     const MODEL_DEFAULT_CHOICE = "__model_default__";
     let bound = false;
     let settingsLoadPromise = null;
@@ -21,6 +22,57 @@
     let storageRetention = null;
     let novelaiModels = [];
     let gallerySortDraft = "created";
+    let settingsPanelFrame = 0;
+
+    function schemaPolicyButton(name) {
+      return `<button class="studio-icon-button parameter-copy" data-edit-schema-policy="${escape(name)}" type="button" aria-label="编辑 ${escape(name)} 的参数行为" data-tooltip="编辑参数行为">${icon("Settings2")}</button>`;
+    }
+
+    function editParameterPolicy(name, descriptor) {
+      const fields = [["webui_visible", "在生图面板显示"], ["record_in_history", "保存到请求记录"], ["refill_from_history", "复现时使用历史值"]];
+      const body = fields.map(([key, label]) => `<div class="toggle-row"><label for="schemaPolicy-${key}">${label}</label><label class="toggle-control"><input id="schemaPolicy-${key}" type="checkbox" ${descriptor[key] !== false ? "checked" : ""}><span aria-hidden="true"></span></label></div>`).join("");
+      const syncDependencies = (changedKey) => {
+        const visible = $("schemaPolicy-webui_visible");
+        const recorded = $("schemaPolicy-record_in_history");
+        const refill = $("schemaPolicy-refill_from_history");
+        if (changedKey === "refill_from_history" && refill.checked) {
+          visible.checked = true;
+          recorded.checked = true;
+        } else if (!visible.checked || !recorded.checked) refill.checked = false;
+      };
+      return library.openModal(`参数行为：${name}`, body, [{ label: "取消", action: () => false }, { label: "保存", primary: true, action: () => {
+        syncDependencies();
+        return Object.fromEntries(fields.map(([key]) => [key, $(`schemaPolicy-${key}`).checked]));
+      } }], { dismissOutside: false, onOpen: () => {
+        for (const [key] of fields) $(`schemaPolicy-${key}`).addEventListener("change", () => syncDependencies(key));
+        syncDependencies();
+      } });
+    }
+
+    function layoutSettingsPanels() {
+      cancelAnimationFrame(settingsPanelFrame); settingsPanelFrame = 0;
+      positionBalancedGrid($("settingsView").querySelector(".settings-layout"), "--settings-columns");
+    }
+
+    function scheduleSettingsPanelLayout() {
+      if (!settingsPanelFrame) settingsPanelFrame = requestAnimationFrame(layoutSettingsPanels);
+    }
+
+    function bindSettingsPanelLayout() {
+      const grid = $("settingsView").querySelector(".settings-layout");
+      grid.classList.add("is-masonry");
+      const observer = window.ResizeObserver ? new ResizeObserver(scheduleSettingsPanelLayout) : null;
+      const observeCards = () => {
+        observer?.disconnect(); observer?.observe(grid);
+        for (const card of grid.children) observer?.observe(card, { box: "border-box" });
+        scheduleSettingsPanelLayout();
+      };
+      observeCards();
+      // Rebind only when whole cards change; their content is covered by size observation.
+      new MutationObserver(observeCards).observe(grid, { childList: true });
+      window.addEventListener("resize", scheduleSettingsPanelLayout, { passive: true });
+      grid.addEventListener("toggle", scheduleSettingsPanelLayout, true);
+    }
 
     async function leaveSettings(view) {
       if (settingsNavigationPending) return;
@@ -73,7 +125,28 @@
       els.storageHealthCheckedAt.textContent = report?.checked_at ? formatDate(report.checked_at) : "尚未执行";
       els.storageHealthDuration.textContent = report?.duration_ms >= 0 ? `${Number(report.duration_ms)} ms` : "-";
       els.storageHealthAssets.textContent = `${Number(stats.assets || 0)} / ${Number(stats.thumbnails || 0)}`;
-      els.storageHealthLeases.textContent = String(Number(stats.active_leases || 0)); els.storageHealthGenerations.textContent = String(Number(stats.generations || 0)); els.storageHealthSize.textContent = formatBytes(stats.size_bytes || 0);
+      els.storageHealthLeases.textContent = String(Number(stats.active_leases || 0)); els.storageHealthGenerations.textContent = String(Number(stats.generations || 0));
+      $("storageHealthAllocated").textContent = stats.disk ? formatBytes(stats.disk.allocated_bytes || 0) : "-";
+      const reusableDatabaseBytes = Number(stats.disk?.database?.reusable_bytes ?? stats.database?.reusable_bytes ?? 0);
+      const diskCategories = { ...stats.disk?.categories };
+      // Keep detailed API accounting intact; group the three caches only for presentation.
+      diskCategories.comfy_cache = Object.fromEntries(["file_bytes", "file_count", "allocated_bytes"].map(field => [field,
+        ["comfy_inputs", "comfy_outputs", "comfy_blobs"].reduce((total, key) => total + Number(diskCategories[key]?.[field] || 0), 0),
+      ]));
+      const categories = [["originals", "画廊原图与参考图"], ["thumbnails", "预览图"], ["comfy_cache", "ComfyUI 缓存"], ["database", "数据库"], ["backups", "升级备份"], ["temporary", "其他临时文件"], ["other", "配置及其他文件"]];
+      $("storageHealthBreakdown").innerHTML = stats.disk ? categories.map(([key, label]) => {
+        const size = formatBytes(diskCategories[key]?.file_bytes || 0);
+        const reusable = key === "database" && reusableDatabaseBytes > 0 ? `（${formatBytes(reusableDatabaseBytes)} 可压缩）` : "";
+        return `<div><span>${escape(label)}</span><strong>${escape(size + reusable)}</strong></div>`;
+      }).join("") : "";
+      const repaired = report?.repaired || {};
+      const repairs = [["expired_leases", "到期保留记录"], ["expired_import_batches", "过期导入批次"], ["broken_assets", "不可用原图"], ["rebuilt_thumbnails", "重建预览"], ["unreferenced_assets", "无引用图片"], ["orphan_files", "无引用文件"], ["stale_temporary_files", "过期临时文件"], ["comfy_files", "ComfyUI 缓存文件"], ["unused_payloads", "无引用快照"], ["backups_removed", "旧升级备份"]].filter(([key]) => Number(repaired[key]) > 0).map(([key, label]) => `${label} ${Number(repaired[key])} 项`);
+      if (report?.database?.compacted) repairs.push(`数据库缩减 ${formatBytes(report.database.bytes_reclaimed)}`);
+      else if (report?.deep && report?.database?.reason === "comfy_tasks_pending") repairs.push("有待处理的 ComfyUI 任务，暂缓数据库压缩");
+      else if (report?.deep && report?.database?.reason === "insufficient_working_space") repairs.push("可用磁盘空间不足，暂缓数据库压缩");
+      else if (report?.deep && report?.database?.reason === "database_busy") repairs.push("数据库正在使用，暂缓压缩");
+      $("storageHealthRepaired").textContent = repairs.length ? `最近维护：${repairs.join("；")}。` : "";
+      $("storageHealthRepaired").classList.toggle("is-hidden", !repairs.length);
       els.storageHealthErrors.textContent = errors.length ? errors.join("；") : "暂无异常。";
       if (report?.retention) storageRetention = report.retention;
       if (Array.isArray(report?.external_sources)) hooks.externalSources().ingest(report.external_sources);
@@ -101,7 +174,7 @@
     async function loadStorageHealth() { try { renderStorageHealth(await apiGet("storage/health")); } catch (error) { els.storageHealthStatus.textContent = "读取失败"; els.storageHealthErrors.textContent = errorMessage(error, "存储状态读取失败"); } }
 
     async function runStorageMaintenance(deep) {
-      if (deep && !await confirmAction("深度检查会重新计算全部原图哈希，历史较多时可能耗时较长。继续执行？")) return;
+      if (deep && !await confirmAction("深度检查会重新计算全部原图哈希，并在数据库空闲空间较多时压缩数据库文件。历史较多时可能耗时较长，期间数据库操作可能需要等待。继续执行？")) return;
       els.runMaintenanceButton.disabled = true; els.runDeepMaintenanceButton.disabled = true; els.storageHealthStatus.textContent = "检查中";
       try { const report = await apiPost("storage/maintenance", { deep: !!deep }); renderStorageHealth(report); await loadStorageHealth(); showNotice(deep ? "存储深度检查已完成。" : "存储检查已完成。", report.status === "error" ? "error" : "success"); }
       catch (error) { showNotice(errorMessage(error, "存储检查失败"), "error"); await loadStorageHealth(); }
@@ -148,7 +221,7 @@
           setError(els.settingsError, message); showNotice(message, "error");
           return false;
         } finally {
-          els.addProviderButton.disabled = false; els.addModelButton.disabled = false; els.saveSettingsButton.disabled = false;
+          els.addProviderButton.disabled = false; els.addModelButton.disabled = false; els.saveSettingsButton.disabled = settingsSaving;
         }
       })();
       const loaded = await settingsLoadPromise;
@@ -284,9 +357,9 @@
       const kind = provider.kind || "custom_json";
       const official = kind === "novelai_official";
       if (official) provider.max_concurrent_generations = 1;
-      const credentialField = official ? `${field("api_key", "NovelAI 完整 API Token", provider.api_key)}<div class="field"><span class="field-hint">填写 NovelAI 账户设置中生成的完整 Persistent API Token，保留前缀，无需添加 Bearer。</span></div>` : kind === "nai_direct" ? `${field("api_key", "生图 Token（toUserId）", provider.api_key)}<div class="field"><span class="field-hint">填写在 nai.sta1n.cn 申请的 toUserId。</span></div>` : field("api_key", "接口密钥（API Key）", provider.api_key);
+      const credentialField = official ? `${field("api_key", "NovelAI 完整 API Token", provider.api_key)}<div class="field"><span class="field-hint">填写 NovelAI 账户设置中生成的完整 Persistent API Token，保留前缀，无需添加 Bearer。</span></div>` : kind === "nai_direct" ? `${field("api_key", "生图 Token（toUserId）", provider.api_key)}<div class="field"><span class="field-hint">填写在 nai.sta1n.cn 申请的 toUserId。</span></div>` : field("api_key", "接口密钥（API Key）", provider.api_key, "text", false, kind === "comfyui" ? "留空时不使用" : "");
       const headersField = kind === "nai_direct" ? "" : textAreaField("custom_headers", "自定义请求头（JSON 或每行一个 Header）", provider.custom_headers);
-      const proxyField = `${field("proxy", "网络代理（可选）", provider.proxy || "")}<div class="field field-wide"><span class="field-hint">留空不启用。支持 HTTP/HTTPS 代理，例如 http://192.168.1.2:7890；此服务商的生图、模型查询、额度查询和结果图下载均使用该代理。</span></div>`;
+      const proxyField = field("proxy", "网络代理", provider.proxy || "", "text", false, "留空时不使用");
       const common = `${field("id", "ID", provider.id)}${field("name", "名称", provider.name)}${selectField("kind", "供应类型", kind, PROVIDER_KINDS)}${field("base_url", "接口地址（Base URL）", provider.base_url)}${credentialField}${field("timeout_seconds", "超时秒数", provider.timeout_seconds, "number")}${field("max_concurrent_generations", "Provider 最大并发", provider.max_concurrent_generations ?? 2, "number", official)}${official ? '<div class="field"><span class="field-hint">官方服务商当前固定串行生成，同时最多处理 1 个请求。</span></div>' : ""}${proxyField}${headersField}`;
       const typeFields = kind === "openai_images" ? `${field("generate_path", "文生图路径", provider.generate_path)}${field("edit_path", "图生图路径", provider.edit_path)}${field("models_path", "模型列表路径", provider.models_path || "/models")}${selectField("edit_request_format", "图生图请求格式", provider.edit_request_format, [["multipart", "multipart"], ["json_data_url", "JSON data URL"]])}` : kind === "gemini" ? `${field("generate_path", "generateContent 路径（支持 {model}）", provider.generate_path)}${field("models_path", "模型列表路径", provider.models_path || "/v1beta/models")}` : kind === "nai_direct" ? `${field("generate_path", "生成路径", provider.generate_path)}<div class="field field-wide"><span class="field-hint">第三方服务协议：GET /generate；Token 作为 token 查询参数发送。该类型不是 NovelAI 官方 API，且仅支持文生图。</span></div>` : `${field("generate_path", "文生图路径", provider.generate_path)}${field("edit_path", "图生图路径", provider.edit_path)}${field("models_path", "模型列表路径", provider.models_path || "/models")}${selectField("edit_request_format", "图生图请求格式", provider.edit_request_format, [["multipart", "multipart"], ["json_data_url", "JSON data URL"]])}${textAreaField("request_template", "请求 JSON 模板（可选）", provider.request_template)}${field("response_image_path", "响应图片路径（可选）", provider.response_image_path)}<div class="field field-wide"><span class="field-hint">模板可使用 {{prompt}}、{{model}}、{{size}}、{{count}} 和参数字段。</span></div>`;
       const officialFields = `${field("generate_path", "文生图路径", provider.generate_path)}${field("edit_path", "图生图路径", provider.edit_path)}<div class="field field-wide"><span class="field-hint">V4.5 支持单底图、精确角色 / 风格参考、Vibe、多角色与局部重绘；V5 支持单底图、多角色、透明背景与局部重绘。V5 精选版局部重绘使用 V4.5 精选版。</span></div>`;
@@ -299,7 +372,7 @@
       $("discoverModelsButton")?.addEventListener("click", () => void discoverProviderModels(provider));
       window.ImageStudioSelect?.refresh(els.providerForm);
     }
-    function field(key, label, value, type = "text", disabled = false) { return `<div class="field"><label>${label}</label><input data-provider-field="${key}" type="${type}" value="${escape(value)}"${disabled ? " disabled" : ""} /></div>`; }
+    function field(key, label, value, type = "text", disabled = false, placeholder = "") { return `<div class="field"><label>${label}</label><input data-provider-field="${key}" type="${type}" value="${escape(value)}"${placeholder ? ` placeholder="${escape(placeholder)}"` : ""}${disabled ? " disabled" : ""} /></div>`; }
     function textAreaField(key, label, value) { return `<div class="field field-wide"><label>${label}</label><textarea data-provider-field="${key}" rows="3">${escape(value)}</textarea></div>`; }
     function selectField(key, label, value, options) { return `<div class="field"><label>${label}</label><select data-provider-field="${key}">${options.map(([id, name]) => `<option value="${id}" ${id === value ? "selected" : ""}>${name}</option>`).join("")}</select></div>`; }
     function updateProviderField(input) { const provider = currentSettingsProvider(); if (!provider) return; const key = input.dataset.providerField; const value = input.type === "checkbox" ? input.checked : input.type === "number" ? Number(input.value) : input.value; if (key === "kind" && value !== provider.kind) { Object.assign(provider, providerDefaults(value)); provider.kind = value; state.selectedSettingsModelId = ""; renderProviderEditor(); renderModelEditor(); return; } provider[key] = value; if (key === "id") { state.selectedSettingsProviderId = input.value; updateSettingsRowId(els.settingsProviderList, "provider", input.value); const activeRow = els.settingsProviderList.querySelector(".provider-row.is-active"); if (activeRow && !provider.name) activeRow.querySelector("strong").textContent = input.value; } refreshSettingsDefaultModels(); }
@@ -353,7 +426,7 @@
     function renderSchemaDefault(name, descriptor) {
       const type = String(descriptor.type || "text").toLowerCase();
       const value = descriptor.default ?? "";
-      const label = `<div class="field-label-row">${schemaParameterLabel(name, descriptor)}${library.schemaPolicyButton(name)}</div>`;
+      const label = `<div class="field-label-row">${schemaParameterLabel(name, descriptor)}${schemaPolicyButton(name)}</div>`;
       const accessibleLabel = escape(schemaParameterTitle(name, descriptor));
       if ((type === "select" || type === "preset") && Array.isArray(descriptor.choices)) return `<div class="field">${label}<select aria-label="${accessibleLabel} 默认值" data-schema-default="${escape(name)}">${descriptor.choices.map((choice) => { const item = typeof choice === "object" ? choice : { value: choice, label: choice }; return `<option value="${escape(item.value)}" ${String(item.value) === String(value) ? "selected" : ""}>${escape(item.label || item.value)}</option>`; }).join("")}</select></div>`;
       if (type === "boolean" || type === "bool") return `<div class="field">${label}<label class="toggle-control"><input data-schema-default="${escape(name)}" aria-label="${accessibleLabel} 默认值" type="checkbox" ${value ? "checked" : ""} /><span aria-hidden="true"></span></label></div>`;
@@ -397,7 +470,7 @@
       els.modelForm.querySelectorAll("[data-edit-tool-parameter]").forEach((button) => button.addEventListener("click", () => openToolParameterDialog(button.dataset.editToolParameter)));
       els.modelForm.querySelectorAll("[data-edit-schema-policy]").forEach((button) => button.addEventListener("click", async () => {
         const name = button.dataset.editSchemaPolicy;
-        const policy = await library.editParameterPolicy(name, model.parameters[name]);
+        const policy = await editParameterPolicy(name, model.parameters[name]);
         if (!policy) return;
         Object.assign(model.parameters[name], policy);
         const raw = $("modelParametersSchema"); if (raw) raw.value = JSON.stringify(model.parameters, null, 2);
@@ -742,6 +815,7 @@
     function bind() {
       if (bound) return;
       bound = true;
+      bindSettingsPanelLayout();
       const bindGallerySort = () => {
         const select = $("gallerySort");
         if (!select || select.dataset.bound) return;
@@ -767,7 +841,7 @@
       $("parameterDialogCancel").addEventListener("click", closeToolParameterDialog); $("parameterDialogApply").addEventListener("click", applyToolParameterDialog); els.addProviderButton.addEventListener("click", () => void addProvider()); els.addModelButton.addEventListener("click", () => void addModel()); els.saveSettingsButton.addEventListener("click", () => void saveSettings());
     }
 
-    return { bind, loadSettings, loadStorageHealth, updateSettingsDirty, currentSettingsModel, renderModelEditor, prepareComfyWorkflowSettings, addComfyWorkflowDraft, closeToolParameterDialog, leaveSettings, settingsDirty,
+    return { bind, layoutSettingsPanels, loadSettings, loadStorageHealth, updateSettingsDirty, currentSettingsModel, renderModelEditor, prepareComfyWorkflowSettings, addComfyWorkflowDraft, closeToolParameterDialog, leaveSettings, settingsDirty,
       isSaving: () => settingsSaving,
       getSettings: () => state.settings,
       setNovelAIModels: models => { if (Array.isArray(models)) novelaiModels = models; },

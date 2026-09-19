@@ -2,7 +2,7 @@
 const assert = require("node:assert/strict");
 const path = require("node:path");
 const { chromium, webkit } = require(process.env.STUDIO_PLAYWRIGHT || "playwright");
-const assets = path.resolve(__dirname, "../../pages/image-studio");
+const assets = require("../support/webui_paths.cjs").frontend;
 
 async function verify(browser, name, width) {
   const page = await browser.newPage({ viewport: { width, height: 800 }, hasTouch: width < 600 });

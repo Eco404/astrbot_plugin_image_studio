@@ -181,17 +181,22 @@ def project_import_metadata(
 ) -> dict[str, Any]:
     """Project a selected ComfyUI output without changing the shared asset metadata."""
 
-    if "comfy_output_node" not in overrides:
-        return metadata
-    output_node = overrides["comfy_output_node"]
+    from ..metadata.comfyui.user_rules import get_rules
+    from ..metadata.parser import PARSER_VERSION, parse_metadata_fields
+
+    rules = get_rules()
+    rules_fingerprint = rules.fingerprint
+    stale_rules = metadata.get("format") == "comfyui" and (
+        bool(metadata.get("rules_fingerprint") or rules.user_rules)
+        and metadata.get("rules_fingerprint") != rules_fingerprint
+    )
+    output_node = overrides.get("comfy_output_node", "")
     if not isinstance(output_node, str):
         raise ValueError("ComfyUI 输出节点 ID 必须是字符串")
-    if not output_node:
+    if not output_node and not stale_rules:
         return metadata
     if metadata.get("format") != "comfyui":
         raise ValueError("仅 ComfyUI 图片支持选择输出节点")
-    from ..metadata.parser import PARSER_VERSION, parse_metadata_fields
-
     raw = metadata.get("raw")
     if not isinstance(raw, dict):
         raise ValueError("ComfyUI 原始工作流不可用，无法选择输出节点")
@@ -208,6 +213,7 @@ def project_import_metadata(
     ).encode()
     key = (
         PARSER_VERSION,
+        rules_fingerprint,
         metadata.get("parser_version"),
         hashlib.sha256(raw_bytes).digest(),
         dimensions.get("width", 0),
@@ -238,6 +244,28 @@ def project_import_metadata(
             ):
                 _COMFY_PROJECTION_CACHE.popitem(last=False)
     return projected
+
+
+def refresh_import_supplemental(
+    supplemental: dict[str, Any], metadata: dict[str, Any]
+) -> dict[str, Any]:
+    """Refresh derived fields while retaining explicitly entered import values."""
+    overrides = supplemental.get("overrides")
+    if (
+        metadata.get("format") != "comfyui"
+        or not isinstance(overrides, dict)
+        or metadata.get("normalized", {}).get("requires_output_selection")
+    ):
+        return supplemental
+    return {
+        **supplemental,
+        **_import_supplemental(
+            str(supplemental.get("original_filename") or ""),
+            overrides,
+            metadata,
+            allow_unresolved_output=True,
+        ),
+    }
 
 
 def _external_parameter_overrides(
@@ -345,22 +373,110 @@ def _load_json(value: str) -> dict[str, Any]:
         return {}
 
 
+def searchable_parameters(value: Any) -> dict[str, Any]:
+    """Keep scalar user parameters while excluding execution/storage internals."""
+    if not isinstance(value, dict):
+        return {}
+    excluded = {
+        "raw",
+        "workflow",
+        "workflow_json",
+        "api_graph",
+        "api_graph_json",
+        "api_prompt",
+        "nodes",
+        "links",
+        "comfyui",
+        "fingerprint",
+        "rules_fingerprint",
+        "request_fingerprint",
+        "sha256",
+        "asset_id",
+    }
+    result = {}
+    for key, item in value.items():
+        if not isinstance(key, str) or key.startswith("_") or key.lower() in excluded:
+            continue
+        if isinstance(item, (str, int, float, bool)):
+            result[key] = item
+        elif isinstance(item, list) and all(
+            isinstance(entry, (str, int, float, bool)) for entry in item
+        ):
+            result[key] = item[:1000]
+    return result
+
+
 def _search_projection(value: Any) -> str:
+    """Index user-facing values, never arbitrary nested execution evidence."""
     values: list[str] = []
+    seen: set[str] = set()
+    fields = {
+        "original_filename",
+        "generation_engine",
+        "model",
+        "models",
+        "mode",
+        "prompt",
+        "negative_prompt",
+        "seed",
+        "steps",
+        "sampler",
+        "scheduler",
+        "noise_schedule",
+        "cfg",
+        "width",
+        "height",
+        "size",
+        "count",
+        "strength",
+        "denoise",
+        "output_format",
+        "artist",
+        "style",
+        "loras",
+    }
+    containers = {
+        "parameters",
+        "overrides",
+        "effective_request",
+        "display_parameters",
+        "external_parameters",
+    }
+
+    def add(item: Any) -> None:
+        if isinstance(item, (str, int, float, bool)):
+            text = str(item).strip()
+            if text and text not in seen:
+                seen.add(text)
+                values.append(text)
 
     def collect(item: Any, depth: int = 0) -> None:
-        if depth > 10:
+        if depth > 5:
             return
-        if isinstance(item, dict):
-            for key, child in item.items():
-                if key not in {"workflow", "raw", "api_prompt", "nodes", "links"}:
-                    values.append(str(key))
-                    collect(child, depth + 1)
-        elif isinstance(item, list):
+        if isinstance(item, list):
             for child in item[:1000]:
                 collect(child, depth + 1)
-        elif item is not None:
-            values.append(str(item))
+        elif isinstance(item, dict):
+            for key, child in item.items():
+                if key in fields:
+                    if isinstance(child, list):
+                        for entry in child[:100]:
+                            if isinstance(entry, dict):
+                                add(entry.get("name"))
+                                add(entry.get("model"))
+                            else:
+                                add(entry)
+                    else:
+                        add(child)
+                elif key in {"parameters", "external_parameters"}:
+                    for entry in searchable_parameters(child).values():
+                        if isinstance(entry, list):
+                            for scalar in entry:
+                                add(scalar)
+                        else:
+                            add(entry)
+                elif key in containers:
+                    collect(child, depth + 1)
 
     collect(value)
     return " ".join(values)[:200000]

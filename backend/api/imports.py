@@ -20,8 +20,15 @@ from ..gallery.errors import (
     ImportDuplicateError,
     ImportEditConflictError,
 )
-from ..metadata.exchange import export_parameters, resolve_parameters
+from ..parameters.exchange import export_parameters, resolve_parameters
+from ..metadata.comfyui.user_rules import (
+    load_rules,
+    make_rules,
+    prepare_rule,
+    use_rules,
+)
 from ..metadata.parser import parse_metadata_fields
+from ..media.files import _atomic_write
 
 LOG_TAG = "[ImageStudio]"
 
@@ -32,6 +39,7 @@ class ImportsAPI:
         self.get_settings = get_settings
         self.uploads = {}
         self.groups = {}
+        self._node_rules_lock = asyncio.Lock()
 
     def clear(self):
         self.uploads.clear()
@@ -49,16 +57,140 @@ class ImportsAPI:
             output_node_id = body.get("output_node_id", "")
             if not isinstance(output_node_id, str):
                 raise ValueError("ComfyUI 输出节点 ID 必须是字符串")
-            result = await asyncio.to_thread(
-                parse_metadata_fields,
+            rules = await asyncio.to_thread(load_rules, self.store.data_dir)
+            with use_rules(rules):
+                result = await asyncio.to_thread(
+                    parse_metadata_fields,
+                    body["metadata"],
+                    width=width,
+                    height=height,
+                    output_node_id=output_node_id,
+                )
+            return json_response(result)
+        except (ValueError, TypeError, OverflowError) as exc:
+            return error_response(str(exc), status_code=400)
+
+    @staticmethod
+    def _node_rule_preview(body: Any, rules, *, delete: bool = False):
+        if not isinstance(body, dict) or (
+            not isinstance(body.get("metadata"), dict)
+            and not (delete and "metadata" not in body)
+        ):
+            raise ValueError("元数据必须是对象")
+        if (
+            len(json.dumps(body, ensure_ascii=False, allow_nan=False).encode())
+            > 4 * 1024 * 1024
+        ):
+            raise ValueError("元数据不能超过 4 MB")
+        width = max(0, min(65535, int(body.get("width") or 0)))
+        height = max(0, min(65535, int(body.get("height") or 0)))
+        output_node_id = body.get("output_node_id", "")
+        if not isinstance(output_node_id, str):
+            raise ValueError("ComfyUI 输出节点 ID 必须是字符串")
+        if delete:
+            rule_id = body.get("rule_id")
+            if not isinstance(rule_id, str) or not any(
+                item["id"] == rule_id for item in rules.user_rules
+            ):
+                raise ValueError("文本节点规则不存在，或属于不可删除的内置规则")
+            rule = None
+        else:
+            node_id = body.get("node_id")
+            if not isinstance(node_id, str) or not node_id:
+                raise ValueError("请选择需要绑定的节点")
+            rule = prepare_rule(body["metadata"], node_id, body.get("rule"))
+            rule_id = rule["id"]
+        items = [item for item in rules.user_rules if item["id"] != rule_id]
+        if rule is not None:
+            items.append(rule)
+        proposed = make_rules(items)
+        if delete and "metadata" not in body:
+            return rule, proposed, None
+        with use_rules(proposed):
+            parsed = parse_metadata_fields(
                 body["metadata"],
                 width=width,
                 height=height,
                 output_node_id=output_node_id,
             )
-            return json_response(result)
-        except (ValueError, TypeError, OverflowError) as exc:
+        if parsed.get("format") != "comfyui":
+            raise ValueError("文本节点规则仅用于 ComfyUI 工作流")
+        if not delete and not any(
+            item.get("node_id") == body["node_id"]
+            for item in parsed.get("normalized", {}).get("node_rule_candidates", [])
+            if isinstance(item, dict)
+        ):
+            raise ValueError(
+                "该节点不在当前选定的保存分支中，请先选择对应的最终保存输出"
+            )
+        return rule, proposed, parsed
+
+    async def _api_import_node_rules(self) -> Any:
+        try:
+            rules = await asyncio.to_thread(load_rules, self.store.data_dir)
+            return json_response(
+                {"rules": rules.user_rules, "revision": rules.fingerprint}
+            )
+        except (OSError, ValueError) as exc:
             return error_response(str(exc), status_code=400)
+
+    async def _api_import_node_rule_preview(self) -> Any:
+        try:
+            body = await web_request.json(default={})
+            rules = await asyncio.to_thread(load_rules, self.store.data_dir)
+            rule, proposed, parsed = await asyncio.to_thread(
+                self._node_rule_preview, body, rules
+            )
+            return json_response(
+                {"rule": rule, "parsed": parsed, "revision": rules.fingerprint}
+            )
+        except (ValueError, TypeError, OverflowError, RecursionError) as exc:
+            return error_response(str(exc), status_code=400)
+
+    async def _change_node_rule(self, *, delete: bool = False) -> Any:
+        try:
+            body = await web_request.json(default={})
+            if not isinstance(body, dict) or not isinstance(body.get("revision"), str):
+                raise ValueError("缺少规则版本，请重新打开文本节点绑定窗口")
+            async with self._node_rules_lock:
+                rules = await asyncio.to_thread(load_rules, self.store.data_dir)
+                if body["revision"] != rules.fingerprint:
+                    return error_response(
+                        "文本节点规则已更改，请重新打开绑定窗口后重试", status_code=409
+                    )
+                rule, proposed, parsed = await asyncio.to_thread(
+                    self._node_rule_preview, body, rules, delete=delete
+                )
+                encoded = json.dumps(
+                    {"version": 1, "rules": proposed.user_rules},
+                    ensure_ascii=False,
+                    indent=2,
+                ).encode()
+                write_task = asyncio.create_task(
+                    asyncio.to_thread(
+                        _atomic_write,
+                        self.store.data_dir / "comfyui_parser_rules.json",
+                        encoded,
+                    )
+                )
+                try:
+                    await asyncio.shield(write_task)
+                except asyncio.CancelledError:
+                    # A disconnected client must not release the mutation lock
+                    # while its worker can still overwrite a later save.
+                    await write_task
+                    raise
+            return json_response(
+                {"rule": rule, "parsed": parsed, "revision": proposed.fingerprint}
+            )
+        except (ValueError, TypeError, OverflowError, RecursionError) as exc:
+            return error_response(str(exc), status_code=400)
+
+    async def _api_import_node_rule_save(self) -> Any:
+        return await self._change_node_rule()
+
+    async def _api_import_node_rule_delete(self) -> Any:
+        return await self._change_node_rule(delete=True)
 
     @staticmethod
     def _import_hash_items(body: Any) -> list[dict[str, str]]:
@@ -459,13 +591,15 @@ class ImportsAPI:
         if len(body["content"]) > 4 * 1024 * 1024:
             return error_response("参数文本不能超过 4 MB", status_code=400)
         try:
-            result = await asyncio.to_thread(
-                resolve_parameters,
-                body["content"],
-                self.get_settings(),
-                str(body.get("model_ref") or ""),
-                for_reproduction=body.get("for_reproduction") is True,
-            )
+            rules = await asyncio.to_thread(load_rules, self.store.data_dir)
+            with use_rules(rules):
+                result = await asyncio.to_thread(
+                    resolve_parameters,
+                    body["content"],
+                    self.get_settings(),
+                    str(body.get("model_ref") or ""),
+                    for_reproduction=body.get("for_reproduction") is True,
+                )
             return json_response(result)
         except ValueError as exc:
             return error_response(str(exc), status_code=400)
@@ -516,11 +650,13 @@ class ImportsAPI:
             detail = await self.store.generation_image_context(generation_id, image_id)
             if detail is None:
                 return error_response("生成记录不存在", status_code=404)
-            result = export_parameters(
-                detail,
-                image_id,
-                str(web_request.query.get("format") or "studio"),
-            )
+            rules = await asyncio.to_thread(load_rules, self.store.data_dir)
+            with use_rules(rules):
+                result = export_parameters(
+                    detail,
+                    image_id,
+                    str(web_request.query.get("format") or "studio"),
+                )
             return json_response(result)
         except ValueError as exc:
             return error_response(str(exc), status_code=400)

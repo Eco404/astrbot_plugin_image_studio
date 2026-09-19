@@ -10,6 +10,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..config import HistorySettings
+from ..database.maintenance import (
+    compact_database,
+    database_space,
+    directory_space,
+    rotate_backups,
+)
+from ..database.payloads import gc_payloads
 from ..database.schema import DATABASE_VERSION
 from ..media.files import (
     _delete_unreferenced_files,
@@ -45,6 +52,7 @@ class GalleryMaintenance:
     def __init__(self, context: GalleryContext, services: MaintenanceServices) -> None:
         self.context = context
         self.services = services
+        self.protected_backup = None
 
     def run_maintenance(
         self,
@@ -151,19 +159,33 @@ class GalleryMaintenance:
             older_than=grace_cutoff
         )
         repaired["stale_temporary_files"] = self.cleanup_stale_files(checked_at)
+        database = {}
         try:
             with self.context.connect() as conn:
+                payloads = gc_payloads(conn)
+                repaired["unused_payloads"] = int(payloads["payloads_removed"])
+                repaired["payload_bytes_reclaimed"] = int(payloads["bytes_reclaimed"])
+            repaired.update(
+                rotate_backups(
+                    self.context.data_dir / "backups",
+                    database_version=DATABASE_VERSION,
+                    protected=self.protected_backup,
+                )
+            )
+            with self.context.connect() as conn:
                 conn.execute("PRAGMA optimize")
+                database = compact_database(conn, self.context.db_path, deep=deep)
         except sqlite3.Error as exc:
-            errors.append(f"SQLite optimize 失败：{type(exc).__name__}")
+            errors.append(f"SQLite 空间维护失败：{type(exc).__name__}")
         return {
             "status": "warning" if errors else "healthy",
             "running": False,
             "checked_at": checked_at,
             "duration_ms": round((time.perf_counter() - started) * 1000),
             "deep": deep,
-            "stats": self.storage_stats(),
+            "stats": self.storage_stats(include_disk=True),
             "repaired": repaired,
+            "database": database,
             "errors": errors,
         }
 
@@ -280,7 +302,7 @@ class GalleryMaintenance:
         with self.context.connect() as conn:
             return int(conn.execute("SELECT COUNT(*) FROM image_assets").fetchone()[0])
 
-    def storage_stats(self) -> dict[str, Any]:
+    def storage_stats(self, *, include_disk: bool = False) -> dict[str, Any]:
         now = time.time()
         with self.context.connect() as conn:
             row = conn.execute(
@@ -294,7 +316,8 @@ class GalleryMaintenance:
                 "COALESCE((SELECT SUM(size_bytes) FROM image_thumbnails), 0)",
                 (now, now),
             ).fetchone()
-        return {
+            database = database_space(conn) if include_disk else None
+        stats = {
             "generations": int(row[0]),
             "assets": int(row[1]),
             "thumbnails": int(row[2]),
@@ -307,6 +330,10 @@ class GalleryMaintenance:
                 if item["enabled"]
             ],
         }
+        if include_disk:
+            stats["disk"] = directory_space(self.context.data_dir)
+            stats["disk"]["database"] = database
+        return stats
 
     def remove_broken_asset(self, asset_id: str) -> int:
         if not _SHA256_RE.fullmatch(asset_id):
@@ -397,6 +424,10 @@ class GalleryMaintenance:
     def cleanup_orphaned_asset_files(self, *, older_than: float | None = None) -> int:
         """Delete content-addressed files that have no database asset row."""
 
+        if self.context.assets_dir.is_symlink() or not _is_within(
+            self.context.assets_dir, self.context.data_dir
+        ):
+            return 0
         with self.context.connect() as conn:
             rows = conn.execute("SELECT path FROM image_assets").fetchall()
         referenced = {
@@ -415,6 +446,10 @@ class GalleryMaintenance:
     def cleanup_orphaned_thumbnails(self, *, older_than: float | None = None) -> int:
         """Delete thumbnail files no longer registered to a shared asset."""
 
+        if self.context.thumbnails_dir.is_symlink() or not _is_within(
+            self.context.thumbnails_dir, self.context.data_dir
+        ):
+            return 0
         with self.context.connect() as conn:
             rows = conn.execute("SELECT path FROM image_thumbnails").fetchall()
         referenced = {
@@ -436,12 +471,17 @@ class GalleryMaintenance:
             (self.context.exports_dir, now - 3600),
             (self.context.delivery_dir, now - 3600),
         ):
-            if not root.is_dir():
+            if (
+                root.is_symlink()
+                or not root.is_dir()
+                or not _is_within(root, self.context.data_dir)
+            ):
                 continue
             for path in root.rglob("*"):
                 try:
                     if (
-                        path.is_file()
+                        not path.is_symlink()
+                        and path.is_file()
                         and _is_within(path, root)
                         and path.stat().st_mtime < cutoff
                     ):

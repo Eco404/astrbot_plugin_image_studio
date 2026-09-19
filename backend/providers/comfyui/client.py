@@ -14,6 +14,14 @@ from urllib.parse import quote, urlsplit, urlunsplit
 import aiohttp
 from PIL import Image, ImageOps
 
+from ...comfyui.catalog import auxiliary_input_policy, is_auxiliary_input_literal
+from ...models import GeneratedImage
+from .global_seed import prepare_global_seed
+from .output_metadata import (
+    image_workflow_snapshot,  # noqa: F401 - compatibility export
+    prepare_output,
+)
+from .ui_sync import synchronize_workflow
 from .workflows import (
     FIXED_OUTPUT_POLICY,
     clear_execution_cache_markers,
@@ -23,13 +31,23 @@ from .workflows import (
     normalize_workflow,
     prepare_graph,
 )
-from ...models import GeneratedImage
 
 MAX_JSON_BYTES = 32 * 1024 * 1024
 MAX_IMAGE_BYTES = 64 * 1024 * 1024
 MAX_BATCH_BYTES = 256 * 1024 * 1024
 MAX_OUTPUT_IMAGES = 256
 MAX_IMAGE_PIXELS = 64_000_000
+
+
+def prepare_submission_workflow(config, graph, targets=()):
+    synchronized = synchronize_workflow(config, graph, targets=targets)
+    global_seed = prepare_global_seed(config, graph, synchronized["workflow"])
+    return {
+        "workflow": global_seed["workflow"],
+        "warnings": list(
+            dict.fromkeys(synchronized["warnings"] + global_seed["warnings"])
+        ),
+    }
 
 
 class ComfyExecutionError(RuntimeError):
@@ -298,6 +316,14 @@ class ComfyClient:
             if binding["source"] == "seed"
             for target in binding["targets"]
         }
+        edited_targets = {
+            (target["node_id"], target["input_name"])
+            for binding in config["bindings"].values()
+            for target in binding["targets"]
+        } | {
+            (target["node_id"], target["input_name"])
+            for target in config.get("workflow_sync_targets", [])
+        }
 
         def issue(
             code: str,
@@ -350,6 +376,32 @@ class ComfyClient:
             for name, value in node["inputs"].items():
                 field = declared.get(name)
                 if field is None:
+                    policy = auxiliary_input_policy(kind, name)
+                    if policy:
+                        label = (
+                            "展示缓存" if policy["role"] == "display" else "界面按钮"
+                        )
+                        linked = is_link(value)
+                        edited = (node_id, name) in edited_targets
+                        if linked or edited:
+                            issue(
+                                "auxiliary_input_link"
+                                if linked
+                                else "auxiliary_input_edit",
+                                node_id,
+                                name,
+                                f"{name} 是{label}，目标节点未将其声明为执行输入；"
+                                + (
+                                    "请检查此连线的目标字段与节点版本"
+                                    if linked
+                                    else "请将参数绑定或固定值修改指向实际执行输入"
+                                ),
+                                "warning",
+                            )
+                            continue
+                        if is_auxiliary_input_literal(policy, value):
+                            # Keep the original graph and display snapshots intact.
+                            continue
                     issue(
                         "unknown_input",
                         node_id,
@@ -582,6 +634,25 @@ class ComfyClient:
                         if key in definition[1]
                     }
                 )
+        synchronized = prepare_submission_workflow(
+            config,
+            graph,
+            targets={
+                (target["node_id"], target["input_name"])
+                for binding in config["bindings"].values()
+                for target in binding["targets"]
+            },
+        )
+        issues.extend(
+            {
+                "code": "workflow_sync_unverified",
+                "node_id": "",
+                "input_name": "",
+                "severity": "warning",
+                "message": warning,
+            }
+            for warning in synchronized["warnings"]
+        )
         return {
             **local,
             "outputs": output_ids,
@@ -989,12 +1060,26 @@ class ComfyClient:
         client_id: str = "",
         prompt_id: str = "",
     ) -> tuple[GeneratedImage, ...]:
-        config = normalize_workflow(
+        supplied_config = (
             config if config is not None else provider.get_model(request.model).comfyui
         )
+        config = normalize_workflow(supplied_config)
         client_id = client_id or "image-studio-" + uuid.uuid4().hex
         node_errors = {}
+        prepared_snapshot = config
         if resume_id:
+            warnings = (
+                supplied_config.get("workflow_sync_warnings", [])
+                if isinstance(supplied_config, dict)
+                else []
+            )
+            if isinstance(warnings, list):
+                prepared_snapshot = {
+                    **config,
+                    "workflow_sync_warnings": [
+                        warning for warning in warnings if isinstance(warning, str)
+                    ],
+                }
             remote_id = resume_id
         else:
             pending_references = [
@@ -1030,14 +1115,33 @@ class ComfyClient:
             references = await self.upload_references(
                 provider, request.references, config=config
             )
-            graph = prepare_graph(config, request, references)
+            written_inputs = set()
+            graph = prepare_graph(
+                config, request, references, written_inputs=written_inputs
+            )
+            synchronized = prepare_submission_workflow(
+                config, graph, targets=written_inputs
+            )
+            prepared_snapshot = {
+                **config,
+                "api_graph": graph,
+                "api_graph_json": json.dumps(graph, ensure_ascii=False),
+                "workflow": synchronized["workflow"],
+                "workflow_json": json.dumps(
+                    synchronized["workflow"], ensure_ascii=False
+                )
+                if synchronized["workflow"] is not None
+                else None,
+                "workflow_sync_warnings": synchronized["warnings"],
+            }
             await _callback(
                 on_prepared,
                 {
                     "api_graph": graph,
                     "api_graph_json": json.dumps(graph, ensure_ascii=False),
-                    "workflow": config["workflow"],
-                    "workflow_json": config["workflow_json"],
+                    "workflow": prepared_snapshot["workflow"],
+                    "workflow_json": prepared_snapshot["workflow_json"],
+                    "workflow_sync_warnings": synchronized["warnings"],
                     "uploaded_references": references,
                     "outputs": config["outputs"],
                     "fingerprint": graph_fingerprint(graph),
@@ -1046,7 +1150,7 @@ class ComfyClient:
             response = await self.submit(
                 provider,
                 graph,
-                config["workflow"],
+                synchronized["workflow"],
                 client_id=client_id,
                 prompt_id=prompt_id,
             )
@@ -1083,12 +1187,17 @@ class ComfyClient:
             )
         except ComfyExecutionError as exc:
             exc.prompt_id = remote_id
+            if exc.images:
+                exc.images = await self._images_with_workflow_snapshot(
+                    exc.images, prepared_snapshot
+                )
             if execution_error:
                 exc.args = (str(execution_error) + "；" + str(exc),)
             if node_errors:
                 exc.node_errors = node_errors
                 exc.args = (str(exc) + "；" + _errors_text(node_errors),)
             raise
+        images = await self._images_with_workflow_snapshot(images, prepared_snapshot)
         if execution_error or node_errors:
             raise ComfyExecutionError(
                 str(execution_error)
@@ -1100,3 +1209,8 @@ class ComfyClient:
                 node_errors=node_errors,
             )
         return images
+
+    async def _images_with_workflow_snapshot(self, images, snapshot):
+        return await asyncio.to_thread(
+            lambda: tuple(prepare_output(image, snapshot) for image in images)
+        )

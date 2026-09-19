@@ -145,7 +145,7 @@ async function matrix(browser, width, dark) {
     assert.equal(await frame.locator("#comfyJobs").evaluate(element => element.open), false, "task queue starts collapsed");
     assert.match(await frame.locator("#comfyJobsSummary").textContent(), /进行中 1/);
     assert.equal(await frame.locator("[data-job-dismiss]").count(), 0, "running tasks cannot be dismissed");
-    assert.match(await frame.locator("#comfyJobs").textContent(), /分批 0\/3/);
+    assert.match(await frame.locator("#comfyJobs").textContent(), /排队中 · 0\/3/);
     assert.equal(submitted.length, 1); assert.equal(submitted[0].prompt, "");
     assert.equal(submitted[0].count, 5, "total target is sent at request level");
     assert.equal(submitted[0].parameters.batch_size, 3, "node batch stays an independent ordinary parameter");
@@ -335,16 +335,19 @@ async function matrix(browser, width, dark) {
     await frame.locator("#comfyImportJSON").fill("not a workflow");
     await frame.locator("#comfyReadJSON").click();
     await frame.locator("#comfyImportStatus").filter({ hasNotText: "正在读取" }).waitFor();
+    assert.equal(await frame.locator(".comfy-import").evaluate(element => element.open), true, "invalid pasted JSON keeps import controls open");
     assert.equal(await frame.locator("#comfyWorkflowEditing").isVisible(), false, "failed imports leave the empty editor hidden");
     assert.equal(await frame.locator("#comfyApplyWorkflow").isDisabled(), true);
     await frame.locator("#comfyImportJSON").fill(JSON.stringify(graph));
     await frame.locator("#comfyReadJSON").click();
-    await frame.locator("#comfyImportStatus").filter({ hasText: "已读取" }).waitFor();
+    await frame.locator("#comfyImportStatus").filter({ hasText: "已读取" }).waitFor({ state: "attached" });
+    assert.equal(await frame.locator(".comfy-import").evaluate(element => element.open), false, "valid pasted JSON collapses import controls");
     assert.equal(await frame.locator("#comfyOutputs").inputValue(), "4");
     assert.equal(await frame.locator("#comfyWorkflowEditing").isVisible(), true);
     assert.equal(await frame.locator("#comfyApplyWorkflow").isDisabled(), false, "valid graphs can be applied even with zero exposed inputs");
     assert.equal(await frame.locator("[data-comfy-binding]").count(), 0, "pasting API JSON leaves inputs empty");
     assert.ok(await frame.locator('#comfyAddBinding option').count() > 2, "identified inputs remain available in the add menu");
+    await frame.locator(".comfy-import > summary").click();
     const gaps = await frame.evaluate(() => {
       const rect = id => document.getElementById(id).getBoundingClientRect();
       return { fileToJSON: document.getElementById("comfyImportJSON").closest("label").getBoundingClientRect().top - rect("comfyChooseFile").bottom, jsonToRead: rect("comfyReadJSON").top - rect("comfyImportJSON").bottom };
@@ -358,11 +361,11 @@ async function matrix(browser, width, dark) {
       await frame.locator(".comfy-import").evaluate(element => { element.open = false; });
       const before = fileImports.length;
       assert.deepEqual(await dropFiles(frame, target, [file]), { highlighted: true, accepted: true, cleared: true });
-      await frame.locator("#comfyImportStatus").filter({ hasText: "已读取" }).waitFor();
+      await frame.locator("#comfyImportStatus").filter({ hasText: "已读取" }).waitFor({ state: "attached" });
       assert.equal(fileImports.length, before + 1, "header, body and footer share exactly one import handler");
       assert.ok(fileImports.at(-1).includes(`filename="${file.name}"`));
       if (file.content) assert.equal(await frame.locator('[data-fixed-node="3"][data-fixed-input="seed"]').inputValue(), "42", "the real importer receives and decodes the dropped JSON file");
-      assert.equal(await frame.locator(".comfy-import").evaluate(element => element.open), true, "drop reveals import feedback even when collapsed");
+      assert.equal(await frame.locator(".comfy-import").evaluate(element => element.open), false, "successful image and JSON drops collapse import controls");
       assert.equal(await frame.locator("#comfyOutputs").inputValue(), "4");
       assert.equal(await frame.locator("[data-comfy-binding]").count(), 0, "dropping an image or JSON never automatically adds bindings");
     }
@@ -373,6 +376,7 @@ async function matrix(browser, width, dark) {
     rejectFileImport = true;
     await dropFiles(frame, "#studioModal > header", [imageFile]);
     await frame.locator("#comfyImportStatus").filter({ hasText: "未包含" }).waitFor();
+    assert.equal(await frame.locator(".comfy-import").evaluate(element => element.open), true, "failed imports remain expanded with visible feedback");
     assert.equal(await frame.locator("#comfyNodeCount").textContent(), "4 个节点", "invalid image preserves the current draft");
     rejectFileImport = false;
     await frame.locator("#studioModalFooter button").filter({ hasText: "应用工作流" }).click();
@@ -381,7 +385,7 @@ async function matrix(browser, width, dark) {
     await frame.locator("#comfyEditWorkflow").click();
     const beforeReopen = fileImports.length;
     await dropFiles(frame, "#studioModalFooter", [jsonFile]);
-    await frame.locator("#comfyImportStatus").filter({ hasText: "已读取" }).waitFor();
+    await frame.locator("#comfyImportStatus").filter({ hasText: "已读取" }).waitFor({ state: "attached" });
     assert.equal(fileImports.length, beforeReopen + 1, "reopening removes the old modal drag handlers");
     await frame.locator("#studioModalFooter button").filter({ hasText: "取消" }).click();
     await frame.locator("#studioModalRoot").waitFor({ state: "hidden" });

@@ -16,7 +16,7 @@ from pathlib import Path
 class GalleryContext:
     data_dir: Path
     external_issue_handler: Callable[[str, str], None] | None = None
-    history_dir: Path = field(init=False)
+    images_dir: Path = field(init=False)
     assets_dir: Path = field(init=False)
     thumbnails_dir: Path = field(init=False)
     staging_dir: Path = field(init=False)
@@ -27,9 +27,9 @@ class GalleryContext:
 
     def __post_init__(self) -> None:
         self.data_dir = self.data_dir.resolve()
-        self.history_dir = self.data_dir / "history"
-        self.assets_dir = self.history_dir / "assets"
-        self.thumbnails_dir = self.history_dir / "thumbnails"
+        self.images_dir = self.data_dir / "images"
+        self.assets_dir = self.images_dir / "assets"
+        self.thumbnails_dir = self.images_dir / "thumbnails"
         self.staging_dir = self.data_dir / "staging_references"
         self.imports_dir = self.data_dir / "import_staging"
         self.exports_dir = self.data_dir / "exports"

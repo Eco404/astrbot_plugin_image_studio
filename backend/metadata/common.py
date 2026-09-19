@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any
 
-PARSER_VERSION = 9
+PARSER_VERSION = 12
 MAX_IMAGE_BYTES = 64 * 1024 * 1024
 MAX_METADATA_BYTES = 4 * 1024 * 1024
 MAX_PIXELS = 64_000_000

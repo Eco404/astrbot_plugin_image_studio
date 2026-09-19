@@ -7,7 +7,7 @@
     const { escape, apiGet, apiPost, bridge, showNotice, errorMessage, formatDate, formatBytes, getGallerySort, openModal } = hooks;
     const { ENGINES, own, serial, icon, renderIcons, modeLabel, engineLabel, engineOf, setCommandLabel } = window.ImageStudioPresentation;
     const { extractMetadata } = window.ImageStudioMetadata;
-    const { promptStatusMarkup, comfyDetailsMarkup } = window.ImageStudioMetadataMarkup({ escape });
+    const { promptStatusMarkup, comfyDetailsMarkup, comfyStageFields } = window.ImageStudioMetadataMarkup({ escape });
     const $ = id => document.getElementById(id);
     let bound = false;
     let imports = [];
@@ -21,6 +21,9 @@
     let importBatchResult = null;
     let importEditor = null;
     let importEditLoading = false;
+    let importRulesBusy = false;
+    let importRulesRevision = 0;
+    const nodeRules = window.ImageStudioNodeRules({ escape, apiGet, apiPost, openModal, showNotice, errorMessage, onChanged: refreshImportRules });
     // Serialized server snapshots are immutable and separate from editable drafts.
     // Each reopen validates item revisions with a fresh lightweight manifest.
     const editSnapshots = new Map();
@@ -78,7 +81,7 @@
     // Uploads and persisted edits share controls, but never share draft state.
     const importContext = {
       get items() { return imports; }, set items(value) { imports = value; },
-      get saving() { return importing; }, get addJobs() { return importAddJobs; },
+      get saving() { return importing || importRulesBusy; }, get addJobs() { return importAddJobs; },
       get epoch() { return importEpoch; },
       get batchJob() { return importBatchJob; }, set batchJob(value) { importBatchJob = value; },
       get batchResult() { return importBatchResult; }, set batchResult(value) { importBatchResult = value; },
@@ -99,7 +102,7 @@
       const outputChoice = saveOutputs.length > 1 ? `<div class="field field-wide"><label for="${item.id}-output">最终保存输出</label><div class="import-output-choice"><select id="${item.id}-output" data-import-output aria-label="最终保存输出"><option value="">请选择保存输出</option>${saveOutputs.map((entry) => `<option value="${escape(entry.node_id)}" ${String(entry.node_id) === String(item.outputNodeId || "") ? "selected" : ""}>${escape(entry.type)} #${escape(entry.node_id)}</option>`).join("")}</select><button class="quiet-button import-batch-button" data-batch-import-output type="button" aria-label="批量应用保存输出到全部匹配图片" data-tooltip="将保存输出选择应用到全部匹配图片（含当前图片）" ${batchChoiceDisabled(item, context) || !selectedOutput?.match_key ? "disabled" : ""}>${icon("CheckCheck")}</button></div></div>` : "";
       return `<article class="import-card glass ${item.duplicateReason ? "is-duplicate" : ""}" data-import-id="${item.id}" data-import-sha256="${item.sha256}">
         <div class="import-card-header"><button class="studio-icon-button import-sort-handle" data-sort-handle type="button" aria-label="调整第 ${index + 1} 张图片顺序：${escape(item.file.name)}" data-tooltip="拖动排序，也可聚焦后使用方向键" ${sortEnabled(context) ? "" : "disabled"}>${icon("GripVertical")}</button><span class="import-order" aria-label="第 ${index + 1} 张">${index + 1}</span><strong data-tooltip="${escape(item.file.name)}" data-tooltip-overflow>${escape(item.file.name)}</strong>${context.editing ? "" : `<button class="studio-icon-button is-danger" data-remove-import="${item.id}" type="button" aria-label="移除 ${escape(item.file.name)}" data-tooltip="移除图片" ${importing ? "disabled" : ""}>${icon("X")}</button>`}</div>
-        <div class="import-card-preview" data-sort-surface><img src="${escape(item.url)}" draggable="false" alt="${escape(item.file.name)}" /></div><div class="import-file-meta">${formatBytes(item.file.size)}${item.width ? ` · ${item.width} × ${item.height}` : ""}</div>
+        <div class="import-card-preview" data-sort-surface><img src="${escape(item.url)}" draggable="false" alt="${escape(item.file.name)}" /></div><div class="import-file-meta"><span>${formatBytes(item.file.size)}${item.width ? ` · ${item.width} × ${item.height}` : ""}</span><span class="import-card-status ${item.status === "error" || item.duplicateReason ? "is-error" : ""}" role="status">${escape(item.duplicateReason || (item.status === "reading" ? "正在识别图片参数…" : item.error || (item.parsed?.format && item.parsed.format !== "unknown" ? `已识别 ${engineLabel(item.parsed.format)}` : "未检测到生图参数，可手动填写")))}</span></div>
         <fieldset class="import-card-fields" ${disabled ? "disabled" : ""}>
           ${outputChoice}
           <label class="field">生图来源<select data-import-field="generation_engine">${options(ENGINES, data.generation_engine)}</select></label>
@@ -109,7 +112,7 @@
           <label class="field field-wide">正向提示词${item.editedFields.has("prompt") ? "" : promptStatusMarkup(item.parsed?.normalized?.prompt_status)}<textarea data-import-field="prompt" rows="3">${escape(data.prompt)}</textarea></label>
           <label class="field field-wide">反向提示词${item.editedFields.has("negative_prompt") ? "" : promptStatusMarkup(item.parsed?.normalized?.negative_prompt_status)}<textarea data-import-field="negative_prompt" rows="2">${escape(data.negative_prompt)}</textarea></label>
           <details class="field-wide advanced" ${context.editing ? 'data-import-deferred="parameters"' : ""}><summary>补充参数</summary>${context.editing ? "" : `<textarea data-import-field="parameters" rows="5" spellcheck="false" aria-label="补充参数 JSON">${escape(data.parameters)}</textarea>`}</details>
-        </fieldset>${promptCandidatesMarkup(item, context)}${context.editing && item.parsed?.normalized?.stages?.length ? `<details class="comfy-workflow-info" data-import-deferred="workflow"><summary>采样阶段与条件 · ${item.parsed.normalized.stages.length} 个阶段</summary></details>` : comfyDetailsMarkup(item.parsed)}<div class="import-card-status ${item.status === "error" || item.duplicateReason ? "is-error" : ""}" role="status">${escape(item.duplicateReason || (item.status === "reading" ? "正在识别图片参数…" : item.error || (item.parsed?.format && item.parsed.format !== "unknown" ? `已识别 ${engineLabel(item.parsed.format)}` : "未检测到生图参数，可手动填写")))}</div>${warnings.length ? `<div class="import-warnings">${warnings.map(escape).join("<br>")}</div>` : ""}</article>`;
+        </fieldset>${promptCandidatesMarkup(item, context)}${context.editing && item.parsed?.normalized?.stages?.length ? `<details class="comfy-workflow-info" data-import-deferred="workflow"><summary>采样阶段与条件 · ${item.parsed.normalized.stages.length} 个阶段</summary></details>` : comfyDetailsMarkup(item.parsed)}${nodeRules.candidatesMarkup(item.parsed, { disabled, editing: context.editing })}${warnings.length ? `<details class="import-warnings" data-import-section="warnings"><summary>需注意 ${warnings.length}</summary><ul>${warnings.map(warning => `<li>${escape(warning)}</li>`).join("")}</ul></details>` : ""}</article>`;
     }
 
     function hasPromptBlock(value, block) {
@@ -133,7 +136,10 @@
       if (candidate.status !== "display_snapshot") return "";
       const sources = [...new Set((candidate.observations || []).map((observation) => `${({ prompt: "API 备用显示值", workflow: "工作流执行回写" })[observation.source] || "图片元数据"} · ${observation.node_type} #${observation.node_id}`))];
       const kind = candidate.snapshot_kind === "api_fallback" ? "API 备用显示值，可能来自上一次运行。" : candidate.snapshot_kind === "workflow" ? "工作流执行回写候选。" : "";
-      return `<div class="prompt-candidate-meta">关联输出 ${escape(candidate.source_ref)}${sources.length ? `<br>${sources.map(escape).join("<br>")}` : ""}</div><p class="prompt-candidate-snapshot-note">${kind}未验证是否为本次结果${candidate.conflicting ? "。同一输出存在不同快照，请核对并选择其中一份。" : "，请核对后再填入。"}</p>`;
+      const applied = [...new Set((candidate.auto_applied_to || []).map((entry) => ({ prompt: "正向", negative_prompt: "反向" })[entry.target]).filter(Boolean))];
+      const adoption = applied.length ? `已按明确链路用于${applied.join("、")}提示词识别。` : "";
+      const advice = candidate.conflicting ? "。同一输出存在不同快照，请核对并选择其中一份。" : applied.length ? "，请核对识别内容。" : "，请核对后再填入。";
+      return `<div class="prompt-candidate-meta">关联输出 ${escape(candidate.source_ref)}${sources.length ? `<br>${sources.map(escape).join("<br>")}` : ""}</div><p class="prompt-candidate-snapshot-note">${kind}${adoption}未验证是否为本次结果${advice}</p>`;
     }
 
     // Keep track of the exact block inserted by a snapshot, including subsequent
@@ -360,6 +366,43 @@
       for (const [key, value] of Object.entries(fields)) if (!item.editedFields.has(key)) item.fields[key] = value;
     }
 
+    async function refreshImportRules() {
+      const epoch = importEpoch, revision = ++importRulesRevision;
+      importRulesBusy = true; importBatchResult = null;
+      const entries = imports.filter((item) => item.rawMetadata && item.status !== "reading");
+      for (const item of entries) { item.status = "reading"; item.error = ""; }
+      renderImports();
+      try {
+        await discardImportGroup();
+        for (let offset = 0; offset < entries.length; offset += 3) {
+          if (epoch !== importEpoch || revision !== importRulesRevision) return;
+          await Promise.all(entries.slice(offset, offset + 3).map(async (item) => {
+            const outputNodeId = item.outputNodeId || "";
+            try {
+              const parsed = await inspectImportOutput(item, outputNodeId, importContext);
+              if (epoch !== importEpoch || revision !== importRulesRevision || !imports.includes(item) || (item.outputNodeId || "") !== outputNodeId) return;
+              applyImportMetadata(item, parsed); item.status = "ready";
+            } catch (error) {
+              if (epoch !== importEpoch || revision !== importRulesRevision || !imports.includes(item)) return;
+              item.status = "error"; item.error = errorMessage(error, "规则已更新，但这张图片重新识别失败，请移除后重新添加");
+            }
+          }));
+        }
+      } finally {
+        if (revision === importRulesRevision) { importRulesBusy = false; renderImports(); }
+      }
+    }
+
+    function editImportNodeRule(button, context) {
+      if (context.editing || cardsBusy(context) || context.addJobs) return;
+      const item = context.items.find((entry) => entry.id === button.closest("[data-import-id]")?.dataset.importId);
+      if (!item || item.status === "reading") return;
+      const node = item.parsed?.normalized?.node_rule_candidates?.find((entry) => String(entry.node_id) === button.dataset.nodeRuleId);
+      if (!node) return;
+      const epoch = context.epoch, outputNodeId = item.outputNodeId || "";
+      void nodeRules.edit({ node, metadata: item.rawMetadata || item.parsed?.raw || {}, width: item.width, height: item.height, outputNodeId, active: () => context.active() && context.epoch === epoch && context.items.includes(item) && (item.outputNodeId || "") === outputNodeId });
+    }
+
     async function inspectImportOutput(item, outputNodeId, context) {
       if (!context.editing) return apiPost("imports/inspect", { metadata: item.rawMetadata || item.parsed?.raw || {}, width: item.width, height: item.height, output_node_id: outputNodeId });
       const parsed = await apiGet(`gallery/import-edit/${context.generationId}`, { image_id: item.imageId, item_revision: item.itemRevision, output_node_id: outputNodeId });
@@ -387,7 +430,7 @@
       context.sorter?.cancel();
       const expanded = new Set(Array.from(grid.querySelectorAll("[data-import-id] details[open]"), (entry) => {
         const card = entry.closest("[data-import-id]");
-        return `${card.dataset.importId}:${Array.from(card.querySelectorAll("details")).indexOf(entry)}`;
+        return `${card.dataset.importId}:${entry.dataset.importSection || Array.from(card.querySelectorAll("details")).indexOf(entry)}`;
       }));
       const focused = document.activeElement;
       const focusId = grid.contains(focused) ? focused?.closest?.("[data-import-id]")?.dataset.importId : null;
@@ -395,7 +438,7 @@
       const focusSort = focused?.hasAttribute?.("data-sort-handle");
       const selection = focusField && typeof focused.selectionStart === "number" ? [focused.selectionStart, focused.selectionEnd] : null;
       grid.innerHTML = context.items.map((item, index) => importCard(item, index, context)).join("");
-      grid.querySelectorAll("[data-import-id]").forEach((card) => card.querySelectorAll("details").forEach((entry, index) => { entry.open = expanded.has(`${card.dataset.importId}:${index}`); }));
+      grid.querySelectorAll("[data-import-id]").forEach((card) => card.querySelectorAll("details").forEach((entry, index) => { entry.open = expanded.has(`${card.dataset.importId}:${entry.dataset.importSection || index}`); }));
       window.ImageStudioSelect?.refresh(grid);
       if (focusId && (focusField || focusSort)) {
         const restored = grid.querySelector(`[data-import-id="${focusId}"] ${focusSort ? "[data-sort-handle]" : `[data-import-field="${focusField}"]`}`);
@@ -429,6 +472,7 @@
         const candidate = event.target.closest("[data-candidate-target]"); if (candidate) addPromptCandidate(candidate, context);
         const batchCandidate = event.target.closest("[data-batch-candidate-target]"); if (batchCandidate) void applyCandidateToImports(batchCandidate, context);
         const batchOutput = event.target.closest("[data-batch-import-output]"); if (batchOutput) void applyOutputToImports(batchOutput, context);
+        const nodeRule = event.target.closest("[data-node-rule-id]"); if (nodeRule) editImportNodeRule(nodeRule, context);
       });
       if (context.editing) grid.addEventListener("toggle", (event) => {
         const section = event.target;
@@ -439,8 +483,7 @@
         delete section.dataset.importDeferred;
         if (kind === "parameters") section.insertAdjacentHTML("beforeend", `<textarea data-import-field="parameters" rows="5" spellcheck="false" aria-label="补充参数 JSON">${escape(item.fields.parameters)}</textarea>`);
         else if (kind === "stage" || kind === "conditions") {
-          const value = kind === "stage" ? { ...(item.parsed.normalized.stages || [])[Number(section.dataset.stageIndex)] } : { condition_nodes: item.parsed.normalized.condition_nodes };
-          delete value.node_id; delete value.type;
+          const value = kind === "stage" ? comfyStageFields((item.parsed.normalized.stages || [])[Number(section.dataset.stageIndex)]) : { condition_nodes: item.parsed.normalized.condition_nodes };
           section.insertAdjacentHTML("beforeend", `<div class="detail-parameter-grid">${Object.entries(value).map(([key, value]) => `<div class="detail-parameter-row"><div class="detail-parameter-label"><span>${escape(key)}</span></div><pre>${escape(serial(value))}</pre></div>`).join("")}</div>`);
         }
         else {
@@ -477,7 +520,9 @@
         batchSummary.classList.toggle("is-hidden", !importBatchResult || !!importBatchJob);
         batchSummary.querySelector("span").textContent = importBatchResult ? batchResultSummary(importBatchResult) : "";
       }
-      $("confirmImportButton").disabled = importing || !!importBatchJob || importAddJobs > 0 || !imports.length || imports.some((item) => item.status === "reading");
+      $("confirmImportButton").disabled = importing || importRulesBusy || !!importBatchJob || importAddJobs > 0 || !imports.length || imports.some((item) => item.status === "reading");
+      $("importNodeRulesButton").disabled = importing || importRulesBusy || !!importBatchJob || importAddJobs > 0;
+      $("importNodeRulesButton").classList.toggle("is-hidden", !imports.some(item => item.parsed?.format === "comfyui"));
       $("cancelImportButton").disabled = importing; $("importDropzone").disabled = importing; $("importFiles").disabled = importing;
       $("importGroupOption").classList.toggle("is-hidden", imports.length < 2);
       $("importAsGroup").disabled = importing || !!importBatchJob || imports.length < 2;
@@ -952,6 +997,7 @@
       $("importDropzone").addEventListener("click", () => $("importFiles").click());
       $("confirmImportButton").addEventListener("click", () => void confirmImports());
       $("cancelImportButton").addEventListener("click", clearImports);
+      $("importNodeRulesButton").addEventListener("click", () => void nodeRules.manage());
       for (const [id, other] of [["importAsGroup", "importMergeExisting"], ["importMergeExisting", "importAsGroup"]]) {
         $(id).addEventListener("change", () => { if ($(id).checked) $(other).checked = false; void discardImportGroup(); });
       }

@@ -27,6 +27,7 @@ from astrbot_plugin_image_studio.backend.generation.service import (
     ImageGenerationService,
 )
 from astrbot_plugin_image_studio.backend.gallery.store import GenerationStore
+from astrbot_plugin_image_studio.tests.support.paths import PLUGIN_ROOT
 
 
 def fixture_image(index: int = 0, *, novelai: bool = False) -> bytes:
@@ -367,6 +368,7 @@ async def create_app(data_dir: Path, seed: bool = True) -> FastAPI:
         plugin.config, plugin._studio_settings
     )
     plugin._settings_lock = asyncio.Lock()
+    plugin._storage_maintenance_lock = asyncio.Lock()
     from astrbot_plugin_image_studio.backend.gallery.external import (
         ExternalGalleryManager,
     )
@@ -460,9 +462,7 @@ async def create_app(data_dir: Path, seed: bool = True) -> FastAPI:
 
     app.mount(
         "/ui",
-        StaticFiles(
-            directory=Path(__file__).parents[2] / "pages" / "image-studio", html=True
-        ),
+        StaticFiles(directory=PLUGIN_ROOT / "pages" / "image-studio", html=True),
         name="ui",
     )
     return app

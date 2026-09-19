@@ -3,9 +3,8 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { execFileSync } = require("node:child_process");
+const { metadataImage } = require("../support/webui_fixtures.cjs");
 const { chromium } = require(process.env.STUDIO_PLAYWRIGHT || "playwright");
-const root = path.resolve(__dirname, "../..");
 const base = process.env.STUDIO_TEST_URL || "http://127.0.0.1:18765";
 const output = fs.mkdtempSync(path.join(os.tmpdir(), "image-studio-browser-"));
 
@@ -32,7 +31,7 @@ async function opened(browser, test) {
   const frame = page.frameLocator("#studio");
   await frame.locator("#runtimeStatus").filter({ hasText: "已加载" }).waitFor({ state: "attached" });
   const inner = page.frames().find(item => item.url().includes("/ui/"));
-  await inner.evaluate(async theme => { await window.ImageStudioAppearance?.ready; window.ImageStudioAppearance.set({ preference: theme }); }, test.theme);
+  await inner.evaluate(async theme => { await window.ImageStudioAppearance?.ready; window.ImageStudioAppearance.set({ preference: theme }); await window.ImageStudioAppearance.save(); }, test.theme);
   return { page, frame, inner, errors };
 }
 
@@ -49,10 +48,10 @@ async function opened(browser, test) {
     ]) {
       const { page, frame, inner, errors } = await opened(browser, test);
       await frame.locator('[data-view="gallery"]').click();
-      await frame.locator(".gallery-card").first().waitFor();
+      await frame.locator(".gallery-card[data-gallery-id]").first().waitFor();
       await checkGeometry(inner);
       const layout = await inner.evaluate(() => ({
-        cards: document.querySelectorAll(".gallery-card").length,
+        cards: document.querySelectorAll(".gallery-card[data-gallery-id]").length,
         columns: getComputedStyle(document.getElementById("galleryGrid")).gridTemplateColumns.split(/\s+/).length,
       }));
       assert.equal(layout.cards % layout.columns, 0, `${test.name}: incomplete row`);
@@ -100,7 +99,8 @@ async function opened(browser, test) {
       await frame.locator("#historyRecords").fill(String(Number(before) + 1));
       await frame.locator("#settingsDirtyStatus").filter({ hasText: "未保存" }).waitFor();
       await frame.locator('[data-view="generate"]').click();
-      await frame.locator('[data-view="settings"]').click();
+      await frame.locator("#staySettingsButton").click();
+      await frame.locator("#studioModalRoot.is-hidden").waitFor({ state: "attached" });
       assert.equal(await frame.locator("#historyRecords").inputValue(), String(Number(before) + 1));
       await checkGeometry(inner);
       await settle(inner);
@@ -126,15 +126,16 @@ async function opened(browser, test) {
 
     const { page, frame, inner, errors } = await opened(browser, { viewport: { width: 1440, height: 1000 }, theme: "light" });
     await frame.locator('[data-view="gallery"]').click();
-    await frame.locator(".gallery-card").first().waitFor();
-    const selectedId = await frame.locator(".gallery-card").first().getAttribute("data-gallery-id");
+    await frame.locator(".gallery-card[data-gallery-id]").first().waitFor();
+    const selectedId = await frame.locator(".gallery-card[data-gallery-id]").first().getAttribute("data-gallery-id");
     await frame.locator(".gallery-selection").first().click();
     await page.setViewportSize({ width: 1100, height: 900 });
-    await inner.waitForFunction(() => document.querySelectorAll(".gallery-card").length === 24);
+    await inner.waitForFunction(() => document.querySelectorAll(".gallery-card[data-gallery-id]").length === 24);
     assert.equal(await frame.locator(`[data-select-id="${selectedId}"]`).isChecked(), true);
     await frame.locator("#cancelSelectionButton").click();
     await frame.locator("#galleryNext").click();
     await frame.locator("#galleryPageLabel").filter({ hasText: "第 2" }).waitFor();
+    await frame.locator(".gallery-card[data-gallery-id]").first().waitFor();
     assert.equal(await frame.locator(".has-cleanup-warning").count(), 10);
     const listing = await (await page.request.get(`${base}/astrbot_plugin_image_studio/gallery/list?limit=60`)).json();
     const multi = (listing.data || listing).items.find(item => item.image_count === 3);
@@ -160,9 +161,8 @@ async function opened(browser, test) {
     const calls = [];
     page.on("request", request => { if (request.url().includes("/imports/")) calls.push(request.url()); });
     await frame.locator('[data-view="import"]').click();
-    const files = ["20260831162558_t2i_nai-diffusion-4-5-full.png", "Anima_00001_.png", "Stable Diffusion 149299935.webp"].map(name => path.join(root, "data/image", name));
-    if (files.every(file => fs.existsSync(file))) {
-      const testFiles = files.map((file, index) => ({ name: `unique-browser-${index}.png`, mimeType: "image/png", buffer: execFileSync(process.env.STUDIO_PYTHON || "/home/coder/apps/miniconda3/envs/astrbot/bin/python", ["-c", "import sys,io; from PIL import Image,PngImagePlugin; image=Image.open(sys.argv[1]); metadata=PngImagePlugin.PngInfo(); [metadata.add_text(k,v) for k,v in image.info.items() if isinstance(v,str)]; metadata.add_text('BrowserFixture',sys.argv[2]); output=io.BytesIO(); image.save(output,format='PNG',pnginfo=metadata,exif=image.info.get('exif',b'')); sys.stdout.buffer.write(output.getvalue())", file, `${path.basename(output)}-${index}`], { maxBuffer: 32 * 1024 * 1024 }) }));
+    {
+      const testFiles = ["novelai", "comfyui", "a1111"].map((kind, index) => metadataImage(kind, `${path.basename(output)}-${index}`));
       await frame.locator("#importFiles").setInputFiles(testFiles);
       await frame.locator(".import-card").nth(2).waitFor();
       await frame.locator("#confirmImportButton:not(:disabled)").waitFor();

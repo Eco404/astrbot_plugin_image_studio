@@ -45,7 +45,8 @@ from .backend.models import (
     ReferenceImage,
 )
 from .backend.providers.executor import ProviderError, ProviderExecutor
-from .backend.providers.comfyui.runtime import ComfyRuntime
+from .backend.generation.comfyui_runtime import ComfyRuntime
+from .backend.providers.comfyui.job_types import RECOVERY_SECONDS
 from .backend.generation.service import ImageGenerationService
 from .backend.gallery.store import GenerationStore
 from .backend.media.images import export_image_filename, image_data_url
@@ -84,7 +85,7 @@ IMAGE_WORKFLOW_CONTINUATION_PROMPT = (
     PLUGIN_NAME,
     "econeco",
     "多服务商 AI 生图与图库工作台，支持 OpenAI、Gemini、ComfyUI 工作流、NovelAI 官方、NAI 第三方及自定义接口。支持对话生图改图、并发批量生成、图片参数导入与工作流复现，可扫描 nai-image 插件图库及自定义目录，统一浏览和管理图片。WebUI 适配桌面与手机。",
-    "1.3.2",
+    "1.4.0",
 )
 class ImageStudioPlugin(Star):
     """Own Image Studio configuration, generation, gallery, and tool APIs."""
@@ -100,6 +101,7 @@ class ImageStudioPlugin(Star):
         self._service: ImageGenerationService | None = None
         self._comfy: ComfyRuntime | None = None
         self._settings_lock = asyncio.Lock()
+        self._storage_maintenance_lock = asyncio.Lock()
         self._maintenance_task: asyncio.Task[None] | None = None
         self._studio_settings, studio_errors = load_studio_settings(Path(self.data_dir))
         self._settings, runtime_errors = runtime_settings(config, self._studio_settings)
@@ -111,14 +113,6 @@ class ImageStudioPlugin(Star):
 
         await self.store.initialize()
         await self._configure_external_gallery()
-        await self.store.run_maintenance(
-            self._settings.history,
-            preview_max_edge=self._settings.asset_preview_max_edge,
-            preview_quality=self._settings.asset_preview_quality,
-        )
-        self._maintenance_task = asyncio.create_task(
-            self._maintenance_loop(), name="image-studio-maintenance"
-        )
         self._session = aiohttp.ClientSession(
             connector=aiohttp.TCPConnector(limit=12, limit_per_host=6),
             timeout=aiohttp.ClientTimeout(total=180),
@@ -130,7 +124,13 @@ class ImageStudioPlugin(Star):
         )
         self._comfy = ComfyRuntime(self._service)
         self._service.comfy_runtime = self._comfy
+        # The gallery has initialized the shared schema. Clear expired terminal
+        # resources before queue recovery; pending/unknown jobs remain protected.
+        await self._run_storage_maintenance()
         await self._comfy.start()
+        self._maintenance_task = asyncio.create_task(
+            self._maintenance_loop(), name="image-studio-maintenance"
+        )
         self._register_web_apis()
         await self._external_gallery.start()
         if self._settings_errors:
@@ -177,20 +177,31 @@ class ImageStudioPlugin(Star):
         while True:
             await asyncio.sleep(3600)
             try:
-                if getattr(self, "_comfy", None) is not None:
-                    await self._comfy.store.cleanup_terminal_files(
-                        terminal_before=time.time() - 7 * 86400
-                    )
-                await self._expire_import_groups()
-                await self.store.run_maintenance(
-                    self._settings.history,
-                    preview_max_edge=self._settings.asset_preview_max_edge,
-                    preview_quality=self._settings.asset_preview_quality,
-                )
+                await self._run_storage_maintenance()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 logger.warning("%s 定时存储维护失败: %s", LOG_TAG, type(exc).__name__)
+
+    async def _run_storage_maintenance(self, *, deep: bool = False) -> dict[str, Any]:
+        """One cleanup order for startup, scheduled runs and the settings action."""
+
+        async with self._storage_maintenance_lock:
+            removed = 0
+            if getattr(self, "_comfy", None) is not None:
+                removed = await self._comfy.store.cleanup_terminal_files(
+                    terminal_before=time.time() - RECOVERY_SECONDS
+                )
+            await self._expire_import_groups()
+            # Release task dependencies first; the gallery then expires imports,
+            # applies quotas and sweeps shared payloads only after owners vanish.
+            return await self.store.run_maintenance(
+                self._settings.history,
+                preview_max_edge=self._settings.asset_preview_max_edge,
+                preview_quality=self._settings.asset_preview_quality,
+                deep=deep,
+                extra_repaired={"comfy_files": removed},
+            )
 
     def _register_web_apis(self) -> None:
         register_web_apis(self, PAGE_PREFIX)
@@ -237,6 +248,7 @@ class ImageStudioPlugin(Star):
                 get_settings=lambda: self._settings,
                 get_service=self._service_or_raise,
                 get_external=lambda: self._external_gallery,
+                run_maintenance=self._run_storage_maintenance,
             )
         return self._gallery_controller
 
@@ -319,6 +331,18 @@ class ImageStudioPlugin(Star):
     async def _api_import_inspect(self) -> Any:
         return await self._import_api()._api_import_inspect()
 
+    async def _api_import_node_rules(self) -> Any:
+        return await self._import_api()._api_import_node_rules()
+
+    async def _api_import_node_rule_preview(self) -> Any:
+        return await self._import_api()._api_import_node_rule_preview()
+
+    async def _api_import_node_rule_save(self) -> Any:
+        return await self._import_api()._api_import_node_rule_save()
+
+    async def _api_import_node_rule_delete(self) -> Any:
+        return await self._import_api()._api_import_node_rule_delete()
+
     async def _api_import_check(self) -> Any:
         return await self._import_api()._api_import_check()
 
@@ -351,6 +375,9 @@ class ImageStudioPlugin(Star):
 
     async def _api_gallery_favorite(self) -> Any:
         return await self._gallery_api()._api_gallery_favorite()
+
+    async def _api_gallery_title(self) -> Any:
+        return await self._gallery_api()._api_gallery_title()
 
     async def _api_gallery_favorite_status(self) -> Any:
         return await self._gallery_api()._api_gallery_favorite_status()

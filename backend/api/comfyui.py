@@ -380,12 +380,18 @@ class ComfyAPI:
                     ]
                 }
             )
-        job = await runtime.store.get_job(job_id)
+        job = await runtime.store.get_job(job_id, light=True)
         if not job:
             return error_response("ComfyUI 任务不存在", status_code=404)
         public = runtime.public_job(job)
         if job["status"] in {"succeeded", "partial"}:
             try:
+                job = await runtime.store.get_job(job_id)
+                if not job:
+                    return error_response("ComfyUI 任务不存在", status_code=404)
+                public = runtime.public_job(job)
+                if job["status"] not in {"succeeded", "partial"}:
+                    return json_response({"job": public})
                 result = await runtime.result(job)
                 detail = (
                     await self.store.generation_detail(

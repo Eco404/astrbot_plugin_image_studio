@@ -30,11 +30,12 @@ async function verify(browser, width) {
   assert.ok(response.ok());
   const cards = (await response.json()).items.slice(0, 3);
   assert.equal(cards.length, 3, "isolated harness supplies gallery records");
-  const specs = new Map(cards.map((card, index) => [card.id, { effective: index !== 1, kind: index === 2 ? "openai_images" : "comfyui" }]));
+  const specs = new Map(cards.map((card, index) => [card.id, { effective: index !== 1, kind: index === 2 ? "openai_images" : "comfyui", workflowName: index === 0 ? "记录时的工作流名称" : "" }]));
+  const savedRequest = spec => ({ ...structuredClone(request), ...(spec.workflowName ? { workflow_name: spec.workflowName } : {}) });
   function fixture(detail, image, spec) {
-    Object.assign(detail, { source: "webui", provider_kind: spec.kind, generation_engine: spec.kind, original_prompt: " \t ", parameters: structuredClone(request) });
+    Object.assign(detail, { source: "webui", provider_kind: spec.kind, generation_engine: spec.kind, model: "saved-target-id", original_prompt: " \t ", parameters: savedRequest(spec) });
     if (!image) return;
-    image.supplemental = spec.effective ? { effective_request: structuredClone(request) } : {};
+    image.supplemental = spec.effective ? { effective_request: savedRequest(spec) } : {};
     image.metadata = { format: spec.kind === "comfyui" ? "comfyui" : "unknown", normalized: { empty_metadata: "", nested: { empty: null } }, raw: { prompt: JSON.stringify(graph), empty_raw: "" }, warnings: [] };
   }
   await page.route("**/gallery/detail/**", async route => {
@@ -61,6 +62,14 @@ async function verify(browser, width) {
       const rows = await block.locator(".detail-parameter-row").evaluateAll(items => Object.fromEntries(items.map(row => [row.querySelector(".detail-parameter-label span").textContent, row.querySelector("pre").textContent])));
       for (const key of ["prompt", "negative_prompt", "size", "empty_text", "whitespace", "missing", "empty_array", "empty_object", "_comfy_job_id"]) assert.ok(!(key in rows), `${spec.kind}: legacy empty/internal field ${key} must not leave a request box`);
       assert.ok(Object.values(rows).every(value => value.trim()), "request rows have no blank content");
+      if (spec.kind === "comfyui") {
+        assert.equal(rows.model, undefined, "workflow identity must not be labelled as the model");
+        assert.equal(rows.workflow_id, "saved-target-id");
+        assert.equal(rows.workflow_name, spec.workflowName || undefined, "legacy records do not invent a historical workflow name");
+      } else {
+        assert.equal(rows.model, "saved-target-id");
+        assert.equal(rows.workflow_id, undefined);
+      }
       assert.equal(rows.seed, "0"); assert.equal(rows.enabled, "false"); assert.equal(rows.text_zero, "0");
       assert.equal(rows.custom_parameter, "user value"); assert.equal(rows._comfy_custom, "user-defined field");
       for (const key of ["nested", "values", "workflow"]) assert.deepEqual(JSON.parse(rows[key]), parameters[key], "complex parameters retain all nested empty values");
@@ -72,10 +81,11 @@ async function verify(browser, width) {
         const detail = window.__requestState.detailData;
         return { stored: detail.parameters, replay: window.__requestHooks.requestParameters(detail), effective: detail.images[window.__requestState.detailImageIndex].supplemental.effective_request };
       });
-      assert.deepEqual(preserved.stored, request, "rendering does not mutate legacy stored values");
+      assert.deepEqual(preserved.stored, savedRequest(spec), "rendering does not mutate legacy stored values");
+      assert.equal(preserved.replay.model, "saved-target-id", "workflow routing identity remains available for reproduction");
       assert.equal(preserved.replay.negative_prompt, "", "an explicitly empty negative prompt remains available for reproduction");
       assert.deepEqual(preserved.replay.parameters, parameters);
-      if (spec.effective) assert.deepEqual(preserved.effective, request);
+      if (spec.effective) assert.deepEqual(preserved.effective, savedRequest(spec));
       const generated = frame.locator("#drawerBody .generated-parameters");
       await generated.locator(":scope > summary").click();
       assert.equal(await generated.locator(".detail-parameter-row").first().locator("pre").textContent(), "", "metadata display is outside request filtering");

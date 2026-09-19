@@ -9,7 +9,8 @@ import sqlite3
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,7 @@ from astrbot.api import logger
 
 from ..config import HistorySettings
 from ..database.schema import ensure_release_schema
+from ..database.migrations.images_layout import migrate_images_layout
 from ..media.display import DisplayImageCache, display_file_version, display_max_edge
 from ..media.files import (
     _atomic_write,
@@ -30,6 +32,7 @@ from ..media.images import (
     detect_mime_type,
     image_data_url,
 )
+from ..metadata.comfyui.user_rules import get_rules, load_rules, use_rules
 from ..models import (
     GeneratedImage,
     GenerationRequest,
@@ -45,16 +48,13 @@ from .constants import (
     WORKFLOW_ASSET_RETENTION_SECONDS,
 )
 from .context import GalleryContext
-from .external_records import ExternalRecords, ExternalServices
 from .errors import _ExternalFileChangedError
+from .external_records import ExternalRecords, ExternalServices
 from .imports import ImportRepository, ImportServices
 from .maintenance import GalleryMaintenance, MaintenanceServices
 from .metadata_records import MetadataRecords, MetadataServices
 from .projection import (
-    _canonical_supplemental,
     _known_merge_engine,
-    _load_json,
-    _search_projection,
     _validate_generation_selection,
     _validate_import_edit_overrides,
     _validate_import_hashes,
@@ -62,6 +62,19 @@ from .projection import (
 )
 from .queries import GalleryQueries, QueryServices
 from .records import GenerationRecords, RecordServices
+from .storage import refresh_gallery_projection
+
+
+def _with_node_rules(function):
+    """Carry this store's immutable rules into worker threads, never global state."""
+
+    @wraps(function)
+    async def wrapped(self, *args, **kwargs):
+        rules = await asyncio.to_thread(load_rules, self.data_dir)
+        with use_rules(rules):
+            return await function(self, *args, **kwargs)
+
+    return wrapped
 
 
 class GenerationStore:
@@ -70,7 +83,7 @@ class GenerationStore:
     def __init__(self, data_dir: Path) -> None:
         self._context = GalleryContext(data_dir)
         self.data_dir = self._context.data_dir
-        self.history_dir = self._context.history_dir
+        self.images_dir = self._context.images_dir
         self.assets_dir = self._context.assets_dir
         self.thumbnails_dir = self._context.thumbnails_dir
         self.staging_dir = self._context.staging_dir
@@ -79,6 +92,7 @@ class GenerationStore:
         self.delivery_dir = self._context.delivery_dir
         self.db_path = self._context.db_path
         self._lock = asyncio.Lock()
+        self.on_results_removed: Callable[[list[str]], Awaitable[Any]] | None = None
         self._display_cache = DisplayImageCache()
         self._revision_lock = threading.Lock()
         self._revision_connection: sqlite3.Connection | None = None
@@ -101,7 +115,9 @@ class GenerationStore:
             self._context,
             ExternalServices(
                 metadata_for_asset=lambda *args, **kwargs: (
-                    self.metadata_records.metadata_for_asset(*args, **kwargs)
+                    self.metadata_records.metadata_for_asset(
+                        *args, rules=get_rules(), **kwargs
+                    )
                 ),
                 prepare_thumbnail=lambda *args, **kwargs: self.assets.prepare_thumbnail(
                     *args, **kwargs
@@ -130,7 +146,9 @@ class GenerationStore:
                     self.maintenance.cleanup_orphaned_thumbnails(*args, **kwargs)
                 ),
                 metadata_for_asset=lambda *args, **kwargs: (
-                    self.metadata_records.metadata_for_asset(*args, **kwargs)
+                    self.metadata_records.metadata_for_asset(
+                        *args, rules=get_rules(), **kwargs
+                    )
                 ),
                 prepare_asset=lambda *args, **kwargs: self.assets.prepare_asset(
                     *args, **kwargs
@@ -188,7 +206,9 @@ class GenerationStore:
             self._context,
             MaintenanceServices(
                 backfill_metadata=lambda *args, **kwargs: (
-                    self.metadata_records.backfill_metadata(*args, **kwargs)
+                    self.metadata_records.backfill_metadata(
+                        *args, rules=get_rules(), **kwargs
+                    )
                 ),
                 delete_expired_import_batches=lambda *args, **kwargs: (
                     self.imports.delete_expired_import_batches(*args, **kwargs)
@@ -240,7 +260,9 @@ class GenerationStore:
                     self.queries.generation_detail(*args, **kwargs)
                 ),
                 metadata_for_asset=lambda *args, **kwargs: (
-                    self.metadata_records.metadata_for_asset(*args, **kwargs)
+                    self.metadata_records.metadata_for_asset(
+                        *args, rules=get_rules(), **kwargs
+                    )
                 ),
                 prepare_asset=lambda *args, **kwargs: self.assets.prepare_asset(
                     *args, **kwargs
@@ -280,10 +302,12 @@ class GenerationStore:
             ),
         )
 
+    @_with_node_rules
     async def initialize(self) -> None:
         """Create directories and database tables."""
 
-        await asyncio.to_thread(self._initialize_sync)
+        async with self._lock:
+            await asyncio.to_thread(self._initialize_sync)
 
     async def close(self) -> None:
         """Release the read-only database observer used by gallery caches."""
@@ -324,11 +348,17 @@ class GenerationStore:
             version = self._revision_connection.execute(
                 "PRAGMA data_version"
             ).fetchone()[0]
-            return f"{self._revision_instance}:{version}"
+            rules_revision = load_rules(self.data_dir).fingerprint
+            return f"{self._revision_instance}:{version}:{rules_revision}"
 
     def _initialize_sync(self) -> None:
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        with self._connect() as conn:
+            backup = ensure_release_schema(conn, backup_dir=self.data_dir / "backups")
+            if backup is not None:
+                self.maintenance.protected_backup = backup
+            migrate_images_layout(conn, self.data_dir)
         for directory in (
-            self.data_dir,
             self.assets_dir,
             self.thumbnails_dir,
             self.staging_dir,
@@ -338,7 +368,6 @@ class GenerationStore:
         ):
             directory.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
-            ensure_release_schema(conn, backup_dir=self.data_dir / "backups")
             # Keep existing session grants, but cap legacy configurable retention
             # at one hour after the last access. Never extend it on restart.
             conn.execute(
@@ -349,7 +378,7 @@ class GenerationStore:
                 (WORKFLOW_ASSET_RETENTION_SECONDS,) * 3,
             )
         self._repair_derived_fields_sync()
-        self.metadata_records.backfill_metadata()
+        self.metadata_records.backfill_metadata(rules=get_rules())
         self.assets.expire_asset_retention(time.time())
         self.imports.delete_expired_import_batches(time.time())
         self.maintenance.purge_unreferenced_assets()
@@ -405,7 +434,9 @@ class GenerationStore:
 
         async with self._lock:
             report = dict(self._last_maintenance_report)
-            report["stats"] = await asyncio.to_thread(self.maintenance.storage_stats)
+            report["stats"] = await asyncio.to_thread(
+                self.maintenance.storage_stats, include_disk=True
+            )
         return report
 
     async def configure_external_source(
@@ -469,6 +500,7 @@ class GenerationStore:
     async def external_sources_status(self) -> list[dict[str, Any]]:
         return await asyncio.to_thread(self.external_records.external_sources_status)
 
+    @_with_node_rules
     async def upsert_external_image(
         self,
         source_id: str,
@@ -558,31 +590,9 @@ class GenerationStore:
 
     @staticmethod
     def _refresh_search_sync(conn: sqlite3.Connection, generation_id: str) -> None:
-        row = conn.execute(
-            "SELECT parameters_json, supplemental_json FROM generations WHERE id = ?",
-            (generation_id,),
-        ).fetchone()
-        if row is None:
-            return
-        values: list[Any] = [
-            _load_json(row["parameters_json"]),
-            _canonical_supplemental(_load_json(row["supplemental_json"])),
-        ]
-        for item in conn.execute(
-            "SELECT m.metadata_json, i.supplemental_json FROM generation_images i LEFT JOIN image_metadata m "
-            "ON m.asset_id = i.asset_id WHERE i.generation_id = ? ORDER BY i.ordinal",
-            (generation_id,),
-        ).fetchall():
-            values.append(_load_json(item["metadata_json"]).get("normalized", {}))
-            values.append(
-                _canonical_supplemental(_load_json(item["supplemental_json"]))
-            )
-        # Only normalized fields are searchable; entire workflow graphs stay out.
-        conn.execute(
-            "UPDATE generations SET search_text = ? WHERE id = ?",
-            (_search_projection(values), generation_id),
-        )
+        refresh_gallery_projection(conn, generation_id)
 
+    @_with_node_rules
     async def run_maintenance(
         self,
         history: HistorySettings,
@@ -590,6 +600,7 @@ class GenerationStore:
         preview_max_edge: int,
         preview_quality: int,
         deep: bool = False,
+        extra_repaired: dict[str, int] | None = None,
     ) -> dict[str, Any]:
         """Check and repair the complete plugin-owned storage graph."""
 
@@ -617,6 +628,8 @@ class GenerationStore:
                     "repaired": {},
                     "errors": [f"存储维护失败：{type(exc).__name__}"],
                 }
+            if extra_repaired:
+                report.setdefault("repaired", {}).update(extra_repaired)
             self._last_maintenance_report = report
             return dict(report)
 
@@ -740,6 +753,7 @@ class GenerationStore:
                 preview_quality,
             )
 
+    @_with_node_rules
     async def record_success(
         self,
         *,
@@ -776,6 +790,7 @@ class GenerationStore:
             await asyncio.to_thread(self.maintenance.cleanup, history)
         return generation_id
 
+    @_with_node_rules
     async def import_edit_snapshot(
         self,
         generation_id: str,
@@ -802,6 +817,7 @@ class GenerationStore:
             include_preview,
         )
 
+    @_with_node_rules
     async def project_import_edit_image(
         self, generation_id: str, image_id: str, item_revision: str, output_node_id: str
     ) -> dict[str, Any]:
@@ -822,6 +838,7 @@ class GenerationStore:
             output_node_id,
         )
 
+    @_with_node_rules
     async def edit_import(
         self, generation_id: str, revision: str, items: list[dict[str, Any]]
     ) -> dict[str, Any]:
@@ -850,6 +867,7 @@ class GenerationStore:
                 self.imports.edit_import, generation_id, revision, items
             )
 
+    @_with_node_rules
     async def import_image(
         self,
         data: bytes,
@@ -875,12 +893,14 @@ class GenerationStore:
                 preview_quality,
             )
 
+    @_with_node_rules
     async def stage_import_file(self, path: Path, data: bytes) -> None:
         """Validate and stage an import while excluding concurrent maintenance."""
 
         async with self._lock:
             await asyncio.to_thread(self.imports.stage_import_file, path, data)
 
+    @_with_node_rules
     async def import_group(
         self,
         entries: list[dict[str, Any]],
@@ -933,6 +953,7 @@ class GenerationStore:
                 },
             )
 
+    @_with_node_rules
     async def append_import_group(
         self,
         entries: list[dict[str, Any]],
@@ -974,6 +995,7 @@ class GenerationStore:
         async with self._lock:
             return await asyncio.to_thread(self.imports.check_import_hashes, hashes)
 
+    @_with_node_rules
     async def commit_import_batch(
         self,
         entries: list[dict[str, Any]],
@@ -1024,6 +1046,7 @@ class GenerationStore:
 
         return await asyncio.to_thread(self.queries.list_generations, filters)
 
+    @_with_node_rules
     async def generation_detail(
         self, generation_id: str, *, include_assets: bool = True, light: bool = False
     ) -> dict[str, Any] | None:
@@ -1037,6 +1060,7 @@ class GenerationStore:
             self.queries.generation_detail, generation_id, include_assets
         )
 
+    @_with_node_rules
     async def gallery_image_info(
         self, image_id: str, *, include_preview: bool = True
     ) -> dict[str, Any] | None:
@@ -1046,6 +1070,7 @@ class GenerationStore:
             self.queries.gallery_image_info, image_id, include_preview
         )
 
+    @_with_node_rules
     async def generation_image_context(
         self, generation_id: str, image_id: str = ""
     ) -> dict[str, Any] | None:
@@ -1208,6 +1233,21 @@ class GenerationStore:
         ids = _validate_generation_selection(generation_ids)
         return await self._external_mutation(self.records.toggle_favorites, ids)
 
+    async def set_title(self, generation_id: str, title: str) -> dict[str, str]:
+        """Rename any local gallery group, including the index of an external image."""
+        if not _SAFE_ID_RE.fullmatch(generation_id):
+            raise ValueError("生成记录 ID 无效")
+        if not isinstance(title, str):
+            raise ValueError("图组标题必须是字符串")
+        title = title.strip()
+        if len(title) > 200:
+            raise ValueError("图组标题不能超过 200 个字符")
+        if any(character in title for character in ("\n", "\r", "\0")):
+            raise ValueError("图组标题必须为单行文本")
+        return await self._external_mutation(
+            self.records.set_title, generation_id, title
+        )
+
     async def delete_images(
         self, generation_id: str, image_ids: list[str]
     ) -> dict[str, Any]:
@@ -1222,23 +1262,40 @@ class GenerationStore:
             for item in image_ids
         ):
             raise ValueError("图片 ID 无效")
-        return await self._external_mutation(
+        result = await self._external_mutation(
             self.records.delete_images, generation_id, list(dict.fromkeys(image_ids))
         )
+        await self._notify_results_removed([generation_id])
+        return result
 
     async def delete_generation(self, generation_id: str) -> bool:
         """Delete one generation and every plugin-owned result/reference file."""
 
         if not _SAFE_ID_RE.fullmatch(generation_id):
             return False
-        return await self._external_mutation(
+        deleted = await self._external_mutation(
             self.records.delete_generation, generation_id
         )
+        if deleted:
+            await self._notify_results_removed([generation_id])
+        return deleted
 
     async def delete_generations(self, generation_ids: list[str]) -> dict[str, Any]:
         """Validate all source permissions before deleting any selected record."""
         ids = _validate_generation_selection(generation_ids)
-        return await self._external_mutation(self.records.delete_generations, ids)
+        result = await self._external_mutation(self.records.delete_generations, ids)
+        await self._notify_results_removed(ids)
+        return result
+
+    async def _notify_results_removed(self, generation_ids: list[str]) -> None:
+        # Called after the gallery transaction and facade lock have completed.
+        # A cleanup failure must not report an already committed deletion as failed;
+        # startup/hourly maintenance retries the same reconciliation.
+        if self.on_results_removed is not None:
+            try:
+                await self.on_results_removed(generation_ids)
+            except Exception:
+                logger.exception("Could not release task caches after gallery deletion")
 
     async def delete_reference(self, reference_id: str) -> bool:
         """Delete one retained reference without deleting its parent history record."""
@@ -1248,6 +1305,7 @@ class GenerationStore:
         async with self._lock:
             return await asyncio.to_thread(self.records.delete_reference, reference_id)
 
+    @_with_node_rules
     async def export_generations(self, generation_ids: list[str]) -> Path:
         """Build a flat ZIP containing each result and its own metadata JSON."""
 

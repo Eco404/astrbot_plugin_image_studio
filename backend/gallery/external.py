@@ -21,6 +21,7 @@ from .timestamps import (
     nai_filename_timestamp,
 )
 from ..metadata.parser import MAX_IMAGE_BYTES
+from ..metadata.comfyui.user_rules import load_rules
 
 MAX_SIDECAR_BYTES = 1024 * 1024
 MAX_SIDECAR_NODES = 4096
@@ -673,6 +674,9 @@ class ExternalGalleryManager:
             for error in enumeration_errors:
                 add_error(error)
             snapshot = await self.store.external_scan_snapshot(source_id)
+            rules = await asyncio.to_thread(
+                load_rules, getattr(self.store, "data_dir", None)
+            )
             report.update(status="scanning", total=len(seen))
             for entry in entries:
                 if not self._current(source_id, epoch):
@@ -690,6 +694,10 @@ class ExternalGalleryManager:
                         and previous.get("thumbnail_max_edge") == self.preview_max_edge
                         and previous.get("thumbnail_quality") == self.preview_quality
                         and int(previous.get("parser_version") or 0) >= PARSER_VERSION
+                        and (
+                            previous.get("metadata_format") != "comfyui"
+                            or previous.get("rules_fingerprint") == rules.fingerprint
+                        )
                         and int(previous.get("time_policy_version") or 0)
                         >= TIME_POLICY_VERSION
                     ):

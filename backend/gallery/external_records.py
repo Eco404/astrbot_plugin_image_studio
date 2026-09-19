@@ -142,18 +142,10 @@ class ExternalRecords:
             )
             if index_changed:
                 # File identity is rooted in this exact directory; changing it starts a new index.
-                ids = [
-                    row[0]
-                    for row in conn.execute(
-                        "SELECT generation_id FROM external_records WHERE source_id=?",
-                        (source_id,),
-                    )
-                ]
                 conn.execute(
                     "DELETE FROM generations WHERE id IN (SELECT generation_id FROM external_records WHERE source_id = ?)",
                     (source_id,),
                 )
-                self.delete_legacy_search(conn, ids)
             conn.execute(
                 "INSERT INTO external_sources (id,name,root_path,enabled,type,recursive,permissions_json) VALUES (?,?,?,?,?,?,?) "
                 "ON CONFLICT(id) DO UPDATE SET name=excluded.name,root_path=excluded.root_path,enabled=excluded.enabled,"
@@ -189,14 +181,14 @@ class ExternalRecords:
             conn.executemany(
                 "DELETE FROM generations WHERE id=?", [(item,) for item in ids]
             )
-            self.delete_legacy_search(conn, ids)
             conn.execute("DELETE FROM external_sources WHERE id=?", (source_id,))
         self.services.purge_unreferenced_assets()
 
     def external_scan_snapshot(self, source_id):
         with self.context.connect() as conn:
             rows = conn.execute(
-                "SELECT e.*,t.path AS thumbnail_path,t.max_edge AS thumbnail_max_edge,t.quality AS thumbnail_quality,m.parser_version "
+                "SELECT e.*,t.path AS thumbnail_path,t.max_edge AS thumbnail_max_edge,t.quality AS thumbnail_quality,m.parser_version, "
+                "m.format AS metadata_format, json_extract(m.metadata_json, '$.rules_fingerprint') AS rules_fingerprint "
                 "FROM external_records e LEFT JOIN image_thumbnails t ON t.asset_id=e.asset_id "
                 "LEFT JOIN image_metadata m ON m.asset_id=e.asset_id WHERE e.source_id=?",
                 (source_id,),
@@ -540,19 +532,8 @@ class ExternalRecords:
                 "DELETE FROM generations WHERE id=?",
                 [(row["generation_id"],) for row in missing],
             )
-            self.delete_legacy_search(conn, [row["generation_id"] for row in missing])
         self.services.purge_unreferenced_assets()
         return len(missing)
-
-    @staticmethod
-    def delete_legacy_search(conn, generation_ids):
-        try:
-            conn.executemany(
-                "DELETE FROM generation_search WHERE generation_id=?",
-                [(item,) for item in generation_ids],
-            )
-        except sqlite3.OperationalError:
-            pass
 
     def trim_disabled_external_thumbnails(self):
         with self.context.connect() as conn:

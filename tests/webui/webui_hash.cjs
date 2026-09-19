@@ -4,7 +4,7 @@ const path = require("node:path");
 const vm = require("node:vm");
 const { createHash, randomBytes, webcrypto } = require("node:crypto");
 
-const root = path.join(__dirname, "../../pages/image-studio");
+const root = require("../support/webui_paths.cjs").frontend;
 const library = fs.readFileSync(path.join(root, "vendor/js-sha256/sha256.min.js"), "utf8");
 const wrapper = fs.readFileSync(path.join(root, "hash.js"), "utf8");
 

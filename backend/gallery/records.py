@@ -158,6 +158,7 @@ class GenerationRecords:
             for name in denied & {"size", "count", "negative_prompt"}:
                 parameters.pop(name, None)
             if provider.kind == "comfyui":
+                parameters["workflow_name"] = model.name or model.id
                 parameters = compact_comfy_request(parameters)
             image_supplementals: dict[str, str] = {}
             for (image_id, _, asset_id), image in zip(image_rows, images):
@@ -354,19 +355,6 @@ class GenerationRecords:
                         ),
                     )
                 self.services.refresh_search(conn, generation_id)
-                try:
-                    conn.execute(
-                        "INSERT INTO generation_search (generation_id, original_prompt, final_prompt, provider_name, model) VALUES (?, ?, ?, ?, ?)",
-                        (
-                            generation_id,
-                            request.prompt,
-                            final_prompt,
-                            provider.name,
-                            request.model or provider.model,
-                        ),
-                    )
-                except sqlite3.OperationalError:
-                    pass
             return generation_id
         except Exception:
             self.services.cleanup_orphaned_asset_files()
@@ -449,6 +437,16 @@ class GenerationRecords:
             "changed_ids": changed_ids,
         }
 
+    def set_title(self, generation_id: str, title: str) -> dict[str, str]:
+        """Keep group titles independent of image metadata and parser projections."""
+        with self.context.connect() as conn:
+            updated = conn.execute(
+                "UPDATE generations SET title=? WHERE id=?", (title, generation_id)
+            )
+            if not updated.rowcount:
+                raise ValueError("生成记录不存在或已删除")
+        return {"id": generation_id, "title": title}
+
     def delete_images(self, generation_id: str, image_ids: list[str]) -> dict[str, Any]:
         with self.context.connect() as conn:
             rows = conn.execute(
@@ -477,13 +475,6 @@ class GenerationRecords:
                     ).fetchall()
                 )
                 conn.execute("DELETE FROM generations WHERE id = ?", (generation_id,))
-                try:
-                    conn.execute(
-                        "DELETE FROM generation_search WHERE generation_id = ?",
-                        (generation_id,),
-                    )
-                except sqlite3.OperationalError:
-                    pass
             else:
                 self.services.refresh_search(conn, generation_id)
         self.services.purge_unreferenced_assets(asset_ids)
@@ -533,13 +524,6 @@ class GenerationRecords:
                 (generation_id, generation_id),
             ).fetchall()
             conn.execute("DELETE FROM generations WHERE id = ?", (generation_id,))
-            try:
-                conn.execute(
-                    "DELETE FROM generation_search WHERE generation_id = ?",
-                    (generation_id,),
-                )
-            except sqlite3.OperationalError:
-                pass
         self.services.purge_unreferenced_assets(
             [str(row["asset_id"]) for row in asset_rows if row["asset_id"]]
         )

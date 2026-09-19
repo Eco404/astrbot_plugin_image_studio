@@ -1,0 +1,1305 @@
+{
+  "version": 1,
+  "description": "Shared, source-verified ComfyUI node facts. metadata_widgets permits metadata reading only; layouts are the separate authority for positional writes. Explicit named keys never imply a positional index. Versions document verification, complete layout signatures and constraints gate writes.",
+  "sources": {
+    "core": {
+      "repository": "Comfy-Org/ComfyUI",
+      "commit": "3c80da7f87ee359b2d06f107cb3c0797079dfbbb",
+      "paths": [
+        "nodes.py",
+        "comfy_extras/nodes_custom_sampler.py",
+        "comfy_extras/nodes_primitive.py",
+        "comfy_extras/nodes_seed.py",
+        "comfy_extras/nodes_logic.py",
+        "comfy_extras/nodes_upscale_model.py",
+        "comfy_extras/nodes_clip_sdxl.py"
+      ]
+    },
+    "frontend": {
+      "repository": "Comfy-Org/ComfyUI_frontend",
+      "commit": "e39498b04b09c9813f4197cf5333acd02efe9d71",
+      "paths": [
+        "src/scripts/widgets.ts",
+        "src/renderer/extensions/vueNodes/widgets/composables/useIntWidget.ts",
+        "src/lib/litegraph/src/LGraphNode.ts"
+      ]
+    },
+    "rgthree": {
+      "repository": "rgthree/rgthree-comfy",
+      "commit": "eadc24ecc8bfc3c80fcc50724c0ebe74489f255b",
+      "paths": [
+        "py/seed.py",
+        "web/comfyui/seed.js"
+      ]
+    },
+    "rgthree_current": {
+      "repository": "rgthree/rgthree-comfy",
+      "commit": "2c5342a8cb0eaecaabf61435a5f37dd594c510ba",
+      "paths": [
+        "py/seed.py",
+        "web/comfyui/seed.js"
+      ]
+    },
+    "mixlab": {
+      "repository": "shadowcz007/comfyui-mixlab-nodes",
+      "commit": "c5392aa23762a440834c056c3e22cf99ccf52703",
+      "paths": [
+        "nodes/Utils.py",
+        "__init__.py",
+        "web/javascript/prompt_mixlab.js"
+      ]
+    },
+    "was": {
+      "repository": "WASasquatch/was-node-suite-comfyui",
+      "commit": "44de705818d4663fefefde57ffe0ea5a9ea39df4",
+      "paths": [
+        "WAS_Node_Suite.py"
+      ]
+    },
+    "was_current": {
+      "repository": "WASasquatch/was-node-suite-comfyui",
+      "commit": "9934caa92dd0ddbb533cdfd5645e08c43ec629af",
+      "paths": [
+        "nodes/text/text_multiline.py",
+        "nodes/text/text_concatenate.py"
+      ]
+    },
+    "impact": {
+      "repository": "ltdrdata/ComfyUI-Impact-Pack",
+      "commit": "429d0159ad429e64d2b3916e6e7be9c22d025c3c",
+      "paths": [
+        "modules/impact/impact_pack.py",
+        "js/impact-pack.js"
+      ]
+    },
+    "impact_subpack": {
+      "repository": "ltdrdata/ComfyUI-Impact-Subpack",
+      "commit": "50c7b71a6a224734cc9b21963c6d1926816a97f1",
+      "paths": [
+        "modules/subpack_nodes.py"
+      ]
+    },
+    "easy": {
+      "repository": "yolain/ComfyUI-Easy-Use",
+      "commit": "450b1ce4ce43b2280521c87f5fa388a898fb2ad2",
+      "paths": [
+        "py/nodes/seed.py",
+        "web_version/v1/js/seed.js",
+        "py/server.py",
+        "py/nodes/logic.py",
+        "web_version/v1/js/easy/easyDynamicWidgets.js"
+      ]
+    },
+    "weilin": {
+      "repository": "weilin9999/WeiLin-Comfyui-Tools",
+      "commit": "efd923795d27e59da1d7a43e453ca95b07e684f9",
+      "paths": ["__init__.py", "js_node/weilin_prompt_ui_node.js"]
+    },
+    "raffle": {
+      "repository": "rainlizard/ComfyUI-Raffle",
+      "commit": "712aebf31856599e4f0afe1ce69f90b73e638e58",
+      "paths": ["raffle.py", "__init__.py"]
+    },
+    "kj": {
+      "repository": "kijai/ComfyUI-KJNodes",
+      "commit": "d3cfe21625e5170126ce06fbfcfe1d88108688c3",
+      "paths": [
+        "nodes/nodes.py",
+        "web/js/jsnodes.js"
+      ]
+    }
+  },
+  "nodes": {
+    "KSampler": {
+      "sources": [
+        "core",
+        "frontend"
+      ],
+      "metadata_widgets": [
+        "seed",
+        "control_after_generate",
+        "steps",
+        "cfg",
+        "sampler_name",
+        "scheduler",
+        "denoise"
+      ],
+      "layouts": [
+        {
+          "widgets": [
+            "seed",
+            "control_after_generate",
+            "steps",
+            "cfg",
+            "sampler_name",
+            "scheduler",
+            "denoise"
+          ],
+          "constraints": {
+            "1": {
+              "one_of": [
+                "fixed",
+                "increment",
+                "decrement",
+                "randomize"
+              ]
+            }
+          }
+        }
+      ],
+      "seed": {
+        "field": "seed",
+        "min": 0,
+        "max": "18446744073709551615",
+        "negative_sentinels": [],
+        "writeback": "none",
+        "role": "seed"
+      }
+    },
+    "KSamplerAdvanced": {
+      "sources": [
+        "core",
+        "frontend"
+      ],
+      "metadata_widgets": [
+        "add_noise",
+        "noise_seed",
+        "control_after_generate",
+        "steps",
+        "cfg",
+        "sampler_name",
+        "scheduler",
+        "start_at_step",
+        "end_at_step",
+        "return_with_leftover_noise"
+      ],
+      "layouts": [
+        {
+          "widgets": [
+            "add_noise",
+            "noise_seed",
+            "control_after_generate",
+            "steps",
+            "cfg",
+            "sampler_name",
+            "scheduler",
+            "start_at_step",
+            "end_at_step",
+            "return_with_leftover_noise"
+          ],
+          "constraints": {
+            "2": {
+              "one_of": [
+                "fixed",
+                "increment",
+                "decrement",
+                "randomize"
+              ]
+            }
+          }
+        }
+      ],
+      "seed": {
+        "field": "noise_seed",
+        "min": 0,
+        "max": "18446744073709551615",
+        "negative_sentinels": [],
+        "writeback": "none",
+        "role": "seed"
+      }
+    },
+    "RandomNoise": {
+      "sources": [
+        "core",
+        "frontend"
+      ],
+      "metadata_widgets": [
+        "noise_seed",
+        "control_after_generate"
+      ],
+      "layouts": [
+        {
+          "widgets": [
+            "noise_seed",
+            "control_after_generate"
+          ],
+          "constraints": {
+            "1": {
+              "one_of": [
+                "fixed",
+                "increment",
+                "decrement",
+                "randomize"
+              ]
+            }
+          }
+        }
+      ],
+      "seed": {
+        "field": "noise_seed",
+        "min": 0,
+        "max": "18446744073709551615",
+        "negative_sentinels": [],
+        "writeback": "none",
+        "role": "seed"
+      }
+    },
+    "CLIPTextEncode": {
+      "sources": [
+        "core",
+        "frontend"
+      ],
+      "metadata_widgets": [
+        "text"
+      ],
+      "layouts": [
+        {
+          "widgets": [
+            "text"
+          ]
+        }
+      ]
+    },
+    "CLIPTextEncodeSDXL": {
+      "sources": [
+        "core",
+        "frontend"
+      ],
+      "metadata_widgets": [
+        "width",
+        "height",
+        "crop_w",
+        "crop_h",
+        "target_width",
+        "target_height",
+        "text_g",
+        "text_l"
+      ],
+      "layouts": [
+        {
+          "widgets": [
+            "width",
+            "height",
+            "crop_w",
+            "crop_h",
+            "target_width",
+            "target_height",
+            "text_g",
+            "text_l"
+          ]
+        }
+      ]
+    },
+    "CLIPTextEncodeSDXLRefiner": {
+      "sources": [
+        "core",
+        "frontend"
+      ],
+      "metadata_widgets": [
+        "ascore",
+        "width",
+        "height",
+        "text"
+      ],
+      "layouts": [
+        {
+          "widgets": [
+            "ascore",
+            "width",
+            "height",
+            "text"
+          ]
+        }
+      ]
+    },
+    "CheckpointLoaderSimple": {
+      "sources": [
+        "core",
+        "frontend"
+      ],
+      "metadata_widgets": [
+        "ckpt_name"
+      ],
+      "layouts": [
+        {
+          "widgets": [
+            "ckpt_name"
+          ]
+        }
+      ]
+    },
+    "UNETLoader": {
+      "sources": [
+        "core",
+        "frontend"
+      ],
+      "metadata_widgets": [
+        "unet_name",
+        "weight_dtype"
+      ],
+      "layouts": [
+        {
+          "widgets": [
+            "unet_name",
+            "weight_dtype"
+          ]
+        }
+      ]
+    },
+    "VAELoader": {
+      "sources": [
+        "core",
+        "frontend"
+      ],
+      "metadata_widgets": [
+        "vae_name"
+      ],
+      "layouts": [
+        {
+          "widgets": [
+            "vae_name"
+          ]
+        }
+      ]
+    },
+    "CLIPLoader": {
+      "sources": [
+        "core",
+        "frontend"
+      ],
+      "metadata_widgets": [
+        "clip_name",
+        "type",
+        "device"
+      ],
+      "layouts": [
+        {
+          "widgets": [
+            "clip_name",
+            "type",
+            "device"
+          ]
+        }
+      ]
+    },
+    "DualCLIPLoader": {
+      "sources": [
+        "core",
+        "frontend"
+      ],
+      "metadata_widgets": [
+        "clip_name1",
+        "clip_name2",
+        "type",
+        "device"
+      ],
+      "layouts": [
+        {
+          "widgets": [
+            "clip_name1",
+            "clip_name2",
+            "type",
+            "device"
+          ]
+        }
+      ]
+    },
+    "LoraLoader": {
+      "sources": [
+        "core",
+        "frontend"
+      ],
+      "metadata_widgets": [
+        "lora_name",
+        "strength_model",
+        "strength_clip"
+      ],
+      "layouts": [
+        {
+          "widgets": [
+            "lora_name",
+            "strength_model",
+            "strength_clip"
+          ]
+        }
+      ]
+    },
+    "LoraLoaderModelOnly": {
+      "sources": [
+        "core",
+        "frontend"
+      ],
+      "metadata_widgets": [
+        "lora_name",
+        "strength_model"
+      ],
+      "layouts": [
+        {
+          "widgets": [
+            "lora_name",
+            "strength_model"
+          ]
+        }
+      ]
+    },
+    "EmptyLatentImage": {
+      "sources": [
+        "core",
+        "frontend"
+      ],
+      "metadata_widgets": [
+        "width",
+        "height",
+        "batch_size"
+      ],
+      "layouts": [
+        {
+          "widgets": [
+            "width",
+            "height",
+            "batch_size"
+          ]
+        }
+      ]
+    },
+    "EmptySD3LatentImage": {
+      "sources": [
+        "core",
+        "frontend"
+      ],
+      "metadata_widgets": [
+        "width",
+        "height",
+        "batch_size"
+      ],
+      "layouts": [
+        {
+          "widgets": [
+            "width",
+            "height",
+            "batch_size"
+          ]
+        }
+      ]
+    },
+    "LatentUpscaleBy": {
+      "sources": [
+        "core",
+        "frontend"
+      ],
+      "metadata_widgets": [
+        "upscale_method",
+        "scale_by"
+      ],
+      "layouts": [
+        {
+          "widgets": [
+            "upscale_method",
+            "scale_by"
+          ]
+        }
+      ]
+    },
+    "LatentUpscale": {
+      "sources": [
+        "core",
+        "frontend"
+      ],
+      "metadata_widgets": [
+        "upscale_method",
+        "width",
+        "height",
+        "crop"
+      ],
+      "layouts": [
+        {
+          "widgets": [
+            "upscale_method",
+            "width",
+            "height",
+            "crop"
+          ]
+        }
+      ]
+    },
+    "ImageScaleBy": {
+      "sources": [
+        "core",
+        "frontend"
+      ],
+      "metadata_widgets": [
+        "upscale_method",
+        "scale_by"
+      ],
+      "layouts": [
+        {
+          "widgets": [
+            "upscale_method",
+            "scale_by"
+          ]
+        }
+      ]
+    },
+    "ImageScale": {
+      "sources": [
+        "core",
+        "frontend"
+      ],
+      "metadata_widgets": [
+        "upscale_method",
+        "width",
+        "height",
+        "crop"
+      ],
+      "layouts": [
+        {
+          "widgets": [
+            "upscale_method",
+            "width",
+            "height",
+            "crop"
+          ]
+        }
+      ]
+    },
+    "SaveImage": {
+      "sources": [
+        "core",
+        "frontend"
+      ],
+      "metadata_widgets": [
+        "filename_prefix"
+      ],
+      "layouts": [
+        {
+          "widgets": [
+            "filename_prefix"
+          ]
+        }
+      ]
+    },
+    "ConditioningAverage": {
+      "sources": [
+        "core",
+        "frontend"
+      ],
+      "metadata_widgets": [
+        "conditioning_to_strength"
+      ],
+      "layouts": [
+        {
+          "widgets": [
+            "conditioning_to_strength"
+          ]
+        }
+      ]
+    },
+    "ConditioningSetArea": {
+      "sources": [
+        "core",
+        "frontend"
+      ],
+      "metadata_widgets": [
+        "width",
+        "height",
+        "x",
+        "y",
+        "strength"
+      ],
+      "layouts": [
+        {
+          "widgets": [
+            "width",
+            "height",
+            "x",
+            "y",
+            "strength"
+          ]
+        }
+      ]
+    },
+    "ConditioningSetAreaPercentage": {
+      "sources": [
+        "core",
+        "frontend"
+      ],
+      "metadata_widgets": [
+        "width",
+        "height",
+        "x",
+        "y",
+        "strength"
+      ],
+      "layouts": [
+        {
+          "widgets": [
+            "width",
+            "height",
+            "x",
+            "y",
+            "strength"
+          ]
+        }
+      ]
+    },
+    "ConditioningSetMask": {
+      "sources": [
+        "core",
+        "frontend"
+      ],
+      "metadata_widgets": [
+        "strength",
+        "set_cond_area"
+      ],
+      "layouts": [
+        {
+          "widgets": [
+            "strength",
+            "set_cond_area"
+          ]
+        }
+      ]
+    },
+    "ConditioningSetTimestepRange": {
+      "sources": [
+        "core",
+        "frontend"
+      ],
+      "metadata_widgets": [
+        "start",
+        "end"
+      ],
+      "layouts": [
+        {
+          "widgets": [
+            "start",
+            "end"
+          ]
+        }
+      ]
+    },
+    "ConditioningSetAreaStrength": {
+      "sources": [
+        "core",
+        "frontend"
+      ],
+      "metadata_widgets": [
+        "strength"
+      ],
+      "layouts": [
+        {
+          "widgets": [
+            "strength"
+          ]
+        }
+      ]
+    },
+    "PrimitiveString": {
+      "sources": [
+        "core",
+        "frontend"
+      ],
+      "metadata_widgets": [
+        "value"
+      ],
+      "layouts": [
+        {
+          "widgets": [
+            "value"
+          ]
+        }
+      ]
+    },
+    "PrimitiveStringMultiline": {
+      "sources": [
+        "core",
+        "frontend"
+      ],
+      "metadata_widgets": [
+        "value"
+      ],
+      "layouts": [
+        {
+          "widgets": [
+            "value"
+          ]
+        }
+      ]
+    },
+    "PrimitiveInt": {
+      "sources": [
+        "core",
+        "frontend"
+      ],
+      "metadata_widgets": [
+        "value"
+      ],
+      "layouts": [
+        {
+          "widgets": [
+            "value",
+            "control_after_generate"
+          ],
+          "constraints": {
+            "1": {
+              "one_of": [
+                "fixed",
+                "increment",
+                "decrement",
+                "randomize"
+              ]
+            }
+          }
+        }
+      ],
+      "seed": {
+        "field": "value",
+        "min": "-9223372036854775807",
+        "max": "9223372036854775807",
+        "negative_sentinels": [],
+        "writeback": "none",
+        "role": "integer"
+      }
+    },
+    "SeedNode": {
+      "sources": [
+        "core",
+        "frontend"
+      ],
+      "metadata_widgets": [
+        "seed",
+        "control_after_generate"
+      ],
+      "layouts": [
+        {
+          "widgets": [
+            "seed",
+            "control_after_generate"
+          ],
+          "constraints": {
+            "1": {
+              "one_of": [
+                "fixed",
+                "increment",
+                "decrement",
+                "randomize"
+              ]
+            }
+          }
+        }
+      ],
+      "seed": {
+        "field": "seed",
+        "min": 0,
+        "max": "9223372036854775807",
+        "negative_sentinels": [],
+        "writeback": "none",
+        "role": "seed"
+      }
+    },
+    "UpscaleModelLoader": {
+      "sources": [
+        "core",
+        "frontend"
+      ],
+      "metadata_widgets": [
+        "model_name"
+      ],
+      "layouts": [
+        {
+          "widgets": [
+            "model_name"
+          ]
+        }
+      ]
+    },
+    "LoadImage": {
+      "sources": [
+        "core",
+        "frontend"
+      ],
+      "metadata_widgets": [
+        "image"
+      ],
+      "layouts": [
+        {
+          "widgets": [
+            "image"
+          ]
+        },
+        {
+          "widgets": [
+            "image",
+            "__upload"
+          ],
+          "constraints": {
+            "1": {
+              "one_of": [
+                "image"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "Seed (rgthree)": {
+      "sources": [
+        "rgthree",
+        "rgthree_current"
+      ],
+      "metadata_widgets": [
+        "seed"
+      ],
+      "layouts": [
+        {
+          "widgets": [
+            "seed",
+            "__random_button",
+            "__fixed_button",
+            "__last_button"
+          ],
+          "constraints": {
+            "1": {
+              "one_of": [
+                ""
+              ]
+            },
+            "2": {
+              "one_of": [
+                ""
+              ]
+            },
+            "3": {
+              "one_of": [
+                "",
+                "okay"
+              ]
+            }
+          }
+        }
+      ],
+      "seed": {
+        "field": "seed",
+        "min": 0,
+        "max": "1125899906842624",
+        "negative_sentinels": [
+          -1,
+          -2,
+          -3
+        ],
+        "writeback": "rgthree",
+        "role": "seed"
+      },
+      "verified_versions": [
+        "eadc24ecc8bfc3c80fcc50724c0ebe74489f255b",
+        "2c5342a8cb0eaecaabf61435a5f37dd594c510ba"
+      ]
+    },
+    "TextInput_": {
+      "sources": [
+        "mixlab"
+      ],
+      "metadata_widgets": [
+        "text"
+      ],
+      "layouts": [
+        {
+          "widgets": [
+            "text"
+          ]
+        }
+      ],
+      "verified_versions": [
+        "0.46.0",
+        "c5392aa23762a440834c056c3e22cf99ccf52703"
+      ]
+    },
+    "TextInput": {
+      "metadata_widgets": [
+        "text"
+      ],
+      "layouts": [],
+      "note": "Legacy metadata reading hint only; no verified write layout."
+    },
+    "String": {
+      "metadata_widgets": [
+        "text"
+      ],
+      "layouts": [],
+      "note": "Legacy metadata reading hint only; no verified write layout."
+    },
+    "Text Multiline": {
+      "sources": [
+        "was",
+        "was_current"
+      ],
+      "metadata_widgets": [
+        "text"
+      ],
+      "layouts": [
+        {
+          "widgets": [
+            "text"
+          ],
+          "sources": [
+            "was"
+          ]
+        },
+        {
+          "widgets": [
+            "text",
+            "dynamic_prompts"
+          ],
+          "sources": [
+            "was_current"
+          ],
+          "constraints": {
+            "1": {
+              "type": "boolean"
+            }
+          }
+        }
+      ]
+    },
+    "Text Concatenate": {
+      "sources": [
+        "was"
+      ],
+      "metadata_widgets": [
+        "delimiter",
+        "clean_whitespace"
+      ],
+      "layouts": [
+        {
+          "widgets": [
+            "delimiter",
+            "clean_whitespace"
+          ],
+          "constraints": {
+            "1": {
+              "one_of": [
+                "true",
+                "false"
+              ]
+            }
+          }
+        }
+      ],
+      "note": "Verified WAS v2 forceInput text sockets. New v3 dynamic optional text widgets are not inferred."
+    },
+    "UltralyticsDetectorProvider": {
+      "sources": [
+        "impact_subpack"
+      ],
+      "metadata_widgets": [
+        "model_name"
+      ],
+      "layouts": [
+        {
+          "widgets": [
+            "model_name"
+          ]
+        }
+      ]
+    },
+    "SAMLoader": {
+      "sources": [
+        "impact"
+      ],
+      "metadata_widgets": [
+        "model_name",
+        "device_mode"
+      ],
+      "layouts": [
+        {
+          "widgets": [
+            "model_name",
+            "device_mode"
+          ],
+          "constraints": {
+            "1": {
+              "one_of": [
+                "AUTO",
+                "Prefer GPU",
+                "CPU"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "FaceDetailer": {
+      "sources": [
+        "impact",
+        "frontend"
+      ],
+      "metadata_widgets": [
+        "guide_size",
+        "guide_size_for",
+        "max_size",
+        "seed",
+        "control_after_generate",
+        "steps",
+        "cfg",
+        "sampler_name",
+        "scheduler",
+        "denoise",
+        "feather",
+        "noise_mask",
+        "force_inpaint",
+        "bbox_threshold",
+        "bbox_dilation",
+        "bbox_crop_factor",
+        "sam_detection_hint",
+        "sam_dilation",
+        "sam_threshold",
+        "sam_bbox_expansion",
+        "sam_mask_hint_threshold",
+        "sam_mask_hint_use_negative",
+        "drop_size",
+        "wildcard",
+        "cycle",
+        "inpaint_model",
+        "noise_mask_feather",
+        "tiled_encode",
+        "tiled_decode"
+      ],
+      "layouts": [
+        {
+          "widgets": [
+            "guide_size",
+            "guide_size_for",
+            "max_size",
+            "seed",
+            "control_after_generate",
+            "steps",
+            "cfg",
+            "sampler_name",
+            "scheduler",
+            "denoise",
+            "feather",
+            "noise_mask",
+            "force_inpaint",
+            "bbox_threshold",
+            "bbox_dilation",
+            "bbox_crop_factor",
+            "sam_detection_hint",
+            "sam_dilation",
+            "sam_threshold",
+            "sam_bbox_expansion",
+            "sam_mask_hint_threshold",
+            "sam_mask_hint_use_negative",
+            "drop_size",
+            "wildcard",
+            "cycle",
+            "inpaint_model",
+            "noise_mask_feather",
+            "tiled_encode",
+            "tiled_decode"
+          ],
+          "constraints": {
+            "4": {
+              "one_of": [
+                "fixed",
+                "increment",
+                "decrement",
+                "randomize"
+              ]
+            }
+          }
+        }
+      ],
+      "seed": {
+        "field": "seed",
+        "min": 0,
+        "max": "18446744073709551615",
+        "negative_sentinels": [],
+        "writeback": "none",
+        "role": "seed"
+      },
+      "verified_versions": [
+        "f8e16df2be0ed2ce914ddd242ef9eadfa386bc2f",
+        "429d0159ad429e64d2b3916e6e7be9c22d025c3c"
+      ]
+    },
+    "easy seed": {
+      "sources": [
+        "easy",
+        "frontend"
+      ],
+      "metadata_widgets": [
+        "seed",
+        "control_after_generate"
+      ],
+      "layouts": [
+        {
+          "widgets": [
+            "seed",
+            "control_after_generate"
+          ],
+          "constraints": {
+            "1": {
+              "one_of": [
+                "fixed",
+                "increment",
+                "decrement",
+                "randomize"
+              ]
+            }
+          }
+        }
+      ],
+      "seed": {
+        "field": "seed",
+        "min": 0,
+        "max": "1125899906842624",
+        "negative_sentinels": [],
+        "writeback": "none",
+        "role": "seed"
+      }
+    },
+    "easy globalSeed": {
+      "sources": [
+        "easy"
+      ],
+      "layouts": [
+        {
+          "widgets": [
+            "value",
+            "mode",
+            "action",
+            "last_seed"
+          ],
+          "constraints": {
+            "1": {
+              "type": "boolean"
+            },
+            "2": {
+              "one_of": [
+                "fixed",
+                "increment",
+                "decrement",
+                "randomize",
+                "increment for each node",
+                "decrement for each node",
+                "randomize for each node"
+              ]
+            }
+          }
+        }
+      ],
+      "global_seed": {
+        "strategy": "easy_global_seed",
+        "fields": [
+          "value",
+          "mode",
+          "action",
+          "last_seed"
+        ]
+      }
+    },
+    "GenerateNoise": {
+      "sources": [
+        "kj",
+        "frontend"
+      ],
+      "metadata_widgets": [
+        "width",
+        "height",
+        "batch_size",
+        "seed",
+        "control_after_generate",
+        "multiplier",
+        "constant_batch_noise",
+        "normalize",
+        "latent_channels",
+        "shape"
+      ],
+      "layouts": [
+        {
+          "widgets": [
+            "width",
+            "height",
+            "batch_size",
+            "seed",
+            "control_after_generate",
+            "multiplier",
+            "constant_batch_noise",
+            "normalize",
+            "latent_channels",
+            "shape"
+          ],
+          "constraints": {
+            "4": {
+              "one_of": [
+                "fixed",
+                "increment",
+                "decrement",
+                "randomize"
+              ]
+            }
+          }
+        }
+      ],
+      "seed": {
+        "field": "seed",
+        "min": 0,
+        "max": "18446744073709551615",
+        "negative_sentinels": [],
+        "writeback": "none",
+        "role": "seed"
+      }
+    },
+    "ComfySwitchNode": {
+      "sources": ["core", "frontend"],
+      "metadata_widgets": ["switch"],
+      "layouts": [{"widgets": ["switch"], "constraints": {"0": {"type": "boolean"}}}],
+      "note": "Only the scalar switch widget is synchronized. This does not declare prompt-flow semantics."
+    },
+    "Raffle": {
+      "sources": ["raffle", "frontend"],
+      "metadata_widgets": ["seed", "control_after_generate", "use_general", "use_questionable", "use_sensitive", "use_explicit", "taglists_must_include", "filter_out_tags", "exclude_taglists_containing", "exclude_tag_categories"],
+      "layouts": [{
+        "widgets": ["seed", "control_after_generate", "use_general", "use_questionable", "use_sensitive", "use_explicit", "taglists_must_include", "filter_out_tags", "exclude_taglists_containing", "exclude_tag_categories"],
+        "constraints": {"1": {"one_of": ["fixed", "increment", "decrement", "randomize"]}, "2": {"type": "boolean"}, "3": {"type": "boolean"}, "4": {"type": "boolean"}, "5": {"type": "boolean"}}
+      }],
+      "seed": {"field": "seed", "min": 0, "max": "18446744073709551615", "negative_sentinels": [], "writeback": "none", "role": "seed"},
+      "note": "Only fixed input widgets are synchronized. Dynamic generated prompt text is not inferred; optional negative_prompt is forceInput."
+    },
+    "StringConstantMultiline": {
+      "sources": ["kj"],
+      "metadata_widgets": ["string", "strip_newlines"],
+      "layouts": [{"widgets": ["string", "strip_newlines"], "constraints": {"1": {"type": "boolean"}}}]
+    },
+    "JoinStringMulti": {
+      "sources": ["kj"],
+      "metadata_widgets": ["inputcount", "delimiter", "return_list"],
+      "layouts": [{"widgets": ["inputcount", "delimiter", "return_list", "__update_inputs"], "constraints": {"2": {"type": "boolean"}, "3": {"one_of": [null]}}}],
+      "note": "Dynamic string sockets remain links. Only the three fixed API widgets and the verified frontend button layout are mapped."
+    },
+    "WeiLinPromptUI": {
+      "sources": ["weilin"],
+      "frontend_inputs": {
+        "打开提示词编辑器": {"role": "button", "value_types": ["empty_string"]},
+        "打开Lora堆": {"role": "button", "value_types": ["empty_string"]},
+        "Open Prompt UI": {"role": "button", "value_types": ["empty_string"]},
+        "Open Lora Stack": {"role": "button", "value_types": ["empty_string"]}
+      },
+      "note": "Exact labels of frontend buttons initialized to an empty string; not backend execution inputs. This grants no widget read/write mapping."
+    },
+    "easy showAnything": {
+      "sources": [
+        "easy"
+      ],
+      "display": {
+        "input": "anything",
+        "api_field": "text",
+        "api_value_types": ["string", "string_list"],
+        "write_protected": [
+          "text"
+        ]
+      },
+      "layouts": []
+    }
+  }
+}

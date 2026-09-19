@@ -8,7 +8,7 @@ const base = process.env.STUDIO_TEST_URL;
 if (!base) throw new Error("Set STUDIO_TEST_URL to an isolated WebUI harness.");
 const output = fs.mkdtempSync(path.join(os.tmpdir(), "studio-appearance-"));
 const storageKey = "image-studio:appearance:v1";
-const defaults = { preference: "system", accentHue: 168, accentSaturation: 38, accentLightness: 50, glassOpacity: 0.68 };
+const defaults = { preference: "system", accentHue: 168, accentSaturation: 38, accentLightness: 50, glassOpacity: 0.68, galleryCardInfo: true };
 
 async function open(context) {
   const page = await context.newPage();
@@ -328,7 +328,7 @@ async function localAndFailure(browser) {
   const page = await context.newPage();
   await page.goto(`${base.replace(/\/$/, "")}/appearance-check`);
   await page.evaluate(() => window.ImageStudioAppearance.ready);
-  assert.deepEqual(await page.evaluate(() => window.ImageStudioAppearance.get()), { preference: "light", accentHue: 359.999999, accentSaturation: 38, accentLightness: 50, glassOpacity: 0.2 });
+  assert.deepEqual(await page.evaluate(() => window.ImageStudioAppearance.get()), { preference: "light", accentHue: 359.999999, accentSaturation: 38, accentLightness: 50, glassOpacity: 0.2, galleryCardInfo: true });
   assert.ok((await page.evaluate(() => window.__appearancePaints)).every((frame) => !frame.visible || frame.visible === "hidden" || frame.theme === "light"), "wrong local theme painted");
   await page.evaluate(() => window.ImageStudioAppearance.set({ preference: "dark" }));
   await silentStatus(page);

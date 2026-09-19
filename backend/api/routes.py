@@ -83,6 +83,30 @@ def register_web_apis(plugin, page_prefix: str) -> None:
             "Image Studio: inspect image metadata",
         ),
         (
+            "imports/node-rules",
+            plugin._api_import_node_rules,
+            ["GET"],
+            "Image Studio: list user text node rules",
+        ),
+        (
+            "imports/node-rules/preview",
+            plugin._api_import_node_rule_preview,
+            ["POST"],
+            "Image Studio: preview a text node binding",
+        ),
+        (
+            "imports/node-rules/save",
+            plugin._api_import_node_rule_save,
+            ["POST"],
+            "Image Studio: save a text node binding",
+        ),
+        (
+            "imports/node-rules/delete",
+            plugin._api_import_node_rule_delete,
+            ["POST"],
+            "Image Studio: delete a text node binding",
+        ),
+        (
             "imports/prepare",
             plugin._api_import_prepare,
             ["POST"],
@@ -141,6 +165,12 @@ def register_web_apis(plugin, page_prefix: str) -> None:
             plugin._api_gallery_favorite,
             ["POST"],
             "Image Studio: favorite record",
+        ),
+        (
+            "gallery/title",
+            plugin._api_gallery_title,
+            ["POST"],
+            "Image Studio: edit gallery group title",
         ),
         (
             "gallery/favorite/status",
