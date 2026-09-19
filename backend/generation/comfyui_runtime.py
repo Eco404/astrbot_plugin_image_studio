@@ -48,10 +48,16 @@ class ComfyRuntime:
 
     async def start(self):
         await self.store.initialize()
+        self.service.store.on_results_removed = self.store.reconcile_gallery_outputs
         await self.manager.resume_pending()
 
     async def close(self):
         await self.manager.close()
+        if (
+            self.service.store.on_results_removed
+            == self.store.reconcile_gallery_outputs
+        ):
+            self.service.store.on_results_removed = None
 
     async def submit(
         self,

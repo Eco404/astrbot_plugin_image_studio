@@ -127,9 +127,18 @@
       els.storageHealthAssets.textContent = `${Number(stats.assets || 0)} / ${Number(stats.thumbnails || 0)}`;
       els.storageHealthLeases.textContent = String(Number(stats.active_leases || 0)); els.storageHealthGenerations.textContent = String(Number(stats.generations || 0)); els.storageHealthSize.textContent = formatBytes(stats.disk?.file_bytes ?? stats.size_bytes ?? 0);
       $("storageHealthAllocated").textContent = stats.disk ? formatBytes(stats.disk.allocated_bytes || 0) : "-";
-      $("storageHealthReusable").textContent = formatBytes(stats.disk?.database?.reusable_bytes || 0);
-      const categories = [["originals", "画廊原图与参考图"], ["thumbnails", "预览图"], ["comfy_inputs", "ComfyUI 输入缓存"], ["comfy_outputs", "ComfyUI 输出缓存"], ["comfy_blobs", "ComfyUI 共享图片"], ["database", "数据库"], ["backups", "升级备份"], ["temporary", "其他临时文件"], ["other", "配置及其他文件"]];
-      $("storageHealthBreakdown").innerHTML = stats.disk ? categories.map(([key, label]) => `<div><span>${escape(label)}</span><strong>${escape(formatBytes(stats.disk.categories?.[key]?.file_bytes || 0))}</strong></div>`).join("") : "";
+      const reusableDatabaseBytes = Number(stats.disk?.database?.reusable_bytes ?? stats.database?.reusable_bytes ?? 0);
+      const diskCategories = { ...stats.disk?.categories };
+      // Keep detailed API accounting intact; group the three caches only for presentation.
+      diskCategories.comfy_cache = Object.fromEntries(["file_bytes", "file_count", "allocated_bytes"].map(field => [field,
+        ["comfy_inputs", "comfy_outputs", "comfy_blobs"].reduce((total, key) => total + Number(diskCategories[key]?.[field] || 0), 0),
+      ]));
+      const categories = [["originals", "画廊原图与参考图"], ["thumbnails", "预览图"], ["comfy_cache", "ComfyUI 缓存"], ["database", "数据库"], ["backups", "升级备份"], ["temporary", "其他临时文件"], ["other", "配置及其他文件"]];
+      $("storageHealthBreakdown").innerHTML = stats.disk ? categories.map(([key, label]) => {
+        const size = formatBytes(diskCategories[key]?.file_bytes || 0);
+        const reusable = key === "database" && reusableDatabaseBytes > 0 ? `（${formatBytes(reusableDatabaseBytes)} 可压缩）` : "";
+        return `<div><span>${escape(label)}</span><strong>${escape(size + reusable)}</strong></div>`;
+      }).join("") : "";
       const repaired = report?.repaired || {};
       const repairs = [["expired_leases", "到期保留记录"], ["expired_import_batches", "过期导入批次"], ["broken_assets", "不可用原图"], ["rebuilt_thumbnails", "重建预览"], ["unreferenced_assets", "无引用图片"], ["orphan_files", "无引用文件"], ["stale_temporary_files", "过期临时文件"], ["comfy_files", "ComfyUI 缓存文件"], ["unused_payloads", "无引用快照"], ["backups_removed", "旧升级备份"]].filter(([key]) => Number(repaired[key]) > 0).map(([key, label]) => `${label} ${Number(repaired[key])} 项`);
       if (report?.database?.compacted) repairs.push(`数据库缩减 ${formatBytes(report.database.bytes_reclaimed)}`);

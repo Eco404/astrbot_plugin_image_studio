@@ -302,7 +302,8 @@ class ComfyJobStore:
             "CASE WHEN generation_id!='' THEN EXISTS(SELECT 1 FROM generation_images gi "
             "JOIN image_assets a ON a.id=gi.asset_id WHERE gi.generation_id=comfy_jobs.generation_id "
             "AND a.file_state='available') ELSE "
-            "archive_state='' AND json_array_length(output_refs_json)>0 END AS has_result"
+            "archive_state='' AND EXISTS(SELECT 1 FROM json_each(output_refs_json) "
+            "WHERE COALESCE(json_extract(value,'$.storage'),'')!='expired') END AS has_result"
         )
 
     async def list_jobs(
@@ -537,7 +538,7 @@ class ComfyJobStore:
                 )
             ):
                 raise ValueError(
-                    "ComfyUI 任务已超过 7 天恢复期限，不能恢复；请重新运行工作流"
+                    "ComfyUI 任务已超过 24 小时恢复期限，不能恢复；请重新运行工作流"
                 )
             if not row["remote_id"]:
                 child_ids = json.loads(row["result_json"]).get("child_ids") or []
@@ -748,16 +749,50 @@ class ComfyJobStore:
             )
         return 0
 
+    async def reconcile_gallery_outputs(self, generation_ids=None):
+        """Release published result caches after deletion or during maintenance."""
+        return await asyncio.to_thread(
+            self._reconcile_gallery_outputs_sync, generation_ids
+        )
+
+    def _reconcile_gallery_outputs_sync(self, generation_ids):
+        query = (
+            "SELECT id,generation_id FROM comfy_jobs "
+            "WHERE status IN ('succeeded','partial') AND generation_id!=''"
+        )
+        args = tuple(dict.fromkeys(generation_ids or ()))
+        if generation_ids is not None:
+            if not args:
+                return 0
+            query += " AND generation_id IN (" + ",".join("?" for _ in args) + ")"
+        with self._connect() as connection:
+            completed = connection.execute(query, args).fetchall()
+        return sum(
+            self._release_gallery_outputs_sync(row["id"], row["generation_id"])
+            for row in completed
+        )
+
     def _release_gallery_outputs_sync(self, job_id, generation_id):
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            owner = connection.execute(
+                "SELECT status,generation_id FROM comfy_jobs WHERE id=?", (job_id,)
+            ).fetchone()
+            # A gallery ID alone is insufficient: publication and terminal state
+            # must have committed before absent links can mean deleted results.
+            if (
+                owner is None
+                or owner["status"] not in {"succeeded", "partial"}
+                or owner["generation_id"] != generation_id
+            ):
+                return 0
             if job_id in self._protected_jobs(
                 connection, time.time() - RECOVERY_SECONDS
             ):
                 return 0
             rows = connection.execute(
-                "SELECT i.id,i.ordinal,a.id AS sha256,a.path,a.size_bytes FROM generation_images i "
-                "JOIN image_assets a ON a.id=i.asset_id WHERE i.generation_id=? AND a.file_state='available'",
+                "SELECT i.id,i.ordinal,a.id AS sha256,a.path,a.size_bytes,a.file_state FROM generation_images i "
+                "JOIN image_assets a ON a.id=i.asset_id WHERE i.generation_id=?",
                 (generation_id,),
             ).fetchall()
             by_ordinal = {row["ordinal"]: row for row in rows}
@@ -770,6 +805,8 @@ class ComfyJobStore:
                 manifest = json.loads(job["output_refs_json"])
                 changed = False
                 for index, item in enumerate(manifest):
+                    if item.get("storage") == "expired":
+                        continue
                     asset = (
                         by_ordinal.get(index)
                         if job["id"] == job_id
@@ -780,6 +817,20 @@ class ComfyJobStore:
                         or asset["sha256"] != item["sha256"]
                         or asset["size_bytes"] != item["size_bytes"]
                     ):
+                        # Keep descriptor positions and digests, but do not retain
+                        # pixels or workflow snapshots for removed gallery links.
+                        item.update(storage="expired", path="")
+                        (item.get("effective_parameters") or {}).pop("_comfyui", None)
+                        connection.execute(
+                            "DELETE FROM storage_payload_refs WHERE owner_table='comfy_jobs' "
+                            "AND owner_id=? AND slot=?",
+                            (job["id"], f"output:{index}"),
+                        )
+                        changed = True
+                        continue
+                    # A retained link with a temporarily unavailable file is not
+                    # proof of deletion; keep its recovery bytes conservatively.
+                    if asset["file_state"] != "available":
                         continue
                     path = (self.data_dir / asset["path"]).resolve()
                     if (
@@ -827,16 +878,7 @@ class ComfyJobStore:
         removal counts once per directory. Database-only archival counts zero.
         """
         removed = await asyncio.to_thread(self._migrate_legacy_files_sync)
-        with self._connect() as connection:
-            protected = self._protected_jobs(connection, terminal_before)
-            completed = connection.execute(
-                "SELECT id,generation_id FROM comfy_jobs WHERE status IN ('succeeded','partial') AND generation_id!=''"
-            ).fetchall()
-        for row in completed:
-            if row["id"] not in protected:
-                removed += await self.release_gallery_outputs(
-                    row["id"], row["generation_id"]
-                )
+        removed += await self.reconcile_gallery_outputs()
         return removed + await asyncio.to_thread(
             self._cleanup_inputs_sync, terminal_before
         )

@@ -46,6 +46,7 @@ from .backend.models import (
 )
 from .backend.providers.executor import ProviderError, ProviderExecutor
 from .backend.generation.comfyui_runtime import ComfyRuntime
+from .backend.providers.comfyui.job_types import RECOVERY_SECONDS
 from .backend.generation.service import ImageGenerationService
 from .backend.gallery.store import GenerationStore
 from .backend.media.images import export_image_filename, image_data_url
@@ -189,7 +190,7 @@ class ImageStudioPlugin(Star):
             removed = 0
             if getattr(self, "_comfy", None) is not None:
                 removed = await self._comfy.store.cleanup_terminal_files(
-                    terminal_before=time.time() - 7 * 86400
+                    terminal_before=time.time() - RECOVERY_SECONDS
                 )
             await self._expire_import_groups()
             # Release task dependencies first; the gallery then expires imports,

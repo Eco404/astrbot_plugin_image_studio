@@ -19,6 +19,9 @@ import pytest
 from astrbot_plugin_image_studio.backend.providers.comfyui.client import (
     ComfyExecutionError,
 )
+from astrbot_plugin_image_studio.backend.providers.comfyui.job_types import (
+    RECOVERY_SECONDS,
+)
 from astrbot_plugin_image_studio.backend.generation.comfyui_runtime import ComfyRuntime
 from astrbot_plugin_image_studio.backend.models import (
     InvocationSource,
@@ -604,9 +607,11 @@ async def expire_terminal_staging(runtime, job_id):
     with runtime.store._connect() as connection:
         connection.execute(
             "UPDATE comfy_jobs SET finished_at=? WHERE id=?",
-            (time.time() - 8 * 86400, job_id),
+            (time.time() - RECOVERY_SECONDS - 3600, job_id),
         )
-    await runtime.store.cleanup_terminal_files(terminal_before=time.time() - 7 * 86400)
+    await runtime.store.cleanup_terminal_files(
+        terminal_before=time.time() - RECOVERY_SECONDS
+    )
 
 
 def test_expired_terminal_outputs_use_gallery_originals_with_exact_metadata(

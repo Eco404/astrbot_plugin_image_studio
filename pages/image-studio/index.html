@@ -28,19 +28,19 @@
     })();
   </script>
   <script src="/api/plugin/page/bridge-sdk.js"></script>
-  <script src="./appearance.js?v=1.4.0-dev.1-layout.1"></script>
+  <script src="./appearance.js?v=1.4.0-dev.1-storage"></script>
   <link rel="stylesheet" href="./vendor/photoswipe/photoswipe.css?v=5.4.4" />
-  <link rel="stylesheet" href="./app.css?v=1.4.0-dev.1-layout.1" />
-  <link rel="stylesheet" href="./library.css?v=1.4.0-dev.1-layout.1" />
-  <link rel="stylesheet" href="./sortable.css?v=1.4.0-dev.1-layout.1" />
-  <link rel="stylesheet" href="./detail-swipe.css?v=1.4.0-dev.1-layout.1" />
-  <link rel="stylesheet" href="./select.css?v=1.4.0-dev.1-layout.1" />
-  <link rel="stylesheet" href="./appearance.css?v=1.4.0-dev.1-layout.1" />
-  <link rel="stylesheet" href="./controls.css?v=1.4.0-dev.1-layout.1" />
-  <link rel="stylesheet" href="./novelai/controls.css?v=1.4.0-dev.1-layout.1" />
-  <link rel="stylesheet" href="./comfyui/controls.css?v=1.4.0-dev.1-layout.1" />
-  <link rel="stylesheet" href="./comfyui/node-rules.css?v=1.4.0-dev.1-layout.1" />
-  <link rel="stylesheet" href="./tooltip.css?v=1.4.0-dev.1-layout.1" />
+  <link rel="stylesheet" href="./app.css?v=1.4.0-dev.1-storage" />
+  <link rel="stylesheet" href="./library.css?v=1.4.0-dev.1-storage" />
+  <link rel="stylesheet" href="./sortable.css?v=1.4.0-dev.1-storage" />
+  <link rel="stylesheet" href="./detail-swipe.css?v=1.4.0-dev.1-storage" />
+  <link rel="stylesheet" href="./select.css?v=1.4.0-dev.1-storage" />
+  <link rel="stylesheet" href="./appearance.css?v=1.4.0-dev.1-storage" />
+  <link rel="stylesheet" href="./controls.css?v=1.4.0-dev.1-storage" />
+  <link rel="stylesheet" href="./novelai/controls.css?v=1.4.0-dev.1-storage" />
+  <link rel="stylesheet" href="./comfyui/controls.css?v=1.4.0-dev.1-storage" />
+  <link rel="stylesheet" href="./comfyui/node-rules.css?v=1.4.0-dev.1-storage" />
+  <link rel="stylesheet" href="./tooltip.css?v=1.4.0-dev.1-storage" />
 </head>
 <body>
   <main class="app-shell quiet-glass-background">
@@ -182,7 +182,7 @@
           </section>
           <section class="settings-panel glass">
             <div class="section-heading"><div><h2>存储健康</h2><p>每小时检查图片与数据库，清理过期任务缓存，并保留最近 3 份有效升级备份。</p></div><span class="health-status" id="storageHealthStatus">未检查</span></div>
-            <div class="storage-health-grid" id="storageHealthGrid"><div><span>最近检查</span><strong id="storageHealthCheckedAt">尚未执行</strong></div><div><span>耗时</span><strong id="storageHealthDuration">-</strong></div><div><span>原图 / 预览</span><strong id="storageHealthAssets">-</strong></div><div><span>临时保留记录</span><strong id="storageHealthLeases">-</strong></div><div><span>生成记录</span><strong id="storageHealthGenerations">-</strong></div><div><span>文件总量</span><strong id="storageHealthSize">-</strong></div><div><span>磁盘实际分配</span><strong id="storageHealthAllocated">-</strong></div><div><span>数据库可复用空间</span><strong id="storageHealthReusable">-</strong></div></div>
+            <div class="storage-health-grid" id="storageHealthGrid"><div><span>最近检查</span><strong id="storageHealthCheckedAt">尚未执行</strong></div><div><span>耗时</span><strong id="storageHealthDuration">-</strong></div><div><span>原图 / 预览</span><strong id="storageHealthAssets">-</strong></div><div><span>临时保留记录</span><strong id="storageHealthLeases">-</strong></div><div><span>生成记录</span><strong id="storageHealthGenerations">-</strong></div><div><span>文件总量</span><strong id="storageHealthSize">-</strong></div><div><span>磁盘实际分配</span><strong id="storageHealthAllocated">-</strong></div></div>
             <div class="storage-health-grid storage-space-breakdown" id="storageHealthBreakdown"></div>
             <p class="field-hint">分类显示文件大小；磁盘实际分配会受共享文件和文件系统影响。数据库空闲页可供后续写入复用，深度检查会在空间充足且适合整理时缩减数据库文件。</p>
             <div class="storage-quota is-hidden" id="storageQuotaRecords"><div class="storage-quota-label"><label for="storageQuotaRecordsProgress">数量限额</label><span id="storageQuotaRecordsLabel"></span></div><progress id="storageQuotaRecordsProgress" value="0" max="1"></progress><span class="storage-quota-exempt" id="storageQuotaRecordsExempt"></span></div>
@@ -280,32 +280,32 @@
       window.__reportImageStudioPageError(false);
     });
   </script>
-  <script src="./tooltip.js?v=1.4.0-dev.1-layout.1" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./tooltip.js?v=1.4.0-dev.1-storage" onerror="window.__reportImageStudioPageError(true)"></script>
   <script src="./vendor/photoswipe/photoswipe.umd.min.js?v=5.4.4"></script>
   <script src="./vendor/exifreader/exif-reader.js?v=4.44.1"></script>
   <script src="./vendor/lucide/icons.js?v=0.468.0-studio2"></script>
-  <script src="./image-placeholder.js?v=1.4.0-dev.1-layout.1" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./media-objects.js?v=1.4.0-dev.1-layout.1" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./image-placeholder.js?v=1.4.0-dev.1-storage" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./media-objects.js?v=1.4.0-dev.1-storage" onerror="window.__reportImageStudioPageError(true)"></script>
   <script src="./vendor/js-sha256/sha256.min.js?v=0.11.1"></script>
-  <script src="./hash.js?v=1.4.0-dev.1-layout.1" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./gallery-preferences.js?v=1.4.0-dev.1-layout.1" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./select.js?v=1.4.0-dev.1-layout.1" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./sortable.js?v=1.4.0-dev.1-layout.1" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./dialog-motion.js?v=1.4.0-dev.1-layout.1" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./components/presentation.js?v=1.4.0-dev.1-layout.1" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./components/modal.js?v=1.4.0-dev.1-layout.1" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./gallery/metadata.js?v=1.4.0-dev.1-layout.1" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./gallery/metadata-markup.js?v=1.4.0-dev.1-layout.1" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./comfyui/node-rules.js?v=1.4.0-dev.1-layout.1" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./gallery/imports.js?v=1.4.0-dev.1-layout.1" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./gallery/controller.js?v=1.4.0-dev.1-layout.1" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./detail-swipe.js?v=1.4.0-dev.1-layout.1" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./backdrop.js?v=1.4.0-dev.1-layout.1" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./viewer-backdrop.js?v=1.4.0-dev.1-layout.1" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./settings/external-sources.js?v=1.4.0-dev.1-layout.1" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./novelai/controls.js?v=1.4.0-dev.1-layout.1" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./comfyui/controls.js?v=1.4.0-dev.1-layout.1" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./settings/controller.js?v=1.4.0-dev.1-layout.1" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./app.js?v=1.4.0-dev.1-layout.1" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./hash.js?v=1.4.0-dev.1-storage" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./gallery-preferences.js?v=1.4.0-dev.1-storage" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./select.js?v=1.4.0-dev.1-storage" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./sortable.js?v=1.4.0-dev.1-storage" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./dialog-motion.js?v=1.4.0-dev.1-storage" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./components/presentation.js?v=1.4.0-dev.1-storage" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./components/modal.js?v=1.4.0-dev.1-storage" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./gallery/metadata.js?v=1.4.0-dev.1-storage" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./gallery/metadata-markup.js?v=1.4.0-dev.1-storage" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./comfyui/node-rules.js?v=1.4.0-dev.1-storage" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./gallery/imports.js?v=1.4.0-dev.1-storage" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./gallery/controller.js?v=1.4.0-dev.1-storage" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./detail-swipe.js?v=1.4.0-dev.1-storage" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./backdrop.js?v=1.4.0-dev.1-storage" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./viewer-backdrop.js?v=1.4.0-dev.1-storage" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./settings/external-sources.js?v=1.4.0-dev.1-storage" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./novelai/controls.js?v=1.4.0-dev.1-storage" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./comfyui/controls.js?v=1.4.0-dev.1-storage" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./settings/controller.js?v=1.4.0-dev.1-storage" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./app.js?v=1.4.0-dev.1-storage" onerror="window.__reportImageStudioPageError(true)"></script>
 </body>
 </html>

@@ -7,7 +7,7 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
-RECOVERY_SECONDS = 7 * 86400
+RECOVERY_SECONDS = 24 * 3600
 
 TERMINAL_STATUSES = frozenset(
     {"succeeded", "partial", "failed", "cancelled", "unknown"}

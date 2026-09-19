@@ -4,6 +4,7 @@ import asyncio
 import json
 
 from astrbot_plugin_image_studio.backend.config import (
+    default_webui_settings,
     load_studio_settings,
     normalize_webui_settings,
     runtime_settings,
@@ -70,6 +71,45 @@ def test_history_zero_and_legacy_negative_record_limits_mean_unlimited() -> None
         )
         assert errors == []
         assert normalized["history"]["max_records"] == 0
+
+
+def test_new_install_has_no_history_count_or_storage_limit(tmp_path) -> None:
+    defaults = default_webui_settings()["history"]
+    loaded, errors = load_studio_settings(tmp_path)
+    assert errors == []
+    for name in ("max_records", "max_megabytes"):
+        assert defaults[name] == 0
+        assert loaded["history"][name] == 0
+    settings, errors = runtime_settings({}, loaded)
+    assert errors == []
+    assert settings.history.max_records == 0
+    assert settings.history.max_megabytes == 0
+
+
+def test_history_missing_or_invalid_limits_default_to_unlimited() -> None:
+    for source in (
+        {},
+        {"history": {}},
+        {"history": None},
+        {"history": {"max_records": None, "max_megabytes": "invalid"}},
+    ):
+        normalized, errors = normalize_webui_settings(source)
+        assert errors == []
+        assert normalized["history"]["max_records"] == 0
+        assert normalized["history"]["max_megabytes"] == 0
+
+
+def test_existing_history_limits_are_preserved_on_load_and_save(tmp_path) -> None:
+    previous = {"history": {"max_records": 200, "max_megabytes": 2048}}
+    config_path = tmp_path / "studio_config.json"
+    config_path.write_text(json.dumps(previous), encoding="utf-8")
+    loaded, errors = load_studio_settings(tmp_path)
+    assert errors == []
+    asyncio.run(save_studio_settings(tmp_path, loaded))
+    saved = json.loads(config_path.read_text(encoding="utf-8"))
+    for name, value in previous["history"].items():
+        assert loaded["history"][name] == value
+        assert saved["history"][name] == value
 
 
 def test_legacy_asset_retention_is_removed_from_saved_and_runtime_settings(

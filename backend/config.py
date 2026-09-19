@@ -125,8 +125,8 @@ def default_webui_settings() -> dict[str, Any]:
         "external_sources": {},
         "history": {
             "enabled": True,
-            "max_records": 200,
-            "max_megabytes": 2048,
+            "max_records": 0,
+            "max_megabytes": 0,
             "retain_reference_images": True,
             "record_invocation_identity": False,
         },
@@ -202,11 +202,9 @@ def normalize_webui_settings(value: Any) -> tuple[dict[str, Any], list[str]]:
 
     history = merged.get("history") if isinstance(merged.get("history"), dict) else {}
     history["enabled"] = _as_bool(history.get("enabled"), True)
-    history["max_records"] = max(
-        0, min(100000, _as_int(history.get("max_records"), 200))
-    )
+    history["max_records"] = max(0, min(100000, _as_int(history.get("max_records"), 0)))
     history["max_megabytes"] = max(
-        0, min(10240, _as_int(history.get("max_megabytes"), 2048))
+        0, min(10240, _as_int(history.get("max_megabytes"), 0))
     )
     history["retain_reference_images"] = _as_bool(
         history.get("retain_reference_images"), True

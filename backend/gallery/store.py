@@ -9,7 +9,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from functools import wraps
 from pathlib import Path
 from typing import Any
@@ -91,6 +91,7 @@ class GenerationStore:
         self.delivery_dir = self._context.delivery_dir
         self.db_path = self._context.db_path
         self._lock = asyncio.Lock()
+        self.on_results_removed: Callable[[list[str]], Awaitable[Any]] | None = None
         self._display_cache = DisplayImageCache()
         self._revision_lock = threading.Lock()
         self._revision_connection: sqlite3.Connection | None = None
@@ -1242,23 +1243,40 @@ class GenerationStore:
             for item in image_ids
         ):
             raise ValueError("图片 ID 无效")
-        return await self._external_mutation(
+        result = await self._external_mutation(
             self.records.delete_images, generation_id, list(dict.fromkeys(image_ids))
         )
+        await self._notify_results_removed([generation_id])
+        return result
 
     async def delete_generation(self, generation_id: str) -> bool:
         """Delete one generation and every plugin-owned result/reference file."""
 
         if not _SAFE_ID_RE.fullmatch(generation_id):
             return False
-        return await self._external_mutation(
+        deleted = await self._external_mutation(
             self.records.delete_generation, generation_id
         )
+        if deleted:
+            await self._notify_results_removed([generation_id])
+        return deleted
 
     async def delete_generations(self, generation_ids: list[str]) -> dict[str, Any]:
         """Validate all source permissions before deleting any selected record."""
         ids = _validate_generation_selection(generation_ids)
-        return await self._external_mutation(self.records.delete_generations, ids)
+        result = await self._external_mutation(self.records.delete_generations, ids)
+        await self._notify_results_removed(ids)
+        return result
+
+    async def _notify_results_removed(self, generation_ids: list[str]) -> None:
+        # Called after the gallery transaction and facade lock have completed.
+        # A cleanup failure must not report an already committed deletion as failed;
+        # startup/hourly maintenance retries the same reconciliation.
+        if self.on_results_removed is not None:
+            try:
+                await self.on_results_removed(generation_ids)
+            except Exception:
+                logger.exception("Could not release task caches after gallery deletion")
 
     async def delete_reference(self, reference_id: str) -> bool:
         """Delete one retained reference without deleting its parent history record."""
