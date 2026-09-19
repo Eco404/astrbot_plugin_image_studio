@@ -410,6 +410,8 @@ def request_snapshot(detail: dict[str, Any]) -> dict[str, Any]:
     ):
         if name in parameters:
             snapshot[name] = parameters[name]
+    if detail.get("provider_kind") == "comfyui" and parameters.get("workflow_name"):
+        snapshot["workflow_name"] = parameters["workflow_name"]
     return (
         compact_comfy_request(snapshot)
         if detail.get("provider_kind") == "comfyui"

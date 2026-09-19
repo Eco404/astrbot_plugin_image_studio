@@ -158,6 +158,7 @@ class GenerationRecords:
             for name in denied & {"size", "count", "negative_prompt"}:
                 parameters.pop(name, None)
             if provider.kind == "comfyui":
+                parameters["workflow_name"] = model.name or model.id
                 parameters = compact_comfy_request(parameters)
             image_supplementals: dict[str, str] = {}
             for (image_id, _, asset_id), image in zip(image_rows, images):

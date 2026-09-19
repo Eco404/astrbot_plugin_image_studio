@@ -90,7 +90,11 @@
       const directoryExternal = detail.source === "external" && detail.external_source?.type === "directory";
       const imported = { ...(supplemental.display_parameters || {}), ...(supplemental.overrides || {}), ...(supplemental.overrides?.parameters || {}), prompt: supplemental.prompt ?? detail.original_prompt, model: supplemental.model ?? detail.model, mode: supplemental.mode ?? detail.mode };
       delete imported.parameters;
-      const requestRows = imageParameters ? imported : { prompt: request.prompt, negative_prompt: request.negative_prompt, model: request.model, mode: modeLabel(request.mode), size: request.size, count: request.count, ...(request.parameters || {}) };
+      const workflowName = effectiveRequest?.workflow_name || detail.parameters?.workflow_name || supplemental.comfyui?.workflow_name;
+      const requestTarget = detail.provider_kind === "comfyui"
+        ? { workflow_name: workflowName, workflow_id: request.model }
+        : { model: request.model };
+      const requestRows = imageParameters ? imported : { prompt: request.prompt, negative_prompt: request.negative_prompt, ...requestTarget, mode: modeLabel(request.mode), size: request.size, count: request.count, ...(request.parameters || {}) };
       // Hide empty legacy request fields only in this display snapshot. Nested
       // workflow inputs and the stored/exported request keep their exact values.
       for (const [key, value] of Object.entries(requestRows)) {

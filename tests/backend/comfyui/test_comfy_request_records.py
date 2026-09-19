@@ -147,6 +147,7 @@ def test_saved_comfy_requests_omit_empties_but_reproduction_retains_allowed_empt
             original = detail["parameters"]
             effective = detail["images"][0]["supplemental"]["effective_request"]
             for stored in (original, effective):
+                assert stored["workflow_name"] == provider.models[0].name
                 assert "negative_prompt" not in stored and "size" not in stored
                 assert (
                     not {"_comfy_job_id", "prefix", "empty_extra"}
@@ -156,6 +157,9 @@ def test_saved_comfy_requests_omit_empties_but_reproduction_retains_allowed_empt
                 assert stored["parameters"]["enabled"] is False
                 assert stored["parameters"]["nested"] == {"keep_empty": ""}
             copied = json.loads(export_parameters(detail)["content"])["data"]
+            assert copied["workflow_name"] == provider.models[0].name
+            assert copied["model"] == "workflow"  # Existing reproduction identity.
+            assert copied["model_ref"] == "comfy:workflow"
             assert all(
                 key not in copied for key in ("prompt", "negative_prompt", "size")
             )

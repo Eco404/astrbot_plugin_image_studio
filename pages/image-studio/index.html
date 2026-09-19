@@ -28,19 +28,19 @@
     })();
   </script>
   <script src="/api/plugin/page/bridge-sdk.js"></script>
-  <script src="./appearance.js?v=1.4.0-dev.1-progress"></script>
+  <script src="./appearance.js?v=1.4.0-dev.1-request"></script>
   <link rel="stylesheet" href="./vendor/photoswipe/photoswipe.css?v=5.4.4" />
-  <link rel="stylesheet" href="./app.css?v=1.4.0-dev.1-progress" />
-  <link rel="stylesheet" href="./library.css?v=1.4.0-dev.1-progress" />
-  <link rel="stylesheet" href="./sortable.css?v=1.4.0-dev.1-progress" />
-  <link rel="stylesheet" href="./detail-swipe.css?v=1.4.0-dev.1-progress" />
-  <link rel="stylesheet" href="./select.css?v=1.4.0-dev.1-progress" />
-  <link rel="stylesheet" href="./appearance.css?v=1.4.0-dev.1-progress" />
-  <link rel="stylesheet" href="./controls.css?v=1.4.0-dev.1-progress" />
-  <link rel="stylesheet" href="./novelai/controls.css?v=1.4.0-dev.1-progress" />
-  <link rel="stylesheet" href="./comfyui/controls.css?v=1.4.0-dev.1-progress" />
-  <link rel="stylesheet" href="./comfyui/node-rules.css?v=1.4.0-dev.1-progress" />
-  <link rel="stylesheet" href="./tooltip.css?v=1.4.0-dev.1-progress" />
+  <link rel="stylesheet" href="./app.css?v=1.4.0-dev.1-request" />
+  <link rel="stylesheet" href="./library.css?v=1.4.0-dev.1-request" />
+  <link rel="stylesheet" href="./sortable.css?v=1.4.0-dev.1-request" />
+  <link rel="stylesheet" href="./detail-swipe.css?v=1.4.0-dev.1-request" />
+  <link rel="stylesheet" href="./select.css?v=1.4.0-dev.1-request" />
+  <link rel="stylesheet" href="./appearance.css?v=1.4.0-dev.1-request" />
+  <link rel="stylesheet" href="./controls.css?v=1.4.0-dev.1-request" />
+  <link rel="stylesheet" href="./novelai/controls.css?v=1.4.0-dev.1-request" />
+  <link rel="stylesheet" href="./comfyui/controls.css?v=1.4.0-dev.1-request" />
+  <link rel="stylesheet" href="./comfyui/node-rules.css?v=1.4.0-dev.1-request" />
+  <link rel="stylesheet" href="./tooltip.css?v=1.4.0-dev.1-request" />
 </head>
 <body>
   <main class="app-shell quiet-glass-background">
@@ -210,7 +210,7 @@
   <aside class="detail-drawer" id="detailDrawer" role="dialog" aria-modal="true" aria-label="生成详情" aria-hidden="true" tabindex="-1">
     <div class="drawer-head"><div><h2>生成详情</h2><p id="detailDate"></p></div><button class="icon-button" id="closeDrawer" type="button" aria-label="关闭详情"><span aria-hidden="true">×</span></button></div>
     <div class="drawer-body" id="drawerBody"></div>
-    <div class="detail-footer" id="detailFooter"><button class="studio-icon-button" id="detailFavorite" type="button" aria-label="收藏生成记录" data-tooltip="收藏生成记录" data-studio-icon="Star"></button><button class="studio-icon-button" id="detailImportEdit" type="button" aria-label="编辑导入记录" data-tooltip="编辑导入记录" data-studio-icon="Pencil" hidden></button><button class="quiet-button detail-command" id="detailReproduce" type="button"><span data-studio-icon="RefreshCw" aria-hidden="true"></span><span>复现参数</span></button><div class="copy-format-control"><select id="detailCopyFormat" aria-label="复制参数格式"></select><button class="studio-icon-button" id="detailCopy" type="button" aria-label="复制完整参数" data-tooltip="复制完整参数" data-studio-icon="Copy"></button></div><button class="studio-icon-button" id="detailWorkflowDownload" type="button" aria-label="下载工作流" data-tooltip="下载工作流" data-studio-icon="Download" hidden></button><button class="quiet-button detail-command" id="detailUseReference" type="button" aria-label="将当前成图用作新参考图" data-tooltip="将当前成图用作新参考图"><span data-studio-icon="ImagePlus" aria-hidden="true"></span><span>用作参考图</span></button><button class="studio-icon-button is-danger" id="detailDelete" type="button" aria-label="删除图片" data-tooltip="删除图片" data-studio-icon="Trash2"></button></div>
+    <div class="detail-footer" id="detailFooter"><button class="studio-icon-button" id="detailFavorite" type="button" aria-label="收藏生成记录" data-tooltip="收藏生成记录" data-studio-icon="Star"></button><button class="studio-icon-button" id="detailImportEdit" type="button" aria-label="编辑导入记录" data-tooltip="编辑导入记录" data-studio-icon="Pencil" hidden></button><button class="quiet-button detail-command" id="detailReproduce" type="button"><span data-studio-icon="Play" aria-hidden="true"></span><span>复现参数</span></button><div class="copy-format-control"><select id="detailCopyFormat" aria-label="复制参数格式"></select><button class="studio-icon-button" id="detailCopy" type="button" aria-label="复制完整参数" data-tooltip="复制完整参数" data-studio-icon="Copy"></button></div><button class="studio-icon-button" id="detailWorkflowDownload" type="button" aria-label="下载工作流" data-tooltip="下载工作流" data-studio-icon="Download" hidden></button><button class="quiet-button detail-command" id="detailUseReference" type="button" aria-label="将当前成图用作新参考图" data-tooltip="将当前成图用作新参考图"><span data-studio-icon="ImagePlus" aria-hidden="true"></span><span>用作参考图</span></button><button class="studio-icon-button is-danger" id="detailDelete" type="button" aria-label="删除图片" data-tooltip="删除图片" data-studio-icon="Trash2"></button></div>
   </aside>
   <div class="scrim is-hidden" id="scrim"></div>
   <div class="studio-modal-root is-hidden" id="studioModalRoot"><div class="studio-modal-scrim"></div><section class="studio-modal glass" id="studioModal" role="dialog" aria-modal="true" aria-labelledby="studioModalTitle" tabindex="-1"><header><h2 id="studioModalTitle"></h2><button class="studio-icon-button" id="studioModalClose" type="button" aria-label="关闭窗口" data-tooltip="关闭窗口" data-studio-icon="X"></button></header><div class="studio-modal-body" id="studioModalBody"></div><div class="studio-modal-error" id="studioModalError" role="alert"></div><footer id="studioModalFooter"></footer></section></div>
@@ -280,32 +280,32 @@
       window.__reportImageStudioPageError(false);
     });
   </script>
-  <script src="./tooltip.js?v=1.4.0-dev.1-progress" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./tooltip.js?v=1.4.0-dev.1-request" onerror="window.__reportImageStudioPageError(true)"></script>
   <script src="./vendor/photoswipe/photoswipe.umd.min.js?v=5.4.4"></script>
   <script src="./vendor/exifreader/exif-reader.js?v=4.44.1"></script>
   <script src="./vendor/lucide/icons.js?v=0.468.0-studio2"></script>
-  <script src="./image-placeholder.js?v=1.4.0-dev.1-progress" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./media-objects.js?v=1.4.0-dev.1-progress" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./image-placeholder.js?v=1.4.0-dev.1-request" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./media-objects.js?v=1.4.0-dev.1-request" onerror="window.__reportImageStudioPageError(true)"></script>
   <script src="./vendor/js-sha256/sha256.min.js?v=0.11.1"></script>
-  <script src="./hash.js?v=1.4.0-dev.1-progress" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./gallery-preferences.js?v=1.4.0-dev.1-progress" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./select.js?v=1.4.0-dev.1-progress" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./sortable.js?v=1.4.0-dev.1-progress" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./dialog-motion.js?v=1.4.0-dev.1-progress" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./components/presentation.js?v=1.4.0-dev.1-progress" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./components/modal.js?v=1.4.0-dev.1-progress" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./gallery/metadata.js?v=1.4.0-dev.1-progress" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./gallery/metadata-markup.js?v=1.4.0-dev.1-progress" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./comfyui/node-rules.js?v=1.4.0-dev.1-progress" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./gallery/imports.js?v=1.4.0-dev.1-progress" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./gallery/controller.js?v=1.4.0-dev.1-progress" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./detail-swipe.js?v=1.4.0-dev.1-progress" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./backdrop.js?v=1.4.0-dev.1-progress" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./viewer-backdrop.js?v=1.4.0-dev.1-progress" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./settings/external-sources.js?v=1.4.0-dev.1-progress" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./novelai/controls.js?v=1.4.0-dev.1-progress" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./comfyui/controls.js?v=1.4.0-dev.1-progress" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./settings/controller.js?v=1.4.0-dev.1-progress" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./app.js?v=1.4.0-dev.1-progress" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./hash.js?v=1.4.0-dev.1-request" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./gallery-preferences.js?v=1.4.0-dev.1-request" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./select.js?v=1.4.0-dev.1-request" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./sortable.js?v=1.4.0-dev.1-request" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./dialog-motion.js?v=1.4.0-dev.1-request" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./components/presentation.js?v=1.4.0-dev.1-request" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./components/modal.js?v=1.4.0-dev.1-request" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./gallery/metadata.js?v=1.4.0-dev.1-request" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./gallery/metadata-markup.js?v=1.4.0-dev.1-request" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./comfyui/node-rules.js?v=1.4.0-dev.1-request" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./gallery/imports.js?v=1.4.0-dev.1-request" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./gallery/controller.js?v=1.4.0-dev.1-request" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./detail-swipe.js?v=1.4.0-dev.1-request" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./backdrop.js?v=1.4.0-dev.1-request" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./viewer-backdrop.js?v=1.4.0-dev.1-request" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./settings/external-sources.js?v=1.4.0-dev.1-request" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./novelai/controls.js?v=1.4.0-dev.1-request" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./comfyui/controls.js?v=1.4.0-dev.1-request" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./settings/controller.js?v=1.4.0-dev.1-request" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./app.js?v=1.4.0-dev.1-request" onerror="window.__reportImageStudioPageError(true)"></script>
 </body>
 </html>
