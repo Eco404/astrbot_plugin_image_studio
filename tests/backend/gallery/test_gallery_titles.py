@@ -4,14 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import sqlite3
-from contextlib import closing
 
 import httpx
 import pytest
 
-from astrbot_plugin_image_studio.backend.database import schema
-from astrbot_plugin_image_studio.backend.database.migrations import v4_storage
 from astrbot_plugin_image_studio.tests.support.webui_harness import create_app
 
 PREFIX = "/astrbot_plugin_image_studio/"
@@ -135,60 +131,3 @@ def test_invalid_titles_do_not_change_history(tmp_path, title):
             ).status_code == 400
 
     asyncio.run(run())
-
-
-def create_dev1(conn):
-    for statement in schema.V4_DEV1_SCHEMA_STATEMENTS:
-        conn.execute(statement)
-    conn.execute(schema._DEVELOPMENT_META_STATEMENT)
-    conn.execute("INSERT INTO schema_meta VALUES(1,4,1)")
-    conn.execute("PRAGMA user_version=3")
-    conn.execute(
-        "INSERT INTO generations(id,created_at,source,status,mode,provider_id,provider_name,provider_kind,model,original_prompt,final_prompt,parameters_json,elapsed_ms) VALUES('old',1,'webui','succeeded','text2img','p','provider','comfyui','workflow','prompt','prompt','{}',0)"
-    )
-    conn.commit()
-
-
-def test_dev1_title_migration_is_backed_up_and_does_not_reconvert_payloads(
-    tmp_path, monkeypatch
-):
-    with closing(sqlite3.connect(tmp_path / "history.sqlite3")) as conn:
-        create_dev1(conn)
-        before = tuple(conn.iterdump())
-
-        def unexpected(*_args):
-            pytest.fail("adding a title must not repeat the frozen payload conversion")
-
-        monkeypatch.setattr(v4_storage, "migrate_comfy_storage", unexpected)
-        monkeypatch.setattr(v4_storage, "migrate_gallery_storage", unexpected)
-        backup = schema.ensure_release_schema(conn, backup_dir=tmp_path / "backups")
-        assert backup is not None
-        assert (
-            conn.execute("SELECT title FROM generations WHERE id='old'").fetchone()[0]
-            == ""
-        )
-        assert conn.execute(
-            "SELECT target_version,dev_revision FROM schema_meta"
-        ).fetchone() == (4, 2)
-        with closing(sqlite3.connect(backup)) as original:
-            assert tuple(original.iterdump()) == before
-        state = tuple(conn.iterdump())
-        assert (
-            schema.ensure_release_schema(conn, backup_dir=tmp_path / "backups") is None
-        )
-        assert tuple(conn.iterdump()) == state
-
-
-def test_title_schema_upgrade_rolls_back_on_failure(tmp_path, monkeypatch):
-    with closing(sqlite3.connect(tmp_path / "history.sqlite3")) as conn:
-        create_dev1(conn)
-        before = tuple(conn.iterdump())
-        monkeypatch.setattr(
-            schema,
-            "V4_DEV2_MIGRATION_STATEMENTS",
-            (*schema.V4_DEV2_MIGRATION_STATEMENTS, "invalid migration SQL"),
-        )
-        with pytest.raises(sqlite3.Error):
-            schema.ensure_release_schema(conn, backup_dir=tmp_path / "backups")
-        assert tuple(conn.iterdump()) == before
-        assert not conn.in_transaction

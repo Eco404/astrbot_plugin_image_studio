@@ -243,3 +243,62 @@ def create_v3_dev(conn):
     conn.execute(DEVELOPMENT_META_STATEMENT)
     conn.execute("INSERT INTO schema_meta VALUES (1, 3, 1)")
     conn.commit()
+
+
+# Frozen from 6153f83: final 1.4 development layout, independent of runtime SQL.
+V4_FINAL_DEVELOPMENT_STATEMENTS = (
+    """CREATE TABLE storage_payloads (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        codec TEXT NOT NULL,
+        data BLOB NOT NULL,
+        size_bytes INTEGER NOT NULL,
+        created_at REAL NOT NULL
+    )""",
+    """CREATE TABLE storage_payload_refs (
+        owner_table TEXT NOT NULL,
+        owner_id TEXT NOT NULL,
+        slot TEXT NOT NULL,
+        payload_id TEXT NOT NULL REFERENCES storage_payloads(id),
+        PRIMARY KEY(owner_table,owner_id,slot)
+    )""",
+    "CREATE INDEX idx_storage_payload_refs_payload ON storage_payload_refs(payload_id)",
+    "ALTER TABLE comfy_jobs ADD COLUMN parent_job_id TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE comfy_jobs ADD COLUMN queue_dismissed INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE comfy_jobs ADD COLUMN temporary INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE comfy_jobs ADD COLUMN model_name TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE comfy_jobs ADD COLUMN archive_state TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE comfy_jobs ADD COLUMN request_fingerprint TEXT NOT NULL DEFAULT ''",
+    "CREATE INDEX idx_comfy_jobs_parent ON comfy_jobs(parent_job_id)",
+    "CREATE INDEX idx_comfy_jobs_queue ON comfy_jobs(parent_job_id,queue_dismissed,created_at DESC)",
+    "CREATE INDEX idx_comfy_jobs_expiry ON comfy_jobs(status,finished_at)",
+    "CREATE INDEX idx_comfy_jobs_revision ON comfy_jobs(revision_id)",
+    "CREATE INDEX idx_comfy_jobs_generation ON comfy_jobs(generation_id)",
+    "ALTER TABLE generation_images ADD COLUMN generated_at REAL",
+    "ALTER TABLE generation_images ADD COLUMN model TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE generation_images ADD COLUMN mode TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE generations ADD COLUMN latest_content_at REAL",
+    "CREATE INDEX idx_generations_latest_content ON generations(COALESCE(latest_content_at,created_at) DESC,created_at DESC,id DESC)",
+    "CREATE TRIGGER storage_refs_delete_comfy_workflow_revisions AFTER DELETE ON comfy_workflow_revisions BEGIN DELETE FROM storage_payload_refs WHERE owner_table='comfy_workflow_revisions' AND owner_id=OLD.id; END",
+    "CREATE TRIGGER storage_refs_delete_comfy_jobs AFTER DELETE ON comfy_jobs BEGIN DELETE FROM storage_payload_refs WHERE owner_table='comfy_jobs' AND owner_id=OLD.id; END",
+    "CREATE TRIGGER storage_refs_delete_image_metadata AFTER DELETE ON image_metadata BEGIN DELETE FROM storage_payload_refs WHERE owner_table='image_metadata' AND owner_id=OLD.asset_id; END",
+    "CREATE TRIGGER storage_refs_delete_generation_images AFTER DELETE ON generation_images BEGIN DELETE FROM storage_payload_refs WHERE owner_table='generation_images' AND owner_id=OLD.id; END",
+    "CREATE TRIGGER storage_refs_delete_generations AFTER DELETE ON generations BEGIN DELETE FROM storage_payload_refs WHERE owner_table='generations' AND owner_id=OLD.id; END",
+    "ALTER TABLE generations ADD COLUMN title TEXT NOT NULL DEFAULT ''",
+)
+
+
+def create_v4_dev(conn, revision=2):
+    create_v3_dev(conn)
+    for statement in V4_FINAL_DEVELOPMENT_STATEMENTS:
+        if revision == 1 and statement.startswith(
+            "ALTER TABLE generations ADD COLUMN title"
+        ):
+            continue
+        conn.execute(statement)
+    conn.execute("PRAGMA user_version = 3")
+    conn.execute(
+        "UPDATE schema_meta SET target_version=4, dev_revision=? WHERE id=1",
+        (revision,),
+    )
+    conn.commit()

@@ -1,4 +1,4 @@
-"""Frozen v3 -> 4-dev.1 body conversion, independent of live repositories.
+"""Frozen v3 -> v4 body conversion, independent of live repositories.
 
 The SQL layout and transaction belong to database.schema. This module describes
 the exact v4 storage projection and reference slots; later repository/parser
@@ -9,6 +9,7 @@ payload store's existing ``json``/``workflow`` formats are used here.
 No image files are accessed, and no metadata is reparsed during this conversion.
 Search columns are rebuildable projections, but their initial migration values
 are kept stable as well. All original heavy bodies remain in shared payloads.
+The conversion was introduced in 4-dev.1; final 4-dev.2 promotion does not rerun it.
 """
 
 from __future__ import annotations

@@ -523,7 +523,7 @@ def test_nai_source_aliases_share_filters_and_preserve_raw_import_information(tm
                     "SELECT asset_id, metadata_json FROM image_metadata ORDER BY asset_id"
                 )
             ] == original_metadata
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
 
     asyncio.run(run())
 

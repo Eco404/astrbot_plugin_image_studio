@@ -44,10 +44,10 @@ def test_published_v2_upgrade_has_verified_backup_and_preserves_data(tmp_path):
         assert backup
         with closing(sqlite3.connect(backup)) as saved:
             assert tuple(saved.iterdump()) == before
-        assert conn.execute("PRAGMA user_version").fetchone() == (3,)
-        assert conn.execute(
-            "SELECT target_version,dev_revision FROM schema_meta"
-        ).fetchone() == (4, 2)
+        assert conn.execute("PRAGMA user_version").fetchone() == (4,)
+        assert not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='schema_meta'"
+        ).fetchone()
         assert conn.execute("SELECT path FROM image_assets").fetchall() == [
             ("kept.png",)
         ]

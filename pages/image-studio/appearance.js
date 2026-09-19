@@ -348,7 +348,7 @@
       <label class="appearance-range"><span>玻璃不透明度<output data-appearance-value="glassOpacity"></output></span><input type="range" min="20" max="100" step="1" data-appearance-field="glassOpacity" aria-label="玻璃不透明度"></label>
       <div id="appearanceResetConfirmation" class="appearance-reset-confirmation" role="group" aria-label="恢复默认主题" hidden><span>恢复默认主题？</span><div><button type="button" class="quiet-button" data-appearance-reset="cancel">取消</button><button type="button" class="quiet-button" data-appearance-reset="confirm">恢复</button></div></div>
       <p class="appearance-status" role="status" aria-live="polite"></p>
-      <div class="field appearance-gallery-sort"><label for="gallerySort">画廊排序方式</label><select id="gallerySort"><option value="created">按创建时间</option><option value="latest_content">按最新内容</option></select><p class="field-hint">按最新内容时，以图组中最新的图片时间排序。</p></div>
+      <div class="field appearance-gallery-sort"><label for="gallerySort">画廊排序方式</label><select id="gallerySort"><option value="created">按创建时间</option><option value="latest_content">按最新内容</option></select></div>
       <div class="toggle-row"><label for="galleryCardInfo">画廊卡片信息显示</label><label class="toggle-control"><input id="galleryCardInfo" type="checkbox" /><span aria-hidden="true"></span></label></div>`;
     window.dispatchEvent(new CustomEvent("image-studio-display-settings-ready"));
     panel.querySelectorAll('[name="appearanceMode"]').forEach((input) => input.addEventListener("change", () => update({ preference: input.value })));

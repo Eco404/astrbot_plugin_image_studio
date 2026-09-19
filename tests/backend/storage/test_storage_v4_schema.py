@@ -1,4 +1,4 @@
-"""The storage development migration is backed up, atomic and lossless."""
+"""The published v4 storage migration is backed up, atomic and lossless."""
 
 import json
 import sqlite3
@@ -83,9 +83,13 @@ def test_v3_snapshots_migrate_into_one_shared_lossless_body(tmp_path):
                 ]
                 == value
             )
-        assert conn.execute(
-            "SELECT target_version,dev_revision FROM schema_meta"
-        ).fetchone() == (4, 2)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='schema_meta'"
+        ).fetchone()
+        assert "title" in {
+            row[1] for row in conn.execute("PRAGMA table_info(generations)")
+        }
         with closing(sqlite3.connect(backup)) as saved:
             assert snapshot(saved) == before
         after = snapshot(conn)
@@ -99,11 +103,12 @@ def test_v3_snapshots_migrate_into_one_shared_lossless_body(tmp_path):
 @pytest.mark.parametrize(
     "damage", ["marker", "trigger", "index", "expression", "payload_fk"]
 )
-def test_current_development_layout_is_validated_before_any_writes(tmp_path, damage):
+def test_current_release_layout_is_validated_before_any_writes(tmp_path, damage):
     with closing(sqlite3.connect(tmp_path / "history.sqlite3")) as conn:
         schema.ensure_release_schema(conn, backup_dir=tmp_path / "backups")
         if damage == "marker":
-            conn.execute("UPDATE schema_meta SET dev_revision=99")
+            conn.execute(schema._DEVELOPMENT_META_STATEMENT)
+            conn.execute("INSERT INTO schema_meta VALUES(1,4,99)")
         elif damage == "trigger":
             conn.execute("DROP TRIGGER storage_refs_delete_comfy_jobs")
         elif damage == "index":

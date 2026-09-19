@@ -137,10 +137,10 @@ def populate_comfy(conn, directory):
 
 
 def assert_release(conn):
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
-    assert conn.execute(
-        "SELECT target_version,dev_revision FROM schema_meta"
-    ).fetchone() == (4, 2)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert not conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE name='schema_meta'"
+    ).fetchone()
     assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
@@ -335,7 +335,7 @@ def test_unknown_or_damaged_v3_development_is_rejected_without_backup(
             )
         elif corruption in {"future_release", "wrong_release"}:
             conn.execute(
-                f"PRAGMA user_version={4 if corruption == 'future_release' else 3}"
+                f"PRAGMA user_version={5 if corruption == 'future_release' else 3}"
             )
         elif corruption == "missing_marker":
             conn.execute("DROP TABLE schema_meta")
