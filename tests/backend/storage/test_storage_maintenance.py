@@ -179,7 +179,9 @@ def test_database_compaction_is_manual_bounded_and_avoids_pending_tasks(tmp_path
 
 def test_backup_rotation_accepts_only_known_development_baselines(tmp_path):
     known = []
-    for index, version in enumerate(("1-dev.3", "2-dev.2", "3-dev.1", "4-dev.1"), 1):
+    for index, version in enumerate(
+        ("1-dev.3", "2-dev.2", "3-dev.1", "4-dev.1", "4-dev.2"), 1
+    ):
         path = (
             tmp_path
             / f"history-pre-v{version}-202609{index:02d}T125244076168Z-u31lndtb.sqlite3"
@@ -192,7 +194,7 @@ def test_backup_rotation_accepts_only_known_development_baselines(tmp_path):
         _backup(path)
         newest.append(path)
     unknown = []
-    for version in ("1-dev.1", "2-dev.3", "3-dev.2", "4-dev.2", "5-dev.1", "5"):
+    for version in ("1-dev.1", "2-dev.3", "3-dev.2", "4-dev.3", "5-dev.1", "5"):
         path = (
             tmp_path
             / f"history-pre-v{version}-20260901T125244076168Z-unverified.sqlite3"
@@ -200,7 +202,7 @@ def test_backup_rotation_accepts_only_known_development_baselines(tmp_path):
         _backup(path)
         unknown.append(path)
     report = rotate_backups(tmp_path, database_version=4)
-    assert report["backups_removed"] == 4
+    assert report["backups_removed"] == 5
     assert all(not path.exists() for path in known)
     assert all(path.exists() for path in [*newest, *unknown])
 

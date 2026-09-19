@@ -376,6 +376,9 @@ class ImageStudioPlugin(Star):
     async def _api_gallery_favorite(self) -> Any:
         return await self._gallery_api()._api_gallery_favorite()
 
+    async def _api_gallery_title(self) -> Any:
+        return await self._gallery_api()._api_gallery_title()
+
     async def _api_gallery_favorite_status(self) -> Any:
         return await self._gallery_api()._api_gallery_favorite_status()
 

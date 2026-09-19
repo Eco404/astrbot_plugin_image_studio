@@ -85,7 +85,7 @@ def test_v3_snapshots_migrate_into_one_shared_lossless_body(tmp_path):
             )
         assert conn.execute(
             "SELECT target_version,dev_revision FROM schema_meta"
-        ).fetchone() == (4, 1)
+        ).fetchone() == (4, 2)
         with closing(sqlite3.connect(backup)) as saved:
             assert snapshot(saved) == before
         after = snapshot(conn)

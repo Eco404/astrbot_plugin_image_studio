@@ -59,6 +59,9 @@ python scripts/verify.py --webui display_snapshots
 # 手动文本节点绑定、预览失效、规则保存删除与手工字段保护
 python scripts/verify.py --webui node_rules
 
+# 图组标题内联编辑、取消、搜索和刷新持久化，以及卡片信息显示设置
+python scripts/verify.py --webui gallery_titles gallery_card_info
+
 # 可同时执行后端、选定的浏览器场景和打包
 python scripts/verify.py --backend --webui comfy_workspace --browser chromium --package
 ```

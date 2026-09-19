@@ -167,6 +167,12 @@ def register_web_apis(plugin, page_prefix: str) -> None:
             "Image Studio: favorite record",
         ),
         (
+            "gallery/title",
+            plugin._api_gallery_title,
+            ["POST"],
+            "Image Studio: edit gallery group title",
+        ),
+        (
             "gallery/favorite/status",
             plugin._api_gallery_favorite_status,
             ["POST"],

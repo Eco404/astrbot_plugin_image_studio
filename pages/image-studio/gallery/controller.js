@@ -32,6 +32,7 @@
     let detailTrigger = null;
     let galleryColumns = 0;
     let detailActionsReady = false;
+    let titleEditor = null;
     let selectionScrollFrame = 0;
     function clearDetailParameterLayout() {
       detailParameterObserver?.disconnect(); detailParameterObserver = null;
@@ -443,17 +444,101 @@
       return '<div class="gallery-card is-placeholder" aria-hidden="true"><div class="gallery-image-wrap"><div class="gallery-image-pending"></div></div><div class="gallery-info"><span class="gallery-skeleton-line"></span><span class="gallery-skeleton-line is-short"></span></div></div>';
     }
 
+    function galleryTitle(item) {
+      return item.title || item.model || item.provider_name || engineLabel(item.generation_engine);
+    }
+
+    function galleryTitleMarkup(item) {
+      return `<strong class="gallery-card-title" data-gallery-title tabindex="0" role="button" aria-label="编辑图组标题">${escape(galleryTitle(item))}</strong>`;
+    }
+
+    function endTitleEdit(restoreFocus = false) {
+      const editing = titleEditor;
+      if (!editing) return;
+      titleEditor = null;
+      editing.slot.innerHTML = galleryTitleMarkup(editing.item);
+      if (restoreFocus && editing.card.isConnected) editing.slot.querySelector("[data-gallery-title]").focus({ preventScroll: true });
+    }
+
+    async function saveTitle(editing) {
+      if (titleEditor !== editing || editing.saving) return;
+      editing.saving = true;
+      const value = editing.input.value;
+      editing.input.disabled = true;
+      editing.confirm.disabled = true;
+      try {
+        const saved = await apiPost("gallery/title", { generation_id: editing.item.id, title: value });
+        editing.item.title = saved.title;
+        const item = state.galleryItems.find(item => item.id === editing.item.id);
+        if (item) item.title = saved.title;
+        if (state.detailData?.id === editing.item.id) state.detailData.title = saved.title;
+        if (titleEditor === editing) endTitleEdit(true);
+        else if (editing.card.isConnected && titleEditor?.card !== editing.card) editing.slot.innerHTML = galleryTitleMarkup(editing.item);
+        if (editing.card.isConnected) editing.card.setAttribute("aria-label", `查看 ${galleryTitle(editing.item)}`);
+      } catch (error) {
+        showNotice(errorMessage(error, "图组标题保存失败"), "error");
+        if (titleEditor === editing) {
+          editing.saving = false;
+          editing.input.disabled = false;
+          editing.confirm.disabled = false;
+          editing.input.focus();
+        }
+      }
+    }
+
+    function editTitle(card) {
+      if (titleEditor?.card === card) return;
+      endTitleEdit();
+      const item = state.galleryItems.find(item => item.id === card.dataset.galleryId);
+      const slot = card.querySelector(".gallery-title-slot");
+      if (!item || !slot) return;
+      slot.innerHTML = `<div class="gallery-title-editor"><input type="text" maxlength="200" aria-label="图组标题" placeholder="输入图组标题" autocomplete="off"><button type="button" class="studio-icon-button" aria-label="保存图组标题">${icon("Check")}</button></div>`;
+      const input = slot.querySelector("input"), confirm = slot.querySelector("button");
+      const editing = { item, card, slot, input, confirm, saving: false };
+      titleEditor = editing;
+      // The fallback model/provider label is presentation only, never a draft.
+      input.value = item.title || "";
+      confirm.addEventListener("click", () => void saveTitle(editing));
+      input.addEventListener("keydown", event => {
+        if (event.isComposing) return;
+        if (event.key === "Enter") { event.preventDefault(); event.stopPropagation(); void saveTitle(editing); }
+        else if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); endTitleEdit(true); }
+      });
+      input.focus(); input.select();
+    }
+
+    function bindGalleryTitles() {
+      $("galleryGrid").addEventListener("click", event => {
+        if (event.target.closest(".gallery-title-slot")) event.stopPropagation();
+        const title = event.target.closest("[data-gallery-title]");
+        if (title) { event.preventDefault(); editTitle(title.closest("[data-gallery-id]")); }
+      });
+      $("galleryGrid").addEventListener("keydown", event => {
+        const title = event.target.closest("[data-gallery-title]");
+        if (title && ["Enter", " "].includes(event.key)) { event.preventDefault(); event.stopPropagation(); editTitle(title.closest("[data-gallery-id]")); }
+      });
+      const cancelOutside = event => {
+        if (titleEditor && !titleEditor.slot.contains(event.target)) endTitleEdit();
+      };
+      document.addEventListener("pointerdown", cancelOutside, true);
+      document.addEventListener("focusin", cancelOutside);
+      window.addEventListener("image-studio-appearance-change", () => {
+        if (window.ImageStudioAppearance?.get().galleryCardInfo === false) endTitleEdit();
+      });
+    }
+
     function renderGalleryCard(item, index = 0) {
       const warning = !!item.cleanup_warning;
       const selected = state.selectedIds.has(item.id);
-      return `<article class="gallery-card ${item.is_favorite ? "is-favorite" : ""} ${warning ? "has-cleanup-warning" : ""} ${selected ? "is-selected" : ""}" data-gallery-id="${escape(item.id)}" tabindex="0" role="button" aria-label="查看 ${escape(item.model || item.provider_name || "图片")}">
+      return `<article class="gallery-card ${item.is_favorite ? "is-favorite" : ""} ${warning ? "has-cleanup-warning" : ""} ${selected ? "is-selected" : ""}" data-gallery-id="${escape(item.id)}" tabindex="0" role="button" aria-label="查看 ${escape(galleryTitle(item))}">
         <div class="gallery-image-wrap">${item.thumbnail_data_url ? `<img src="${escape(item.thumbnail_data_url)}" alt="${escape(item.prompt_preview)}" loading="${index < Math.max(1, galleryColumns) * 2 ? "eager" : "lazy"}" decoding="async" />` : '<div class="gallery-image-pending"></div>'}
           <label class="gallery-selection"><input type="checkbox" data-select-id="${escape(item.id)}" aria-label="选择生成记录" ${selected ? "checked" : ""} /><span>${icon("Check")}</span></label>
           <span class="gallery-source-label${item.is_external ? " is-external" : ""}"${item.is_external ? ` data-tooltip="来自 ${escape(item.external_source?.name || "nai-image 插件图库")}" aria-label="${escape(engineLabel(item.generation_engine))}，来自 ${escape(item.external_source?.name || "nai-image 插件图库")}"` : ""}>${escape(engineLabel(item.generation_engine))}</span>${Number(item.image_count) > 1 ? `<span class="gallery-image-count" aria-label="${Number(item.image_count)} 张图片">${icon("Image")}<span>${Number(item.image_count)}</span></span>` : ""}${item.is_favorite ? `<span class="gallery-favorite" data-tooltip="已收藏" aria-label="已收藏">${icon("Star")}</span>` : ""}
-        </div><div class="gallery-info"><strong>${escape(item.model || item.provider_name || engineLabel(item.generation_engine))}</strong><p>${escape(item.prompt_preview || "无提示词")}</p><div class="gallery-meta"><span>${modeLabel(item.mode)}</span><span>${formatDate(item.sort_time || item.created_at)}</span></div>${warning ? '<span class="cleanup-warning-label">清理候选</span>' : ""}${item.file_state && item.file_state !== "available" ? '<span class="cleanup-warning-label">文件需检查</span>' : ""}</div></article>`;
+        </div><div class="gallery-info"><div class="gallery-title-slot">${galleryTitleMarkup(item)}</div><p>${escape(item.prompt_preview || "无提示词")}</p><div class="gallery-meta"><span>${modeLabel(item.mode)}</span><span>${formatDate(item.sort_time || item.created_at)}</span></div>${warning ? '<span class="cleanup-warning-label">清理候选</span>' : ""}${item.file_state && item.file_state !== "available" ? '<span class="cleanup-warning-label">文件需检查</span>' : ""}</div></article>`;
     }
 
     function galleryRendered(payload) {
+      if (titleEditor && !titleEditor.card.isConnected) endTitleEdit();
       closeGalleryPagePicker();
       selectionChanged(true);
       syncFloatingBars();
@@ -510,6 +595,7 @@
       importController.bind();
       renderIcons();
       bindGalleryPagePicker();
+      bindGalleryTitles();
       $("galleryGrid").addEventListener("keydown", (event) => { const card = event.target.closest("[data-gallery-id]"); if (event.target !== card) return; if (["Enter", " "].includes(event.key)) { event.preventDefault(); detailTrigger = card; void hooks.openDetail(card.dataset.galleryId); } });
       window.addEventListener("scroll", scheduleSelectionHeader, { passive: true });
       window.addEventListener("resize", scheduleSelectionHeader, { passive: true });
@@ -565,7 +651,7 @@
       }, true);
       window.addEventListener("resize", scheduleDetailParameterLayout, { passive: true });
       window.addEventListener("beforeunload", clearDetailParameterLayout);
-      $("galleryGrid").addEventListener("click", (event) => { const card = event.target.closest("[data-gallery-id]"); if (card && !event.target.closest(".gallery-selection")) detailTrigger = card; });
+      $("galleryGrid").addEventListener("click", (event) => { const card = event.target.closest("[data-gallery-id]"); if (card && !event.target.closest(".gallery-selection, .gallery-title-slot")) detailTrigger = card; });
       $("closeDrawer").addEventListener("click", () => detailTrigger?.focus?.({ preventScroll: true }));
       window.addEventListener("resize", () => {
         clearTimeout(resizeTimer); resizeTimer = window.setTimeout(() => {

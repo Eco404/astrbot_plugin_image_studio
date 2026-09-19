@@ -15,7 +15,7 @@ _BACKUP_NAME = re.compile(
     r"history-pre-v(?P<version>[1-9]\d*)(?:-dev\.(?P<revision>[1-9]\d*))?"
     r"-(?P<stamp>\d{8}T\d{12}Z)-[A-Za-z0-9_-]+\.sqlite3"
 )
-_SUPPORTED_DEVELOPMENT_BACKUPS = {(1, 3), (2, 2), (3, 1), (4, 1)}
+_SUPPORTED_DEVELOPMENT_BACKUPS = {(1, 3), (2, 2), (3, 1), (4, 1), (4, 2)}
 _MIN_VACUUM_BYTES = 16 * 1024 * 1024
 _CATEGORIES = (
     "originals",

@@ -3026,7 +3026,7 @@
       centerDetailFilmstrip(els.drawerBody.querySelector(".detail-filmstrip"));
       if (touchImageDisplay() && state.detailData && !mobileViewerSession?.active) void loadDetailAssets(state.detailId, state.detailData, state.detailFallbackThumbnail);
     }, { passive: true });
-    els.galleryGrid.addEventListener("click", (event) => { const card = event.target.closest("[data-gallery-id]"); if (card && !event.target.closest(".gallery-selection")) void openDetail(card.dataset.galleryId); });
+    els.galleryGrid.addEventListener("click", (event) => { const card = event.target.closest("[data-gallery-id]"); if (card && !event.target.closest(".gallery-selection, .gallery-title-slot")) void openDetail(card.dataset.galleryId); });
     els.galleryGrid.addEventListener("change", (event) => { const input = event.target.closest("[data-select-id]"); if (!input) return; input.checked ? state.selectedIds.add(input.dataset.selectId) : state.selectedIds.delete(input.dataset.selectId); updateSelection(); });
     document.querySelectorAll(".nav-item").forEach((button) => button.addEventListener("click", () => switchView(button.dataset.view)));
     document.querySelectorAll(".segment").forEach((button) => button.addEventListener("click", () => {

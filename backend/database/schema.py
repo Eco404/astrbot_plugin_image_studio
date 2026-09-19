@@ -12,7 +12,7 @@ from typing import Any
 
 RELEASE_VERSION = 3
 DATABASE_VERSION = 4
-DEVELOPMENT_REVISION = 1
+DEVELOPMENT_REVISION = 2
 
 # Published v1 is immutable; future releases retain this upgrade starting point.
 V1_SCHEMA_STATEMENTS = (
@@ -241,11 +241,15 @@ PAYLOAD_TRIGGER_STATEMENTS = tuple(
     f"DELETE FROM storage_payload_refs WHERE owner_table='{table}' AND owner_id=OLD.{key}; END"
     for table, key in _PAYLOAD_OWNER_KEYS.items()
 )
-SCHEMA_STATEMENTS = (
+V4_DEV1_SCHEMA_STATEMENTS = (
     *V3_SCHEMA_STATEMENTS,
     *V4_MIGRATION_STATEMENTS,
     *PAYLOAD_TRIGGER_STATEMENTS,
 )
+V4_DEV2_MIGRATION_STATEMENTS = (
+    "ALTER TABLE generations ADD COLUMN title TEXT NOT NULL DEFAULT ''",
+)
+SCHEMA_STATEMENTS = (*V4_DEV1_SCHEMA_STATEMENTS, *V4_DEV2_MIGRATION_STATEMENTS)
 _TABLES = (*_V3_TABLES, *_PAYLOAD_TABLES)
 _DEVELOPMENT_META_STATEMENT = """CREATE TABLE schema_meta (
     id INTEGER PRIMARY KEY CHECK(id = 1),
@@ -288,14 +292,21 @@ def _table_shape(conn: sqlite3.Connection, table: str) -> tuple[Any, ...]:
     return columns, foreign_keys, sorted(indexes)
 
 
-@lru_cache(maxsize=4)
-def _release_shapes(version: int = RELEASE_VERSION) -> dict[str, tuple[Any, ...]]:
+@lru_cache(maxsize=8)
+def _release_shapes(
+    version: int = RELEASE_VERSION, development_revision: int = DEVELOPMENT_REVISION
+) -> dict[str, tuple[Any, ...]]:
     with closing(sqlite3.connect(":memory:")) as conn:
         statements, tables = {
             1: (V1_SCHEMA_STATEMENTS, _V1_TABLES),
             2: (V2_SCHEMA_STATEMENTS, _V2_TABLES),
             3: (V3_SCHEMA_STATEMENTS, _V3_TABLES),
-            4: (SCHEMA_STATEMENTS, _TABLES),
+            4: (
+                V4_DEV1_SCHEMA_STATEMENTS
+                if development_revision == 1
+                else SCHEMA_STATEMENTS,
+                _TABLES,
+            ),
         }[version]
         for statement in statements:
             conn.execute(statement)
@@ -303,9 +314,11 @@ def _release_shapes(version: int = RELEASE_VERSION) -> dict[str, tuple[Any, ...]
 
 
 def _validate_release_layout(
-    conn: sqlite3.Connection, version: int = RELEASE_VERSION
+    conn: sqlite3.Connection,
+    version: int = RELEASE_VERSION,
+    development_revision: int = DEVELOPMENT_REVISION,
 ) -> None:
-    for table, expected in _release_shapes(version).items():
+    for table, expected in _release_shapes(version, development_revision).items():
         if _table_shape(conn, table) != expected:
             raise RuntimeError(f"图库数据库结构与正式基线不符：{table}；未执行升级")
     if version == 1 and any(
@@ -377,6 +390,9 @@ def _database_kind(conn: sqlite3.Connection) -> str:
         ):
             _validate_release_layout(conn, DATABASE_VERSION)
             return "current"
+        if release == RELEASE_VERSION and marker == (1, 4, 1):
+            _validate_release_layout(conn, 4, development_revision=1)
+            return "upgrade_v4_dev1"
         if release == 2 and marker == (1, 3, 1):
             _validate_release_layout(conn, 3)
             return "promotion_v3"
@@ -389,7 +405,7 @@ def _database_kind(conn: sqlite3.Connection) -> str:
         raise RuntimeError(
             "不支持此图库数据库开发修订；1-dev 系列请先用末版开发版升级，"
             "2-dev 系列请先升级到 1.1.0-dev.2 的最终数据库 2-dev.2 后再转换；"
-            "3-dev 系列仅支持最终数据库 3-dev.1；4-dev 系列仅支持当前修订"
+            "3-dev 系列仅支持最终数据库 3-dev.1；4-dev 系列支持 4-dev.1 和当前修订"
         )
     if release in {1, 2, RELEASE_VERSION}:
         _validate_release_layout(conn, release)
@@ -440,7 +456,7 @@ def _change_token(conn: sqlite3.Connection) -> tuple[int, int, int]:
 
 
 def ensure_release_schema(conn: sqlite3.Connection, *, backup_dir: Path) -> Path | None:
-    """Upgrade published baselines to the explicit 4-dev.1 storage layout.
+    """Upgrade published baselines to the explicit 4-dev.2 storage layout.
 
     Backups precede every existing-database upgrade. Version/structure and commit
     tokens are checked again under the write lock, keeping backup and migration
@@ -457,6 +473,16 @@ def ensure_release_schema(conn: sqlite3.Connection, *, backup_dir: Path) -> Path
         conn.execute("BEGIN IMMEDIATE")
         if _database_kind(conn) != kind or _change_token(conn) != initial_token:
             raise RuntimeError("图库数据库在备份后发生变化，请重新启动插件重试")
+        if kind == "upgrade_v4_dev1":
+            for statement in V4_DEV2_MIGRATION_STATEMENTS:
+                conn.execute(statement)
+            _validate_release_layout(conn, DATABASE_VERSION)
+            conn.execute(
+                "UPDATE schema_meta SET dev_revision=? WHERE id=1",
+                (DEVELOPMENT_REVISION,),
+            )
+            conn.commit()
+            return backup
         if kind == "empty":
             for statement in SCHEMA_STATEMENTS:
                 conn.execute(statement)
@@ -481,6 +507,9 @@ def ensure_release_schema(conn: sqlite3.Connection, *, backup_dir: Path) -> Path
 
         migrate_comfy_storage(conn)
         migrate_gallery_storage(conn)
+        if kind != "empty":
+            for statement in V4_DEV2_MIGRATION_STATEMENTS:
+                conn.execute(statement)
         conn.execute("DROP TABLE IF EXISTS generation_search")
         gc_payloads(conn)
         if conn.execute("PRAGMA foreign_key_check").fetchone() is not None:

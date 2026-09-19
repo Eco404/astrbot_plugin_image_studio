@@ -171,7 +171,7 @@ def test_new_storage_creates_complete_schema_once_with_development_metadata(
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
         assert conn.execute(
             "SELECT target_version,dev_revision FROM schema_meta"
-        ).fetchone() == (4, 1)
+        ).fetchone() == (4, 2)
         assert "supplemental_json" in {
             row[1] for row in conn.execute("PRAGMA table_info(generation_images)")
         }
@@ -265,7 +265,7 @@ def test_v1_upgrade_preserves_all_business_rows_files_and_restore_backup(
                 conn.execute(
                     "SELECT target_version,dev_revision FROM schema_meta"
                 ).fetchone()
-            ) == (4, 1)
+            ) == (4, 2)
             assert business_rows(conn) == before
             assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
         backups = list((tmp_path / "backups").glob("history-pre-v4-*.sqlite3"))

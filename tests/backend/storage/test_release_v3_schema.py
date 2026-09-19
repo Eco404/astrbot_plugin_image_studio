@@ -140,7 +140,7 @@ def assert_release(conn):
     assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
     assert conn.execute(
         "SELECT target_version,dev_revision FROM schema_meta"
-    ).fetchone() == (4, 1)
+    ).fetchone() == (4, 2)
     assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
 

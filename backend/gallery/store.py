@@ -1233,6 +1233,21 @@ class GenerationStore:
         ids = _validate_generation_selection(generation_ids)
         return await self._external_mutation(self.records.toggle_favorites, ids)
 
+    async def set_title(self, generation_id: str, title: str) -> dict[str, str]:
+        """Rename any local gallery group, including the index of an external image."""
+        if not _SAFE_ID_RE.fullmatch(generation_id):
+            raise ValueError("生成记录 ID 无效")
+        if not isinstance(title, str):
+            raise ValueError("图组标题必须是字符串")
+        title = title.strip()
+        if len(title) > 200:
+            raise ValueError("图组标题不能超过 200 个字符")
+        if any(character in title for character in ("\n", "\r", "\0")):
+            raise ValueError("图组标题必须为单行文本")
+        return await self._external_mutation(
+            self.records.set_title, generation_id, title
+        )
+
     async def delete_images(
         self, generation_id: str, image_ids: list[str]
     ) -> dict[str, Any]:

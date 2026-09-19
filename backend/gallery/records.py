@@ -437,6 +437,16 @@ class GenerationRecords:
             "changed_ids": changed_ids,
         }
 
+    def set_title(self, generation_id: str, title: str) -> dict[str, str]:
+        """Keep group titles independent of image metadata and parser projections."""
+        with self.context.connect() as conn:
+            updated = conn.execute(
+                "UPDATE generations SET title=? WHERE id=?", (title, generation_id)
+            )
+            if not updated.rowcount:
+                raise ValueError("生成记录不存在或已删除")
+        return {"id": generation_id, "title": title}
+
     def delete_images(self, generation_id: str, image_ids: list[str]) -> dict[str, Any]:
         with self.context.connect() as conn:
             rows = conn.execute(

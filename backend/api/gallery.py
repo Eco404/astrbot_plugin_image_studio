@@ -74,6 +74,19 @@ class GalleryAPI:
             return error_response(str(exc), status_code=400)
         return json_response(result)
 
+    async def _api_gallery_title(self) -> Any:
+        body = await web_request.json(default={})
+        if not isinstance(body, dict) or not isinstance(body.get("title"), str):
+            return error_response("图组标题必须是字符串", status_code=400)
+        try:
+            return json_response(
+                await self.store.set_title(
+                    str(body.get("generation_id") or ""), body["title"]
+                )
+            )
+        except ValueError as exc:
+            return error_response(str(exc), status_code=400)
+
     async def _api_gallery_favorite(self) -> Any:
         body = await web_request.json(default={})
         if isinstance(body, dict) and "generation_ids" in body:

@@ -138,14 +138,14 @@ class GalleryQueries:
                 "(g.original_prompt LIKE ? OR g.final_prompt LIKE ? OR g.provider_name LIKE ? OR g.model LIKE ? "
                 "OR g.platform_name LIKE ? OR g.platform_id LIKE ? OR g.group_id LIKE ? "
                 "OR g.group_name LIKE ? OR g.user_id LIKE ? OR g.user_name LIKE ? "
-                "OR g.search_text LIKE ? OR g.generation_engine LIKE ? "
+                "OR g.search_text LIKE ? OR g.generation_engine LIKE ? OR g.title LIKE ? "
                 "OR g.context_type LIKE ? "
                 "OR (CASE g.context_type WHEN 'group' THEN '群聊' WHEN 'private' THEN '私聊' ELSE '' END) LIKE ? "
                 "OR (CASE lower(g.platform_name) WHEN 'aiocqhttp' THEN 'OneBot v11 OneBotV11' "
                 "WHEN 'qq_official' THEN 'QQ 官方 QQ官方' ELSE '' END) LIKE ?)"
             )
             token = f"%{query}%"
-            args.extend([token] * 15)
+            args.extend([token] * 16)
         clause = f"WHERE {' AND '.join(where)}" if where else ""
         return clause, args
 
@@ -217,7 +217,7 @@ class GalleryQueries:
                 ).fetchone()[0]
             )
             rows = conn.execute(
-                f"SELECT g.id, g.created_at, {sort_time} AS sort_time, g.source, g.mode, g.provider_id, g.provider_name, "
+                f"SELECT g.id, g.title, g.created_at, {sort_time} AS sort_time, g.source, g.mode, g.provider_id, g.provider_name, "
                 f"g.model, g.original_prompt, g.elapsed_ms, g.context_type, g.platform_name, "
                 f"g.platform_id, g.group_id, g.group_name, g.user_id, g.user_name, "
                 f"g.is_favorite, g.cleanup_protected_until, g.generation_engine, g.generated_at, "
@@ -254,7 +254,7 @@ class GalleryQueries:
         with self.context.connect() as conn:
             conn.execute("BEGIN")
             record = conn.execute(
-                "SELECT id, created_at, source, status, mode, provider_id, provider_name, "
+                "SELECT id, title, created_at, source, status, mode, provider_id, provider_name, "
                 "provider_kind, model, elapsed_ms, error_message, is_favorite, cleanup_protected_until, "
                 "generation_engine, generated_at, context_type, platform_name, platform_id, "
                 "group_id, group_name, user_id, user_name FROM generations WHERE id = ?",
@@ -374,7 +374,7 @@ class GalleryQueries:
             if not self.services.external_generation_enabled(row["generation_id"]):
                 return None
             record = conn.execute(
-                "SELECT id, created_at, source, status, mode, provider_id, provider_name, "
+                "SELECT id, title, created_at, source, status, mode, provider_id, provider_name, "
                 "provider_kind, model, original_prompt, final_prompt, parameters_json, "
                 "supplemental_json, elapsed_ms, error_message, is_favorite, "
                 "cleanup_protected_until, generation_engine, generated_at, context_type, "
@@ -474,7 +474,7 @@ class GalleryQueries:
         order_join, sort_time = self.gallery_order(filters)
         with self.context.connect() as conn:
             rows = conn.execute(
-                f"SELECT g.id AS generation_id, g.created_at, {sort_time} AS sort_time, g.source, "
+                f"SELECT g.id AS generation_id, g.title, g.created_at, {sort_time} AS sort_time, g.source, "
                 "i.mode, g.provider_id, i.model, "
                 "i.id AS image_id, i.ordinal, a.mime_type, a.size_bytes, "
                 f"a.id AS sha256, {_THUMBNAIL_REVISION_SQL} AS thumbnail_revision, "
@@ -769,6 +769,7 @@ class GalleryQueries:
         item = {
             **self.services.external_display(row["id"], row["source"]),
             "id": row["id"],
+            "title": row.get("title", ""),
             "created_at": row["created_at"],
             "sort_time": row["sort_time"],
             "source": row["source"],
