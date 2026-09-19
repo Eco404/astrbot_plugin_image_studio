@@ -13,6 +13,7 @@ from ..config import SUPPORTED_PROVIDER_KINDS, RuntimeSettings
 from ..models import ImageModel, ImageProvider
 
 MODES = ("text2img", "img2img")
+MODEL_REFS_LIMIT = 20
 CapabilitySelection = tuple[
     ImageProvider, ImageModel, list[str], list[str], int | None, str
 ]
@@ -33,6 +34,27 @@ def _mode(value: Any) -> str:
 
 def _modes(model: ImageModel) -> list[str]:
     return [mode for mode in MODES if model.supports(mode)]
+
+
+def _default_modes_by_ref(
+    settings: RuntimeSettings, mode: str = "", *, strict: bool = False
+) -> dict[str, list[str]]:
+    result: dict[str, list[str]] = {}
+    for target_mode in (mode,) if mode else MODES:
+        requested = settings.default_model_ref(target_mode, "llm_tool")
+        if not requested:
+            continue
+        resolved, error = _resolve_model(settings, requested, target_mode)
+        if error:
+            if strict and error["code"] == "ambiguous_model_id":
+                raise ValueError(
+                    f"默认模型 {requested} 的 ID 不唯一，"
+                    "请在默认模型设置中使用 provider_id:model_id。"
+                )
+            continue
+        provider, model = resolved
+        result.setdefault(f"{provider.id}:{model.id}", []).append(target_mode)
+    return result
 
 
 def _fold(value: str) -> str:
@@ -100,6 +122,7 @@ def search_catalog(
             raise ValueError(f"服务商已停用：{provider_id}。")
 
     ranked: list[tuple[int, dict[str, Any]]] = []
+    default_modes = _default_modes_by_ref(settings, mode)
     folded_query = _fold(query)
     for provider in settings.providers:
         if (
@@ -157,6 +180,7 @@ def search_catalog(
                         "provider_kind": provider.kind,
                         "modes": _modes(model),
                         "max_reference_images": model.llm_max_reference_images,
+                        "default_for_modes": default_modes.get(ref, []),
                         "selection_description": description,
                         "matched_fields": [
                             "model_name" if field == "name" else field
@@ -167,6 +191,15 @@ def search_catalog(
             )
     # Python's stable sort retains persisted provider/model ordering within rank.
     ranked.sort(key=lambda item: item[0])
+    page = ranked[offset : offset + limit]
+    if not ranked:
+        next_action = "没有匹配项，请调整 query 关键词或筛选条件后重试。"
+    elif not page:
+        next_action = "当前页没有结果，请根据 total 调整 offset 后重试。"
+    elif query_type == "providers":
+        next_action = '设置 query_type="search"，将所选服务商的 ID 填入 provider_id，查询其模型或工作流。'
+    else:
+        next_action = '设置 query_type="model"，将所选模型的 model_ref 放入 model_refs 数组，查询它在 Image Studio 中可用的生成模式、参数和提示词要求。'
     return {
         "query_type": query_type,
         "query": query,
@@ -178,15 +211,9 @@ def search_catalog(
         "offset": offset,
         "has_more": offset + limit < len(ranked),
         "providers" if query_type == "providers" else "models": [
-            item[1] for item in ranked[offset : offset + limit]
+            item[1] for item in page
         ],
-        "next_action": (
-            "使用 query_type=search 和 provider_id 查询该服务商下的模型或工作流；"
-            "搜索摘要不包含完整调用参数。"
-            if query_type == "providers"
-            else "选定模型后使用 query_type=model、model_refs 查询完整能力与参数，"
-            "再使用返回的 model_ref 调用 image_studio_generate；搜索摘要不替代完整能力查询。"
-        ),
+        "next_action": next_action,
     }
 
 
@@ -267,7 +294,9 @@ def select_capability_models(
     query_type = _text(query_type, "query_type").lower()
     mode = _mode(mode)
     if query_type not in {"default", "all", "model"}:
-        raise ValueError("完整能力查询 query_type 仅支持 default、all 或 model。")
+        raise ValueError(
+            '查询模型的生成模式、参数和提示词要求时，query_type 仅支持 "default"、"all" 或 "model"。'
+        )
     if _text(provider_id, "provider_id") or _text(provider_kind, "provider_kind"):
         raise ValueError(
             "provider_id 和 provider_kind 筛选仅用于 providers 或 search 查询。"
@@ -280,9 +309,16 @@ def select_capability_models(
             or not all(isinstance(item, str) and item.strip() for item in model_refs)
         ):
             raise ValueError("model_refs 必须是至少包含一个非空字符串的数组。")
+        if len(model_refs) > MODEL_REFS_LIMIT:
+            raise ValueError(
+                f"model_refs 一次最多查询 {MODEL_REFS_LIMIT} 项，请分批查询。"
+            )
         requested_refs = [item.strip() for item in model_refs]
     selected: list[CapabilitySelection] = []
     errors: list[dict[str, Any]] = []
+    default_modes_by_ref = _default_modes_by_ref(
+        settings, mode, strict=query_type == "default"
+    )
     if query_type == "model":
         if not requested_refs:
             raise ValueError("查询指定模型时必须传入 model_refs。")
@@ -299,7 +335,7 @@ def select_capability_models(
                     provider,
                     model,
                     [mode] if mode else _modes(model),
-                    [],
+                    default_modes_by_ref.get(f"{provider.id}:{model.id}", []),
                     index,
                     requested_ref,
                 )
@@ -308,19 +344,11 @@ def select_capability_models(
     if requested_refs:
         raise ValueError("model_refs 仅用于 query_type=model 查询。")
 
-    default_modes_by_ref: dict[str, list[str]] = {}
     if query_type == "default":
-        for target_mode in (mode,) if mode else MODES:
-            default_ref = settings.default_model_ref(target_mode, "llm_tool")
-            if default_ref:
-                _, error = _resolve_model(settings, default_ref, target_mode)
-                if error and error["code"] == "ambiguous_model_id":
-                    raise ValueError(
-                        f"默认模型 {default_ref} 的 ID 不唯一，"
-                        "请在默认模型设置中使用 provider_id:model_id。"
-                    )
-                default_modes_by_ref.setdefault(default_ref, []).append(target_mode)
-        if not default_modes_by_ref:
+        if not any(
+            settings.default_model_ref(target_mode, "llm_tool")
+            for target_mode in ((mode,) if mode else MODES)
+        ):
             raise ValueError(
                 "当前模式尚未设置默认 LLM 生图模型。"
                 if mode
@@ -334,15 +362,7 @@ def select_capability_models(
             if not model.llm_enabled or not modes or (mode and mode not in modes):
                 continue
             ref = f"{provider.id}:{model.id}"
-            default_modes = [
-                item
-                for item in modes
-                if item
-                in (
-                    default_modes_by_ref.get(ref, [])
-                    + default_modes_by_ref.get(model.id, [])
-                )
-            ]
+            default_modes = default_modes_by_ref.get(ref, [])
             if query_type == "default" and not default_modes:
                 continue
             selected.append(

@@ -8,11 +8,13 @@ import math
 import re
 import time
 from dataclasses import replace
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
 import aiohttp
+from astrbot.api import logger
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 from astrbot.core.utils.media_utils import MediaResolver, file_uri_to_path, is_file_uri
 
@@ -194,7 +196,9 @@ class ImageGenerationService:
             if negative_prompt is None:
                 negative_prompt = selected_model.negative_prompt_default
         else:
-            batch_parameters = _parameters(parameters)
+            batch_parameters = _parameters(
+                parameters, declared_names=selected_model.active_parameters
+            )
             if source == "llm_tool":
                 batch_parameters = {
                     key: value
@@ -342,17 +346,48 @@ class ImageGenerationService:
                 )
             )
         elapsed_ms = round((time.perf_counter() - started) * 1000)
-        generation_id = await self.store.record_success(
-            provider=provider,
-            request=request,
-            images=images,
-            elapsed_ms=elapsed_ms,
-            history=settings.history,
-            preview_max_edge=settings.asset_preview_max_edge,
-            preview_quality=settings.asset_preview_quality,
-            batch_failures=batch_failures,
-        )
-        await self.store.discard_staged_references(request.references)
+        generation_id = ""
+        try:
+            generation_id = await self.store.record_success(
+                provider=provider,
+                request=request,
+                images=images,
+                elapsed_ms=elapsed_ms,
+                history=settings.history,
+                preview_max_edge=settings.asset_preview_max_edge,
+                preview_quality=settings.asset_preview_quality,
+                batch_failures=batch_failures,
+            )
+        except Exception as exc:
+            # The durable ComfyUI runner owns its result recovery. For ordinary
+            # Agent providers, keep the returned bytes available for asset
+            # registration instead of disguising a storage error as generation
+            # failure and encouraging another billable request.
+            if source != "llm_tool" or provider.kind == "comfyui":
+                raise
+            logger.warning(
+                "[ImageStudio] 生图已完成，画廊登记失败: %s", type(exc).__name__
+            )
+            warning = "；".join(
+                filter(
+                    None,
+                    [
+                        warning,
+                        "图片已生成，但画廊记录保存未完成；请核对存储状态，不要重新生图。原图资产仍会尝试登记。",
+                    ],
+                )
+            )
+        try:
+            await self.store.discard_staged_references(request.references)
+        except Exception as exc:
+            if source != "llm_tool" or provider.kind == "comfyui":
+                raise
+            logger.warning(
+                "[ImageStudio] 生图后临时参考清理失败: %s", type(exc).__name__
+            )
+            warning = "；".join(
+                filter(None, [warning, "临时参考图清理未完成，不影响已生成图片。"])
+            )
         return GenerationResult(
             provider=provider,
             request=request,
@@ -360,6 +395,7 @@ class ImageGenerationService:
             elapsed_ms=elapsed_ms,
             generation_id=generation_id,
             warning=warning,
+            partial=bool(batch_failures) or len(images) < request.count,
         )
 
     async def run_provider_request(
@@ -862,7 +898,7 @@ def _command_count(
         (value for name, value in descriptors if name == "count"),
         descriptors[0][1] if descriptors else {},
     )
-    raw = _parameters(parameters)
+    raw = _parameters(parameters, declared_names=model.active_parameters)
     raw_count = next(
         (
             raw[name]
@@ -941,13 +977,15 @@ def _size(value: str, provider_kind: str = "") -> str:
     return text
 
 
-def _parameters(value: Any) -> dict[str, Any]:
+def _parameters(value: Any, *, declared_names: Any = ()) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
     clean: dict[str, Any] = {}
     for key, item in value.items():
         name = str(key or "").strip()
-        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", name):
+        if name not in declared_names and not re.fullmatch(
+            r"[A-Za-z][A-Za-z0-9_-]{0,63}", name
+        ):
             continue
         try:
             import json
@@ -970,29 +1008,15 @@ def _parameters_for_model(
 def _resolved_model_values(
     value: Any, model: ImageModel, *, source: str = "webui"
 ) -> dict[str, Any]:
-    raw = _parameters(value)
+    raw = _parameters(value, declared_names=model.active_parameters)
     values: dict[str, Any] = {}
     active_parameters = model.active_parameters
     inactive = set(model.parameters) - set(active_parameters)
-    for name, descriptor in active_parameters.items():
-        if "default" not in descriptor:
-            continue
-        values[name] = descriptor["default"]
-    tool_parameters = model.tool.get("parameters")
-    if source == "llm_tool" and isinstance(tool_parameters, dict):
-        for name, descriptor in tool_parameters.items():
-            if (
-                name in active_parameters
-                and isinstance(descriptor, dict)
-                and "default_override" in descriptor
-            ):
-                values[name] = descriptor["default_override"]
-            elif (
-                name in active_parameters
-                and isinstance(descriptor, dict)
-                and "default" in descriptor
-            ):
-                values[name] = descriptor["default"]
+    missing = object()
+    for name in active_parameters:
+        default = model.parameter_default(name, source=source, fallback=missing)
+        if default is not missing:
+            values[name] = default
     _expand_parameter_presets(values, model)
     allowed = model.llm_exposed_parameter_names
     supplied: dict[str, Any] = {}
@@ -1088,22 +1112,12 @@ def _control_parameter_value(
     value: Any, model: ImageModel, name: str, *, source: str
 ) -> Any:
     name = _control_parameter_name(model, name)
-    raw = _parameters(value)
+    raw = _parameters(value, declared_names=model.active_parameters)
     if name in raw and (
         source != "llm_tool" or name in model.llm_exposed_parameter_names
     ):
         return raw[name]
-    descriptor = model.parameters.get(name)
-    if not isinstance(descriptor, dict):
-        return ""
-    tool_parameters = model.tool.get("parameters")
-    if source == "llm_tool" and isinstance(tool_parameters, dict):
-        policy = tool_parameters.get(name)
-        if isinstance(policy, dict) and "default_override" in policy:
-            return policy["default_override"]
-        if isinstance(policy, dict) and "default" in policy:
-            return policy["default"]
-    return descriptor.get("default", "")
+    return model.parameter_default(name, source=source, fallback="")
 
 
 def _validate_parameter_value(
@@ -1127,12 +1141,25 @@ def _validate_parameter_value(
     parameter_type = str(descriptor.get("type") or "").lower()
     if parameter_type in {"number", "int", "integer", "float"}:
         try:
-            numeric = float(value)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"参数 {name} 必须是数字") from exc
-        if descriptor.get("min") is not None and numeric < float(descriptor["min"]):
+            if isinstance(value, bool):
+                raise ValueError
+            numeric = Decimal(str(value))
+            if not numeric.is_finite():
+                raise ValueError
+        except (TypeError, ValueError, InvalidOperation) as exc:
+            raise ValueError(f"参数 {name} 必须是有限数字") from exc
+        if (
+            parameter_type in {"int", "integer"}
+            and numeric != numeric.to_integral_value()
+        ):
+            raise ValueError(f"参数 {name} 必须是整数")
+        if descriptor.get("min") is not None and numeric < Decimal(
+            str(descriptor["min"])
+        ):
             raise ValueError(f"参数 {name} 不能小于 {descriptor['min']}")
-        if descriptor.get("max") is not None and numeric > float(descriptor["max"]):
+        if descriptor.get("max") is not None and numeric > Decimal(
+            str(descriptor["max"])
+        ):
             raise ValueError(f"参数 {name} 不能大于 {descriptor['max']}")
 
 

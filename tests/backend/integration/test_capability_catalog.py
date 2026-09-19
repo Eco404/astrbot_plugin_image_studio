@@ -167,6 +167,45 @@ def test_pagination_uses_filtered_total_and_stable_boundaries() -> None:
 
 
 @pytest.mark.parametrize(
+    "query_type,next_query,argument",
+    [("providers", "search", "provider_id"), ("search", "model", "model_refs")],
+)
+def test_catalog_guidance_only_points_to_its_next_discovery_step(
+    query_type, next_query, argument
+):
+    config = settings(
+        provider("main", model("chosen")),
+        default_tool_text2img_model_ref="main:chosen",
+    )
+    payload = search_catalog(config, query_type=query_type)
+    guidance = payload["next_action"]
+    assert f'query_type="{next_query}"' in guidance
+    assert argument in guidance
+    assert "直接生成" not in guidance
+    assert "同轮" not in guidance
+    assert "能力缺口" not in guidance
+    if query_type == "search":
+        assert payload["models"][0]["default_for_modes"] == ["text2img"]
+
+
+@pytest.mark.parametrize("query_type", ["providers", "search"])
+def test_empty_catalog_guidance_distinguishes_no_matches_from_page_overflow(query_type):
+    config = settings(provider("main", model("chosen")))
+    collection = "providers" if query_type == "providers" else "models"
+    unmatched = search_catalog(config, query_type=query_type, query="absent", offset=2)
+    assert unmatched[collection] == [] and unmatched["total"] == 0
+    assert "query" in unmatched["next_action"]
+    assert "筛选" in unmatched["next_action"]
+    assert "offset" not in unmatched["next_action"]
+    beyond = search_catalog(config, query_type=query_type, offset=1)
+    assert beyond[collection] == [] and beyond["total"] == 1
+    assert "offset" in beyond["next_action"] and "total" in beyond["next_action"]
+    for payload in (unmatched, beyond):
+        assert not payload["has_more"]
+        assert "所选" not in payload["next_action"]
+
+
+@pytest.mark.parametrize(
     "kwargs",
     [
         {"limit": True},
@@ -297,7 +336,41 @@ def test_all_and_default_keep_config_order_and_mode_contracts() -> None:
     ]
     selected, _ = select_capability_models(config, query_type="all")
     assert refs(selected) == ["first:edit", "second:text", "second:other"]
-    assert all(item[3] == [] and item[4] is None for item in selected)
+    assert [item[3] for item in selected] == [["img2img"], ["text2img"], []]
+    assert all(item[4] is None for item in selected)
+
+
+def test_search_and_model_queries_identify_mode_defaults_without_changing_ranking():
+    config = settings(
+        provider("main", model("ordinary"), model("chosen", edit=True)),
+        default_tool_text2img_model_ref="chosen",
+        default_tool_img2img_model_ref="main:chosen",
+    )
+    found = search_catalog(config, query_type="search")
+    assert [item["model_ref"] for item in found["models"]] == [
+        "main:ordinary",
+        "main:chosen",
+    ]
+    assert [item["default_for_modes"] for item in found["models"]] == [
+        [],
+        ["text2img", "img2img"],
+    ]
+    selected, _ = select_capability_models(
+        config, query_type="model", mode="img2img", model_refs=["main:chosen"]
+    )
+    assert selected[0][3] == ["img2img"]
+
+
+def test_ambiguous_default_is_not_falsely_marked_in_discovery():
+    config = settings(
+        provider("first", model("same")),
+        provider("second", model("same")),
+        default_tool_text2img_model_ref="same",
+    )
+    assert all(
+        not item["default_for_modes"]
+        for item in search_catalog(config, query_type="search")["models"]
+    )
 
 
 def test_shared_default_merges_both_modes() -> None:

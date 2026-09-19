@@ -344,8 +344,8 @@
         <div class="appearance-sample-image"><canvas id="appearanceSampleCanvas" width="0" height="0" tabindex="0" aria-label="取色图片" hidden></canvas><span class="appearance-sample-point" hidden aria-hidden="true"></span></div>
         <div class="appearance-sample-actions"><span id="appearanceSampleSwatch" aria-hidden="true"></span><output id="appearanceSampleValue" aria-live="polite">尚未取色</output><button type="button" id="appearanceSampleApply" class="quiet-button" disabled>使用颜色</button></div>
       </section>
-      <label class="appearance-range"><span>强调色饱和度<output data-appearance-value="accentSaturation"></output></span><input type="range" min="0" max="100" step="1" data-appearance-field="accentSaturation" aria-label="强调色饱和度"></label>
-      <label class="appearance-range"><span>玻璃不透明度<output data-appearance-value="glassOpacity"></output></span><input type="range" min="20" max="100" step="1" data-appearance-field="glassOpacity" aria-label="玻璃不透明度"></label>
+      <label class="appearance-range"><span>饱和度<output data-appearance-value="accentSaturation"></output></span><input type="range" min="0" max="100" step="1" data-appearance-field="accentSaturation" aria-label="饱和度"></label>
+      <label class="appearance-range"><span>不透明度<output data-appearance-value="glassOpacity"></output></span><input type="range" min="20" max="100" step="1" data-appearance-field="glassOpacity" aria-label="不透明度"></label>
       <div id="appearanceResetConfirmation" class="appearance-reset-confirmation" role="group" aria-label="恢复默认主题" hidden><span>恢复默认主题？</span><div><button type="button" class="quiet-button" data-appearance-reset="cancel">取消</button><button type="button" class="quiet-button" data-appearance-reset="confirm">恢复</button></div></div>
       <p class="appearance-status" role="status" aria-live="polite"></p>
       <div class="field appearance-gallery-sort"><label for="gallerySort">画廊排序方式</label><select id="gallerySort"><option value="created">按创建时间</option><option value="latest_content">按最新内容</option></select></div>

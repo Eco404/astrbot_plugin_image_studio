@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import httpx
 import mcp.types
@@ -50,7 +51,9 @@ def test_partial_batch_reaches_caller_with_images_and_warning(tmp_path, source):
                 assert result["generation_id"]
         elif source == "command":
             plugin._command_reference_sources = no_references
-            event = CommandEvent(f"/img mountain landscape --model {MODEL_REF} --n 3")
+            event = CommandEvent(
+                f"/istudio mountain landscape --model {MODEL_REF} --n 3"
+            )
             messages = [item async for item in plugin.image_gen(event)]
             assert len(messages) == 1
             chain = messages[0]["chain"]
@@ -71,6 +74,7 @@ def test_partial_batch_reaches_caller_with_images_and_warning(tmp_path, source):
                 parameters={"count": 3},
             )
             assert not result.isError
+            assert json.loads(result.content[0].text)["status"] == "partial"
             warning = "".join(
                 item.text
                 for item in result.content

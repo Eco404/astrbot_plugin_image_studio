@@ -283,6 +283,41 @@ class ComfyJobStore:
     async def get_job(self, job_id: str, *, light=False) -> dict[str, Any] | None:
         return await asyncio.to_thread(self._get_job_sync, job_id, light)
 
+    async def get_agent_job(
+        self, job_id: str, *, scope_hash: str
+    ) -> dict[str, Any] | None:
+        """Authorize before expanding a task; unscoped legacy jobs are never exposed."""
+        return await asyncio.to_thread(self._get_agent_job_sync, job_id, scope_hash)
+
+    def _get_agent_job_sync(self, job_id: str, scope_hash: str):
+        with self._connect() as connection:
+            connection.execute("BEGIN")
+            row = connection.execute(
+                "SELECT * FROM comfy_jobs WHERE id=? AND "
+                "json_extract(request_json,'$.agent.scope_hash')=?",
+                (_job_id(job_id), scope_hash),
+            ).fetchone()
+            return self._decode(row, connection) if row else None
+
+    async def list_agent_jobs(
+        self, *, scope_hash: str, limit: int = 5
+    ) -> list[dict[str, Any]]:
+        """Recent top-level tasks only, without materializing execution snapshots."""
+        return await asyncio.to_thread(self._list_agent_jobs_sync, scope_hash, limit)
+
+    def _list_agent_jobs_sync(self, scope_hash: str, limit: int):
+        with self._connect() as connection:
+            connection.execute("BEGIN")
+            rows = connection.execute(
+                f"SELECT {self._summary_columns()},"
+                "json_extract(request_json,'$.agent.request_id') AS agent_request_id "
+                "FROM comfy_jobs WHERE parent_job_id='' AND "
+                "json_extract(request_json,'$.agent.scope_hash')=? "
+                "ORDER BY created_at DESC,id DESC LIMIT ?",
+                (scope_hash, limit),
+            ).fetchall()
+            return [self._decode(row, connection, light=True) for row in rows]
+
     def _get_job_sync(self, job_id: str, light=False) -> dict[str, Any] | None:
         with self._connect() as connection:
             connection.execute("BEGIN")
@@ -1027,6 +1062,8 @@ class ComfyJobStore:
                 # Execution needs caller context while recoverable. Archived
                 # tasks retain only identity that the gallery policy elected to
                 # record, rather than a second permanent private request copy.
+                # request.agent is a separate hashed authorization binding; keep
+                # it so archived results remain scoped when identity logging is off.
                 identity_fields = (
                     "context_type",
                     "platform_name",

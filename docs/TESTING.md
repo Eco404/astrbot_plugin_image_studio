@@ -9,15 +9,15 @@
 需要 Python 3.12+（同时满足所用 AstrBot 版本要求）、Git，以及 Node.js 20+。AstrBot 可以已安装在当前虚拟环境，也可以使用源码目录：
 
 ```bash
-# 当前目录为插件仓库，AstrBot 源码为同级目录时无需设置此变量。
-export ASTRBOT_ROOT="/path/to/AstrBot"
+# 当前目录为插件仓库。
+ASTRBOT_SOURCE="/path/to/AstrBot"
 
 # 使用已激活的虚拟环境。
-python -m pip install -r "$ASTRBOT_ROOT/requirements.txt"
+python -m pip install -r "$ASTRBOT_SOURCE/requirements.txt"
 python -m pip install -r requirements.txt pytest ruff fastapi uvicorn httpx
 ```
 
-也可以在调用验证脚本时使用 `--astrbot-root /path/to/AstrBot`。默认查找插件同级的 `AstrBot` 目录；现有 `PYTHONPATH` 会保留。
+调用验证脚本时使用 `--astrbot-root /path/to/AstrBot` 指定源码。默认查找插件同级的 `AstrBot` 目录；现有 `PYTHONPATH` 会保留。`ASTRBOT_ROOT` 是宿主的可写运行目录，不用于指定源码；验证脚本忽略继承值，替换为本次独立临时目录，防止宿主导入时迁移现有配置。单独运行 pytest 或宿主导入脚本时，也应在独立临时目录中执行并显式设置临时 `ASTRBOT_ROOT`。
 
 浏览器依赖通过仓库内的锁文件安装：
 
@@ -85,6 +85,8 @@ python scripts/verify.py --backend --webui comfy_workspace --browser chromium --
 
 ## 隔离、超时和结果
 
+对话工具回归覆盖工具定义中的模型选择与调用前提、同轮能力复用、模式参数/中文字段/数值约束、ComfyUI 持久任务与会话鉴权、任务恢复和显式幂等、结果来源说明、资产登记重试及复制部分成功。检查宿主注册的请求钩子以及生成／查看后的请求上下文，确认人格提示词、其他插件上下文和工具集合不被修改；发送结果只报告本次投递事实。ComfyUI 使用假客户端暂停和释放执行、注入错误，并检查实际提交次数；这不代表真实服务商生图或真实 LLM 选型已经验证。
+
 每个浏览器场景都启动自己的 `tests/support/webui_harness.py`，使用系统临时目录和自动分配的 `127.0.0.1` 端口；不复用运行中的部署服务。调用方已有的 `STUDIO_TEST_URL` 会被忽略。测试服务使用假图片提供方，场景中的远程接口采用固定结果或拦截，不需要真实 API Key。
 
 验证结束、检查失败、超时或按 `Ctrl+C` 都会终止本次启动的测试服务及子进程，并清理测试服务的数据目录。截图、测试生成的样例及服务日志保存在 `dist/verification/` 的独立子目录中，可用 `--artifacts-dir` 指定其他位置；这些文件不会进入安装包。
@@ -103,10 +105,12 @@ python scripts/verify.py --webui comfy_provider --browser webkit --timeout 900 -
 
 ```bash
 studio_repo="$PWD"
+studio_source_root="${ASTRBOT_SOURCE:-$(dirname "$studio_repo")/AstrBot}"
 studio_test_workdir="$(mktemp -d)"
 (
   cd "$studio_test_workdir"
-  PYTHONPATH="$(dirname "$studio_repo"):${ASTRBOT_ROOT:-$(dirname "$studio_repo")/AstrBot}" \
+  ASTRBOT_ROOT="$studio_test_workdir/astrbot-runtime" \
+    PYTHONPATH="$(dirname "$studio_repo"):$studio_source_root${PYTHONPATH:+:$PYTHONPATH}" \
     python -m pytest -q "$studio_repo/tests/backend/integration/test_capability_search_tool.py"
 )
 ```

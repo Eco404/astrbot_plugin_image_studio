@@ -112,10 +112,19 @@ class ComfyJobManager:
                     job_id, status="unknown" if uncertain else "failed", error=str(exc)
                 )
 
-    async def wait(self, job_id: str) -> dict[str, Any]:
+    async def wait(
+        self, job_id: str, *, timeout_seconds: float | None = None
+    ) -> dict[str, Any]:
+        """Return the current job after a bounded wait without cancelling execution."""
         task = self._tasks.get(job_id)
         if task is not None:
-            await asyncio.shield(task)
+            if timeout_seconds is None:
+                await asyncio.shield(task)
+            elif timeout_seconds > 0:
+                done, _pending = await asyncio.wait({task}, timeout=timeout_seconds)
+                if done:
+                    # Preserve the existing propagation of runner persistence errors.
+                    await asyncio.shield(task)
         job = await self.store.get_job(job_id)
         if job is None:
             raise ValueError("ComfyUI 任务不存在")

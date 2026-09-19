@@ -4,7 +4,7 @@ import shlex
 from typing import Any
 
 COMMAND_HELP = """Image Studio 生图指令
-/image_gen <提示词> [参数]，别名 /img
+/istudio <提示词> [参数]
 
 --provider ID：指定服务商
 --model ID：指定模型，可用 服务商ID:模型ID
@@ -20,17 +20,17 @@ COMMAND_HELP = """Image Studio 生图指令
 参考图顺序：当前消息、引用消息、--ref；去重后按模型上限截断。
 指定图生图但没有可用参考图会报错；指定文生图则忽略参考图。
 参数可写成 --key=value；包含空格的值请使用英文引号。
-单独 /img --help 显示此帮助；与其他内容混用时忽略 --help。
+单独 /istudio --help 显示此帮助；与其他内容混用时忽略 --help。
 
-示例：/img 清晨的山间湖泊
-示例：/img 重绘这张图 --mode img2img --ref input.png
-示例：/img '1girl, solo, full body, garden' --provider nai --model nai-diffusion-4-5-full --param-style galgame
+示例：/istudio 清晨的山间湖泊
+示例：/istudio 重绘这张图 --mode img2img --ref input.png
+示例：/istudio '1girl, solo, full body, garden' --provider nai --model nai-diffusion-4-5-full --param-style galgame
 """.strip()
 
 
 def parse_command(raw: str, *, allow_empty_prompt: bool = False) -> dict[str, Any]:
     tokens = shlex.split(raw.strip())
-    if tokens and tokens[0] in {"/image_gen", "image_gen", "/img", "img"}:
+    if tokens and tokens[0] in {"/istudio", "istudio"}:
         tokens.pop(0)
     help_only = tokens == ["--help"]
     tokens = [token for token in tokens if token != "--help"]
@@ -100,5 +100,5 @@ def parse_command(raw: str, *, allow_empty_prompt: bool = False) -> dict[str, An
         index += 1
     values["prompt"] = " ".join(prompt_parts).strip()
     if not values["prompt"] and not allow_empty_prompt:
-        raise ValueError("请填写提示词；使用 /image_gen --help 查看指令帮助")
+        raise ValueError("请填写提示词；使用 /istudio --help 查看指令帮助")
     return values

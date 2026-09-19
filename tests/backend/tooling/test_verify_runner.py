@@ -58,10 +58,12 @@ def test_child_environment_clears_external_url_and_uses_current_python(
     monkeypatch.setenv("STUDIO_BROWSER", "webkit")
     monkeypatch.setenv("STUDIO_PLAYWRIGHT", "/tmp/old-library")
     monkeypatch.setenv("PYTHONPATH", "keep-this-search-path")
+    monkeypatch.setenv("ASTRBOT_ROOT", "/must-not-write-here")
 
     env = verify.child_environment(host)
 
     assert "STUDIO_TEST_URL" not in env
+    assert "ASTRBOT_ROOT" not in env
     assert "STUDIO_BROWSER" not in env
     assert "STUDIO_PLAYWRIGHT" not in env
     assert env["STUDIO_PYTHON"] == sys.executable
@@ -83,6 +85,24 @@ def test_playwright_requires_repository_pinned_dependency(monkeypatch, tmp_path)
         verify.playwright_module()
     (module / "package.json").write_text('{"version":"1.62.0"}')
     assert verify.playwright_module() == module
+
+
+def test_main_pins_owned_runtime_even_when_live_root_is_inherited(
+    monkeypatch, tmp_path
+):
+    inherited = tmp_path / "live"
+    monkeypatch.setenv("ASTRBOT_ROOT", str(inherited))
+    observed = []
+    monkeypatch.setattr(verify, "require_python", lambda *args, **kwargs: None)
+
+    def run(command, *, cwd, env, **kwargs):
+        assert env["ASTRBOT_ROOT"] == str(cwd / "astrbot-runtime")
+        assert env["ASTRBOT_ROOT"] != str(inherited)
+        observed.append(command)
+
+    monkeypatch.setattr(verify, "run", run)
+    assert verify.main(["--backend"]) == 0
+    assert len(observed) == 1
 
 
 def test_run_timeout_and_error_stop_owned_subprocesses(monkeypatch, tmp_path):

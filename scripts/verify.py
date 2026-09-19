@@ -58,7 +58,7 @@ def parser() -> argparse.ArgumentParser:
         "--astrbot-root",
         type=Path,
         default=None,
-        help="AstrBot source checkout (also ASTRBOT_ROOT); defaults to sibling AstrBot",
+        help="AstrBot source checkout; defaults to sibling AstrBot (runtime data is isolated)",
     )
     result.add_argument(
         "--timeout",
@@ -139,7 +139,9 @@ def selected_suites(names: list[str], browser: str | None) -> list[Path]:
 
 def child_environment(astrbot_root: Path | None) -> dict[str, str]:
     env = os.environ.copy()
-    host = astrbot_root or Path(env.get("ASTRBOT_ROOT", str(ROOT.parent / "AstrBot")))
+    host = astrbot_root or ROOT.parent / "AstrBot"
+    # ASTRBOT_ROOT is the host's writable runtime, not its source checkout.
+    env.pop("ASTRBOT_ROOT", None)
     paths = [str(ROOT.parent)]
     if (host / "astrbot").is_dir():
         paths.append(str(host.resolve()))
@@ -232,7 +234,7 @@ def require_python(
         run([sys.executable, "-c", script, *modules], cwd=cwd, env=env, timeout=timeout)
     except VerificationError as exc:
         raise VerificationError(
-            f"{exc}\nUse the activated virtual environment; install AstrBot dependencies and the development requirements in docs/TESTING.md. For a source checkout, pass --astrbot-root or set ASTRBOT_ROOT."
+            f"{exc}\nUse the activated virtual environment; install AstrBot dependencies and the development requirements in docs/TESTING.md. For a source checkout, pass --astrbot-root."
         ) from exc
 
 
@@ -458,6 +460,7 @@ def main(argv: list[str] | None = None) -> int:
         env = child_environment(args.astrbot_root)
         with tempfile.TemporaryDirectory(prefix="image-studio-verify-") as temporary:
             workdir = Path(temporary)
+            env["ASTRBOT_ROOT"] = str(workdir / "astrbot-runtime")
             if args.static:
                 static_checks(env=env, timeout=args.timeout)
             if args.backend:

@@ -12,7 +12,6 @@ from astrbot.core.provider.register import llm_tools
 from astrbot_plugin_image_studio.backend.config import HistorySettings, RuntimeSettings
 from astrbot_plugin_image_studio.main import (
     CAPABILITY_QUERY_EXTRA_KEY,
-    IMAGE_WORKFLOW_STATE_EXTRA_KEY,
     ImageStudioPlugin,
 )
 from astrbot_plugin_image_studio.backend.models import (
@@ -157,14 +156,15 @@ def test_model_query_returns_each_success_and_failure_in_input_order():
     assert [entry["model_ref"] for entry in payload["models"]] == [
         "p2:shared",
         "p1:alpha",
-        "p1:alpha",
     ]
-    assert [entry["input_index"] for entry in payload["models"]] == [0, 2, 4]
+    assert [entry["input_index"] for entry in payload["models"]] == [0, 2]
     assert [entry["requested_ref"] for entry in payload["models"]] == [
         refs[0],
         refs[2],
-        refs[4],
     ]
+    assert payload["models"][1]["input_indices"] == [2, 4]
+    assert payload["models"][1]["requested_refs"] == [refs[2], refs[4]]
+    assert "input_mapping" in payload
     assert [entry["model_ref"] for entry in payload["errors"]] == [refs[1], refs[3]]
     assert [entry["input_index"] for entry in payload["errors"]] == [1, 3]
     assert all(entry["code"] and entry["message"] for entry in payload["errors"])
@@ -174,6 +174,27 @@ def test_model_query_returns_each_success_and_failure_in_input_order():
     }
     assert "steps" in payload["models"][1]["parameters"]
     assert "private" not in payload["models"][1]["parameters"]
+
+
+def test_model_batch_bounds_and_alias_deduplication_preserve_input_mapping():
+    plugin = plugin_fixture()
+    accepted = query(plugin, query_type="model", model_refs=["p1:alpha"] * 20)
+    assert len(accepted["models"]) == 1
+    assert accepted["models"][0]["input_indices"] == list(range(20))
+    unique = query(plugin, query_type="model", model_refs=["p1:alpha"])
+    assert "input_mapping" not in unique
+    aliases = query(plugin, query_type="model", model_refs=["alpha", "p1:alpha"])
+    assert len(aliases["models"]) == 1
+    assert aliases["models"][0]["requested_refs"] == ["alpha", "p1:alpha"]
+    event = ToolEvent()
+    result = asyncio.run(
+        plugin.image_studio_get_capabilities(
+            event, query_type="model", model_refs=["p1:alpha"] * 21
+        )
+    )
+    assert result.isError
+    assert "20" in result.content[0].text
+    assert event.get_extra(CAPABILITY_QUERY_EXTRA_KEY) is None
 
 
 def test_ambiguous_bare_id_does_not_remove_explicit_reference_success():
@@ -207,7 +228,6 @@ def test_all_invalid_models_return_structured_result_without_authorizing_generat
         "unsupported_mode",
     ]
     assert event.get_extra(CAPABILITY_QUERY_EXTRA_KEY) is None
-    assert event.get_extra(IMAGE_WORKFLOW_STATE_EXTRA_KEY) is None
 
 
 @pytest.mark.parametrize(
@@ -266,7 +286,6 @@ def test_discovery_does_not_activate_image_workflow_or_disclose_secrets(query_ty
     assert '"parameters"' not in serialized
     assert '"prompt_contract"' not in serialized
     assert event.get_extra(CAPABILITY_QUERY_EXTRA_KEY) is None
-    assert event.get_extra(IMAGE_WORKFLOW_STATE_EXTRA_KEY) is None
     result = asyncio.run(
         plugin.image_studio_generate(
             event, mode="text2img", prompt="tree", model_ref="p1:alpha"
@@ -383,7 +402,7 @@ def test_search_preserves_prior_full_contract_but_does_not_refresh_revision():
     assert not plugin._generation_calls
 
 
-def test_batch_contracts_are_consumed_independently():
+def test_batch_contracts_are_reusable_independently():
     plugin = plugin_fixture()
     event = ToolEvent()
     query(
@@ -405,8 +424,8 @@ def test_batch_contracts_are_consumed_independently():
             event, mode="text2img", prompt="tree", model_ref="p1:alpha"
         )
     )
-    assert result.isError
-    assert len(plugin._generation_calls) == 2
+    assert not result.isError
+    assert len(plugin._generation_calls) == 3
 
 
 @pytest.mark.parametrize(
