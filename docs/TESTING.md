@@ -105,10 +105,12 @@ python scripts/verify.py --webui comfy_provider --browser webkit --timeout 900 -
 
 ```bash
 studio_repo="$PWD"
+studio_source_root="${ASTRBOT_SOURCE:-$(dirname "$studio_repo")/AstrBot}"
 studio_test_workdir="$(mktemp -d)"
 (
   cd "$studio_test_workdir"
-  PYTHONPATH="$(dirname "$studio_repo"):${ASTRBOT_ROOT:-$(dirname "$studio_repo")/AstrBot}" \
+  ASTRBOT_ROOT="$studio_test_workdir/astrbot-runtime" \
+    PYTHONPATH="$(dirname "$studio_repo"):$studio_source_root${PYTHONPATH:+:$PYTHONPATH}" \
     python -m pytest -q "$studio_repo/tests/backend/integration/test_capability_search_tool.py"
 )
 ```

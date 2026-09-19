@@ -2,7 +2,7 @@
 
 在 AstrBot 中生成、编辑和管理图片。既能打开 WebUI 调整参数，也能在聊天中使用指令，或让 Agent 把生图作为任务中的一步，继续改图、拼接和制作其他作品。
 
-当前开发版本为 **1.4.1-dev.1**，基于正式版 **1.4.0** 继续开发。正式安装请使用 [Releases](https://github.com/Eco404/astrbot_plugin_image_studio/releases) 中的版本，完整变化见 [更新记录](CHANGELOG.md)。
+当前正式版本为 **1.4.1**。安装包见 [Releases](https://github.com/Eco404/astrbot_plugin_image_studio/releases)，完整变化见 [更新记录](CHANGELOG.md)。
 
 ![Image Studio 生图工作台](docs/images/generate.png)
 
@@ -35,9 +35,9 @@ https://github.com/Eco404/astrbot_plugin_image_studio
 
 也可以从 [Releases](https://github.com/Eco404/astrbot_plugin_image_studio/releases) 下载 ZIP 安装。安装后，在插件详情中打开 **Image Studio** 页面。
 
-从旧版升级前，请停止 AstrBot 并备份完整插件数据目录。1.4.0 将旧数据库迁移到正式 **v4**，保留图库、收藏、工作流、任务和人工编辑数据。支持从正式 v1／v2／v3 及已支持的最终开发库升级；最终开发库 4-dev.2 经核验和备份后转为 v4，不重复转换正文。较早的 4-dev.1 数据库需先使用末版开发代码（提交 `6153f83`）升级到 4-dev.2，再安装正式版。
+从旧版升级前，建议备份完整插件数据目录。
 
-当前 1.4.1-dev.1 沿用正式 v4，从 1.4.0 升级不新增数据库结构迁移。
+聊天生图指令已统一为 `/istudio`，不再注册 `/image_gen` 或 `/img`。
 
 本地图片统一保存在数据目录下的 `images/`。旧版 `history/assets` 和 `history/thumbnails` 会在首次启动时校验并迁入对应的 `images/` 子目录，无需手动移动。迁移可在中断后继续；遇到内容冲突或不安全的路径时会停止，保留原文件。
 
