@@ -367,6 +367,7 @@ async def create_app(data_dir: Path, seed: bool = True) -> FastAPI:
         plugin.config, plugin._studio_settings
     )
     plugin._settings_lock = asyncio.Lock()
+    plugin._storage_maintenance_lock = asyncio.Lock()
     from astrbot_plugin_image_studio.backend.gallery.external import (
         ExternalGalleryManager,
     )

@@ -22,11 +22,14 @@ LOG_TAG = "[ImageStudio]"
 
 
 class GalleryAPI:
-    def __init__(self, *, store, get_settings, get_service, get_external):
+    def __init__(
+        self, *, store, get_settings, get_service, get_external, run_maintenance=None
+    ):
         self.store = store
         self.get_settings = get_settings
         self.get_service = get_service
         self.get_external = get_external
+        self.run_maintenance = run_maintenance
         self.exports = {}
 
     async def _api_storage_health(self) -> Any:
@@ -152,12 +155,15 @@ class GalleryAPI:
         body = await web_request.json(default={})
         if not isinstance(body, dict):
             return error_response("请求体必须是 JSON 对象", status_code=400)
-        report = await self.store.run_maintenance(
-            self.get_settings().history,
-            preview_max_edge=self.get_settings().asset_preview_max_edge,
-            preview_quality=self.get_settings().asset_preview_quality,
-            deep=bool(body.get("deep", False)),
-        )
+        if self.run_maintenance is not None:
+            report = await self.run_maintenance(deep=bool(body.get("deep", False)))
+        else:
+            report = await self.store.run_maintenance(
+                self.get_settings().history,
+                preview_max_edge=self.get_settings().asset_preview_max_edge,
+                preview_quality=self.get_settings().asset_preview_quality,
+                deep=bool(body.get("deep", False)),
+            )
         return json_response(report)
 
     @staticmethod

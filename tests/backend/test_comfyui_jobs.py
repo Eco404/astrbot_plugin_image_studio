@@ -43,12 +43,9 @@ def test_published_v2_upgrade_has_verified_backup_and_preserves_data(tmp_path):
         with closing(sqlite3.connect(backup)) as saved:
             assert tuple(saved.iterdump()) == before
         assert conn.execute("PRAGMA user_version").fetchone() == (3,)
-        assert (
-            conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE name='schema_meta'"
-            ).fetchone()
-            is None
-        )
+        assert conn.execute(
+            "SELECT target_version,dev_revision FROM schema_meta"
+        ).fetchone() == (4, 1)
         assert conn.execute("SELECT path FROM image_assets").fetchall() == [
             ("kept.png",)
         ]
@@ -125,7 +122,7 @@ def test_job_retries_freeze_reference_order_without_duplicate_files(tmp_path):
         results = await asyncio.gather(*(store.create_job(**kwargs) for _ in range(4)))
         assert len({item["id"] for item in results}) == 1
         assert await store.load_references("same-job") == references
-        assert len(list(store.inputs_dir.rglob("*.image"))) == 2
+        assert len(list(store.blobs_dir.glob("*.image"))) == 1
         with pytest.raises(ValueError, match="不同参考图"):
             await store.create_job(**{**kwargs, "references": references[:1]})
         with pytest.raises(ValueError, match="不同请求"):
@@ -166,7 +163,7 @@ def test_tampered_input_and_output_files_report_precise_errors(tmp_path):
             request={},
             references=(ReferenceImage("x", "portrait.png", b"original", "image/png"),),
         )
-        (store.inputs_dir / job["references"][0]["path"]).write_bytes(b"replaced")
+        (store.blobs_dir / job["references"][0]["path"]).write_bytes(b"replaced")
         with pytest.raises(ValueError, match="portrait.png"):
             await store.load_references(job["id"])
         outputs = (GeneratedImage(b"output", "image/png", {"seed": 1}, 0),)
@@ -177,7 +174,7 @@ def test_tampered_input_and_output_files_report_precise_errors(tmp_path):
             await store.save_outputs(
                 job["id"], (GeneratedImage(b"changed", "image/png"),)
             )
-        (store.outputs_dir / descriptors[0]["path"]).unlink()
+        (store.blobs_dir / descriptors[0]["path"]).unlink()
         with pytest.raises(ValueError, match="第 1 张输出图片"):
             await store.load_outputs(job["id"])
 
@@ -385,7 +382,12 @@ def test_cleanup_only_removes_expired_terminal_staging_not_unknown_or_gallery(tm
             )
             await store.update_job(job["id"], status=status)
             identifiers[status] = job["id"]
-        assert await store.cleanup_terminal_files(terminal_before=time.time() + 1) == 2
+        assert await store.cleanup_terminal_files(terminal_before=time.time() + 1) == 0
+        assert (await store.get_job(identifiers["succeeded"]))[
+            "archive_state"
+        ] == "archived"
+        with pytest.raises(ValueError, match="已过期"):
+            await store.load_references(identifiers["succeeded"])
         for status in ("running", "unknown"):
             assert await store.load_references(identifiers[status])
             assert await store.load_outputs(identifiers[status])

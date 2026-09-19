@@ -341,6 +341,7 @@ def test_prebaseline_receipt_layout_is_rejected_without_changing_gallery(tmp_pat
             ):
                 conn.execute(f"DROP TABLE {table}")
             conn.execute("DROP TABLE import_batches")
+            conn.execute("DROP TABLE IF EXISTS schema_meta")
             conn.execute(
                 "CREATE TABLE schema_meta (id INTEGER PRIMARY KEY CHECK(id = 1), target_version INTEGER NOT NULL, dev_revision INTEGER NOT NULL)"
             )

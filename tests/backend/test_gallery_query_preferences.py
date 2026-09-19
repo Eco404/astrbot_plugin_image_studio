@@ -6,12 +6,15 @@ import json
 import httpx
 import pytest
 from astrbot_plugin_image_studio.backend.config import HistorySettings
+from astrbot_plugin_image_studio.backend.gallery.storage import (
+    refresh_gallery_projection,
+)
+from astrbot_plugin_image_studio.backend.gallery.store import GenerationStore
 from astrbot_plugin_image_studio.backend.models import (
     GeneratedImage,
     GenerationRequest,
     InvocationSource,
 )
-from astrbot_plugin_image_studio.backend.gallery.store import GenerationStore
 from astrbot_plugin_image_studio.tests.backend.test_external_storage import (
     add as add_external,
 )
@@ -42,6 +45,7 @@ async def record(store, *, created_at=100, identity=None, keep_identity=True):
             "UPDATE generations SET created_at = ? WHERE id = ?",
             (created_at, generation_id),
         )
+        refresh_gallery_projection(conn, generation_id)
     return generation_id
 
 
@@ -203,6 +207,7 @@ def test_latest_content_sort_tracks_image_dates_after_append_edit_and_delete(tmp
         later = await record(store, created_at=200)
         with store._connect() as conn:
             conn.execute("UPDATE generations SET created_at=50 WHERE id=?", (group_id,))
+            refresh_gallery_projection(conn, group_id)
 
         async def check(expected, expected_time):
             listing = await store.list_generations({"sort": "latest_content"})
@@ -282,6 +287,7 @@ def test_latest_content_uses_per_record_fallback_and_external_chosen_time(tmp_pa
                 "UPDATE generation_images SET supplemental_json=? WHERE generation_id=?",
                 ('{"generated_at":800}', external["generation_id"]),
             )
+            refresh_gallery_projection(conn, external["generation_id"])
         for invalid in (None, "700", True, -1, 253402300800, float("inf")):
             with store._connect() as conn:
                 # SQLite JSON accepts numeric overflow as infinity, but it must
@@ -295,6 +301,7 @@ def test_latest_content_uses_per_record_fallback_and_external_chosen_time(tmp_pa
                     "UPDATE generation_images SET supplemental_json=? WHERE generation_id=?",
                     (payload, new),
                 )
+                refresh_gallery_projection(conn, new)
             listing = await store.list_generations({"sort": "latest_content"})
             assert [(item["id"], item["sort_time"]) for item in listing["items"]] == [
                 (new, 300),
@@ -318,6 +325,7 @@ def test_gallery_sort_api_validates_and_keeps_list_and_sequence_consistent(tmp_p
                 "UPDATE generation_images SET supplemental_json=? WHERE generation_id=?",
                 ('{"generated_at":300}', first),
             )
+            refresh_gallery_projection(conn, first)
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test"
         ) as client:

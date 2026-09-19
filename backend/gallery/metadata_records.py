@@ -16,6 +16,7 @@ from .context import GalleryContext
 from .projection import (
     _load_json,
 )
+from .storage import decode_metadata, encode_metadata
 
 
 @dataclass(frozen=True)
@@ -49,13 +50,13 @@ class MetadataRecords:
                 "SELECT metadata_json FROM image_metadata WHERE asset_id = ?",
                 (asset_id,),
             ).fetchone()
-        if row is not None:
-            cached = _load_json(str(row["metadata_json"]))
-            if int(cached.get("parser_version", 0)) >= PARSER_VERSION and (
-                cached.get("format") != "comfyui"
-                or cached.get("rules_fingerprint") == get_rules().fingerprint
-            ):
-                return cached
+            if row is not None:
+                cached = _load_json(str(row["metadata_json"]))
+                if int(cached.get("parser_version", 0)) >= PARSER_VERSION and (
+                    cached.get("format") != "comfyui"
+                    or cached.get("rules_fingerprint") == get_rules().fingerprint
+                ):
+                    return decode_metadata(conn, cached)
         try:
             return parse_image_metadata(data)
         except ValueError as exc:
@@ -73,25 +74,36 @@ class MetadataRecords:
     def save_metadata(
         conn: sqlite3.Connection, metadata: dict[str, dict[str, Any]]
     ) -> None:
-        conn.executemany(
-            "INSERT INTO image_metadata (asset_id, format, parser_version, metadata_json) "
-            "VALUES (?, ?, ?, ?) ON CONFLICT(asset_id) DO UPDATE SET "
-            "format=excluded.format, parser_version=excluded.parser_version, "
-            "metadata_json=excluded.metadata_json "
-            "WHERE image_metadata.parser_version < excluded.parser_version OR "
-            "(image_metadata.parser_version = excluded.parser_version AND "
-            "COALESCE(json_extract(image_metadata.metadata_json, '$.rules_fingerprint'), '') "
-            "!= COALESCE(json_extract(excluded.metadata_json, '$.rules_fingerprint'), ''))",
-            [
+        for asset_id, item in metadata.items():
+            old = conn.execute(
+                "SELECT parser_version,json_extract(metadata_json,'$.rules_fingerprint') "
+                "FROM image_metadata WHERE asset_id=?",
+                (asset_id,),
+            ).fetchone()
+            version = int(item.get("parser_version", 1))
+            if old is not None and (
+                old[0] > version
+                or old[0] == version
+                and (old[1] or "") == (item.get("rules_fingerprint") or "")
+            ):
+                continue
+            compact = encode_metadata(conn, asset_id, item)
+            conn.execute(
+                "INSERT INTO image_metadata (asset_id, format, parser_version, metadata_json) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT(asset_id) DO UPDATE SET "
+                "format=excluded.format, parser_version=excluded.parser_version, "
+                "metadata_json=excluded.metadata_json "
+                "WHERE image_metadata.parser_version < excluded.parser_version OR "
+                "(image_metadata.parser_version = excluded.parser_version AND "
+                "COALESCE(json_extract(image_metadata.metadata_json, '$.rules_fingerprint'), '') "
+                "!= COALESCE(json_extract(excluded.metadata_json, '$.rules_fingerprint'), ''))",
                 (
                     asset_id,
                     str(item.get("format") or "unknown"),
-                    int(item.get("parser_version", 1)),
-                    json.dumps(item, ensure_ascii=False, separators=(",", ":")),
-                )
-                for asset_id, item in metadata.items()
-            ],
-        )
+                    version,
+                    json.dumps(compact, ensure_ascii=False, separators=(",", ":")),
+                ),
+            )
 
     def backfill_metadata(self, *, rules=None) -> None:
         """Parse old asset metadata outside the schema migration transaction."""

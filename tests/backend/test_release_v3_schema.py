@@ -11,8 +11,13 @@ from contextlib import closing
 import pytest
 
 from astrbot_plugin_image_studio.backend.database import schema
+from astrbot_plugin_image_studio.backend.database.payloads import load_payload
 from astrbot_plugin_image_studio.backend.gallery.store import GenerationStore
 from astrbot_plugin_image_studio.backend.providers.comfyui.jobs import ComfyJobStore
+from astrbot_plugin_image_studio.backend.providers.comfyui.storage import (
+    expand_outputs,
+    expand_result,
+)
 from astrbot_plugin_image_studio.tests.support.schema_upgrade_fixtures import (
     DEVELOPMENT_META_STATEMENT,
     V1_STATEMENTS,
@@ -30,10 +35,25 @@ def snapshot(conn):
 
 
 def rows(conn):
-    return {
-        table: conn.execute(f'SELECT * FROM "{table}" ORDER BY id').fetchall()
-        for table in ("comfy_workflow_revisions", "comfy_jobs")
-    }
+    revisions = [
+        list(row)
+        for row in conn.execute("SELECT * FROM comfy_workflow_revisions ORDER BY id")
+    ]
+    configs = {}
+    for row in revisions:
+        row[2] = load_payload(conn, json.loads(row[2]))
+        configs[row[0]] = row[2]
+    jobs = [
+        list(row[:15]) for row in conn.execute("SELECT * FROM comfy_jobs ORDER BY id")
+    ]
+    for row in jobs:
+        row[6] = json.loads(row[6])
+        if isinstance(row[6].get("model"), dict):
+            row[6]["model"]["comfyui"] = configs[row[4]]
+        row[7] = json.loads(row[7])
+        row[8] = expand_outputs(conn, json.loads(row[8]))
+        row[9] = expand_result(conn, json.loads(row[9]))
+    return {"comfy_workflow_revisions": revisions, "comfy_jobs": jobs}
 
 
 def populate_comfy(conn, directory):
@@ -116,12 +136,9 @@ def populate_comfy(conn, directory):
 
 def assert_release(conn):
     assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
-    assert (
-        conn.execute(
-            "SELECT name FROM sqlite_master WHERE name='schema_meta'"
-        ).fetchone()
-        is None
-    )
+    assert conn.execute(
+        "SELECT target_version,dev_revision FROM schema_meta"
+    ).fetchone() == (4, 1)
     assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
@@ -135,12 +152,17 @@ def test_published_migrations_keep_previous_release_sql_immutable():
 
 
 @pytest.mark.parametrize(
-    "baseline", ["empty", "v1", "v2", "1-dev.3", "2-dev.2", "3-dev.1"]
+    "baseline", ["empty", "v1", "v2", "v3", "1-dev.3", "2-dev.2", "3-dev.1"]
 )
-def test_all_supported_baselines_converge_to_release_v3(tmp_path, baseline):
+def test_all_supported_baselines_converge_to_current_storage(tmp_path, baseline):
     with closing(sqlite3.connect(tmp_path / "history.sqlite3")) as conn:
         conn.execute("PRAGMA foreign_keys=ON")
-        if baseline == "1-dev.3":
+        if baseline == "v3":
+            create_v3_dev(conn)
+            conn.execute("DROP TABLE schema_meta")
+            conn.execute("PRAGMA user_version=3")
+            conn.commit()
+        elif baseline == "1-dev.3":
             create_v1(conn)
             conn.execute("PRAGMA user_version=0")
             conn.execute(DEVELOPMENT_META_STATEMENT)
@@ -161,24 +183,25 @@ def test_all_supported_baselines_converge_to_release_v3(tmp_path, baseline):
         assert_release(conn)
         assert bool(backup) == (baseline != "empty")
         if backup:
-            assert backup.name.startswith("history-pre-v3-")
+            assert backup.name.startswith("history-pre-v4-")
             with closing(sqlite3.connect(backup)) as saved:
                 assert snapshot(saved) == before
         if baseline == "3-dev.1":
             assert not any(
-                statement.startswith(("CREATE", "ALTER", "INSERT", "UPDATE", "DELETE"))
-                for statement in statements
+                statement.startswith("DROP TABLE comfy_") for statement in statements
             )
-            assert [
-                statement for statement in statements if statement.startswith("DROP")
-            ] == ["DROP TABLE schema_meta"]
+            assert "DROP TABLE schema_meta" in statements
         if baseline == "v2":
             ddl = [
                 statement
                 for statement in statements
                 if statement.startswith(("CREATE", "ALTER", "DROP"))
             ]
-            assert ddl == list(schema.V3_MIGRATION_STATEMENTS)
+            assert ddl[:5] == list(schema.V3_MIGRATION_STATEMENTS)
+            assert (
+                "ALTER TABLE comfy_jobs ADD COLUMN parent_job_id TEXT NOT NULL DEFAULT ''"
+                in ddl
+            )
         with closing(sqlite3.connect(":memory:")) as fresh:
             schema.ensure_release_schema(fresh, backup_dir=tmp_path / "unused")
             assert {
@@ -256,7 +279,7 @@ def test_v3_upgrade_failure_preserves_preupgrade_database(
             def final_validation(target, version=schema.RELEASE_VERSION):
                 if (
                     target.in_transaction
-                    and version == schema.RELEASE_VERSION
+                    and version == schema.DATABASE_VERSION
                     and not target.execute(
                         "SELECT 1 FROM sqlite_master WHERE name='schema_meta'"
                     ).fetchone()

@@ -42,6 +42,7 @@ from .projection import (
     project_import_metadata,
     refresh_import_supplemental,
 )
+from .storage import decode_metadata, decode_supplemental
 
 
 @dataclass(frozen=True)
@@ -73,7 +74,7 @@ class ImportRepository:
         ).fetchone()
         if record is None or record["source"] != "import":
             return
-        record_supplemental = _load_json(record["supplemental_json"])
+        record_supplemental = decode_supplemental(conn, record["supplemental_json"])
         images = conn.execute(
             "SELECT i.id, i.supplemental_json, m.metadata_json FROM generation_images i "
             "LEFT JOIN image_metadata m ON m.asset_id = i.asset_id "
@@ -82,8 +83,11 @@ class ImportRepository:
         ).fetchall()
         prepared: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
         for image in images:
-            previous = _load_json(image["supplemental_json"]) or record_supplemental
-            metadata = _load_json(image["metadata_json"])
+            metadata = decode_metadata(conn, image["metadata_json"])
+            previous = (
+                decode_supplemental(conn, image["supplemental_json"], metadata)
+                or record_supplemental
+            )
             overrides = previous.get("overrides")
             # An absent override snapshot does not establish which old values were user edits.
             if (
@@ -224,10 +228,15 @@ class ImportRepository:
         ).hexdigest()
 
     @staticmethod
-    def import_edit_previous(record: sqlite3.Row, row: sqlite3.Row) -> dict[str, Any]:
-        previous = _load_json(row["supplemental_json"]) or _load_json(
-            record["supplemental_json"]
-        )
+    def import_edit_previous(
+        conn: sqlite3.Connection,
+        record: sqlite3.Row,
+        row: sqlite3.Row,
+        metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        previous = decode_supplemental(
+            conn, row["supplemental_json"], metadata
+        ) or decode_supplemental(conn, record["supplemental_json"], metadata)
         if not previous:
             # Very old single-image imports stored only record-level fields.
             previous = {
@@ -287,6 +296,14 @@ class ImportRepository:
             conn.execute("BEGIN")
             record, rows = self.import_edit_rows(conn, generation_id, image_id)
             revision = "" if image_id else self.import_edit_revision(record, rows)
+            decoded = {}
+            if not light or image_id:
+                for row in rows:
+                    metadata = decode_metadata(conn, row["metadata_json"])
+                    decoded[row["id"]] = (
+                        metadata,
+                        self.import_edit_previous(conn, record, row, metadata),
+                    )
         if image_id:
             current_revision = self.import_edit_item_revision(record, rows[0])
             if item_revision != current_revision:
@@ -313,8 +330,7 @@ class ImportRepository:
             }
         items = []
         for row in rows:
-            previous = self.import_edit_previous(record, row)
-            metadata = _load_json(row["metadata_json"])
+            metadata, previous = decoded[row["id"]]
             overrides = _import_edit_existing_overrides(previous, metadata)
             metadata = project_import_metadata(metadata, overrides)
             previous = refresh_import_supplemental(previous, metadata)
@@ -363,10 +379,11 @@ class ImportRepository:
         with self.context.connect() as conn:
             conn.execute("BEGIN")
             record, rows = self.import_edit_rows(conn, generation_id, image_id)
+            cached_metadata = decode_metadata(conn, rows[0]["metadata_json"])
         if self.import_edit_item_revision(record, rows[0]) != item_revision:
             raise ImportEditConflictError("图片已被修改或重新排序，请重新打开编辑窗口")
         metadata = project_import_metadata(
-            _load_json(rows[0]["metadata_json"]), {"comfy_output_node": output_node_id}
+            cached_metadata, {"comfy_output_node": output_node_id}
         )
         return {key: value for key, value in metadata.items() if key != "raw"}
 
@@ -388,8 +405,8 @@ class ImportRepository:
             for ordinal, item in enumerate(items):
                 image_id = item["image_id"]
                 row = by_id[image_id]
-                previous = self.import_edit_previous(record, row)
-                metadata = _load_json(row["metadata_json"])
+                metadata = decode_metadata(conn, row["metadata_json"])
+                previous = self.import_edit_previous(conn, record, row, metadata)
                 overrides = _import_edit_existing_overrides(previous, metadata)
                 changes = item.get("overrides", {})
                 if changes:
@@ -435,7 +452,7 @@ class ImportRepository:
                 self.update_import_summary(
                     conn,
                     generation_id,
-                    _load_json(record["supplemental_json"]),
+                    decode_supplemental(conn, record["supplemental_json"]),
                     prepared,
                 )
                 self.services.refresh_search(conn, generation_id)

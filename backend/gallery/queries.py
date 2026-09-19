@@ -37,6 +37,7 @@ from .projection import (
     project_import_metadata,
     refresh_import_supplemental,
 )
+from .storage import decode_metadata, decode_supplemental
 
 
 @dataclass(frozen=True)
@@ -155,21 +156,7 @@ class GalleryQueries:
             raise ValueError("画廊排序方式必须是 created 或 latest_content")
         if sort == "created":
             return "", "g.created_at"
-        # Calculate each group's image time once, including for the flat image
-        # cursor. Asset creation times cannot be used: content hashes are shared
-        # across records. External records already use their selected source time.
-        image_time = "json_extract(latest_image.supplemental_json, '$.generated_at')"
-        join = (
-            "LEFT JOIN (SELECT latest_image.generation_id, MAX(CASE "
-            "WHEN latest_generation.source = 'external' THEN latest_generation.created_at "
-            "WHEN json_type(latest_image.supplemental_json, '$.generated_at') IN ('integer', 'real') "
-            f"AND {image_time} >= 0 AND {image_time} < 253402300800 THEN {image_time} "
-            "ELSE latest_generation.created_at END) AS sort_time "
-            "FROM generation_images latest_image JOIN generations latest_generation "
-            "ON latest_generation.id=latest_image.generation_id "
-            "GROUP BY latest_image.generation_id) gallery_order ON gallery_order.generation_id=g.id "
-        )
-        return join, "COALESCE(gallery_order.sort_time, g.created_at)"
+        return "", "COALESCE(g.latest_content_at, g.created_at)"
 
     @staticmethod
     def gallery_facet_order(value: str) -> tuple[bool, str]:
@@ -279,8 +266,7 @@ class GalleryQueries:
                 "SELECT i.id, i.generation_id, i.ordinal, a.mime_type, a.size_bytes, "
                 "a.id AS sha256, a.width, a.height, a.file_state, a.path, "
                 f"{_THUMBNAIL_REVISION_SQL} AS thumbnail_revision, "
-                "json_extract(i.supplemental_json, '$.model') AS model, "
-                "json_extract(i.supplemental_json, '$.mode') AS mode "
+                "i.model, i.mode "
                 "FROM generation_images i JOIN image_assets a ON a.id = i.asset_id "
                 "LEFT JOIN image_thumbnails t ON t.asset_id = a.id "
                 "WHERE i.generation_id = ? ORDER BY i.ordinal, i.id",
@@ -330,12 +316,19 @@ class GalleryQueries:
         if "parameters_json" in result:
             result["parameters"] = _load_json(result.pop("parameters_json"))
         if "supplemental_json" in result:
-            result["supplemental"] = _canonical_supplemental(
-                _load_json(result.pop("supplemental_json"))
-            )
+            if "_stored_supplemental" in result:
+                supplemental = result.pop("_stored_supplemental")
+                result.pop("supplemental_json")
+            else:
+                with self.context.connect() as conn:
+                    supplemental = decode_supplemental(
+                        conn, result.pop("supplemental_json")
+                    )
+            result["supplemental"] = _canonical_supplemental(supplemental)
         result["generation_engine"] = _canonical_engine(result["generation_engine"])
         result["is_favorite"] = bool(result["is_favorite"])
         result.pop("search_text", None)
+        result.pop("latest_content_at", None)
         result.pop("import_key", None)
         result["invocation_source"] = {
             key: str(result.pop(key, "") or "")
@@ -394,6 +387,11 @@ class GalleryQueries:
                 "FROM generation_images WHERE generation_id = ?",
                 (row["ordinal"], row["generation_id"]),
             ).fetchone()
+            row = self.hydrate_asset_row(conn, dict(row))
+            record = dict(record)
+            record["_stored_supplemental"] = decode_supplemental(
+                conn, record["supplemental_json"]
+            )
         detail = self.generation_header(dict(record))
         if not include_group_manifest:
             detail["supplemental"].pop("group_manifest", None)
@@ -477,8 +475,7 @@ class GalleryQueries:
         with self.context.connect() as conn:
             rows = conn.execute(
                 f"SELECT g.id AS generation_id, g.created_at, {sort_time} AS sort_time, g.source, "
-                "COALESCE(json_extract(i.supplemental_json, '$.mode'), g.mode) AS mode, g.provider_id, "
-                "COALESCE(json_extract(i.supplemental_json, '$.model'), g.model) AS model, "
+                "i.mode, g.provider_id, i.model, "
                 "i.id AS image_id, i.ordinal, a.mime_type, a.size_bytes, "
                 f"a.id AS sha256, {_THUMBNAIL_REVISION_SQL} AS thumbnail_revision, "
                 "a.width, a.height, a.path, a.file_state, "
@@ -526,8 +523,7 @@ class GalleryQueries:
         with self.context.connect() as conn:
             row = conn.execute(
                 "SELECT a.path, a.mime_type, i.generation_id, g.created_at, g.provider_id, "
-                "COALESCE(json_extract(i.supplemental_json, '$.model'), g.model) AS model, "
-                "COALESCE(json_extract(i.supplemental_json, '$.mode'), g.mode) AS mode, "
+                "i.model, i.mode, "
                 "(SELECT COUNT(*) FROM generation_images n WHERE n.generation_id = i.generation_id) AS image_count, "
                 "(SELECT COUNT(*) + 1 FROM generation_images n WHERE n.generation_id = i.generation_id "
                 "AND n.ordinal < i.ordinal) AS image_index "
@@ -694,6 +690,7 @@ class GalleryQueries:
         if not self.services.external_generation_enabled(generation_id):
             return None
         with self.context.connect() as conn:
+            conn.execute("BEGIN")
             row = conn.execute(
                 "SELECT * FROM generations WHERE id = ?", (generation_id,)
             ).fetchone()
@@ -719,6 +716,13 @@ class GalleryQueries:
                 "WHERE r.generation_id = ? ORDER BY r.ordinal",
                 (generation_id,),
             ).fetchall()
+            image_rows = [
+                self.hydrate_asset_row(conn, dict(item)) for item in image_rows
+            ]
+            row = dict(row)
+            row["_stored_supplemental"] = decode_supplemental(
+                conn, row["supplemental_json"]
+            )
         result = self.generation_header(dict(row))
         result["images"] = [
             self.asset_item(dict(item), preview_full=include_assets)
@@ -793,6 +797,18 @@ class GalleryQueries:
             )
         return item
 
+    @staticmethod
+    def hydrate_asset_row(
+        conn: sqlite3.Connection, row: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Read body references under the same snapshot as their owner row."""
+        metadata = decode_metadata(conn, row.get("metadata_json"))
+        row["_stored_metadata"] = metadata
+        row["_stored_supplemental"] = decode_supplemental(
+            conn, row.get("supplemental_json"), metadata
+        )
+        return row
+
     def asset_item(
         self, row: dict[str, Any], *, preview_full: bool, include_preview: bool = True
     ) -> dict[str, Any]:
@@ -803,10 +819,11 @@ class GalleryQueries:
             if path is not None
             else ""
         )
-        supplemental = _canonical_supplemental(
-            _load_json(row.get("supplemental_json") or "{}")
-        )
-        metadata = _load_json(row.get("metadata_json") or "{}")
+        if "_stored_metadata" not in row:
+            with self.context.connect() as conn:
+                row = self.hydrate_asset_row(conn, row)
+        metadata = row["_stored_metadata"]
+        supplemental = _canonical_supplemental(row["_stored_supplemental"])
         try:
             metadata = project_import_metadata(
                 metadata, supplemental.get("overrides") or {}

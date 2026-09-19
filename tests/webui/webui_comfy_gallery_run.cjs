@@ -95,7 +95,7 @@ async function verify(browser, width) {
   const page = await browser.newPage({ viewport: { width, height: 980 }, hasTouch: width < 600 });
   const errors = [], submitted = [], saves = [], automaticSaves = [], imports = [], inspections = [], reproductions = [];
   page.on("pageerror", error => errors.push(error.message));
-  let available = true, rejectImport = false, currentJob = null, heldImport = null, releaseHeldImport = null;
+  let available = true, rejectImport = false, currentJob = null, heldImport = null, releaseHeldImport = null, heldHealth = null, releaseHeldHealth = null;
   const provider = { id: "comfy-gallery-empty", name: "空的 ComfyUI", kind: "comfyui", enabled: true, base_url: "http://comfy.invalid:8188", models: [] };
   const savedProvider = { ...provider, id: "comfy-gallery-saved", name: "已配置的 ComfyUI", models: [structuredClone(model)] };
   const initial = await api(page, "get", "settings/get");
@@ -150,6 +150,13 @@ async function verify(browser, width) {
   });
   await page.route("**/comfy/workflows", route => { automaticSaves.push(route.request().postDataJSON()); return route.fulfill({ status: 500, json: { message: "禁止自动保存" } }); });
   await page.route("**/settings/save", route => { saves.push(route.request().postDataJSON()); return route.continue(); });
+  await page.route("**/storage/health", async route => {
+    const held = saves.length ? heldHealth : null;
+    if (held) heldHealth = null;
+    const response = await route.fetch();
+    if (held) { held.started(); await held.gate; }
+    await route.fulfill({ response });
+  });
   await page.route("**/gallery/reproduce/**", route => { reproductions.push(route.request().url()); return route.fulfill({ json: { provider_id: savedProvider.id, model: "saved", model_ref: `${savedProvider.id}:saved`, mode: "img2img", prompt: "historical matched prompt", parameters: { seed: 42 }, comfyui: historical, comfyui_model: { ...model, provider_kind: "comfyui" }, references: [] } }); });
   let frame;
   async function openGallery(index = 0) {
@@ -304,7 +311,22 @@ async function verify(browser, width) {
     await openGallery(); await choose(frame, "#comfyGalleryUse", "settings"); await choose(frame, "#comfyGalleryProvider", provider.id); await frame.locator("#comfyGalleryContinue").click();
     await frame.locator("#comfyEditor").waitFor(); await frame.locator("#comfyApplyWorkflow").click();
     await frame.waitForFunction(() => document.getElementById("studioModalRoot").classList.contains("is-hidden"));
+    // Acknowledgement marks the draft saved before bootstrap/storage refreshes
+    // finish. Keep that real follow-up pending to exercise the navigation guard
+    // instead of assuming "已保存" also means the whole action is idle.
+    let markHealthStarted;
+    const healthStarted = new Promise(resolve => { markHealthStarted = resolve; });
+    heldHealth = { started: markHealthStarted, gate: new Promise(resolve => { releaseHeldHealth = resolve; }) };
     await frame.locator("#saveSettingsButton").click(); await frame.locator("#settingsDirtyStatus").filter({ hasText: "已保存" }).waitFor();
+    await Promise.race([healthStarted, new Promise((_, reject) => setTimeout(() => reject(new Error("post-save storage refresh did not start")), 10000))]);
+    assert.equal(await frame.evaluate(() => window.__settingsController.isSaving()), true);
+    assert.equal(await frame.locator("#saveSettingsButton").isDisabled(), true);
+    await frame.locator('[data-view="gallery"]').click();
+    await frame.locator("#appNotice").filter({ hasText: "正在保存设置，请稍候再切换页面" }).waitFor();
+    assert.equal(await frame.evaluate(() => window.__galleryState.view), "settings", "navigation stays on settings until its save action finishes");
+    releaseHeldHealth();
+    await frame.locator("#saveSettingsButton:not(:disabled)").waitFor();
+    assert.equal(await frame.evaluate(() => window.__settingsController.isSaving()), false);
     assert.equal(saves.length, 1); assert.equal((await api(page, "get", "settings/get")).webui.providers.find(item => item.id === provider.id).models.length, 1);
     available = false; await openGallery();
     await frame.locator("#appNotice").filter({ hasText: "请先在设置中添加并保存 ComfyUI 服务商" }).waitFor();
@@ -317,7 +339,7 @@ async function verify(browser, width) {
     assert.equal(await frame.locator("#comfyGalleryUse").count(), 0);
     assert.deepEqual(automaticSaves, []); assert.deepEqual(errors, []);
     assert.ok(inspections.length >= 3); assert.ok(imports.some(body => body.temporary_model));
-  } finally { releaseHeldImport?.(); await page.close(); }
+  } finally { releaseHeldImport?.(); releaseHeldHealth?.(); await page.close(); }
 }
 (async () => {
   const browser = await playwright[process.env.STUDIO_BROWSER || "chromium"].launch({ headless: true });

@@ -9,6 +9,12 @@ from urllib.parse import urlsplit
 
 import httpx
 import pytest
+from astrbot_plugin_image_studio.backend.providers.comfyui import (
+    jobs as comfy_jobs_module,
+)
+from astrbot_plugin_image_studio.backend.providers.comfyui import (
+    storage as comfy_storage_module,
+)
 from astrbot_plugin_image_studio.backend.providers.comfyui.runtime import (
     connection_fingerprint,
 )
@@ -576,6 +582,84 @@ def test_api_queue_dismiss_rejects_active_missing_and_invalid_requests(tmp_path)
                     await client.post(PREFIX + "comfy/jobs/dismiss", json=payload)
                 ).status_code == 400
             assert not transport.calls
+        finally:
+            await teardown(app, client)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("status", ["queued", "running", "failed", "unknown"])
+def test_api_single_job_poll_does_not_decode_workflow_bodies(
+    tmp_path, monkeypatch, status
+):
+    async def run():
+        app, client, _ = await setup(tmp_path)
+        try:
+            runtime = app.state.plugin._comfy_or_raise()
+            revision = await runtime.store.save_revision(config())
+            job = await runtime.store.create_job(
+                provider_id="comfy",
+                model_id="workflow",
+                revision_id=revision,
+                request={"model": {"name": "Observed workflow", "comfyui": config()}},
+            )
+            await runtime.store.update_job(
+                job["id"],
+                status=status,
+                result={"api_graph": graph(), "progress": {"value": 2, "max": 10}},
+            )
+
+            def unexpected(*_args, **_kwargs):
+                pytest.fail("an unfinished single-job poll decoded a workflow body")
+
+            monkeypatch.setattr(comfy_jobs_module, "load_payload", unexpected)
+            monkeypatch.setattr(comfy_storage_module, "load_payload", unexpected)
+            response = await client.get(PREFIX + "comfy/jobs", params={"id": job["id"]})
+            assert response.status_code == 200, response.text
+            payload = response.json()["job"]
+            assert payload["status"] == status
+            assert payload["model_name"] == "Observed workflow"
+            assert payload["progress"] == {"value": 2, "max": 10}
+            assert "result" not in payload
+        finally:
+            await teardown(app, client)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("second_status", [None, "running"])
+def test_api_completed_poll_rechecks_disappearing_or_changed_record(
+    tmp_path, monkeypatch, second_status
+):
+    async def run():
+        app, client, _ = await setup(tmp_path)
+        try:
+            runtime = app.state.plugin._comfy_or_raise()
+            calls = []
+
+            async def read(identifier, *, light=False):
+                calls.append(light)
+                if light:
+                    return {"id": identifier, "status": "succeeded"}
+                return (
+                    {"id": identifier, "status": second_status}
+                    if second_status
+                    else None
+                )
+
+            async def unexpected(_job):
+                pytest.fail("result serializer used a stale terminal status")
+
+            monkeypatch.setattr(runtime.store, "get_job", read)
+            monkeypatch.setattr(runtime, "result", unexpected)
+            response = await client.get(PREFIX + "comfy/jobs", params={"id": "changed"})
+            assert calls == [True, False]
+            if second_status is None:
+                assert response.status_code == 404
+            else:
+                assert response.status_code == 200
+                assert response.json()["job"]["status"] == second_status
+                assert "result" not in response.json()["job"]
         finally:
             await teardown(app, client)
 

@@ -58,7 +58,9 @@ def test_create_and_upgrade_share_layout_and_repeat_without_writes(tmp_path, exi
         conn.set_trace_callback(migration_statements.append)
         backup = schema.ensure_release_schema(conn, backup_dir=tmp_path / "backups")
         conn.set_trace_callback(None)
-        assert not any(s.startswith("ALTER TABLE") for s in migration_statements)
+        assert not any(
+            s.startswith("ALTER TABLE external_") for s in migration_statements
+        )
         if existing == "final_dev":
             assert not any(
                 s.startswith(
@@ -73,14 +75,11 @@ def test_create_and_upgrade_share_layout_and_repeat_without_writes(tmp_path, exi
             ), (
                 "Final dev promotion must preserve its original external tables and rows."
             )
-        assert schema.DATABASE_VERSION == 3
+        assert schema.DATABASE_VERSION == 4
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
-        assert (
-            conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE name='schema_meta'"
-            ).fetchone()
-            is None
-        )
+        assert conn.execute(
+            "SELECT target_version,dev_revision FROM schema_meta"
+        ).fetchone() == (4, 1)
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
         if existing != "empty":
             assert backup and backup.is_file()

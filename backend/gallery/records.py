@@ -354,19 +354,6 @@ class GenerationRecords:
                         ),
                     )
                 self.services.refresh_search(conn, generation_id)
-                try:
-                    conn.execute(
-                        "INSERT INTO generation_search (generation_id, original_prompt, final_prompt, provider_name, model) VALUES (?, ?, ?, ?, ?)",
-                        (
-                            generation_id,
-                            request.prompt,
-                            final_prompt,
-                            provider.name,
-                            request.model or provider.model,
-                        ),
-                    )
-                except sqlite3.OperationalError:
-                    pass
             return generation_id
         except Exception:
             self.services.cleanup_orphaned_asset_files()
@@ -477,13 +464,6 @@ class GenerationRecords:
                     ).fetchall()
                 )
                 conn.execute("DELETE FROM generations WHERE id = ?", (generation_id,))
-                try:
-                    conn.execute(
-                        "DELETE FROM generation_search WHERE generation_id = ?",
-                        (generation_id,),
-                    )
-                except sqlite3.OperationalError:
-                    pass
             else:
                 self.services.refresh_search(conn, generation_id)
         self.services.purge_unreferenced_assets(asset_ids)
@@ -533,13 +513,6 @@ class GenerationRecords:
                 (generation_id, generation_id),
             ).fetchall()
             conn.execute("DELETE FROM generations WHERE id = ?", (generation_id,))
-            try:
-                conn.execute(
-                    "DELETE FROM generation_search WHERE generation_id = ?",
-                    (generation_id,),
-                )
-            except sqlite3.OperationalError:
-                pass
         self.services.purge_unreferenced_assets(
             [str(row["asset_id"]) for row in asset_rows if row["asset_id"]]
         )

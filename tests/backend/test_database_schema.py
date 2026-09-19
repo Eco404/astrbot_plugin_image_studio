@@ -17,6 +17,10 @@ from astrbot_plugin_image_studio.backend.models import (
     ReferenceImage,
 )
 from astrbot_plugin_image_studio.backend.gallery.store import GenerationStore
+from astrbot_plugin_image_studio.backend.gallery.storage import (
+    decode_metadata,
+    decode_supplemental,
+)
 from astrbot_plugin_image_studio.tests.support.schema_upgrade_fixtures import create_v1
 from astrbot_plugin_image_studio.tests.backend.test_import_groups import image
 
@@ -35,21 +39,72 @@ def snapshot(conn):
 
 
 def business_rows(conn):
-    return {
-        table: [
-            tuple(row) for row in conn.execute(f'SELECT * FROM "{table}" ORDER BY 1')
-        ]
-        for table in (
-            "generations",
-            "generation_images",
-            "generation_references",
-            "image_assets",
-            "image_thumbnails",
-            "agent_asset_leases",
-            "image_metadata",
-            "import_batches",
-        )
-    }
+    with closing(sqlite3.connect(":memory:")) as legacy:
+        create_v1(legacy)
+        columns = {
+            table: [
+                row[1]
+                for row in legacy.execute(f'PRAGMA table_info("{table}")')
+                if row[1] != "search_text"
+            ]
+            for table in (
+                "generations",
+                "generation_images",
+                "generation_references",
+                "image_assets",
+                "image_thumbnails",
+                "agent_asset_leases",
+                "image_metadata",
+                "import_batches",
+            )
+        }
+    result = {}
+    for table, fields in columns.items():
+        values = []
+        for row in conn.execute(f'SELECT {",".join(fields)} FROM "{table}" ORDER BY 1'):
+            value = dict(zip(fields, row))
+            if table == "image_metadata":
+                value["metadata_json"] = decode_metadata(conn, value["metadata_json"])
+            elif table in {"generations", "generation_images"}:
+                metadata = None
+                if table == "generation_images":
+                    meta = conn.execute(
+                        "SELECT metadata_json FROM image_metadata WHERE asset_id=?",
+                        (value["asset_id"],),
+                    ).fetchone()
+                    metadata = decode_metadata(conn, meta[0]) if meta else None
+                value["supplemental_json"] = decode_supplemental(
+                    conn, value["supplemental_json"], metadata
+                )
+            values.append(value)
+        result[table] = values
+    return result
+
+
+def restore_v1_fixture(store, *, promotion):
+    """Export semantic business records into the independently frozen v1 DDL."""
+    with store._connect() as source:
+        records = business_rows(source)
+    with closing(sqlite3.connect(":memory:")) as legacy:
+        create_v1(legacy)
+        for table, rows in records.items():
+            for row in rows:
+                row = {
+                    key: json.dumps(value, ensure_ascii=False)
+                    if isinstance(value, dict)
+                    else value
+                    for key, value in row.items()
+                }
+                columns = list(row)
+                legacy.execute(
+                    f'INSERT INTO "{table}" ({",".join(columns)}) VALUES ({",".join("?" for _ in columns)})',
+                    [row[key] for key in columns],
+                )
+        if promotion:
+            mark_development(legacy)
+        legacy.commit()
+        with store._connect() as target:
+            legacy.backup(target)
 
 
 async def populated_store(directory):
@@ -104,7 +159,7 @@ async def populated_store(directory):
     return store
 
 
-def test_new_release_creates_complete_schema_once_without_development_metadata(
+def test_new_storage_creates_complete_schema_once_with_development_metadata(
     tmp_path,
 ):
     with closing(sqlite3.connect(tmp_path / "history.sqlite3")) as conn:
@@ -112,14 +167,11 @@ def test_new_release_creates_complete_schema_once_without_development_metadata(
             schema.ensure_release_schema(conn, backup_dir=tmp_path / "backups") is None
         )
         assert schema.RELEASE_VERSION == 3
-        assert schema.DATABASE_VERSION == 3
+        assert schema.DATABASE_VERSION == 4
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
-        assert (
-            conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE name='schema_meta'"
-            ).fetchone()
-            is None
-        )
+        assert conn.execute(
+            "SELECT target_version,dev_revision FROM schema_meta"
+        ).fetchone() == (4, 1)
         assert "supplemental_json" in {
             row[1] for row in conn.execute("PRAGMA table_info(generation_images)")
         }
@@ -201,18 +253,7 @@ def test_v1_upgrade_preserves_all_business_rows_files_and_restore_backup(
             for path in store.history_dir.rglob("*")
             if path.is_file()
         }
-        with store._connect() as conn:
-            for table in (
-                "comfy_jobs",
-                "comfy_workflow_revisions",
-                "external_records",
-                "external_sources",
-            ):
-                conn.execute(f"DROP TABLE {table}")
-            if promotion:
-                mark_development(conn)
-            else:
-                conn.execute("PRAGMA user_version = 1")
+        restore_v1_fixture(store, promotion=promotion)
         with store._connect() as conn:
             before = business_rows(conn)
             old_snapshot = snapshot(conn)
@@ -220,15 +261,14 @@ def test_v1_upgrade_preserves_all_business_rows_files_and_restore_backup(
         await promoted.initialize()
         with promoted._connect() as conn:
             assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
-            assert (
+            assert tuple(
                 conn.execute(
-                    "SELECT 1 FROM sqlite_master WHERE name='schema_meta'"
+                    "SELECT target_version,dev_revision FROM schema_meta"
                 ).fetchone()
-                is None
-            )
+            ) == (4, 1)
             assert business_rows(conn) == before
             assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
-        backups = list((tmp_path / "backups").glob("history-pre-v3-*.sqlite3"))
+        backups = list((tmp_path / "backups").glob("history-pre-v4-*.sqlite3"))
         assert len(backups) == 1
         with closing(sqlite3.connect(backups[0])) as backup:
             assert snapshot(backup) == old_snapshot

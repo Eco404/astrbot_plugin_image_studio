@@ -65,6 +65,8 @@ backend/
     exchange.py                 参数复制、导入与复现映射
   media/                        图片格式/编码/缩略图/文件名及文件辅助函数
   database/schema.py            数据库正式/开发版本和迁移
+  database/payloads.py          共享压缩正文、owner 引用与垃圾回收
+  database/maintenance.py       完整磁盘统计、备份轮换与受控空间回收
   ui/                           浏览器主题、图库偏好的传输格式
 pages/image-studio/
   app.js                       页面启动、生图与图库/详情协调
@@ -114,7 +116,7 @@ scripts/                       验证入口和发布包构建
 
 `GenerationStore` 保留异步调用、原修改锁、缓存修订和取消保护。同步事务整体移入对应仓储，仓储共用 `GalleryContext`，不创建独立修改锁，也不通过代理访问整个 store。跨仓储调用以显式服务回调传入，数据库连接仍由原事务发起者持有。ComfyUI 任务继续使用同一图库数据库和原任务状态机，结构迁移由 `backend/database/schema.py` 集中处理。
 
-1.3.0 的数据库正式基线为 v3：已发布的 v1 → v2 与本次 v2 → v3 分别保留，开发修订不进入正式迁移链。当前 `3-dev.1` 在结构核验及备份后移除开发标记；升级和恢复细节见 [开发与发布维护](DEVELOPMENT.md)。
+1.3.x 的数据库正式基线为 v3，已发布迁移保持不变。当前 1.4.0 存储开发使用 4-dev.1：任务、图库和元数据仓储通过 `database/payloads.py` 共享不可变正文，各自持有引用；`gallery/storage.py` 维护轻量投影与按需展开，`providers/comfyui/storage.py` 管理任务编码。开发结构和正文迁移在同一备份保护的事务内提交；细节见 [开发与发布维护](DEVELOPMENT.md)及[存储生命周期](STORAGE_LIFECYCLE.md)。
 
 `GenerationConcurrency` 由主生成服务持有并随当前设置调整；ComfyUI 执行视图通过构造参数借用同一组件。历史任务和临时工作流不会用快照重新覆盖当前并发上限，异常和取消仍释放已占用的所有层级。NovelAI 官方相同账号继续共用串行限制。
 

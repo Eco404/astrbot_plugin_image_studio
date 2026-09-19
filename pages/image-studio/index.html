@@ -181,12 +181,15 @@
             <p class="inline-error" id="externalSourcesError" role="status"></p>
           </section>
           <section class="settings-panel glass">
-            <div class="section-heading"><div><h2>存储健康</h2><p>每小时自动检查数据库、临时保留记录、资产和预览关系。</p></div><span class="health-status" id="storageHealthStatus">未检查</span></div>
-            <div class="storage-health-grid" id="storageHealthGrid"><div><span>最近检查</span><strong id="storageHealthCheckedAt">尚未执行</strong></div><div><span>耗时</span><strong id="storageHealthDuration">-</strong></div><div><span>原图 / 预览</span><strong id="storageHealthAssets">-</strong></div><div><span>临时保留记录</span><strong id="storageHealthLeases">-</strong></div><div><span>生成记录</span><strong id="storageHealthGenerations">-</strong></div><div><span>物理占用</span><strong id="storageHealthSize">-</strong></div></div>
+            <div class="section-heading"><div><h2>存储健康</h2><p>每小时检查图片与数据库，清理过期任务缓存，并保留最近 3 份有效升级备份。</p></div><span class="health-status" id="storageHealthStatus">未检查</span></div>
+            <div class="storage-health-grid" id="storageHealthGrid"><div><span>最近检查</span><strong id="storageHealthCheckedAt">尚未执行</strong></div><div><span>耗时</span><strong id="storageHealthDuration">-</strong></div><div><span>原图 / 预览</span><strong id="storageHealthAssets">-</strong></div><div><span>临时保留记录</span><strong id="storageHealthLeases">-</strong></div><div><span>生成记录</span><strong id="storageHealthGenerations">-</strong></div><div><span>文件总量</span><strong id="storageHealthSize">-</strong></div><div><span>磁盘实际分配</span><strong id="storageHealthAllocated">-</strong></div><div><span>数据库可复用空间</span><strong id="storageHealthReusable">-</strong></div></div>
+            <div class="storage-health-grid storage-space-breakdown" id="storageHealthBreakdown"></div>
+            <p class="field-hint">分类显示文件大小；磁盘实际分配会受共享文件和文件系统影响。数据库空闲页可供后续写入复用，深度检查会在空间充足且适合整理时缩减数据库文件。</p>
             <div class="storage-quota is-hidden" id="storageQuotaRecords"><div class="storage-quota-label"><label for="storageQuotaRecordsProgress">数量限额</label><span id="storageQuotaRecordsLabel"></span></div><progress id="storageQuotaRecordsProgress" value="0" max="1"></progress><span class="storage-quota-exempt" id="storageQuotaRecordsExempt"></span></div>
             <div class="storage-quota is-hidden" id="storageQuotaBytes"><div class="storage-quota-label"><label for="storageQuotaBytesProgress">容量限额</label><span id="storageQuotaBytesLabel"></span></div><progress id="storageQuotaBytesProgress" value="0" max="1"></progress><span class="storage-quota-exempt" id="storageQuotaBytesExempt"></span></div>
             <div class="is-hidden" id="storageExternalSources"></div>
             <p class="maintenance-report" id="storageHealthErrors">暂无异常。</p>
+            <p class="maintenance-report is-hidden" id="storageHealthRepaired"></p>
             <div class="section-actions maintenance-actions"><button class="quiet-button" id="runMaintenanceButton" type="button">立即检查</button><button class="quiet-button" id="runDeepMaintenanceButton" type="button">深度检查</button></div>
           </section>
           <section class="settings-panel glass" id="appearanceSettings" aria-label="主题与显示设置"></section>

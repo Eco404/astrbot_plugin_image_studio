@@ -919,7 +919,7 @@ def test_deleted_reference_staging_does_not_block_results_or_restore_tombstone(
             )
             reference_id = detail["references"][0]["id"]
             await service.store.delete_reference(reference_id)
-            (runtime.store.inputs_dir / job["references"][0]["path"]).unlink()
+            (runtime.store.blobs_dir / job["references"][0]["path"]).unlink()
             readable = await runtime.result(job)
             assert readable.images == result.images
             assert readable.request.references == ()

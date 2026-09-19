@@ -142,18 +142,10 @@ class ExternalRecords:
             )
             if index_changed:
                 # File identity is rooted in this exact directory; changing it starts a new index.
-                ids = [
-                    row[0]
-                    for row in conn.execute(
-                        "SELECT generation_id FROM external_records WHERE source_id=?",
-                        (source_id,),
-                    )
-                ]
                 conn.execute(
                     "DELETE FROM generations WHERE id IN (SELECT generation_id FROM external_records WHERE source_id = ?)",
                     (source_id,),
                 )
-                self.delete_legacy_search(conn, ids)
             conn.execute(
                 "INSERT INTO external_sources (id,name,root_path,enabled,type,recursive,permissions_json) VALUES (?,?,?,?,?,?,?) "
                 "ON CONFLICT(id) DO UPDATE SET name=excluded.name,root_path=excluded.root_path,enabled=excluded.enabled,"
@@ -189,7 +181,6 @@ class ExternalRecords:
             conn.executemany(
                 "DELETE FROM generations WHERE id=?", [(item,) for item in ids]
             )
-            self.delete_legacy_search(conn, ids)
             conn.execute("DELETE FROM external_sources WHERE id=?", (source_id,))
         self.services.purge_unreferenced_assets()
 
@@ -541,19 +532,8 @@ class ExternalRecords:
                 "DELETE FROM generations WHERE id=?",
                 [(row["generation_id"],) for row in missing],
             )
-            self.delete_legacy_search(conn, [row["generation_id"] for row in missing])
         self.services.purge_unreferenced_assets()
         return len(missing)
-
-    @staticmethod
-    def delete_legacy_search(conn, generation_ids):
-        try:
-            conn.executemany(
-                "DELETE FROM generation_search WHERE generation_id=?",
-                [(item,) for item in generation_ids],
-            )
-        except sqlite3.OperationalError:
-            pass
 
     def trim_disabled_external_thumbnails(self):
         with self.context.connect() as conn:

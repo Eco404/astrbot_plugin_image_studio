@@ -10,6 +10,7 @@ import zipfile
 import pytest
 from astrbot_plugin_image_studio.backend.config import HistorySettings
 from astrbot_plugin_image_studio.backend.gallery.errors import ImportDuplicateError
+from astrbot_plugin_image_studio.backend.gallery.storage import decode_metadata
 from astrbot_plugin_image_studio.backend.gallery.store import GenerationStore
 from PIL import Image, PngImagePlugin
 
@@ -137,8 +138,9 @@ def test_comfy_output_selection_is_required_and_link_scoped(tmp_path):
             == 12
         )
         with store._connect() as conn:
-            shared = json.loads(
-                conn.execute("SELECT metadata_json FROM image_metadata").fetchone()[0]
+            shared = decode_metadata(
+                conn,
+                conn.execute("SELECT metadata_json FROM image_metadata").fetchone()[0],
             )
         assert shared["normalized"]["requires_output_selection"] is True
         assert not shared["normalized"].get("prompt") and not shared["normalized"].get(
@@ -463,6 +465,7 @@ def test_older_development_layout_is_rejected_without_rewriting_imports(tmp_path
             ):
                 conn.execute(f"DROP TABLE {table}")
             conn.execute("ALTER TABLE generation_images DROP COLUMN supplemental_json")
+            conn.execute("DROP TABLE IF EXISTS schema_meta")
             conn.execute(
                 "CREATE TABLE schema_meta (id INTEGER PRIMARY KEY CHECK(id = 1), target_version INTEGER NOT NULL, dev_revision INTEGER NOT NULL)"
             )

@@ -47,16 +47,13 @@ from .constants import (
     WORKFLOW_ASSET_RETENTION_SECONDS,
 )
 from .context import GalleryContext
-from .external_records import ExternalRecords, ExternalServices
 from .errors import _ExternalFileChangedError
+from .external_records import ExternalRecords, ExternalServices
 from .imports import ImportRepository, ImportServices
 from .maintenance import GalleryMaintenance, MaintenanceServices
 from .metadata_records import MetadataRecords, MetadataServices
 from .projection import (
-    _canonical_supplemental,
     _known_merge_engine,
-    _load_json,
-    _search_projection,
     _validate_generation_selection,
     _validate_import_edit_overrides,
     _validate_import_hashes,
@@ -64,6 +61,7 @@ from .projection import (
 )
 from .queries import GalleryQueries, QueryServices
 from .records import GenerationRecords, RecordServices
+from .storage import refresh_gallery_projection
 
 
 def _with_node_rules(function):
@@ -362,7 +360,9 @@ class GenerationStore:
         ):
             directory.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
-            ensure_release_schema(conn, backup_dir=self.data_dir / "backups")
+            backup = ensure_release_schema(conn, backup_dir=self.data_dir / "backups")
+            if backup is not None:
+                self.maintenance.protected_backup = backup
             # Keep existing session grants, but cap legacy configurable retention
             # at one hour after the last access. Never extend it on restart.
             conn.execute(
@@ -429,7 +429,9 @@ class GenerationStore:
 
         async with self._lock:
             report = dict(self._last_maintenance_report)
-            report["stats"] = await asyncio.to_thread(self.maintenance.storage_stats)
+            report["stats"] = await asyncio.to_thread(
+                self.maintenance.storage_stats, include_disk=True
+            )
         return report
 
     async def configure_external_source(
@@ -583,30 +585,7 @@ class GenerationStore:
 
     @staticmethod
     def _refresh_search_sync(conn: sqlite3.Connection, generation_id: str) -> None:
-        row = conn.execute(
-            "SELECT parameters_json, supplemental_json FROM generations WHERE id = ?",
-            (generation_id,),
-        ).fetchone()
-        if row is None:
-            return
-        values: list[Any] = [
-            _load_json(row["parameters_json"]),
-            _canonical_supplemental(_load_json(row["supplemental_json"])),
-        ]
-        for item in conn.execute(
-            "SELECT m.metadata_json, i.supplemental_json FROM generation_images i LEFT JOIN image_metadata m "
-            "ON m.asset_id = i.asset_id WHERE i.generation_id = ? ORDER BY i.ordinal",
-            (generation_id,),
-        ).fetchall():
-            values.append(_load_json(item["metadata_json"]).get("normalized", {}))
-            values.append(
-                _canonical_supplemental(_load_json(item["supplemental_json"]))
-            )
-        # Only normalized fields are searchable; entire workflow graphs stay out.
-        conn.execute(
-            "UPDATE generations SET search_text = ? WHERE id = ?",
-            (_search_projection(values), generation_id),
-        )
+        refresh_gallery_projection(conn, generation_id)
 
     @_with_node_rules
     async def run_maintenance(
@@ -616,6 +595,7 @@ class GenerationStore:
         preview_max_edge: int,
         preview_quality: int,
         deep: bool = False,
+        extra_repaired: dict[str, int] | None = None,
     ) -> dict[str, Any]:
         """Check and repair the complete plugin-owned storage graph."""
 
@@ -643,6 +623,8 @@ class GenerationStore:
                     "repaired": {},
                     "errors": [f"存储维护失败：{type(exc).__name__}"],
                 }
+            if extra_repaired:
+                report.setdefault("repaired", {}).update(extra_repaired)
             self._last_maintenance_report = report
             return dict(report)
 

@@ -6,6 +6,7 @@ import asyncio
 import copy
 import hashlib
 import json
+import time
 import uuid
 from dataclasses import replace
 
@@ -16,6 +17,7 @@ from ...models import (
     GenerationResult,
     ImageProvider,
     InvocationSource,
+    ReferenceImage,
 )
 from ..executor import ProviderError, ProviderPartialResponseError
 from .client import (
@@ -24,8 +26,9 @@ from .client import (
     normalize_workflow,
     prepare_submission_workflow,
 )
-from .jobs import ComfyJobManager, ComfyJobStore
+from .jobs import RECOVERY_SECONDS, ComfyJobManager, ComfyJobStore
 from .output_metadata import prepare_output
+from .storage import compact_request
 from .workflows import FIXED_OUTPUT_POLICY, migrate_fixed_outputs
 
 
@@ -129,7 +132,28 @@ class ComfyRuntime:
         client = ComfyClient(self.service.executor.session)
         config = await self.store.get_revision(job["revision_id"])
         fixed_outputs = config.get("execution_policy") == FIXED_OUTPUT_POLICY
-        references = await self.store.load_references(job["id"])
+        missing_reference_warning = ""
+        try:
+            references = await self.store.load_references(job["id"])
+        except (OSError, ValueError):
+            if not (
+                job.get("remote_id") or (job.get("result") or {}).get("child_ids")
+            ) or job.get("status") in {
+                "succeeded",
+                "partial",
+                "cancelled",
+            }:
+                raise
+            # Monitoring an acknowledged remote prompt no longer needs uploaded
+            # inputs. Preserve their count for request validation but never save
+            # empty placeholders as gallery reference assets or upload them again.
+            references = tuple(
+                ReferenceImage(item["id"], item["filename"], b"", item["mime_type"])
+                for item in job.get("references", ())
+            )
+            missing_reference_warning = (
+                "原任务参考图已不可用；已恢复远端结果，未保留缺失的参考图。"
+            )
         values = dict(job["request"]["values"])
         identity = values.pop("invocation_source", None) or {}
         values.pop("comfyui", None)
@@ -146,6 +170,14 @@ class ComfyRuntime:
 
             async def discard_staged_references(self, _references):
                 return None
+
+        class RecoveryGalleryStore:
+            def __getattr__(self, name):
+                return getattr(runtime.service.store, name)
+
+            async def record_success(self, **kwargs):
+                kwargs["request"] = replace(kwargs["request"], references=())
+                return await runtime.service.store.record_success(**kwargs)
 
         class Executor:
             async def generate_batch(self, selected_provider, request):
@@ -249,7 +281,7 @@ class ComfyRuntime:
                     synchronized = prepare_submission_workflow(
                         config, graph, targets=written_inputs
                     )
-                    if (await runtime.store.get_job(job["id"]))[
+                    if (await runtime.store.get_job(job["id"], light=True))[
                         "status"
                     ] == "cancelled":
                         raise asyncio.CancelledError
@@ -299,16 +331,15 @@ class ComfyRuntime:
                     )
 
                 async def progress(value):
-                    latest = await runtime.store.get_job(job["id"])
-                    if latest["status"] == "cancelled":
-                        raise asyncio.CancelledError
-                    await runtime.store.update_job(
+                    state = await runtime.store.update_progress(
                         job["id"],
+                        value,
                         status="running"
                         if value.get("status") == "running"
                         else "submitted",
-                        result={**(latest.get("result") or {}), "progress": value},
                     )
+                    if state == "cancelled":
+                        raise asyncio.CancelledError
 
                 latest = await runtime.store.get_job(job["id"])
                 node_errors = (latest.get("result") or {}).get("node_errors")
@@ -382,7 +413,9 @@ class ComfyRuntime:
                         else {}
                     ),
                 }
-                if (await runtime.store.get_job(job["id"]))["status"] == "cancelled":
+                if (await runtime.store.get_job(job["id"], light=True))[
+                    "status"
+                ] == "cancelled":
                     raise asyncio.CancelledError
                 images = await asyncio.to_thread(
                     lambda: tuple(prepare_output(image, snapshot) for image in images)
@@ -413,7 +446,13 @@ class ComfyRuntime:
         isolated = ImageGenerationService(
             settings=replace(self.service.settings, providers=(provider,)),
             executor=Executor(),
-            store=ChildGalleryStore() if is_child else self.service.store,
+            store=(
+                ChildGalleryStore()
+                if is_child
+                else RecoveryGalleryStore()
+                if missing_reference_warning
+                else self.service.store
+            ),
             concurrency=self.service.concurrency,
         )
         result = await isolated.generate(
@@ -468,7 +507,9 @@ class ComfyRuntime:
                 "source": result.request.source,
                 "invocation_source": result.request.invocation_source.public_dict(),
             },
-            "warning": result.warning,
+            "warning": "；".join(
+                filter(None, (result.warning, missing_reference_warning))
+            ),
             "elapsed_ms": result.elapsed_ms,
             "provider_name": provider.name,
             "model": job["model_id"],
@@ -546,7 +587,9 @@ class ComfyRuntime:
         revision_id = parent["revision_id"]
         children = []
         for index, (child_id, size) in enumerate(zip(child_ids, sizes)):
-            if (await self.store.get_job(parent["id"]))["status"] == "cancelled":
+            if (await self.store.get_job(parent["id"], light=True))[
+                "status"
+            ] == "cancelled":
                 raise asyncio.CancelledError
             values = {
                 "mode": request.mode,
@@ -564,15 +607,33 @@ class ComfyRuntime:
                 "parent_job_id": parent["id"],
                 "chunk_index": index,
             }
-            child = await self.store.create_job(
-                provider_id=provider.id,
-                model_id=request.model,
-                revision_id=revision_id,
-                request=child_request,
-                references=request.references,
-                job_id=child_id,
-            )
-            if (await self.store.get_job(parent["id"]))["status"] == "cancelled":
+            child = await self.store.get_job(child_id)
+            if child is None:
+                if any(not item.data for item in request.references):
+                    raise ProviderError(
+                        "任务参考图已不可用，不能提交尚未创建的子任务；已确认的远端任务可单独恢复"
+                    )
+                child = await self.store.create_job(
+                    provider_id=provider.id,
+                    model_id=request.model,
+                    revision_id=revision_id,
+                    request=child_request,
+                    references=request.references,
+                    job_id=child_id,
+                )
+            elif (
+                child.get("archive_state")
+                or child["provider_id"] != provider.id
+                or child["model_id"] != request.model
+                or child["revision_id"] != revision_id
+                or compact_request(child["request"]) != compact_request(child_request)
+            ):
+                raise ProviderError(
+                    "ComfyUI 子任务与保存的批次请求不一致或已归档，不能重复提交"
+                )
+            if (await self.store.get_job(parent["id"], light=True))[
+                "status"
+            ] == "cancelled":
                 if child["status"] not in {
                     "succeeded",
                     "partial",
@@ -609,7 +670,7 @@ class ComfyRuntime:
                     raise
             async with progress_lock:
                 completed_count += 1
-                current = await self.store.get_job(parent["id"])
+                current = await self.store.get_job(parent["id"], light=True)
                 if current["status"] not in {
                     "succeeded",
                     "partial",
@@ -617,21 +678,20 @@ class ComfyRuntime:
                     "cancelled",
                     "unknown",
                 }:
-                    await self.store.update_job(
+                    await self.store.update_progress(
                         parent["id"],
-                        result={
-                            **(current.get("result") or {}),
-                            "progress": {
-                                "status": "running",
-                                "completed": completed_count,
-                                "total": len(sizes),
-                            },
+                        {
+                            "status": "running",
+                            "completed": completed_count,
+                            "total": len(sizes),
                         },
                     )
             return completed_child
 
         completed = await asyncio.gather(*(wait_child(child) for child in children))
-        if (await self.store.get_job(parent["id"]))["status"] == "cancelled":
+        if (await self.store.get_job(parent["id"], light=True))[
+            "status"
+        ] == "cancelled":
             raise asyncio.CancelledError
         images, failures = [], []
         for index, child in enumerate(completed):
@@ -687,7 +747,9 @@ class ComfyRuntime:
         )
         if not images:
             raise ProviderError("ComfyUI 批次没有返回图片：" + warning)
-        if (await self.store.get_job(parent["id"]))["status"] == "cancelled":
+        if (await self.store.get_job(parent["id"], light=True))[
+            "status"
+        ] == "cancelled":
             raise asyncio.CancelledError
         await self.store.save_outputs(parent["id"], tuple(images))
         if failures:
@@ -719,8 +781,18 @@ class ComfyRuntime:
         values = details.get("resolved_request") or job["request"]["values"]
         terminal = job.get("status") in {"succeeded", "partial"}
         warning = details.get("warning", "")
+        generation_id = str(
+            details.get("generation_id") or job.get("generation_id") or ""
+        )
         try:
-            images = await self.store.load_outputs(job["id"])
+            # Once published, gallery links define which images still exist.
+            # A protected sibling cache or pre-migration cache must not undo a
+            # user's deletion from this generation.
+            images = (
+                ()
+                if terminal and generation_id
+                else await self.store.load_outputs(job["id"])
+            )
         except (OSError, ValueError):
             if not terminal:
                 raise
@@ -728,9 +800,6 @@ class ComfyRuntime:
         if terminal and not images:
             from ...models import GeneratedImage
 
-            generation_id = str(
-                details.get("generation_id") or job.get("generation_id") or ""
-            )
             gallery = (
                 await self.service.store.generation_detail(generation_id, light=True)
                 if generation_id
@@ -764,7 +833,14 @@ class ComfyRuntime:
                     GeneratedImage(
                         content,
                         mime_type,
-                        descriptor.get("effective_parameters") or {},
+                        await self.store.output_parameters(
+                            {
+                                **descriptor,
+                                "storage": "gallery",
+                                "gallery_image_id": item["id"],
+                                "gallery_generation_id": generation_id,
+                            }
+                        ),
                         descriptor.get("response_index"),
                     )
                 )
@@ -877,7 +953,7 @@ class ComfyRuntime:
                 )
         elif job["status"] == "submitting":
             raise ValueError(
-                "正在提交，远端任务编号尚未确定，请稍后再试；不会发送全局中断"
+                "正在提交，提交结果未知，远端任务编号尚未确定，请稍后再试；不会发送全局中断"
             )
         await self.store.update_job(
             job_id,
@@ -911,15 +987,29 @@ class ComfyRuntime:
                 "generation_id",
             )
         } | {
-            "temporary": bool(job.get("request", {}).get("temporary")),
+            "temporary": bool(
+                job.get("temporary", job.get("request", {}).get("temporary"))
+            ),
             "progress": (job.get("result") or {}).get("progress"),
             "can_resume": job.get("status") in {"failed", "unknown"}
+            and not job.get("archive_state")
+            and (
+                job.get("status") == "unknown"
+                or not job.get("finished_at")
+                or job.get("recovery_protected")
+                or job["finished_at"] >= time.time() - RECOVERY_SECONDS
+            )
             and bool(
                 job.get("remote_id") or (job.get("result") or {}).get("child_ids")
             ),
-            "parent_job_id": job.get("request", {}).get("parent_job_id", ""),
-            "model_name": job.get("request", {}).get("model", {}).get("name")
+            "parent_job_id": job.get(
+                "parent_job_id", job.get("request", {}).get("parent_job_id", "")
+            ),
+            "model_name": job.get("model_name")
+            or job.get("request", {}).get("model", {}).get("name")
             or job.get("model_id", ""),
             "result_available": job.get("status") in {"succeeded", "partial"}
-            and bool(job.get("outputs") or job.get("generation_id")),
+            and bool(
+                job.get("has_result", job.get("outputs") or job.get("generation_id"))
+            ),
         }

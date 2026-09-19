@@ -100,6 +100,7 @@ class ImageStudioPlugin(Star):
         self._service: ImageGenerationService | None = None
         self._comfy: ComfyRuntime | None = None
         self._settings_lock = asyncio.Lock()
+        self._storage_maintenance_lock = asyncio.Lock()
         self._maintenance_task: asyncio.Task[None] | None = None
         self._studio_settings, studio_errors = load_studio_settings(Path(self.data_dir))
         self._settings, runtime_errors = runtime_settings(config, self._studio_settings)
@@ -111,14 +112,6 @@ class ImageStudioPlugin(Star):
 
         await self.store.initialize()
         await self._configure_external_gallery()
-        await self.store.run_maintenance(
-            self._settings.history,
-            preview_max_edge=self._settings.asset_preview_max_edge,
-            preview_quality=self._settings.asset_preview_quality,
-        )
-        self._maintenance_task = asyncio.create_task(
-            self._maintenance_loop(), name="image-studio-maintenance"
-        )
         self._session = aiohttp.ClientSession(
             connector=aiohttp.TCPConnector(limit=12, limit_per_host=6),
             timeout=aiohttp.ClientTimeout(total=180),
@@ -130,7 +123,13 @@ class ImageStudioPlugin(Star):
         )
         self._comfy = ComfyRuntime(self._service)
         self._service.comfy_runtime = self._comfy
+        # The gallery has initialized the shared schema. Clear expired terminal
+        # resources before queue recovery; pending/unknown jobs remain protected.
+        await self._run_storage_maintenance()
         await self._comfy.start()
+        self._maintenance_task = asyncio.create_task(
+            self._maintenance_loop(), name="image-studio-maintenance"
+        )
         self._register_web_apis()
         await self._external_gallery.start()
         if self._settings_errors:
@@ -177,20 +176,31 @@ class ImageStudioPlugin(Star):
         while True:
             await asyncio.sleep(3600)
             try:
-                if getattr(self, "_comfy", None) is not None:
-                    await self._comfy.store.cleanup_terminal_files(
-                        terminal_before=time.time() - 7 * 86400
-                    )
-                await self._expire_import_groups()
-                await self.store.run_maintenance(
-                    self._settings.history,
-                    preview_max_edge=self._settings.asset_preview_max_edge,
-                    preview_quality=self._settings.asset_preview_quality,
-                )
+                await self._run_storage_maintenance()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 logger.warning("%s 定时存储维护失败: %s", LOG_TAG, type(exc).__name__)
+
+    async def _run_storage_maintenance(self, *, deep: bool = False) -> dict[str, Any]:
+        """One cleanup order for startup, scheduled runs and the settings action."""
+
+        async with self._storage_maintenance_lock:
+            removed = 0
+            if getattr(self, "_comfy", None) is not None:
+                removed = await self._comfy.store.cleanup_terminal_files(
+                    terminal_before=time.time() - 7 * 86400
+                )
+            await self._expire_import_groups()
+            # Release task dependencies first; the gallery then expires imports,
+            # applies quotas and sweeps shared payloads only after owners vanish.
+            return await self.store.run_maintenance(
+                self._settings.history,
+                preview_max_edge=self._settings.asset_preview_max_edge,
+                preview_quality=self._settings.asset_preview_quality,
+                deep=deep,
+                extra_repaired={"comfy_files": removed},
+            )
 
     def _register_web_apis(self) -> None:
         register_web_apis(self, PAGE_PREFIX)
@@ -237,6 +247,7 @@ class ImageStudioPlugin(Star):
                 get_settings=lambda: self._settings,
                 get_service=self._service_or_raise,
                 get_external=lambda: self._external_gallery,
+                run_maintenance=self._run_storage_maintenance,
             )
         return self._gallery_controller
 

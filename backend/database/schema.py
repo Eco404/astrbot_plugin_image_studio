@@ -11,7 +11,8 @@ from pathlib import Path
 from typing import Any
 
 RELEASE_VERSION = 3
-DATABASE_VERSION = RELEASE_VERSION
+DATABASE_VERSION = 4
+DEVELOPMENT_REVISION = 1
 
 # Published v1 is immutable; future releases retain this upgrade starting point.
 V1_SCHEMA_STATEMENTS = (
@@ -190,9 +191,62 @@ V3_MIGRATION_STATEMENTS = (
     "CREATE INDEX idx_comfy_jobs_provider ON comfy_jobs(provider_id, created_at)",
     "CREATE UNIQUE INDEX idx_comfy_jobs_remote ON comfy_jobs(provider_id, remote_id) WHERE remote_id != ''",
 )
-SCHEMA_STATEMENTS = (*V2_SCHEMA_STATEMENTS, *V3_MIGRATION_STATEMENTS)
+V3_SCHEMA_STATEMENTS = (*V2_SCHEMA_STATEMENTS, *V3_MIGRATION_STATEMENTS)
 _COMFY_TABLES = ("comfy_workflow_revisions", "comfy_jobs")
-_TABLES = (*_V2_TABLES, *_COMFY_TABLES)
+_V3_TABLES = (*_V2_TABLES, *_COMFY_TABLES)
+_PAYLOAD_TABLES = ("storage_payloads", "storage_payload_refs")
+V4_MIGRATION_STATEMENTS = (
+    """CREATE TABLE storage_payloads (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        codec TEXT NOT NULL,
+        data BLOB NOT NULL,
+        size_bytes INTEGER NOT NULL,
+        created_at REAL NOT NULL
+    )""",
+    """CREATE TABLE storage_payload_refs (
+        owner_table TEXT NOT NULL,
+        owner_id TEXT NOT NULL,
+        slot TEXT NOT NULL,
+        payload_id TEXT NOT NULL REFERENCES storage_payloads(id),
+        PRIMARY KEY(owner_table,owner_id,slot)
+    )""",
+    "CREATE INDEX idx_storage_payload_refs_payload ON storage_payload_refs(payload_id)",
+    "ALTER TABLE comfy_jobs ADD COLUMN parent_job_id TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE comfy_jobs ADD COLUMN queue_dismissed INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE comfy_jobs ADD COLUMN temporary INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE comfy_jobs ADD COLUMN model_name TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE comfy_jobs ADD COLUMN archive_state TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE comfy_jobs ADD COLUMN request_fingerprint TEXT NOT NULL DEFAULT ''",
+    "CREATE INDEX idx_comfy_jobs_parent ON comfy_jobs(parent_job_id)",
+    "CREATE INDEX idx_comfy_jobs_queue ON comfy_jobs(parent_job_id,queue_dismissed,created_at DESC)",
+    "CREATE INDEX idx_comfy_jobs_expiry ON comfy_jobs(status,finished_at)",
+    "CREATE INDEX idx_comfy_jobs_revision ON comfy_jobs(revision_id)",
+    "CREATE INDEX idx_comfy_jobs_generation ON comfy_jobs(generation_id)",
+    "ALTER TABLE generation_images ADD COLUMN generated_at REAL",
+    "ALTER TABLE generation_images ADD COLUMN model TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE generation_images ADD COLUMN mode TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE generations ADD COLUMN latest_content_at REAL",
+    "CREATE INDEX idx_generations_latest_content ON generations(COALESCE(latest_content_at,created_at) DESC,created_at DESC,id DESC)",
+)
+_PAYLOAD_OWNER_KEYS = {
+    "comfy_workflow_revisions": "id",
+    "comfy_jobs": "id",
+    "image_metadata": "asset_id",
+    "generation_images": "id",
+    "generations": "id",
+}
+PAYLOAD_TRIGGER_STATEMENTS = tuple(
+    f"CREATE TRIGGER storage_refs_delete_{table} AFTER DELETE ON {table} BEGIN "
+    f"DELETE FROM storage_payload_refs WHERE owner_table='{table}' AND owner_id=OLD.{key}; END"
+    for table, key in _PAYLOAD_OWNER_KEYS.items()
+)
+SCHEMA_STATEMENTS = (
+    *V3_SCHEMA_STATEMENTS,
+    *V4_MIGRATION_STATEMENTS,
+    *PAYLOAD_TRIGGER_STATEMENTS,
+)
+_TABLES = (*_V3_TABLES, *_PAYLOAD_TABLES)
 _DEVELOPMENT_META_STATEMENT = """CREATE TABLE schema_meta (
     id INTEGER PRIMARY KEY CHECK(id = 1),
     target_version INTEGER NOT NULL,
@@ -225,7 +279,7 @@ def _table_shape(conn: sqlite3.Connection, table: str) -> tuple[Any, ...]:
             for item in conn.execute(f"PRAGMA index_xinfo({_identifier(row[1])})")
         )
         partial_sql = ""
-        if row[4]:
+        if row[4] or any(item[0] == ("special", -2) for item in columns_in_index):
             partial_sql = conn.execute(
                 "SELECT sql FROM sqlite_master WHERE type='index' AND name=?",
                 (row[1],),
@@ -234,13 +288,14 @@ def _table_shape(conn: sqlite3.Connection, table: str) -> tuple[Any, ...]:
     return columns, foreign_keys, sorted(indexes)
 
 
-@lru_cache(maxsize=3)
+@lru_cache(maxsize=4)
 def _release_shapes(version: int = RELEASE_VERSION) -> dict[str, tuple[Any, ...]]:
     with closing(sqlite3.connect(":memory:")) as conn:
         statements, tables = {
             1: (V1_SCHEMA_STATEMENTS, _V1_TABLES),
             2: (V2_SCHEMA_STATEMENTS, _V2_TABLES),
-            3: (SCHEMA_STATEMENTS, _TABLES),
+            3: (V3_SCHEMA_STATEMENTS, _V3_TABLES),
+            4: (SCHEMA_STATEMENTS, _TABLES),
         }[version]
         for statement in statements:
             conn.execute(statement)
@@ -260,6 +315,19 @@ def _validate_release_layout(
         raise RuntimeError("图库数据库存在未登记的外部图库结构；未执行升级")
     if version < 3:
         _reject_unregistered_comfy_tables(conn)
+    if version < 4 and any(
+        conn.execute("SELECT 1 FROM sqlite_master WHERE name=?", (table,)).fetchone()
+        for table in _PAYLOAD_TABLES
+    ):
+        raise RuntimeError("图库数据库存在未登记的存储正文结构；未执行升级")
+    if version == 4:
+        for statement in PAYLOAD_TRIGGER_STATEMENTS:
+            name = statement.split()[2]
+            row = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?", (name,)
+            ).fetchone()
+            if row is None or "".join(row[0].split()) != "".join(statement.split()):
+                raise RuntimeError("存储正文引用清理结构无效；未执行升级")
 
 
 def _reject_unregistered_comfy_tables(conn: sqlite3.Connection) -> None:
@@ -302,6 +370,13 @@ def _database_kind(conn: sqlite3.Connection) -> str:
     ).fetchone()
     if has_marker:
         marker = _development_marker(conn)
+        if release == RELEASE_VERSION and marker == (
+            1,
+            DATABASE_VERSION,
+            DEVELOPMENT_REVISION,
+        ):
+            _validate_release_layout(conn, DATABASE_VERSION)
+            return "current"
         if release == 2 and marker == (1, 3, 1):
             _validate_release_layout(conn, 3)
             return "promotion_v3"
@@ -314,17 +389,19 @@ def _database_kind(conn: sqlite3.Connection) -> str:
         raise RuntimeError(
             "不支持此图库数据库开发修订；1-dev 系列请先用末版开发版升级，"
             "2-dev 系列请先升级到 1.1.0-dev.2 的最终数据库 2-dev.2 后再转换；"
-            "3-dev 系列仅支持最终数据库 3-dev.1"
+            "3-dev 系列仅支持最终数据库 3-dev.1；4-dev 系列仅支持当前修订"
         )
     if release in {1, 2, RELEASE_VERSION}:
         _validate_release_layout(conn, release)
-        return "release" if release == RELEASE_VERSION else f"upgrade_v{release}"
+        return f"upgrade_v{release}"
     if not conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone():
         return "empty"
     raise RuntimeError("图库数据库没有受支持的版本信息；请先用末版开发版升级后再转换")
 
 
 def _backup_database(conn: sqlite3.Connection, backup_dir: Path) -> Path:
+    if backup_dir.is_symlink():
+        raise RuntimeError("数据库备份目录不能是符号链接；未执行升级")
     backup_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     with tempfile.NamedTemporaryFile(
@@ -347,6 +424,11 @@ def _backup_database(conn: sqlite3.Connection, backup_dir: Path) -> Path:
 
 def _stamp_release(conn: sqlite3.Connection) -> None:
     conn.execute(f"PRAGMA user_version = {RELEASE_VERSION}")
+    conn.execute(_DEVELOPMENT_META_STATEMENT)
+    conn.execute(
+        "INSERT INTO schema_meta(id,target_version,dev_revision) VALUES(1,?,?)",
+        (DATABASE_VERSION, DEVELOPMENT_REVISION),
+    )
 
 
 def _change_token(conn: sqlite3.Connection) -> tuple[int, int, int]:
@@ -357,29 +439,18 @@ def _change_token(conn: sqlite3.Connection) -> tuple[int, int, int]:
     )
 
 
-def _create_search_index(conn: sqlite3.Connection) -> None:
-    try:
-        conn.execute(
-            "CREATE VIRTUAL TABLE generation_search USING fts5("
-            "generation_id UNINDEXED, original_prompt, final_prompt, provider_name, model)"
-        )
-    except sqlite3.OperationalError as exc:
-        if "no such module: fts5" not in str(exc).lower():
-            raise
-
-
 def ensure_release_schema(conn: sqlite3.Connection, *, backup_dir: Path) -> Path | None:
-    """Create/upgrade to published v3; release databases have no schema_meta table.
+    """Upgrade published baselines to the explicit 4-dev.1 storage layout.
 
     Backups precede every existing-database upgrade. Version/structure and commit
     tokens are checked again under the write lock, keeping backup and migration
-    tied to the same state. Current release startup only validates the schema.
+    tied to the same state. Current development startup only validates the schema.
     """
     if conn.in_transaction:
         raise RuntimeError("图库数据库升级必须在独立事务中执行")
     initial_token = _change_token(conn)
     kind = _database_kind(conn)
-    if kind == "release":
+    if kind == "current":
         return None
     backup = _backup_database(conn, backup_dir) if kind != "empty" else None
     try:
@@ -389,17 +460,30 @@ def ensure_release_schema(conn: sqlite3.Connection, *, backup_dir: Path) -> Path
         if kind == "empty":
             for statement in SCHEMA_STATEMENTS:
                 conn.execute(statement)
-            _create_search_index(conn)
         else:
             if kind in {"promotion_v1", "promotion_v2", "promotion_v3"}:
                 conn.execute("DROP TABLE schema_meta")
             if kind in {"promotion_v1", "upgrade_v1"}:
                 for statement in V2_MIGRATION_STATEMENTS:
                     conn.execute(statement)
-            if kind != "promotion_v3":
+            if kind not in {"promotion_v3", "upgrade_v3"}:
                 for statement in V3_MIGRATION_STATEMENTS:
                     conn.execute(statement)
-        _validate_release_layout(conn)
+            for statement in (*V4_MIGRATION_STATEMENTS, *PAYLOAD_TRIGGER_STATEMENTS):
+                conn.execute(statement)
+        # Repository codecs are also used for new writes; migration never edits
+        # image files and cannot delete task recovery resources.
+        from ..gallery.storage import migrate_gallery_storage
+        from ..providers.comfyui.storage import migrate_comfy_storage
+        from .payloads import gc_payloads
+
+        migrate_comfy_storage(conn)
+        migrate_gallery_storage(conn)
+        conn.execute("DROP TABLE IF EXISTS generation_search")
+        gc_payloads(conn)
+        if conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
+            raise RuntimeError("存储迁移后引用校验失败，已取消升级")
+        _validate_release_layout(conn, DATABASE_VERSION)
         _stamp_release(conn)
         conn.commit()
     except Exception:

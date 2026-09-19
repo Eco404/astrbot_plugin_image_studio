@@ -275,13 +275,10 @@ def test_database_release_version_is_explicit_and_future_versions_are_rejected(
         ] == DATABASE_VERSION
         with sqlite3.connect(store.db_path) as conn:
             assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
-            assert (
-                conn.execute(
-                    "SELECT 1 FROM sqlite_master WHERE name='schema_meta'"
-                ).fetchone()
-                is None
-            )
-            conn.execute("PRAGMA user_version = 4")
+            assert conn.execute(
+                "SELECT target_version,dev_revision FROM schema_meta WHERE id=1"
+            ).fetchone() == (4, 1)
+            conn.execute("PRAGMA user_version = 5")
         with pytest.raises(RuntimeError, match="正式版本"):
             await GenerationStore(tmp_path).initialize()
 
@@ -593,7 +590,7 @@ def test_metadata_parser_upgrade_refreshes_cache_without_losing_import(
 
         def upgraded(data):
             result = parse(data)
-            result["normalized"]["new_field"] = "upgraded-search"
+            result["normalized"]["prompt"] = "upgraded-search"
             return result
 
         monkeypatch.setattr(metadata_module, "PARSER_VERSION", next_version)

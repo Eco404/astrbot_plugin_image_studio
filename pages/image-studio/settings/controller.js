@@ -73,7 +73,19 @@
       els.storageHealthCheckedAt.textContent = report?.checked_at ? formatDate(report.checked_at) : "尚未执行";
       els.storageHealthDuration.textContent = report?.duration_ms >= 0 ? `${Number(report.duration_ms)} ms` : "-";
       els.storageHealthAssets.textContent = `${Number(stats.assets || 0)} / ${Number(stats.thumbnails || 0)}`;
-      els.storageHealthLeases.textContent = String(Number(stats.active_leases || 0)); els.storageHealthGenerations.textContent = String(Number(stats.generations || 0)); els.storageHealthSize.textContent = formatBytes(stats.size_bytes || 0);
+      els.storageHealthLeases.textContent = String(Number(stats.active_leases || 0)); els.storageHealthGenerations.textContent = String(Number(stats.generations || 0)); els.storageHealthSize.textContent = formatBytes(stats.disk?.file_bytes ?? stats.size_bytes ?? 0);
+      $("storageHealthAllocated").textContent = stats.disk ? formatBytes(stats.disk.allocated_bytes || 0) : "-";
+      $("storageHealthReusable").textContent = formatBytes(stats.disk?.database?.reusable_bytes || 0);
+      const categories = [["originals", "画廊原图与参考图"], ["thumbnails", "预览图"], ["comfy_inputs", "ComfyUI 输入缓存"], ["comfy_outputs", "ComfyUI 输出缓存"], ["comfy_blobs", "ComfyUI 共享图片"], ["database", "数据库"], ["backups", "升级备份"], ["temporary", "其他临时文件"], ["other", "配置及其他文件"]];
+      $("storageHealthBreakdown").innerHTML = stats.disk ? categories.map(([key, label]) => `<div><span>${escape(label)}</span><strong>${escape(formatBytes(stats.disk.categories?.[key]?.file_bytes || 0))}</strong></div>`).join("") : "";
+      const repaired = report?.repaired || {};
+      const repairs = [["expired_leases", "到期保留记录"], ["expired_import_batches", "过期导入批次"], ["broken_assets", "不可用原图"], ["rebuilt_thumbnails", "重建预览"], ["unreferenced_assets", "无引用图片"], ["orphan_files", "无引用文件"], ["stale_temporary_files", "过期临时文件"], ["comfy_files", "ComfyUI 缓存文件"], ["unused_payloads", "无引用快照"], ["backups_removed", "旧升级备份"]].filter(([key]) => Number(repaired[key]) > 0).map(([key, label]) => `${label} ${Number(repaired[key])} 项`);
+      if (report?.database?.compacted) repairs.push(`数据库缩减 ${formatBytes(report.database.bytes_reclaimed)}`);
+      else if (report?.deep && report?.database?.reason === "comfy_tasks_pending") repairs.push("有待处理的 ComfyUI 任务，暂缓数据库压缩");
+      else if (report?.deep && report?.database?.reason === "insufficient_working_space") repairs.push("可用磁盘空间不足，暂缓数据库压缩");
+      else if (report?.deep && report?.database?.reason === "database_busy") repairs.push("数据库正在使用，暂缓压缩");
+      $("storageHealthRepaired").textContent = repairs.length ? `最近维护：${repairs.join("；")}。` : "";
+      $("storageHealthRepaired").classList.toggle("is-hidden", !repairs.length);
       els.storageHealthErrors.textContent = errors.length ? errors.join("；") : "暂无异常。";
       if (report?.retention) storageRetention = report.retention;
       if (Array.isArray(report?.external_sources)) hooks.externalSources().ingest(report.external_sources);
@@ -101,7 +113,7 @@
     async function loadStorageHealth() { try { renderStorageHealth(await apiGet("storage/health")); } catch (error) { els.storageHealthStatus.textContent = "读取失败"; els.storageHealthErrors.textContent = errorMessage(error, "存储状态读取失败"); } }
 
     async function runStorageMaintenance(deep) {
-      if (deep && !await confirmAction("深度检查会重新计算全部原图哈希，历史较多时可能耗时较长。继续执行？")) return;
+      if (deep && !await confirmAction("深度检查会重新计算全部原图哈希，并在数据库空闲空间较多时压缩数据库文件。历史较多时可能耗时较长，期间数据库操作可能需要等待。继续执行？")) return;
       els.runMaintenanceButton.disabled = true; els.runDeepMaintenanceButton.disabled = true; els.storageHealthStatus.textContent = "检查中";
       try { const report = await apiPost("storage/maintenance", { deep: !!deep }); renderStorageHealth(report); await loadStorageHealth(); showNotice(deep ? "存储深度检查已完成。" : "存储检查已完成。", report.status === "error" ? "error" : "success"); }
       catch (error) { showNotice(errorMessage(error, "存储检查失败"), "error"); await loadStorageHealth(); }
@@ -148,7 +160,7 @@
           setError(els.settingsError, message); showNotice(message, "error");
           return false;
         } finally {
-          els.addProviderButton.disabled = false; els.addModelButton.disabled = false; els.saveSettingsButton.disabled = false;
+          els.addProviderButton.disabled = false; els.addModelButton.disabled = false; els.saveSettingsButton.disabled = settingsSaving;
         }
       })();
       const loaded = await settingsLoadPromise;
