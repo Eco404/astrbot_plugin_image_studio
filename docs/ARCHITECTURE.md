@@ -82,7 +82,8 @@ backend/
   database/schema.py            数据库正式/开发版本和迁移
   database/payloads.py          共享压缩正文、owner 引用与垃圾回收
   database/maintenance.py       完整磁盘统计、备份轮换与受控空间回收
-  database/migrations/          固定版本数据转换，不依赖当前业务仓储
+  database/migrations/          固定版本正文转换及可续跑的图片布局迁移
+    images_layout.py           旧 history 图片目录转为 images，协调文件与路径事务
   ui/                           浏览器主题、图库偏好的传输格式
 pages/image-studio/
   app.js                       页面启动、生图与图库/详情协调
@@ -147,7 +148,9 @@ Provider 调度通过显式适配函数和长期客户端组合；共用 HTTP/�
 
 ## 持久化边界
 
-代码目录移动不移动数据。`StarTools.get_data_dir` 仍是运行数据目录入口，原配置文件、图库路径、SQLite 文件、任务修订和资产编号均沿用既有位置与格式。
+`StarTools.get_data_dir` 仍是运行数据目录入口，配置、数据库文件 `history.sqlite3`、任务修订和资产编号沿用原约定。本地原图与参考图统一放在 `images/assets`，预览缓存放在 `images/thumbnails`；旧 `history/assets`、`history/thumbnails` 由独立的 `database/migrations/images_layout.py` 在首次初始化时迁移。外部图库原图保留来源路径。
+
+图片布局迁移先预检冲突和符号链接，校验后通过链接或复制准备目标文件，再用单一事务更新资产、预览和 ComfyUI 已知图库路径，提交后清除已核验旧副本及空目录。迁移日志支持中断续跑，未知旧目录内容保留；日常统计兼容新旧布局。这一文件与路径转换保持数据库结构版本 4-dev.1、插件版本 `1.4.0-dev.1`。
 
 `GenerationStore` 保留异步调用、原修改锁、缓存修订和取消保护。同步事务整体移入对应仓储，仓储共用 `GalleryContext`，不创建独立修改锁，也不通过代理访问整个 store。跨仓储调用以显式服务回调传入，数据库连接仍由原事务发起者持有。ComfyUI 任务继续使用同一图库数据库和原任务状态机，结构迁移由 `backend/database/schema.py` 集中处理。
 

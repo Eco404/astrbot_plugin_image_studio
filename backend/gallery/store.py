@@ -18,6 +18,7 @@ from astrbot.api import logger
 
 from ..config import HistorySettings
 from ..database.schema import ensure_release_schema
+from ..database.migrations.images_layout import migrate_images_layout
 from ..media.display import DisplayImageCache, display_file_version, display_max_edge
 from ..media.files import (
     _atomic_write,
@@ -82,7 +83,7 @@ class GenerationStore:
     def __init__(self, data_dir: Path) -> None:
         self._context = GalleryContext(data_dir)
         self.data_dir = self._context.data_dir
-        self.history_dir = self._context.history_dir
+        self.images_dir = self._context.images_dir
         self.assets_dir = self._context.assets_dir
         self.thumbnails_dir = self._context.thumbnails_dir
         self.staging_dir = self._context.staging_dir
@@ -305,7 +306,8 @@ class GenerationStore:
     async def initialize(self) -> None:
         """Create directories and database tables."""
 
-        await asyncio.to_thread(self._initialize_sync)
+        async with self._lock:
+            await asyncio.to_thread(self._initialize_sync)
 
     async def close(self) -> None:
         """Release the read-only database observer used by gallery caches."""
@@ -350,8 +352,13 @@ class GenerationStore:
             return f"{self._revision_instance}:{version}:{rules_revision}"
 
     def _initialize_sync(self) -> None:
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        with self._connect() as conn:
+            backup = ensure_release_schema(conn, backup_dir=self.data_dir / "backups")
+            if backup is not None:
+                self.maintenance.protected_backup = backup
+            migrate_images_layout(conn, self.data_dir)
         for directory in (
-            self.data_dir,
             self.assets_dir,
             self.thumbnails_dir,
             self.staging_dir,
@@ -361,9 +368,6 @@ class GenerationStore:
         ):
             directory.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
-            backup = ensure_release_schema(conn, backup_dir=self.data_dir / "backups")
-            if backup is not None:
-                self.maintenance.protected_backup = backup
             # Keep existing session grants, but cap legacy configurable retention
             # at one hour after the last access. Never extend it on restart.
             conn.execute(

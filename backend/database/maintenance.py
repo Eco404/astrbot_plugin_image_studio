@@ -47,10 +47,12 @@ def database_space(conn: sqlite3.Connection) -> dict[str, int]:
 
 def _category(relative: Path) -> str:
     parts = relative.parts
-    if parts[:2] == ("history", "assets"):
-        return "originals"
-    if parts[:2] == ("history", "thumbnails"):
-        return "thumbnails"
+    # Count both layouts while an interrupted images migration is resumed.
+    if len(parts) >= 2 and parts[0] in {"images", "history"}:
+        if parts[1] == "assets":
+            return "originals"
+        if parts[1] == "thumbnails":
+            return "thumbnails"
     if parts and parts[0] in {"comfyui_inputs", "comfyui_outputs", "comfyui_blobs"}:
         return {
             "comfyui_inputs": "comfy_inputs",

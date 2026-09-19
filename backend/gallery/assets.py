@@ -6,7 +6,6 @@ import hashlib
 import sqlite3
 import time
 import uuid
-from pathlib import Path
 from typing import Any
 
 from ..media.files import (
@@ -251,7 +250,11 @@ class AssetRepository:
         digest = hashlib.sha256(data).hexdigest()
         mime_type = detect_mime_type(data, mime_hint)
         suffix = _image_suffix(mime_type, data)
-        relative_path = Path("history") / "assets" / digest[:2] / f"{digest}{suffix}"
+        relative_path = (
+            self.context.assets_dir.relative_to(self.context.data_dir)
+            / digest[:2]
+            / f"{digest}{suffix}"
+        )
         target = self.context.data_dir / relative_path
         try:
             current_size = target.stat().st_size
@@ -262,7 +265,7 @@ class AssetRepository:
         width, height = _image_dimensions(data)
         return {
             "id": digest,
-            "path": str(relative_path),
+            "path": relative_path.as_posix(),
             "mime_type": mime_type,
             "size_bytes": len(data),
             "width": width,
@@ -278,7 +281,10 @@ class AssetRepository:
     ) -> dict[str, Any]:
         max_edge = max(256, min(2048, int(max_edge)))
         quality = max(40, min(95, int(quality)))
-        relative_path = Path("history") / "thumbnails" / f"{asset['id']}.webp"
+        relative_path = (
+            self.context.thumbnails_dir.relative_to(self.context.data_dir)
+            / f"{asset['id']}.webp"
+        )
         target = self.context.data_dir / relative_path
         with self.context.connect() as conn:
             current = conn.execute(
@@ -301,7 +307,7 @@ class AssetRepository:
         raw = target.read_bytes()
         return {
             "asset_id": asset["id"],
-            "path": str(relative_path),
+            "path": relative_path.as_posix(),
             "mime_type": detect_mime_type(raw, "image/webp"),
             "size_bytes": len(raw),
             "max_edge": max_edge,

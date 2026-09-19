@@ -46,6 +46,7 @@ REQUIRED_BACKEND_FILES = (
     "backend/database/payloads.py",
     "backend/database/maintenance.py",
     "backend/database/migrations/__init__.py",
+    "backend/database/migrations/images_layout.py",
     "backend/database/migrations/v4_storage.py",
     "backend/gallery/__init__.py",
     "backend/gallery/assets.py",

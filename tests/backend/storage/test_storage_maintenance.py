@@ -7,6 +7,8 @@ import time
 from contextlib import closing
 from types import SimpleNamespace
 
+import pytest
+
 from astrbot_plugin_image_studio.backend.config import HistorySettings
 from astrbot_plugin_image_studio.backend.database.maintenance import (
     compact_database,
@@ -17,12 +19,15 @@ from astrbot_plugin_image_studio.backend.database.maintenance import (
 from astrbot_plugin_image_studio.backend.gallery.store import GenerationStore
 
 
-def test_disk_inventory_counts_all_owned_files_without_following_links(tmp_path):
+@pytest.mark.parametrize("image_directory", ["images", "history"])
+def test_disk_inventory_counts_all_owned_files_without_following_links(
+    tmp_path, image_directory
+):
     root = tmp_path / "plugin"
     root.mkdir()
     paths = {
-        "history/assets/a.png": ("originals", b"original"),
-        "history/thumbnails/a.webp": ("thumbnails", b"preview"),
+        f"{image_directory}/assets/a.png": ("originals", b"original"),
+        f"{image_directory}/thumbnails/a.webp": ("thumbnails", b"preview"),
         "comfyui_inputs/input.png": ("comfy_inputs", b"input"),
         "comfyui_outputs/output.png": ("comfy_outputs", b"output"),
         "comfyui_blobs/shared.png": ("comfy_blobs", b"shared"),
@@ -36,8 +41,8 @@ def test_disk_inventory_counts_all_owned_files_without_following_links(tmp_path)
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
-    original = root / "history/assets/a.png"
-    os.link(original, root / "history/assets/shared.png")
+    original = root / image_directory / "assets/a.png"
+    os.link(original, root / image_directory / "assets/shared.png")
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "large.bin").write_bytes(b"x" * 100_000)
@@ -65,6 +70,35 @@ def test_disk_inventory_counts_all_owned_files_without_following_links(tmp_path)
         == report["allocated_bytes"]
     )
     assert (outside / "large.bin").exists()
+
+
+def test_disk_inventory_groups_both_layouts_during_migration(tmp_path):
+    source = tmp_path / "history" / "assets" / "shared.png"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"shared image")
+    target = tmp_path / "images" / "assets" / "shared.png"
+    target.parent.mkdir(parents=True)
+    os.link(source, target)
+    for directory in ("history", "images"):
+        thumbnail = tmp_path / directory / "thumbnails" / "preview.webp"
+        thumbnail.parent.mkdir()
+        thumbnail.write_bytes(b"preview")
+    unrelated = tmp_path / "history" / "notes.txt"
+    unrelated.write_bytes(b"user file")
+    report = directory_space(tmp_path)
+    assert report["categories"]["originals"]["file_count"] == 2
+    assert report["categories"]["originals"]["file_bytes"] == 2 * len(b"shared image")
+    assert report["categories"]["thumbnails"]["file_count"] == 2
+    assert report["categories"]["thumbnails"]["file_bytes"] == 2 * len(b"preview")
+    assert report["categories"]["other"]["file_count"] == 1
+    assert report["categories"]["other"]["file_bytes"] == len(b"user file")
+    owned_paths = [tmp_path, *tmp_path.rglob("*")]
+    allocated = {
+        (path.stat().st_dev, path.stat().st_ino): path.stat().st_blocks * 512
+        for path in owned_paths
+    }
+    assert report["allocated_bytes"] == sum(allocated.values())
+    assert source.exists() and target.exists() and unrelated.exists()
 
 
 def _backup(path):

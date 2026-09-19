@@ -250,7 +250,7 @@ def test_v1_upgrade_preserves_all_business_rows_files_and_restore_backup(
         store = await populated_store(tmp_path)
         files = {
             str(path.relative_to(tmp_path)): path.read_bytes()
-            for path in store.history_dir.rglob("*")
+            for path in store.images_dir.rglob("*")
             if path.is_file()
         }
         restore_v1_fixture(store, promotion=promotion)
@@ -281,7 +281,7 @@ def test_v1_upgrade_preserves_all_business_rows_files_and_restore_backup(
         assert list((tmp_path / "backups").glob("*.sqlite3")) == backups
         assert {
             str(path.relative_to(tmp_path)): path.read_bytes()
-            for path in store.history_dir.rglob("*")
+            for path in store.images_dir.rglob("*")
             if path.is_file()
         } == files
         await promoted.run_maintenance(

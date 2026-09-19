@@ -677,7 +677,7 @@ def test_configuration_rejects_duplicates_overlaps_own_data_and_symlink_paths(tm
     for config in (
         {"a": directory_setting(root), "b": directory_setting(root, enabled=False)},
         {"a": directory_setting(root, recursive=True), "b": directory_setting(child)},
-        {"a": directory_setting(manager.data_dir / "history" / "assets")},
+        {"a": directory_setting(manager.data_dir / "images" / "assets")},
         {"a": directory_setting(manager.data_dir.parent, recursive=True)},
         {"a": directory_setting("/")},
         {"a": directory_setting("relative")},
