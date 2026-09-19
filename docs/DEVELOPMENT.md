@@ -12,7 +12,7 @@
 
 官方资料、与 NAI2API 的差异和待验证项见 [NovelAI 官方接口核对](NOVELAI_API_REVIEW.md)。
 
-ComfyUI 架构、工作流绑定、任务恢复与范围见 [ComfyUI 接入](COMFYUI_IMPLEMENTATION.md)。`backend/providers/comfyui/client.py` 负责原生协议，`backend/providers/comfyui/workflows.py` 负责执行图和绑定，`backend/providers/comfyui/jobs.py` 保存修订/任务/临时文件，`backend/providers/comfyui/runtime.py` 接入现有生成与图库流程。运行中任务不受浏览器连接生命周期影响。
+ComfyUI 架构、工作流绑定、任务恢复与范围见 [ComfyUI 接入](COMFYUI_IMPLEMENTATION.md)。`backend/providers/comfyui/client.py` 负责原生协议，`backend/providers/comfyui/workflows.py` 负责执行图和绑定，`backend/providers/comfyui/job_store.py` 保存修订/任务/临时文件，`backend/generation/comfyui_runtime.py` 接入现有生成与图库流程。运行中任务不受浏览器连接生命周期影响。
 
 ## 当前开发版本与正式基线
 
@@ -76,11 +76,11 @@ data/plugin_data/astrbot_plugin_image_studio/backups/
 
 ## 后续开发版本
 
-ComfyUI 提示词解析声明位于 `backend/metadata/rules/comfyui_nodes.json`；共用的节点控件布局、读取字段、种子范围及特殊值契约集中在 `backend/comfyui/rules/node_adapters.json`，记录源码来源和验证约束，不再在同步器中维护另一份控件顺序。共用目录指纹也参与解析缓存失效。读取许可与写回许可分开，未知布局不因能读出一个值就获得写入权限。
+ComfyUI 两份内置规则集中在 `backend/comfyui/rules/`：`prompt_analysis.json` 描述提示词分析语义，`node_adapters.json` 提供节点控件布局、读取字段、种子范围及特殊值契约。展示节点字段以节点目录为唯一来源。解析指纹仅覆盖读取所需规则，执行约束和源码说明变动不再让解析缓存失效；切换到这一指纹方案时已有解析缓存会按当前规则正常刷新一次。读取许可与写回许可分开，用户规则文件名与保存位置不变。
 
 用户声明保存在插件数据目录的 `comfyui_parser_rules.json`（`version: 1` 与 `rules` 数组）。规则只允许有限文本操作，不接受执行代码、正反向标签或未知用途，也不能修改内置控件或种子策略。工作流范围同时绑定工作流结构和节点；同类节点范围绑定端口签名及非选中控制项。每个匹配位置保留一条声明，不维护不同控制项组合的规则矩阵。
 
-`node_rules.py` 负责规范化、端口核验和不可变规则集；使用 ContextVar 在每次仓储操作及 worker 线程中固定规则快照，不依赖全局可变用户配置。规则保存原子写入且检查请求 revision；同解析器版本的不同规则指纹也会使缓存过期。详情即时投影、后台维护持久化派生数据，不改写原图或人工覆盖。新增内置规则需提供来源依据与回归样例，不能仅根据一次显示值猜测复杂节点逻辑。
+`metadata/comfyui/user_rules.py` 负责规范化、端口核验和不可变规则集；使用 ContextVar 在每次仓储操作及 worker 线程中固定规则快照，不依赖全局可变用户配置。规则保存原子写入且检查请求 revision；同解析器版本的不同规则指纹也会使缓存过期。详情即时投影、后台维护持久化派生数据，不改写原图或人工覆盖。新增内置规则需提供来源依据与回归样例，不能仅根据一次显示值猜测复杂节点逻辑。
 
 1. 当前 `1.4.0-dev.1` 的存储优化从正式 v3 升级至 4-dev.1，不修改已发布结构的版本含义。
 2. 普通 UI、指令或 Provider 修改不单独提高数据库修订；结构改变需要明确的新开发修订及受控迁移。

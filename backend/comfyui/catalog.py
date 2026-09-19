@@ -16,11 +16,55 @@ CATALOG_PATH = Path(__file__).with_name("rules") / "node_adapters.json"
 _RAW = CATALOG_PATH.read_bytes()
 _CATALOG = json.loads(_RAW)
 _NODES = _CATALOG["nodes"]
+ANALYSIS_PATH = CATALOG_PATH.with_name("prompt_analysis.json")
+_ANALYSIS = json.loads(ANALYSIS_PATH.read_text(encoding="utf-8"))
 
 
 def catalog_fingerprint() -> str:
-    """Invalidate parser caches when any packaged adapter fact changes."""
+    """Full packaged source identity for diagnostics, not parser invalidation."""
     return hashlib.sha256(_RAW).hexdigest()
+
+
+def analysis_catalog() -> dict[str, Any]:
+    """Resolve parser semantics from one authority for shared node facts."""
+    catalog = copy.deepcopy(_ANALYSIS)
+    catalog["widgets"] = metadata_widget_catalog()
+    for kind, rule in catalog.get("observers", {}).items():
+        display = _NODES.get(kind, {}).get("display", {})
+        if not display.get("input") or not display.get("api_field"):
+            raise ValueError(f"显示节点 {kind} 缺少共用节点声明")
+        if set(rule) - {"widget_index"}:
+            raise ValueError(f"显示节点 {kind} 的读取字段必须来自共用节点声明")
+        rule.update(input=display["input"], api_field=display["api_field"])
+    return catalog
+
+
+def _fingerprint(value: Any) -> str:
+    raw = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def analysis_fingerprint() -> str:
+    """Only fields read by the metadata parser invalidate its cached result."""
+    return _fingerprint(analysis_catalog())
+
+
+def execution_fingerprint() -> str:
+    """Keep execution/write contracts separate from prompt-flow semantics."""
+    return _fingerprint(
+        {
+            kind: {
+                key: value
+                for key, value in adapter.items()
+                if key in {"layouts", "seed", "display", "frontend_inputs"}
+            }
+            for kind, adapter in _NODES.items()
+            if any(
+                key in adapter
+                for key in ("layouts", "seed", "display", "frontend_inputs")
+            )
+        }
+    )
 
 
 def node_adapter(kind: str) -> dict[str, Any]:

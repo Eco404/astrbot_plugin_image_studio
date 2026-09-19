@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "text_sources": {
+    "TextInput_": {"fields": ["text", "value"], "output_port": 0},
+    "TextInput": {"fields": ["text", "value"], "output_port": 0},
+    "String": {"fields": ["text", "value"], "output_port": 0},
+    "PrimitiveString": {"fields": ["text", "value"], "output_port": 0}
+  },
+  "concatenators": {
+    "Text Concatenate": {"input_prefix": "text_", "delimiter_field": "delimiter"},
+    "TextConcatenate": {"input_prefix": "text_", "delimiter_field": "delimiter"}
+  },
+  "observers": {
+    "easy showAnything": {"widget_index": null}
+  },
+  "text_encoders": {
+    "CLIPTextEncode": {"fields": ["text"], "operation": "encode"},
+    "CLIPTextEncodeSDXL": {"fields": ["text_g", "text_l"], "operation": "encode_sdxl"},
+    "CLIPTextEncodeSDXLRefiner": {"fields": ["text"], "operation": "encode"}
+  },
+  "text_fields": {
+    "CLIPTextEncode": ["text"],
+    "CLIPTextEncodeSDXL": ["text_g", "text_l"],
+    "CLIPTextEncodeSDXLRefiner": ["text"],
+    "TextInput_": ["text"],
+    "TextInput": ["text"],
+    "String": ["text", "value"],
+    "PrimitiveString": ["value", "text"],
+    "Text Concatenate": ["text_a", "text_b", "text_c", "text_d"],
+    "TextConcatenate": ["text_a", "text_b", "text_c", "text_d"]
+  },
+  "condition_nodes": {
+    "ConditioningCombine": {"operation": "combine", "inputs": ["conditioning_1", "conditioning_2"]},
+    "ConditioningConcat": {"operation": "concat", "inputs": ["conditioning_to", "conditioning_from"]},
+    "ConditioningAverage": {"operation": "average", "inputs": ["conditioning_to", "conditioning_from"]},
+    "ConditioningSetArea": {"operation": "set_area", "inputs": ["conditioning"]},
+    "ConditioningSetAreaPercentage": {"operation": "set_area_percentage", "inputs": ["conditioning"]},
+    "ConditioningSetMask": {"operation": "set_mask", "inputs": ["conditioning"]},
+    "ConditioningSetTimestepRange": {"operation": "set_timestep_range", "inputs": ["conditioning"]},
+    "ConditioningSetAreaStrength": {"operation": "set_area_strength", "inputs": ["conditioning"]},
+    "ConditioningZeroOut": {"operation": "zero_out", "inputs": ["conditioning"]}
+  },
+  "save_types": ["SaveImage", "SaveAnimatedWEBP", "SaveAnimatedPNG", "SaveImageWebsocket"],
+  "sampler_types": ["KSampler", "KSamplerAdvanced", "FaceDetailer", "FaceDetailerPipe", "DetailerForEach"],
+  "detail_types": ["FaceDetailer", "FaceDetailerPipe", "DetailerForEach"]
+}

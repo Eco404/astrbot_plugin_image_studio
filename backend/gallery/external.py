@@ -21,7 +21,7 @@ from .timestamps import (
     nai_filename_timestamp,
 )
 from ..metadata.parser import MAX_IMAGE_BYTES
-from ..metadata.node_rules import load_rules
+from ..metadata.comfyui.user_rules import load_rules
 
 MAX_SIDECAR_BYTES = 1024 * 1024
 MAX_SIDECAR_NODES = 4096

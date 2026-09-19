@@ -65,6 +65,8 @@ python scripts/verify.py --backend --webui comfy_workspace --browser chromium --
 
 `--webui` 接受去掉 `webui_` 和 `.cjs` 的场景名，也接受完整文件名。多次传入同一场景只执行一次。
 
+场景发现递归扫描 `tests/webui/`，子目录中仍使用同样的短名称；重名场景会报错，避免悄悄漏跑。共享路径集中在 `tests/support/webui_paths.cjs`，新增场景应使用该辅助模块而不是假定固定目录深度。
+
 `--list-webui` 中的浏览器标记：
 
 | 标记 | 行为 |
@@ -74,7 +76,9 @@ python scripts/verify.py --backend --webui comfy_workspace --browser chromium --
 | `native-matrix` | 既有脚本内含固定的多浏览器矩阵，请省略 `--browser`；脚本会拒绝无法兑现的浏览器覆盖 |
 | `node` | 无需浏览器的 JavaScript 测试，例如哈希逻辑 |
 
-浏览器覆盖通过现有脚本的 `STUDIO_BROWSER`、`STUDIO_BROWSERS` 或 `STUDIO_ENGINES` 传递，不会把 Chromium 运行伪装成 WebKit。窗口尺寸与明暗主题仍由每个场景自行定义。部分较早场景可能需要本地样例图片或包含已经过时的界面断言；它们不会因此被算作通过，失败时应修正场景或检查产品行为。
+浏览器覆盖通过现有脚本的 `STUDIO_BROWSER`、`STUDIO_BROWSERS` 或 `STUDIO_ENGINES` 传递，不会把 Chromium 运行伪装成 WebKit。窗口尺寸与明暗主题仍由每个场景自行定义。较早场景的界面断言需要随产品行为维护，失败不能直接视为通过。
+
+图片元数据回归使用 `tests/fixtures/image_metadata.py` 生成最小合成样例，经 `tests/support/webui_fixtures.cjs` 提供给浏览器；NovelAI、ComfyUI、A1111 与 WebP 导入分支不再因本地 `data/image/` 缺少真实图片而跳过。私人图库样本仅用于另行授权的额外验证，不进入仓库或安装包。后端复用 ComfyUI 运行环境和图库图片生成器分别位于 `tests/support/comfy_runtime.py`、`gallery_images.py`，无需从其他测试文件导入这些公共夹具。
 
 ## 隔离、超时和结果
 
@@ -92,13 +96,15 @@ python scripts/verify.py --webui comfy_provider --browser webkit --timeout 900 -
 
 如只需单项 Python 回归，仍可以直接运行：
 
+后端测试按 `comfyui/`、`gallery/`、`providers/`、`storage/`、`config/`、`integration/`、`tooling/` 分组；测试文件名和参数化用例保持一致。Python 共享路径由 `tests/support/paths.py` 提供，移动测试不改变插件根目录定位。
+
 ```bash
 studio_repo="$PWD"
 studio_test_workdir="$(mktemp -d)"
 (
   cd "$studio_test_workdir"
   PYTHONPATH="$(dirname "$studio_repo"):${ASTRBOT_ROOT:-$(dirname "$studio_repo")/AstrBot}" \
-    python -m pytest -q "$studio_repo/tests/backend/test_capability_search_tool.py"
+    python -m pytest -q "$studio_repo/tests/backend/integration/test_capability_search_tool.py"
 )
 ```
 

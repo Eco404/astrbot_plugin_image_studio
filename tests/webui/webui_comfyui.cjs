@@ -84,11 +84,13 @@ async function chooseFormat(frame, inner, value) {
 
 async function verifyStages(scope, name) {
   const container = scope.locator(".comfy-workflow-info").first(); await container.waitFor();
-  assert.equal(await container.locator("[data-comfy-stage]").count(), 2, `${name}: both samplers must be represented`);
   await container.locator(":scope > summary").click();
+  await container.locator("[data-comfy-stage]").first().waitFor({ state: "attached" });
+  assert.equal(await container.locator("[data-comfy-stage]").count(), 2, `${name}: both samplers must be represented`);
   for (const [node, steps] of [["7", "28"], ["9", "18"]]) {
     const direct = container.locator(`[data-comfy-stage="${node}"]`);
     await direct.locator(":scope > summary").click();
+    await direct.locator(".detail-parameter-grid").waitFor();
     const body = await direct.textContent();
     assert.match(body, new RegExp(steps)); assert.match(body, /mountain lake in daylight/); assert.match(body, /soft clouds and calm reflections/);
     await direct.locator(":scope > summary").click();
@@ -156,6 +158,8 @@ async function verifyStages(scope, name) {
       await frame.locator("#gallerySearch").fill(fixture.model); await frame.locator("#gallerySearch").press("Tab");
       await frame.locator(`[data-gallery-id="${first.id}"]`).waitFor();
       await frame.locator(`[data-gallery-id="${first.id}"] .gallery-info`).click();
+      // Detail metadata is intentionally folded and hydrated only on expansion.
+      await frame.locator("#drawerBody .generated-parameters > summary").click();
       await frame.locator("#drawerBody .comfy-summary-status").first().waitFor();
       assert.equal(await inner.locator("#drawerBody").evaluate((body) => body.lastElementChild?.matches(".detail-warnings") && !!body.lastElementChild.previousElementSibling?.querySelector("[data-detail-references]")), true, "warnings must follow the reference section at the end of the scrollable details");
       assert.equal(await frame.locator("#drawerBody .detail-warnings").count(), 1);

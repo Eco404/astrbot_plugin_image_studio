@@ -11,7 +11,7 @@ from typing import Any
 from ..media.files import (
     _is_within,
 )
-from ..metadata.node_rules import get_rules, load_rules, use_rules
+from ..metadata.comfyui.user_rules import get_rules, load_rules, use_rules
 from .context import GalleryContext
 from .projection import (
     _load_json,

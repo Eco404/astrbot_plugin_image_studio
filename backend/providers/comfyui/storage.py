@@ -67,7 +67,7 @@ def compact_outputs(connection, job_id, outputs):
     for index, item in enumerate(value):
         effective = item.get("effective_parameters") or {}
         if isinstance(effective.get("_comfyui"), dict):
-            # Decoding also accepts already compact records during migrations.
+            # Rewriting a task also accepts already compact output snapshots.
             snapshot = load_payload(connection, effective["_comfyui"])
             effective["_comfyui"] = store_payload(
                 connection,
@@ -86,58 +86,3 @@ def expand_outputs(connection, outputs):
         if isinstance(effective.get("_comfyui"), dict):
             effective["_comfyui"] = load_payload(connection, effective["_comfyui"])
     return outputs
-
-
-def migrate_comfy_storage(connection):
-    """Called inside the schema migration transaction; never touches image files."""
-    revision_configs = {}
-    for row in connection.execute(
-        "SELECT id,config_json FROM comfy_workflow_revisions"
-    ).fetchall():
-        revision_id, encoded = row
-        config = load_payload(connection, json.loads(encoded))
-        revision_configs[revision_id] = config
-        marker = store_payload(
-            connection,
-            "comfy_workflow_revisions",
-            revision_id,
-            "config",
-            config,
-            kind="workflow",
-        )
-        connection.execute(
-            "UPDATE comfy_workflow_revisions SET config_json=? WHERE id=?",
-            (dumps(marker), revision_id),
-        )
-    for row in connection.execute(
-        "SELECT id,revision_id,request_json,input_refs_json,output_refs_json,result_json FROM comfy_jobs"
-    ).fetchall():
-        job_id, revision_id, request_json, input_json, output_json, result_json = row
-        original_request = json.loads(request_json)
-        model = original_request.get("model")
-        if isinstance(model, dict) and "comfyui" in model:
-            if revision_id not in revision_configs or dumps(model["comfyui"]) != dumps(
-                revision_configs[revision_id]
-            ):
-                raise ValueError(
-                    f"ComfyUI 任务 {job_id} 的工作流快照与修订不一致，已中止存储迁移；原始数据与备份保持完整"
-                )
-        request = compact_request(original_request)
-        references = json.loads(input_json)
-        result = compact_result(connection, job_id, json.loads(result_json))
-        outputs = compact_outputs(connection, job_id, json.loads(output_json))
-        connection.execute(
-            "UPDATE comfy_jobs SET request_json=?,output_refs_json=?,result_json=?,"
-            "parent_job_id=?,temporary=?,model_name=?,queue_dismissed=?,request_fingerprint=? WHERE id=?",
-            (
-                dumps(request),
-                dumps(outputs),
-                dumps(result),
-                str(request.get("parent_job_id") or ""),
-                int(bool(request.get("temporary"))),
-                str((request.get("model") or {}).get("name") or ""),
-                int(result.get("queue_dismissed") is True),
-                request_fingerprint(request, references),
-                job_id,
-            ),
-        )

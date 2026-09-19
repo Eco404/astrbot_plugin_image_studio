@@ -608,8 +608,8 @@ class ImageGenerationService:
     ) -> dict[str, Any]:
         """Return a reproducible draft and stage retained references when available."""
 
-        from ..metadata.exchange import export_parameters, resolve_parameters
-        from ..metadata.node_rules import load_rules, use_rules
+        from ..parameters.exchange import export_parameters, resolve_parameters
+        from ..metadata.comfyui.user_rules import load_rules, use_rules
         from ..providers.comfyui.workflows import migrate_fixed_outputs
 
         detail = await self.store.generation_image_context(generation_id, image_id)

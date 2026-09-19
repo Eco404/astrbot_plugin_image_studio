@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const playwright = require(process.env.STUDIO_PLAYWRIGHT || "playwright");
-const root = path.resolve(__dirname, "../../pages/image-studio");
+const root = require("../support/webui_paths.cjs").frontend;
 const css = ["app.css", "library.css"].map(file => fs.readFileSync(path.join(root, file), "utf8")).join("\n");
 const engines = process.env.STUDIO_BROWSER ? [process.env.STUDIO_BROWSER] : ["chromium", "webkit"];
 

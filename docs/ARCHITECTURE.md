@@ -23,20 +23,31 @@ backend/
     capabilities.py             完整能力载荷组装
   generation/service.py         生图校验、批次、并发、结果登记与复现
   generation/concurrency.py     服务商、模型与官方账号共享限流
+  generation/comfyui_runtime.py  ComfyUI 与生成服务、图库、可恢复任务的协调
   comfyui/
-    catalog.py / rules/         共用节点身份、控件布局、种子契约与来源依据
+    catalog.py                  节点事实、解析/执行指纹及语义目录组装
+    rules/node_adapters.json    控件布局、种子契约与来源依据
+    rules/prompt_analysis.json  提示词流向、条件处理与成图节点语义
   providers/
-    executor.py                 通用服务商调度及 HTTP 适配
+    executor.py                 服务商调度和长期客户端实例
+    errors.py / http.py         共用错误、HTTP 校验及图片响应读取
+    discovery.py                模型发现与能力提取
+    openai_images.py / gemini.py OpenAI / Gemini 图片协议
+    nai_direct.py / custom_json.py NAI 第三方及自定义请求协议
     comfyui/
       client.py                 ComfyUI HTTP/WebSocket 协议
       workflows.py              执行图规范化、参数绑定、执行计划
-      jobs.py                   任务/修订持久化与任务管理
-      runtime.py                生图服务与可恢复任务的协调
+      job_store.py              任务/修订事务、引用、归档及清理决策
+      job_manager.py            异步任务生命周期、恢复与关闭
+      job_files.py              文件校验、共享图片写入及旧缓存操作
+      job_types.py              任务状态、期限和快照校验
+      storage.py                当前任务正文编码与还原
       imports.py                图片/JSON 导入结果适配
       ui_sync.py                仅同步明确写入的界面控件，兼容位置与具名值
       global_seed.py            已知全局种子提交钩子的映射与回写核验
       output_metadata.py        运行结果回写核验及 PNG 工作流元数据修正
     novelai/
+      client.py                 官方生成/额度请求、Vibe 缓存与编码锁
       protocol.py               官方接口请求/响应处理
       catalog.py                模型能力目录
       inputs.py                 高级输入处理
@@ -50,6 +61,7 @@ backend/
     assets.py                   资产、引用和临时保护
     external_records.py         外部图库索引与权限校验
     metadata_records.py         元数据缓存及回填
+    storage.py                  当前图库正文编码与轻量投影
     maintenance.py              配额、清理和健康维护
     projection.py               参数投影和检索字段转换
     errors.py / constants.py    存储错误类型和共享规则
@@ -60,27 +72,42 @@ backend/
     common.py / readers.py      共用解码、时间识别和图片字段读取
     novelai.py                  NovelAI 字段及隐写数据
     stable_diffusion.py         SD 参数文本
-    comfyui*.py                 展示用工作流分析、候选提示词与去重
-    node_rules.py / rules/      内置文本节点声明、用户绑定及规则指纹
-    exchange.py                 参数复制、导入与复现映射
+    comfyui/
+      parser.py                 工作流遍历与生成参数提取
+      graph.py                  从界面图读取已知控件与连线
+      candidates.py / evidence.py 提示词候选、显示快照及证据核验
+      user_rules.py             手动文本流声明、约束与规则指纹
+  parameters/exchange.py        参数复制、导入与复现草稿映射
   media/                        图片格式/编码/缩略图/文件名及文件辅助函数
   database/schema.py            数据库正式/开发版本和迁移
   database/payloads.py          共享压缩正文、owner 引用与垃圾回收
   database/maintenance.py       完整磁盘统计、备份轮换与受控空间回收
+  database/migrations/          固定版本数据转换，不依赖当前业务仓储
   ui/                           浏览器主题、图库偏好的传输格式
 pages/image-studio/
   app.js                       页面启动、生图与图库/详情协调
-  library.js                   图库操作和详情参数展示
-  components/                  通用展示辅助与弹窗生命周期
-  settings/controller.js       配置草稿、模型/服务商编辑和保存流程
+  components/                  通用展示、平衡布局算法与弹窗生命周期
+  settings/controller.js       配置草稿、参数行为编辑、设置布局及保存流程
+  settings/external-sources.js 外部来源配置
+  gallery/controller.js       图库操作和详情参数展示
   gallery/imports.js           导入队列、图组编辑和快照缓存
   gallery/metadata*.js         浏览器图片元数据读取和参数展示
-  node-rules.js / .css         手动文本节点绑定、预览与规则管理
+  comfyui/controls.js / .css   工作流配置与编辑
+  comfyui/node-rules.js / .css 手动文本节点绑定、预览与规则管理
+  novelai/controls.js / .css   官方参考图、角色与重绘输入
   vendor/                      随包附许可证的第三方静态资源
 tests/
-  backend/                     Python 业务与安装包回归
+  backend/
+    comfyui/                   工作流解析、执行与任务恢复
+    gallery/                   图库、导入与外部来源
+    providers/                 Provider 协议与高级输入
+    storage/                   数据库、正文与存储维护
+    config/                    配置、参数行为与默认值
+    integration/               指令、工具及跨模块生成流程
+    tooling/                   安装包与验证入口
   webui/                       浏览器场景
   support/                     隔离服务和数据库升级样例
+  fixtures/                    可重复生成的最小图片元数据样例
 scripts/                       验证入口和发布包构建
 ```
 
@@ -94,11 +121,17 @@ scripts/                       验证入口和发布包构建
 
 `backend/` 子包的 `__init__.py` 保持轻量。内部调用使用明确的相对导入；测试引用相应的新模块，避免根目录转发层和模块别名掩盖循环依赖。
 
-`backend/comfyui/` 的声明不依赖 Provider 执行或图库解析器。读取元数据使用明确的读取字段，写回界面使用经过验证的布局和约束，二者共用来源而不共用写入权限。用户文本流向规则不获得控件写入或种子执行权限。
+`backend/comfyui/` 的声明不依赖 Provider 执行或图库解析器。两份内置规则集中在该目录，显示节点的输入与缓存字段只在 `node_adapters.json` 声明，解析语义引用它。读取元数据使用明确的读取字段，写回界面使用经过验证的布局和约束，用户文本规则不获得控件写入或种子执行权限。解析指纹只覆盖实际读取的规则，种子执行约束与源码说明等无关变动不会使解析缓存失效。
+
+Provider 调度通过显式适配函数和长期客户端组合；共用 HTTP/图片读取与专属协议分开。NovelAI Vibe 缓存、失败缓存和并发锁随客户端存活，不在每次请求重建。ComfyUI 文件组件不打开数据库、也不决定资源是否过期；任务仓储持有事务和引用决策，异步任务管理器只负责任务生命周期。
 
 ## 页面状态
 
 前端保留原生 JavaScript 模块工厂与既有加载顺序。通用弹窗拥有自己的打开/关闭与退出动画状态；导入模块拥有上传队列、编辑草稿和受容量限制的快照缓存；设置模块拥有配置草稿、已保存基线和保存/重读队列。它们通过明确回调访问导航或当前选中图片，不持有整个应用状态。
+
+本轮仍加载 29 个脚本和 12 份样式。参数行为编辑及设置布局由设置模块负责；详情与设置共享平衡布局算法，各自管理观察器与调度。图片缓存和手势交接的状态归属保持不变。
+
+自有静态资源使用 `1.4.0-dev.1-layout.1` 缓存标识，避免升级后旧脚本与新目录混用；插件版本仍为 `1.4.0-dev.1`。
 
 图库列表、详情导航和图片缓存仍由 `app.js` 协调，既有手势、模糊背景与媒体复用组件沿用原边界。此处保留紧密相关的状态以避免跨组件转交期间重置缓存或丢失手势。后续可依据实际新增功能继续提取，不以文件行数作为唯一拆分目标。
 
@@ -118,13 +151,15 @@ scripts/                       验证入口和发布包构建
 
 1.3.x 的数据库正式基线为 v3，已发布迁移保持不变。当前 1.4.0 存储开发使用 4-dev.1：任务、图库和元数据仓储通过 `database/payloads.py` 共享不可变正文，各自持有引用；`gallery/storage.py` 维护轻量投影与按需展开，`providers/comfyui/storage.py` 管理任务编码。开发结构和正文迁移在同一备份保护的事务内提交；细节见 [开发与发布维护](DEVELOPMENT.md)及[存储生命周期](STORAGE_LIFECYCLE.md)。
 
+`database/migrations/v4_storage.py` 固定旧数据到 4-dev.1 的转换契约，不调用日常业务仓储、当前解析器或可变投影代码。版本转换中相似的编码代码属于有意冻结的历史契约，不能随当前业务重构一起改写。本轮目录调整不改变数据库结构和版本。
+
 `GenerationConcurrency` 由主生成服务持有并随当前设置调整；ComfyUI 执行视图通过构造参数借用同一组件。历史任务和临时工作流不会用快照重新覆盖当前并发上限，异常和取消仍释放已占用的所有层级。NovelAI 官方相同账号继续共用串行限制。
 
 元数据中的 ComfyUI 图分析用于展示和导入参数识别，执行图校验与绑定仍在 `providers/comfyui/workflows.py`。两者保留独立语义，不能把展示用的近似图直接视为可执行工作流。
 
 解析器 10 的显示快照匹配从其关联输出端口向下游追踪，只纳入通向所选保存节点的连线与节点类型，允许该输出上游的提示词来源变化。前端继续校验观察节点与快照来源，遇到歧义不自动选择。普通文本候选和保存输出的匹配仍使用整个保存分支指纹；元数据版本回填更新匹配信息并保留人工覆盖，不改变数据库结构或执行工作流。
 
-解析器 11 将显示快照证据识别放在条件摘要之前。`comfyui_evidence.py` 按采样阶段与正反向分别汇总文本，只补全已知编码器直接读取的未解析输入；观察节点、文本输入、已知条件链及采样器到所选保存节点的 API/UI 连线需一致且启用。只接纳唯一有效工作流回写，不将候选注入通用静态求值器；未知转换、API 备用值和冲突快照保持手动。直接采用的状态为 `snapshot`，组合或不同阶段保留 `summary`／`partial`，`prompt_sources`／`negative_prompt_sources` 保存使用位置与观察来源，`freshness` 仍为 `unverified`。清零条件不贡献文本，也不标记自动采用；同一编码器在不同链路中的证据独立核验。
+解析器 11 将显示快照证据识别放在条件摘要之前。`metadata/comfyui/evidence.py` 按采样阶段与正反向分别汇总文本，只补全已知编码器直接读取的未解析输入；观察节点、文本输入、已知条件链及采样器到所选保存节点的 API/UI 连线需一致且启用。只接纳唯一有效工作流回写，不将候选注入通用静态求值器；未知转换、API 备用值和冲突快照保持手动。直接采用的状态为 `snapshot`，组合或不同阶段保留 `summary`／`partial`，`prompt_sources`／`negative_prompt_sources` 保存使用位置与观察来源，`freshness` 仍为 `unverified`。清零条件不贡献文本，也不标记自动采用；同一编码器在不同链路中的证据独立核验。
 
 解析器 12 将节点字段、控件顺序、已知条件组合和观察节点声明集中到内置 JSON，图遍历、证据核验、冲突与深度限制继续在代码中执行。用户绑定只支持有限的字面值、原样传递、明确拼接和显示回写；直接读取的结果为 `declared`，`prompt_sources` 保留规则身份及用户声明来源。显示快照可以经过已声明的有限文本关系抵达编码器，但未经绑定的节点仍中断自动识别。
 

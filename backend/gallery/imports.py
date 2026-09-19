@@ -201,7 +201,7 @@ class ImportRepository:
 
     @staticmethod
     def import_edit_revision(record: sqlite3.Row, rows: list[sqlite3.Row]) -> str:
-        from ..metadata.node_rules import get_rules
+        from ..metadata.comfyui.user_rules import get_rules
 
         # Include stored JSON, not its display projection, so concurrent edits,
         # metadata repairs, appends and deletions cannot silently replace changes.
@@ -250,7 +250,7 @@ class ImportRepository:
 
     @staticmethod
     def import_edit_item_revision(record: sqlite3.Row, row: sqlite3.Row) -> str:
-        from ..metadata.node_rules import get_rules
+        from ..metadata.comfyui.user_rules import get_rules
 
         snapshot = [
             get_rules().fingerprint,

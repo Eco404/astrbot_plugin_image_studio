@@ -24,5 +24,27 @@
   function setCommandLabel(id, label) { const button = $(id); const span = button.querySelector("span"); if (span) span.textContent = label; else button.textContent = label; button.setAttribute("aria-label", label); button.dataset.tooltip = label; button.dataset.tooltipOverflow = span ? ":scope > span:last-child" : ""; }
 
 
-  window.ImageStudioPresentation = { ENGINES, own, serial, icon, renderIcons, modeLabel, engineLabel, engineOf, setCommandLabel };
+  // Shared geometry only; each view owns observers and scheduled layout work.
+  function positionBalancedGrid(grid, columnsProperty) {
+    if (!grid?.isConnected || !grid.getClientRects().length || !grid.clientWidth) return;
+    const columns = Number(getComputedStyle(grid).getPropertyValue(columnsProperty)) === 1 ? 1 : 2;
+    const rows = Array.from(grid.children);
+    if (columns === 1) rows.forEach(row => { row.style.gridColumn = "1"; });
+    // Measure at the final column width, independently of opening transforms.
+    const sizes = rows.map(row => {
+      const style = getComputedStyle(row);
+      return Math.max(1, Math.ceil((parseFloat(style.height) || row.offsetHeight) + (parseFloat(style.marginBottom) || 0)));
+    });
+    const heights = [0, 0]; let column = 0;
+    rows.forEach((row, index) => {
+      const gridColumn = String(column + 1);
+      const gridRow = `${heights[column] + 1} / span ${sizes[index]}`;
+      if (row.style.gridColumn !== gridColumn) row.style.gridColumn = gridColumn;
+      if (row.style.gridRow !== gridRow) row.style.gridRow = gridRow;
+      heights[column] += sizes[index];
+      if (columns === 2 && heights[column] > heights[1 - column]) column = 1 - column;
+    });
+  }
+
+  window.ImageStudioPresentation = { ENGINES, own, serial, icon, renderIcons, modeLabel, engineLabel, engineOf, setCommandLabel, positionBalancedGrid };
 })();

@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { execFileSync } = require("node:child_process");
 const { chromium, webkit } = require(process.env.STUDIO_PLAYWRIGHT || "playwright");
-const root = path.resolve(__dirname, "../../pages/image-studio");
+const root = require("../support/webui_paths.cjs").frontend;
 const css = ["app.css", "library.css"].map(file => fs.readFileSync(path.join(root, file), "utf8")).join("\n");
 const python = process.env.STUDIO_PYTHON || "python3";
 const pixelReader = [

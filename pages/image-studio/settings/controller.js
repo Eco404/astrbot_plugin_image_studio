@@ -6,6 +6,7 @@
   window.ImageStudioSettings = function (hooks) {
     const { escape, apiGet, apiPost, showNotice, errorMessage, formatDate, formatBytes, setError, confirmAction, syncPageScrollLock, schemaParameterTitle, schemaParameterLabel, configuredReferenceLimit, referenceLimitForModel, effectiveModelParameters, modelParameterMatches, bootstrap, closeDetail, switchView, library } = hooks;
     const $ = id => document.getElementById(id);
+    const { icon, positionBalancedGrid } = window.ImageStudioPresentation;
     const state = { settings: null, selectedSettingsProviderId: "", selectedSettingsModelId: "", modelEditorTab: "model", editingToolParameter: "", editingToolDefaultChoices: [] };
     const els = Object.fromEntries(["addModelButton", "addProviderButton", "agentImageReturnMode", "agentPreviewMaxEdge", "agentPreviewQuality", "filter", "find", "flatMap", "historyEnabled", "historyMegabytes", "historyRecords", "length", "map", "modelForm", "newModelChoice", "newModelChoices", "parameterDialog", "providerForm", "push", "recordInvocationIdentity", "retainReferences", "runDeepMaintenanceButton", "runMaintenanceButton", "saveSettingsButton", "settingPageDefaultImageModel", "settingPageDefaultTextModel", "settingTool", "settingToolDefaultImageModel", "settingToolDefaultTextModel", "settingsError", "settingsModelList", "settingsProviderList", "some", "storageHealthAssets", "storageHealthCheckedAt", "storageHealthDuration", "storageHealthErrors", "storageHealthGenerations", "storageHealthLeases", "storageHealthSize", "storageHealthStatus", "toolParameterChoices", "toolParameterDefault", "toolParameterDefaultChoice", "toolParameterDefaultHint", "toolParameterDescription", "toolParameterExposed"].map(id => [id, $(id)]));
     const MODEL_DEFAULT_CHOICE = "__model_default__";
@@ -21,6 +22,57 @@
     let storageRetention = null;
     let novelaiModels = [];
     let gallerySortDraft = "created";
+    let settingsPanelFrame = 0;
+
+    function schemaPolicyButton(name) {
+      return `<button class="studio-icon-button parameter-copy" data-edit-schema-policy="${escape(name)}" type="button" aria-label="编辑 ${escape(name)} 的参数行为" data-tooltip="编辑参数行为">${icon("Settings2")}</button>`;
+    }
+
+    function editParameterPolicy(name, descriptor) {
+      const fields = [["webui_visible", "在生图面板显示"], ["record_in_history", "保存到请求记录"], ["refill_from_history", "复现时使用历史值"]];
+      const body = fields.map(([key, label]) => `<div class="toggle-row"><label for="schemaPolicy-${key}">${label}</label><label class="toggle-control"><input id="schemaPolicy-${key}" type="checkbox" ${descriptor[key] !== false ? "checked" : ""}><span aria-hidden="true"></span></label></div>`).join("");
+      const syncDependencies = (changedKey) => {
+        const visible = $("schemaPolicy-webui_visible");
+        const recorded = $("schemaPolicy-record_in_history");
+        const refill = $("schemaPolicy-refill_from_history");
+        if (changedKey === "refill_from_history" && refill.checked) {
+          visible.checked = true;
+          recorded.checked = true;
+        } else if (!visible.checked || !recorded.checked) refill.checked = false;
+      };
+      return library.openModal(`参数行为：${name}`, body, [{ label: "取消", action: () => false }, { label: "保存", primary: true, action: () => {
+        syncDependencies();
+        return Object.fromEntries(fields.map(([key]) => [key, $(`schemaPolicy-${key}`).checked]));
+      } }], { dismissOutside: false, onOpen: () => {
+        for (const [key] of fields) $(`schemaPolicy-${key}`).addEventListener("change", () => syncDependencies(key));
+        syncDependencies();
+      } });
+    }
+
+    function layoutSettingsPanels() {
+      cancelAnimationFrame(settingsPanelFrame); settingsPanelFrame = 0;
+      positionBalancedGrid($("settingsView").querySelector(".settings-layout"), "--settings-columns");
+    }
+
+    function scheduleSettingsPanelLayout() {
+      if (!settingsPanelFrame) settingsPanelFrame = requestAnimationFrame(layoutSettingsPanels);
+    }
+
+    function bindSettingsPanelLayout() {
+      const grid = $("settingsView").querySelector(".settings-layout");
+      grid.classList.add("is-masonry");
+      const observer = window.ResizeObserver ? new ResizeObserver(scheduleSettingsPanelLayout) : null;
+      const observeCards = () => {
+        observer?.disconnect(); observer?.observe(grid);
+        for (const card of grid.children) observer?.observe(card, { box: "border-box" });
+        scheduleSettingsPanelLayout();
+      };
+      observeCards();
+      // Rebind only when whole cards change; their content is covered by size observation.
+      new MutationObserver(observeCards).observe(grid, { childList: true });
+      window.addEventListener("resize", scheduleSettingsPanelLayout, { passive: true });
+      grid.addEventListener("toggle", scheduleSettingsPanelLayout, true);
+    }
 
     async function leaveSettings(view) {
       if (settingsNavigationPending) return;
@@ -365,7 +417,7 @@
     function renderSchemaDefault(name, descriptor) {
       const type = String(descriptor.type || "text").toLowerCase();
       const value = descriptor.default ?? "";
-      const label = `<div class="field-label-row">${schemaParameterLabel(name, descriptor)}${library.schemaPolicyButton(name)}</div>`;
+      const label = `<div class="field-label-row">${schemaParameterLabel(name, descriptor)}${schemaPolicyButton(name)}</div>`;
       const accessibleLabel = escape(schemaParameterTitle(name, descriptor));
       if ((type === "select" || type === "preset") && Array.isArray(descriptor.choices)) return `<div class="field">${label}<select aria-label="${accessibleLabel} 默认值" data-schema-default="${escape(name)}">${descriptor.choices.map((choice) => { const item = typeof choice === "object" ? choice : { value: choice, label: choice }; return `<option value="${escape(item.value)}" ${String(item.value) === String(value) ? "selected" : ""}>${escape(item.label || item.value)}</option>`; }).join("")}</select></div>`;
       if (type === "boolean" || type === "bool") return `<div class="field">${label}<label class="toggle-control"><input data-schema-default="${escape(name)}" aria-label="${accessibleLabel} 默认值" type="checkbox" ${value ? "checked" : ""} /><span aria-hidden="true"></span></label></div>`;
@@ -409,7 +461,7 @@
       els.modelForm.querySelectorAll("[data-edit-tool-parameter]").forEach((button) => button.addEventListener("click", () => openToolParameterDialog(button.dataset.editToolParameter)));
       els.modelForm.querySelectorAll("[data-edit-schema-policy]").forEach((button) => button.addEventListener("click", async () => {
         const name = button.dataset.editSchemaPolicy;
-        const policy = await library.editParameterPolicy(name, model.parameters[name]);
+        const policy = await editParameterPolicy(name, model.parameters[name]);
         if (!policy) return;
         Object.assign(model.parameters[name], policy);
         const raw = $("modelParametersSchema"); if (raw) raw.value = JSON.stringify(model.parameters, null, 2);
@@ -754,6 +806,7 @@
     function bind() {
       if (bound) return;
       bound = true;
+      bindSettingsPanelLayout();
       const bindGallerySort = () => {
         const select = $("gallerySort");
         if (!select || select.dataset.bound) return;
@@ -779,7 +832,7 @@
       $("parameterDialogCancel").addEventListener("click", closeToolParameterDialog); $("parameterDialogApply").addEventListener("click", applyToolParameterDialog); els.addProviderButton.addEventListener("click", () => void addProvider()); els.addModelButton.addEventListener("click", () => void addModel()); els.saveSettingsButton.addEventListener("click", () => void saveSettings());
     }
 
-    return { bind, loadSettings, loadStorageHealth, updateSettingsDirty, currentSettingsModel, renderModelEditor, prepareComfyWorkflowSettings, addComfyWorkflowDraft, closeToolParameterDialog, leaveSettings, settingsDirty,
+    return { bind, layoutSettingsPanels, loadSettings, loadStorageHealth, updateSettingsDirty, currentSettingsModel, renderModelEditor, prepareComfyWorkflowSettings, addComfyWorkflowDraft, closeToolParameterDialog, leaveSettings, settingsDirty,
       isSaving: () => settingsSaving,
       getSettings: () => state.settings,
       setNovelAIModels: models => { if (Array.isArray(models)) novelaiModels = models; },

@@ -4,7 +4,7 @@ const path = require("node:path");
 const vm = require("node:vm");
 const test = require("node:test");
 
-const source = fs.readFileSync(path.join(__dirname, "../../pages/image-studio/appearance.js"), "utf8");
+const source = fs.readFileSync(require("../support/webui_paths.cjs").pagePath("appearance.js"), "utf8");
 const key = "image-studio:appearance:v1";
 const plain = (value) => JSON.parse(JSON.stringify(value));
 const deferred = () => {

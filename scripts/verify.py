@@ -92,10 +92,17 @@ def positive_number(value: str) -> float:
 
 
 def suites() -> dict[str, Path]:
-    return {
-        path.stem.removeprefix("webui_"): path
-        for path in sorted((ROOT / "tests" / "webui").glob("webui_*.cjs"))
-    }
+    available: dict[str, Path] = {}
+    for path in sorted((ROOT / "tests" / "webui").rglob("webui_*.cjs")):
+        name = path.stem.removeprefix("webui_")
+        if name in available:
+            raise VerificationError(
+                f"Duplicate WebUI suite name: {name}: "
+                f"{available[name].relative_to(ROOT)} and {path.relative_to(ROOT)}. "
+                "Use distinct suite basenames to preserve existing short names."
+            )
+        available[name] = path
+    return available
 
 
 def browser_support(path: Path) -> str:

@@ -471,10 +471,12 @@ def ensure_release_schema(conn: sqlite3.Connection, *, backup_dir: Path) -> Path
                     conn.execute(statement)
             for statement in (*V4_MIGRATION_STATEMENTS, *PAYLOAD_TRIGGER_STATEMENTS):
                 conn.execute(statement)
-        # Repository codecs are also used for new writes; migration never edits
-        # image files and cannot delete task recovery resources.
-        from ..gallery.storage import migrate_gallery_storage
-        from ..providers.comfyui.storage import migrate_comfy_storage
+        # Versioned converters must not change with current repository codecs.
+        # They never edit image files or remove task recovery resources.
+        from .migrations.v4_storage import (
+            migrate_comfy_storage,
+            migrate_gallery_storage,
+        )
         from .payloads import gc_payloads
 
         migrate_comfy_storage(conn)

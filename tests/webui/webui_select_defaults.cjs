@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { chromium, webkit } = require(process.env.STUDIO_PLAYWRIGHT || "playwright");
 
-const root = path.resolve(__dirname, "../../pages/image-studio");
+const root = require("../support/webui_paths.cjs").frontend;
 const key = "image_studio.gallery.filter_defaults.v1";
 const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="stylesheet" href="/select.css"><link rel="stylesheet" href="/appearance.css">

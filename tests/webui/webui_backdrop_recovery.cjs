@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const path = require("node:path");
 const playwright = require(process.env.STUDIO_PLAYWRIGHT || "playwright");
 const requestedBrowser = process.env.STUDIO_BROWSER;
-const root = path.resolve(__dirname, "../../pages/image-studio");
+const root = require("../support/webui_paths.cjs").frontend;
 
 async function fixture(page, surface) {
   await page.setContent('<style>main{position:relative;width:160px;height:160px;isolation:isolate}img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}</style><main></main>');

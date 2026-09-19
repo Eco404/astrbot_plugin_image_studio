@@ -3,10 +3,9 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { execFileSync } = require("node:child_process");
+const { metadataImage } = require("../support/webui_fixtures.cjs");
 const { chromium } = require(process.env.STUDIO_PLAYWRIGHT || "playwright");
 const base = process.env.STUDIO_TEST_URL || "http://127.0.0.1:18765";
-const root = path.resolve(__dirname, "../..");
 const output = fs.mkdtempSync(path.join(os.tmpdir(), "image-studio-gallery-controls-"));
 
 async function choose(frame, selector, value) {
@@ -123,15 +122,12 @@ async function checkMenu(frame, expectedSelected = 1) {
       assert.equal(await frame.locator("#newModelChoice").inputValue(), "custom-model-id");
       assert.equal(await frame.locator("#newModelChoice").getAttribute("list"), null);
 
-      const sample = path.join(root, "data/image/149037466_p0.webp");
-      const checkWebpImport = process.env.STUDIO_SKIP_LOCAL_SAMPLE !== "1" && fs.existsSync(sample);
-      if (checkWebpImport) {
+      {
         await frame.locator('[data-view="import"]').click();
-        const buffer = execFileSync(process.env.STUDIO_PYTHON || "/home/coder/apps/miniconda3/envs/astrbot/bin/python", ["-c", "import sys,io; from PIL import Image,PngImagePlugin; image=Image.open(sys.argv[1]); metadata=PngImagePlugin.PngInfo(); [metadata.add_text(k,v) for k,v in image.info.items() if isinstance(v,str)]; metadata.add_text('BrowserFixture',sys.argv[2]); output=io.BytesIO(); image.save(output,format='PNG',pnginfo=metadata,exif=image.info.get('exif',b'')); sys.stdout.buffer.write(output.getvalue())", sample, `${path.basename(output)}-${test.width}-${test.theme}`], { maxBuffer: 32 * 1024 * 1024 });
-        await frame.locator("#importFiles").setInputFiles({ name: `converted-${test.width}.png`, mimeType: "image/png", buffer });
+        await frame.locator("#importFiles").setInputFiles(metadataImage("comfyui-webp", `${path.basename(output)}-${test.width}-${test.theme}`));
         await frame.locator("#confirmImportButton:not(:disabled)").waitFor();
         assert.equal(await frame.locator('[data-import-field="generation_engine"]').inputValue(), "comfyui");
-        assert.equal(await frame.locator('[data-import-field="model"]').inputValue(), "anima_baseV10.safetensors");
+        assert.equal(await frame.locator('[data-import-field="model"]').inputValue(), "synthetic-model.safetensors");
         assert.ok((await frame.locator(".import-card-status").innerText()).includes("已识别 ComfyUI"));
         await choose(frame, '[data-import-field="mode"]', "text2img");
         await frame.locator("#confirmImportButton").click();
@@ -140,7 +136,7 @@ async function checkMenu(frame, expectedSelected = 1) {
       const geometry = await frame.evaluate(() => ({ width: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth }));
       assert.ok(geometry.scroll <= geometry.width + 1, JSON.stringify(geometry));
       assert.deepEqual(errors, []);
-      console.log(`${test.width}-${test.theme}: stable gallery, masonry, themed controls and modal focus passed; WebP import ${checkWebpImport ? "passed" : "skipped"}`);
+      console.log(`${test.width}-${test.theme}: stable gallery, masonry, themed controls, modal focus and synthetic WebP import passed`);
       await page.close();
     }
     console.log(`Screenshots: ${output}`);

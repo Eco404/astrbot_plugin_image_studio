@@ -45,7 +45,7 @@ from .backend.models import (
     ReferenceImage,
 )
 from .backend.providers.executor import ProviderError, ProviderExecutor
-from .backend.providers.comfyui.runtime import ComfyRuntime
+from .backend.generation.comfyui_runtime import ComfyRuntime
 from .backend.generation.service import ImageGenerationService
 from .backend.gallery.store import GenerationStore
 from .backend.media.images import export_image_filename, image_data_url

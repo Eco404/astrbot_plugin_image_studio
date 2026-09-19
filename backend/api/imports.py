@@ -20,8 +20,13 @@ from ..gallery.errors import (
     ImportDuplicateError,
     ImportEditConflictError,
 )
-from ..metadata.exchange import export_parameters, resolve_parameters
-from ..metadata.node_rules import load_rules, make_rules, prepare_rule, use_rules
+from ..parameters.exchange import export_parameters, resolve_parameters
+from ..metadata.comfyui.user_rules import (
+    load_rules,
+    make_rules,
+    prepare_rule,
+    use_rules,
+)
 from ..metadata.parser import parse_metadata_fields
 from ..media.files import _atomic_write
 

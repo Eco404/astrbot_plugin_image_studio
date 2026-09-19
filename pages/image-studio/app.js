@@ -332,7 +332,7 @@
     refreshProviderQuota();
     library.syncFloatingBars();
     if (view === "gallery") void loadGallery();
-    if (view === "settings") { library.layoutSettingsPanels(); void loadSettings(); void loadStorageHealth(); }
+    if (view === "settings") { settings.layoutSettingsPanels(); void loadSettings(); void loadStorageHealth(); }
     externalSources.viewChanged();
     window.ImageStudioSelect?.refresh();
   }

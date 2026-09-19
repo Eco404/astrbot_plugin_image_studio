@@ -181,7 +181,7 @@ def project_import_metadata(
 ) -> dict[str, Any]:
     """Project a selected ComfyUI output without changing the shared asset metadata."""
 
-    from ..metadata.node_rules import get_rules
+    from ..metadata.comfyui.user_rules import get_rules
     from ..metadata.parser import PARSER_VERSION, parse_metadata_fields
 
     rules = get_rules()

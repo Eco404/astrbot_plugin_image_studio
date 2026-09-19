@@ -318,34 +318,3 @@ def refresh_gallery_projection(conn: sqlite3.Connection, generation_id: str) -> 
             generation_id,
         ),
     )
-
-
-def migrate_gallery_storage(conn: sqlite3.Connection) -> None:
-    """Migration shares the same codecs and projections as live mutations."""
-    # Invalid persisted bodies are not empty records. Abort the whole schema
-    # transaction instead of overwriting data that may need manual recovery.
-    for table, column in (
-        ("image_metadata", "metadata_json"),
-        ("generation_images", "supplemental_json"),
-        ("generations", "supplemental_json"),
-        ("generations", "parameters_json"),
-    ):
-        for (value,) in conn.execute(f"SELECT {column} FROM {table}"):
-            try:
-                parsed = json.loads(value)
-            except (ValueError, TypeError, RecursionError) as exc:
-                raise ValueError(
-                    f"{table}.{column} 包含无效 JSON，已停止存储迁移"
-                ) from exc
-            if not isinstance(parsed, dict):
-                raise ValueError(f"{table}.{column} 不是 JSON 对象，已停止存储迁移")
-    for row in conn.execute(
-        "SELECT asset_id,metadata_json FROM image_metadata"
-    ).fetchall():
-        compact = encode_metadata(conn, row[0], row[1])
-        conn.execute(
-            "UPDATE image_metadata SET metadata_json=? WHERE asset_id=?",
-            (_dump(compact), row[0]),
-        )
-    for row in conn.execute("SELECT id FROM generations").fetchall():
-        refresh_gallery_projection(conn, row[0])

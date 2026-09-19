@@ -5,7 +5,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const engines = require(process.env.STUDIO_PLAYWRIGHT || "playwright");
-const root = path.resolve(__dirname, "../../pages/image-studio");
+const root = require("../support/webui_paths.cjs").frontend;
 
 async function install(page, cold = false, navigationDelay = 0) {
   await page.evaluate(({ cold, navigationDelay }) => {

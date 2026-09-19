@@ -31,7 +31,7 @@ from ..media.images import (
     detect_mime_type,
     image_data_url,
 )
-from ..metadata.node_rules import get_rules, load_rules, use_rules
+from ..metadata.comfyui.user_rules import get_rules, load_rules, use_rules
 from ..models import (
     GeneratedImage,
     GenerationRequest,
