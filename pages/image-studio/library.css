@@ -86,6 +86,7 @@ html { scroll-padding-top: 112px; scroll-padding-bottom: calc(100px + env(safe-a
 .parameter-import-notice pre { max-height: 220px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 .gallery-card.is-favorite, .gallery-card.is-favorite:hover { box-shadow: var(--favorite-shadow); }
 .gallery-card { animation: none; }
+html[data-gallery-card-info="false"] #galleryGrid .gallery-info { display: none; }
 .gallery-image-wrap { aspect-ratio: 1; background: var(--surface); }
 .gallery-load-state { display: flex; align-items: center; gap: 10px; min-height: 36px; margin-bottom: 8px; color: var(--muted); font-size: 12px; }
 .gallery-load-state button { min-height: 32px; }

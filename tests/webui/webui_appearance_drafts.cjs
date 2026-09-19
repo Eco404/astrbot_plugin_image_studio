@@ -89,6 +89,24 @@ test("cross-tab saved settings update the baseline while preserving local drafts
   assert.equal(app.api.isDirty(), false);
 });
 
+test("gallery information visibility previews, discards and persists with appearance", async () => {
+  const app = mount({ initial: { preference: "light" } });
+  await app.initialize();
+  assert.equal(app.api.get().galleryCardInfo, true, "old preferences default to showing card information");
+  app.api.set({ galleryCardInfo: false });
+  assert.equal(app.root.dataset.galleryCardInfo, "false");
+  assert.equal(app.stored().galleryCardInfo, true, "preview must not save a draft");
+  app.api.discard();
+  assert.equal(app.root.dataset.galleryCardInfo, "true");
+  app.api.set({ galleryCardInfo: false });
+  await app.api.save();
+  const reopened = mount({ initial: app.stored() });
+  await reopened.initialize();
+  assert.equal(reopened.root.dataset.galleryCardInfo, "false");
+  reopened.api.set({ galleryCardInfo: "false" });
+  assert.equal(reopened.api.get().galleryCardInfo, true, "invalid values keep the safe default");
+});
+
 test("opaque iframe saves verify storage and retain edits made during the save", async () => {
   const post = deferred();
   let saved;

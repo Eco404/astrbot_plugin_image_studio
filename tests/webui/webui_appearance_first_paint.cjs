@@ -7,7 +7,7 @@ const playwright = require(process.env.STUDIO_PLAYWRIGHT || "playwright");
 const base = process.env.STUDIO_TEST_URL;
 if (!base) throw new Error("Set STUDIO_TEST_URL to an isolated WebUI harness.");
 
-const saved = { preference: "dark", accentHue: 345, accentSaturation: 65, accentLightness: 60, glassOpacity: .4 };
+const saved = { preference: "dark", accentHue: 345, accentSaturation: 65, accentLightness: 60, glassOpacity: .4, galleryCardInfo: true };
 const deferred = () => {
   let resolve;
   const promise = new Promise((done) => { resolve = done; });

@@ -70,6 +70,7 @@ def test_appearance_api_is_browser_owned_not_plugin_settings(tmp_path):
             "accentHue": 216,
             "accentSaturation": 27,
             "glassOpacity": 0.73,
+            "galleryCardInfo": False,
         }
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test"
@@ -113,6 +114,7 @@ def test_old_appearance_cookie_defaults_source_lightness():
     assert decode_appearance_cookie(encode_appearance_cookie(old)) == {
         **old,
         "accentLightness": 50,
+        "galleryCardInfo": True,
     }
 
 
@@ -134,3 +136,19 @@ def test_source_lightness_rejects_untrusted_values():
         assert normalize_appearance({"accentLightness": value}) == APPEARANCE_DEFAULTS
     assert normalize_appearance({"accentLightness": -1})["accentLightness"] == 0
     assert normalize_appearance({"accentLightness": 101})["accentLightness"] == 100
+
+
+@pytest.mark.parametrize("value", [None, "false", 0, 1, [], {}])
+def test_gallery_card_info_invalid_preferences_keep_default_visible(value):
+    assert normalize_appearance({"galleryCardInfo": value})["galleryCardInfo"] is True
+
+
+def test_gallery_card_info_can_be_hidden_and_restored_through_cookie():
+    hidden = {**APPEARANCE_DEFAULTS, "galleryCardInfo": False}
+    assert decode_appearance_cookie(encode_appearance_cookie(hidden)) == hidden
+    assert (
+        decode_appearance_cookie(encode_appearance_cookie(APPEARANCE_DEFAULTS))[
+            "galleryCardInfo"
+        ]
+        is True
+    )

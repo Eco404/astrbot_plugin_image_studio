@@ -14,6 +14,7 @@ APPEARANCE_DEFAULTS = {
     "accentSaturation": 38,
     "accentLightness": 50,
     "glassOpacity": 0.68,
+    "galleryCardInfo": True,
 }
 
 
@@ -22,6 +23,8 @@ def normalize_appearance(value: Any) -> dict[str, Any]:
     result = dict(APPEARANCE_DEFAULTS)
     if value.get("preference") in ("system", "light", "dark"):
         result["preference"] = value["preference"]
+    if isinstance(value.get("galleryCardInfo"), bool):
+        result["galleryCardInfo"] = value["galleryCardInfo"]
     for key, lower, upper in (
         ("accentHue", 0, 359.999999),
         ("accentSaturation", 0, 100),
