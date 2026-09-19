@@ -86,8 +86,14 @@
         "py/nodes/seed.py",
         "web_version/v1/js/seed.js",
         "py/server.py",
-        "py/nodes/logic.py"
+        "py/nodes/logic.py",
+        "web_version/v1/js/easy/easyDynamicWidgets.js"
       ]
+    },
+    "weilin": {
+      "repository": "weilin9999/WeiLin-Comfyui-Tools",
+      "commit": "efd923795d27e59da1d7a43e453ca95b07e684f9",
+      "paths": ["__init__.py", "js_node/weilin_prompt_ui_node.js"]
     },
     "raffle": {
       "repository": "rainlizard/ComfyUI-Raffle",
@@ -1271,6 +1277,16 @@
       "layouts": [{"widgets": ["inputcount", "delimiter", "return_list", "__update_inputs"], "constraints": {"2": {"type": "boolean"}, "3": {"one_of": [null]}}}],
       "note": "Dynamic string sockets remain links. Only the three fixed API widgets and the verified frontend button layout are mapped."
     },
+    "WeiLinPromptUI": {
+      "sources": ["weilin"],
+      "frontend_inputs": {
+        "打开提示词编辑器": {"role": "button", "value_types": ["empty_string"]},
+        "打开Lora堆": {"role": "button", "value_types": ["empty_string"]},
+        "Open Prompt UI": {"role": "button", "value_types": ["empty_string"]},
+        "Open Lora Stack": {"role": "button", "value_types": ["empty_string"]}
+      },
+      "note": "Exact labels of frontend buttons initialized to an empty string; not backend execution inputs. This grants no widget read/write mapping."
+    },
     "easy showAnything": {
       "sources": [
         "easy"
@@ -1278,6 +1294,7 @@
       "display": {
         "input": "anything",
         "api_field": "text",
+        "api_value_types": ["string", "string_list"],
         "write_protected": [
           "text"
         ]

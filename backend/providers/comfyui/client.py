@@ -14,6 +14,7 @@ from urllib.parse import quote, urlsplit, urlunsplit
 import aiohttp
 from PIL import Image, ImageOps
 
+from ...comfyui.catalog import auxiliary_input_policy, is_auxiliary_input_literal
 from ...models import GeneratedImage
 from .global_seed import prepare_global_seed
 from .output_metadata import (
@@ -315,6 +316,14 @@ class ComfyClient:
             if binding["source"] == "seed"
             for target in binding["targets"]
         }
+        edited_targets = {
+            (target["node_id"], target["input_name"])
+            for binding in config["bindings"].values()
+            for target in binding["targets"]
+        } | {
+            (target["node_id"], target["input_name"])
+            for target in config.get("workflow_sync_targets", [])
+        }
 
         def issue(
             code: str,
@@ -367,6 +376,32 @@ class ComfyClient:
             for name, value in node["inputs"].items():
                 field = declared.get(name)
                 if field is None:
+                    policy = auxiliary_input_policy(kind, name)
+                    if policy:
+                        label = (
+                            "展示缓存" if policy["role"] == "display" else "界面按钮"
+                        )
+                        linked = is_link(value)
+                        edited = (node_id, name) in edited_targets
+                        if linked or edited:
+                            issue(
+                                "auxiliary_input_link"
+                                if linked
+                                else "auxiliary_input_edit",
+                                node_id,
+                                name,
+                                f"{name} 是{label}，目标节点未将其声明为执行输入；"
+                                + (
+                                    "请检查此连线的目标字段与节点版本"
+                                    if linked
+                                    else "请将参数绑定或固定值修改指向实际执行输入"
+                                ),
+                                "warning",
+                            )
+                            continue
+                        if is_auxiliary_input_literal(policy, value):
+                            # Keep the original graph and display snapshots intact.
+                            continue
                     issue(
                         "unknown_input",
                         node_id,

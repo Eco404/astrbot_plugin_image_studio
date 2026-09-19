@@ -448,6 +448,131 @@ def test_unknown_custom_literals_warn_instead_of_guessing_function():
     assert report["issues"][0]["code"] == "unknown_input"
 
 
+def auxiliary_config(kind, name, payload):
+    value = config()
+    value["api_graph"]["9"] = {"class_type": kind, "inputs": {name: payload}}
+    info = definitions()
+    info[kind] = {"input": {"required": {}, "optional": {}}, "output": ["*"]}
+    return value, info
+
+
+@pytest.mark.parametrize(
+    "kind,name,payload",
+    [
+        ("easy showAnything", "text", "previous display snapshot"),
+        ("easy showAnything", "text", ["one", "two"]),
+        ("easy showAnything", "text", []),
+        ("WeiLinPromptUI", "打开提示词编辑器", ""),
+        ("WeiLinPromptUI", "打开Lora堆", ""),
+        ("WeiLinPromptUI", "Open Prompt UI", ""),
+        ("WeiLinPromptUI", "Open Lora Stack", ""),
+    ],
+)
+def test_known_auxiliary_literals_pass_preflight_without_removing_data(
+    kind, name, payload
+):
+    value, info = auxiliary_config(kind, name, payload)
+    value["workflow"] = {
+        "nodes": [{"id": 9, "type": kind, "widgets_values": [payload]}],
+        "links": [],
+    }
+    before = copy.deepcopy(value)
+    report = asyncio.run(
+        ComfyClient(Session([Response(info)])).inspect(provider(), value)
+    )
+    assert report["status"] == "ready"
+    assert report["issues"] == []
+    assert value == before
+    node = next(node for node in report["nodes"] if node["id"] == "9")
+    assert node["inputs"][0]["value"] == payload
+
+
+@pytest.mark.parametrize(
+    "kind,name,payload",
+    [
+        ("easy showAnything", "text", {"unexpected": "shape"}),
+        ("easy showAnything", "text", ["text", None]),
+        ("easy showAnything", "text", 12),
+        ("WeiLinPromptUI", "打开提示词编辑器", "unexpected button value"),
+        ("WeiLinPromptUI", "打开Lora堆", False),
+        ("WeiLinPromptUI", "打开Lora堆", None),
+        ("OtherDisplay", "text", "looks like a display"),
+        ("easy showAnything", "other_text", "not the verified field"),
+        ("WeiLinPromptUI", "another_button", None),
+    ],
+)
+def test_auxiliary_exemptions_do_not_hide_unknown_fields_or_shapes(kind, name, payload):
+    value, info = auxiliary_config(kind, name, payload)
+    report = asyncio.run(
+        ComfyClient(Session([Response(info)])).inspect(provider(), value)
+    )
+    assert report["status"] == "warning"
+    assert report["issues"][0]["code"] == "unknown_input"
+
+
+@pytest.mark.parametrize(
+    "kind,name", [("easy showAnything", "text"), ("WeiLinPromptUI", "打开Lora堆")]
+)
+@pytest.mark.parametrize("upstream", ["2", "missing"])
+def test_auxiliary_links_remain_visible_even_for_a_missing_source(kind, name, upstream):
+    value, info = auxiliary_config(kind, name, [upstream, 0])
+    report = asyncio.run(
+        ComfyClient(Session([Response(info)])).inspect(provider(), value)
+    )
+    assert report["status"] == "warning"
+    assert report["issues"][0]["code"] == "auxiliary_input_link"
+    assert "连线" in report["issues"][0]["message"]
+
+
+@pytest.mark.parametrize(
+    "kind,name,payload",
+    [("easy showAnything", "text", "cached"), ("WeiLinPromptUI", "打开Lora堆", "")],
+)
+@pytest.mark.parametrize("edit", ["binding", "fixed", "persisted_fixed"])
+def test_auxiliary_bindings_and_fixed_edits_are_not_silenced(kind, name, payload, edit):
+    value, info = auxiliary_config(kind, name, payload)
+    if edit == "binding":
+        value["bindings"] = {"bad_target": binding("9", name)}
+    else:
+        value["input_overrides"] = [
+            {"node_id": "9", "input_name": name, "value": payload}
+        ]
+        if edit == "persisted_fixed":
+            value = normalize_workflow(value)
+    report = asyncio.run(
+        ComfyClient(Session([Response(info)])).inspect(provider(), value)
+    )
+    issues = [item for item in report["issues"] if item["node_id"] == "9"]
+    assert issues[0]["code"] == "auxiliary_input_edit"
+    assert "实际执行输入" in issues[0]["message"]
+
+
+def test_remote_declaration_wins_over_auxiliary_catalog():
+    value, info = auxiliary_config("easy showAnything", "text", "not in choices")
+    info["easy showAnything"]["input"]["optional"]["text"] = [["valid"]]
+    report = asyncio.run(
+        ComfyClient(Session([Response(info)])).inspect(provider(), value)
+    )
+    assert report["issues"][0]["code"] == "value_not_in_list"
+    assert report["status"] == "blocked"
+
+
+def test_auxiliary_literals_do_not_hide_required_inputs_models_or_missing_nodes():
+    value, info = auxiliary_config("easy showAnything", "text", "snapshot")
+    info["easy showAnything"]["input"]["required"]["anything"] = ["*"]
+    value["api_graph"]["1"]["inputs"]["ckpt_name"] = "missing.safetensors"
+    value["api_graph"]["10"] = {"class_type": "Absent", "inputs": {}}
+    report = asyncio.run(
+        ComfyClient(Session([Response(info)])).inspect(provider(), value)
+    )
+    assert report["status"] == "blocked"
+    assert {item["code"] for item in report["issues"]} == {
+        "required_input_missing",
+        "missing_model",
+        "missing_node_type",
+    }
+
+
 def test_submit_records_api_and_ui_graph_without_mutation_and_keeps_partial_errors():
     errors = {"6": {"class_type": "SaveImage", "errors": [{"message": "failed"}]}}
     session = Session([Response({"prompt_id": "remote-id", "node_errors": errors})])

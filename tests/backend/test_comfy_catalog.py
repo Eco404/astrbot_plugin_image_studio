@@ -28,6 +28,17 @@ def test_catalog_sources_are_pinned_and_layout_constraints_are_complete():
             assert adapter.get("sources")
             for index in layout.get("constraints", {}):
                 assert 0 <= int(index) < len(names)
+        for policy in adapter.get("frontend_inputs", {}).values():
+            assert adapter.get("sources")
+            assert policy["role"] == "button"
+            assert policy["value_types"] == ["empty_string"]
+        if "api_value_types" in adapter.get("display", {}):
+            assert adapter.get("sources")
+            assert adapter["display"]["api_field"]
+            assert set(adapter["display"]["api_value_types"]) <= {
+                "string",
+                "string_list",
+            }
 
 
 def test_read_hints_are_not_permission_to_write_unknown_layouts():

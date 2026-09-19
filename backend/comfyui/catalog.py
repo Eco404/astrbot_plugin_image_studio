@@ -28,6 +28,32 @@ def node_adapter(kind: str) -> dict[str, Any]:
     return copy.deepcopy(_NODES.get(kind, {}))
 
 
+def auxiliary_input_policy(kind: str, name: str) -> dict[str, Any]:
+    """Known frontend payloads, not permission to remove or write fields."""
+    adapter = _NODES.get(kind, {})
+    display = adapter.get("display", {})
+    if name == display.get("api_field"):
+        return {
+            "role": "display",
+            "value_types": list(display.get("api_value_types", [])),
+        }
+    return copy.deepcopy(adapter.get("frontend_inputs", {}).get(name, {}))
+
+
+def is_auxiliary_input_literal(policy: dict[str, Any], value: Any) -> bool:
+    """Suppress warnings only for source-verified literal shapes."""
+    shapes = policy.get("value_types", [])
+    return (
+        ("empty_string" in shapes and isinstance(value, str) and value == "")
+        or ("string" in shapes and isinstance(value, str))
+        or (
+            "string_list" in shapes
+            and isinstance(value, list)
+            and all(isinstance(item, str) for item in value)
+        )
+    )
+
+
 def metadata_widget_names(kind: str) -> tuple[str, ...]:
     return tuple(_NODES.get(kind, {}).get("metadata_widgets", ()))
 
