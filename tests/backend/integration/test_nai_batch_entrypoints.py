@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import httpx
 import mcp.types
@@ -71,6 +72,7 @@ def test_partial_batch_reaches_caller_with_images_and_warning(tmp_path, source):
                 parameters={"count": 3},
             )
             assert not result.isError
+            assert json.loads(result.content[0].text)["status"] == "partial"
             warning = "".join(
                 item.text
                 for item in result.content

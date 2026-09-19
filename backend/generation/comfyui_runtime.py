@@ -6,6 +6,7 @@ import asyncio
 import copy
 import hashlib
 import json
+import math
 import time
 import uuid
 from dataclasses import replace
@@ -26,7 +27,7 @@ from ..providers.comfyui.client import (
 )
 from ..providers.comfyui.job_manager import ComfyJobManager
 from ..providers.comfyui.job_store import ComfyJobStore
-from ..providers.comfyui.job_types import RECOVERY_SECONDS
+from ..providers.comfyui.job_types import RECOVERY_SECONDS, TERMINAL_STATUSES, _job_id
 from ..providers.comfyui.output_metadata import prepare_output
 from ..providers.comfyui.storage import compact_request
 from ..providers.comfyui.workflows import FIXED_OUTPUT_POLICY, migrate_fixed_outputs
@@ -38,6 +39,23 @@ def connection_fingerprint(provider: ImageProvider) -> str:
     # Credentials can rotate; an address change must never recover a task from
     # a different ComfyUI instance just because its provider ID was reused.
     return hashlib.sha256(provider.base_url.rstrip("/").encode()).hexdigest()
+
+
+def _agent_scope_hash(scope_id: str) -> str:
+    if not isinstance(scope_id, str) or not scope_id.strip():
+        raise ValueError("ComfyUI 任务需要有效的当前会话范围")
+    return hashlib.sha256(scope_id.strip().encode()).hexdigest()
+
+
+def _agent_wait_seconds(value: float) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or not 0 <= value <= 30
+    ):
+        raise ValueError("wait_seconds 必须是 0 至 30 秒的数字")
+    return float(value)
 
 
 class ComfyRuntime:
@@ -67,6 +85,8 @@ class ComfyRuntime:
         references=(),
         comfyui=None,
         temporary: bool = False,
+        _agent: dict | None = None,
+        _job_id: str | None = None,
         **values,
     ):
         config = normalize_workflow(comfyui or model.comfyui)
@@ -96,6 +116,7 @@ class ComfyRuntime:
             "provider_name": provider.name,
             "connection": connection_fingerprint(provider),
             "temporary": bool(temporary),
+            **({"agent": dict(_agent)} if _agent is not None else {}),
         }
         return await self.manager.submit(
             provider_id=provider.id,
@@ -103,7 +124,98 @@ class ComfyRuntime:
             workflow=config,
             request=request,
             references=references,
+            job_id=_job_id,
         )
+
+    async def submit_agent(
+        self,
+        *,
+        scope_id: str,
+        request_id: str | None = None,
+        wait_seconds: float = 0,
+        **values,
+    ) -> dict:
+        """Start or identify one Agent invocation, independently of identity logging.
+
+        Only an explicit request_id enables idempotency. Equal prompts are never
+        treated as retries; reuse of an ID with changed inputs is rejected by the
+        store's transaction and immutable request fingerprint.
+        """
+        wait_seconds = _agent_wait_seconds(wait_seconds)
+        scope_hash = _agent_scope_hash(scope_id)
+        if request_id is not None:
+            if not isinstance(request_id, str):
+                raise ValueError("request_id 必须是非空任务请求标识字符串")
+            request_id = _job_id(request_id)
+        identity = (
+            "agent_"
+            + hashlib.sha256(f"{scope_hash}\0{request_id}".encode()).hexdigest()
+            if request_id is not None
+            else None
+        )
+        job = await self.submit(
+            **{**values, "source": "llm_tool"},
+            _agent={"scope_hash": scope_hash, "request_id": request_id},
+            _job_id=identity,
+        )
+        return await self.inspect_agent(
+            job["id"], scope_id=scope_id, wait_seconds=wait_seconds
+        )
+
+    async def inspect_agent(
+        self,
+        task_id: str,
+        *,
+        scope_id: str,
+        wait_seconds: float = 0,
+        resume: bool = False,
+    ) -> dict:
+        """Read or resume an existing scoped task without creating a new one."""
+        wait_seconds = _agent_wait_seconds(wait_seconds)
+        if not isinstance(task_id, str):
+            raise ValueError("task_id 必须是 ComfyUI 任务编号字符串")
+        if not isinstance(resume, bool):
+            raise ValueError("resume 必须是布尔值")
+        scope_hash = _agent_scope_hash(scope_id)
+        job = await self.store.get_agent_job(task_id, scope_hash=scope_hash)
+        if job is None:
+            raise ValueError("ComfyUI 任务不存在或不属于当前会话")
+        if resume and job["status"] in {"failed", "unknown"}:
+            # The existing manager permits recovery only with acknowledged remote
+            # IDs/children, and never resubmits an uncertain remote request.
+            job = await self.manager.resume(task_id)
+        elif resume and job["status"] not in TERMINAL_STATUSES:
+            # A caller can disappear after committing a queued job but before
+            # submit() schedules it. Recover that same durable job explicitly.
+            # Existing runners are deduplicated by the manager's task lock.
+            await self.manager._start(job)
+        if job["status"] not in TERMINAL_STATUSES:
+            await self.manager.wait(task_id, timeout_seconds=wait_seconds)
+            # Read through the same authorization boundary after waiting as well.
+            job = await self.store.get_agent_job(task_id, scope_hash=scope_hash)
+            if job is None:
+                raise ValueError("ComfyUI 任务不存在或不属于当前会话")
+        return job
+
+    async def list_agent(self, *, scope_id: str, limit: int = 5) -> list[dict]:
+        """Find this session's recent submissions after a caller loses its task ID."""
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= 20
+        ):
+            raise ValueError("limit 必须是 1 至 20 的整数")
+        jobs = await self.store.list_agent_jobs(
+            scope_hash=_agent_scope_hash(scope_id), limit=limit
+        )
+        return [
+            {
+                **self.public_job(job),
+                "task_id": job["id"],
+                "request_id": job.get("agent_request_id"),
+            }
+            for job in jobs
+        ]
 
     async def generate(self, **values) -> GenerationResult:
         job = await self.submit(**values)
@@ -876,6 +988,7 @@ class ComfyRuntime:
             details.get("elapsed_ms", 0),
             generation_id=details.get("generation_id", ""),
             warning=warning,
+            partial=job.get("status") == "partial",
         )
 
     async def cancel(self, job_id):

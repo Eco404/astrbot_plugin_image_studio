@@ -19,7 +19,6 @@ from astrbot_plugin_image_studio.backend.commands.parser import (
 from astrbot_plugin_image_studio.main import (
     AGENT_WORKFLOW_PROMPT_MARKER,
     CAPABILITY_QUERY_EXTRA_KEY,
-    IMAGE_WORKFLOW_CONTINUATION_MARKER,
     IMAGE_WORKFLOW_STATE_EXTRA_KEY,
     ImageStudioPlugin,
     _invocation_source,
@@ -259,7 +258,7 @@ def test_llm_tool_returns_mcp_image_content() -> None:
     text = next(
         item.text for item in result.content if isinstance(item, mcp.types.TextContent)
     )
-    assert "generation_id=gallery-123" in text
+    assert json.loads(text)["generation_id"] == "gallery-123"
     assert '"asset_id":"' in text
     assert "original_path" not in text
 
@@ -427,7 +426,11 @@ def test_llm_tool_image_return_modes_preserve_original_asset_path() -> None:
             for item in result.content
             if isinstance(item, mcp.types.TextContent)
         )
-        assert f"return_mode={mode}" in text
+        payload = json.loads(text)
+        assert payload["return_mode"] == mode
+        assert payload["origin"] == "tool_generated"
+        assert "由你调用生图工具生成" in payload["message"]
+        assert isinstance(result.content[0], mcp.types.TextContent)
         assert '"asset_id":"' in text
         assert "original_path" not in text
 
@@ -444,9 +447,9 @@ def test_llm_can_view_agent_asset_on_demand() -> None:
         plugin.image_studio_view_asset(ToolEvent(), asset_ids=[f"{2:064x}"])
     )
 
-    assert isinstance(result.content[0], mcp.types.ImageContent)
-    assert "asset_id" in result.content[1].text
-    assert "original_path" not in result.content[1].text
+    assert isinstance(result.content[1], mcp.types.ImageContent)
+    assert json.loads(result.content[0].text)["origin"] == "existing_asset"
+    assert "original_path" not in result.content[0].text
     assert missing.isError
     payload = json.loads(missing.content[0].text)
     assert payload["failures"] == [
@@ -492,7 +495,7 @@ def test_llm_can_view_multiple_assets_in_input_order() -> None:
         if isinstance(item, mcp.types.ImageContent)
     ]
     assert images == [b"second", b"first"]
-    payload = json.loads(result.content[-1].text.split("。", 1)[0])
+    payload = json.loads(result.content[0].text)
     assert payload["assets"] == [
         {
             "index": 0,
@@ -532,7 +535,7 @@ def test_new_llm_task_can_view_surviving_asset_after_retention_ends(tmp_path) ->
             ToolEvent(), asset_ids=[assets[0].asset_id], detail="original"
         )
         assert not result.isError
-        assert base64.b64decode(result.content[0].data) == PNG
+        assert base64.b64decode(result.content[1].data) == PNG
         outsider = ToolEvent()
         outsider.unified_msg_origin = "test:private:user-2"
         denied = await plugin.image_studio_view_asset(
@@ -572,7 +575,7 @@ def test_llm_asset_batch_reports_every_failure_without_partial_images() -> None:
     assert all(item["retryable"] is False for item in payload["failures"])
 
 
-def test_capability_query_activates_scoped_sender_and_hides_native_sender() -> None:
+def test_capability_query_does_not_change_delivery_tools() -> None:
     plugin = object.__new__(ImageStudioPlugin)
     plugin._settings = settings()
     event = ToolEvent()
@@ -610,10 +613,10 @@ def test_capability_query_activates_scoped_sender_and_hides_native_sender() -> N
     assert "temporary_retention_policy" not in policy
     assert "access_policy" not in policy
     assert "temporary_preview_path" not in policy
-    assert "send_message_to_user" not in tool_set.names
+    assert "send_message_to_user" in tool_set.names
     assert "pc_send_current_media" in tool_set.names
     assert "image_studio_send_output" in tool_set.names
-    assert event.get_extra(IMAGE_WORKFLOW_STATE_EXTRA_KEY)["active"] is True
+    assert event.get_extra(IMAGE_WORKFLOW_STATE_EXTRA_KEY) is None
 
 
 def test_successful_generation_hides_competing_private_media_sender() -> None:
@@ -750,8 +753,6 @@ def test_image_studio_sender_delivers_leased_asset_to_current_session(tmp_path) 
             }
         )
         event = ToolEvent()
-        await plugin.image_studio_get_capabilities(event)
-
         result = await plugin.image_studio_send_output(
             event,
             destination="session",
@@ -804,8 +805,6 @@ def test_image_studio_sender_materializes_asset_to_local_workspace(
             }
         )
         event = ToolEvent()
-        event.set_extra(IMAGE_WORKFLOW_STATE_EXTRA_KEY, {"active": True})
-
         result = await plugin.image_studio_send_output(
             event,
             destination="workspace",
@@ -838,7 +837,7 @@ def test_llm_tool_rejects_generation_before_capability_query() -> None:
     assert "必须先调用 image_studio_get_capabilities" in result.content[0].text
 
 
-def test_capability_query_is_consumed_by_one_generation() -> None:
+def test_capability_query_is_reusable_within_event_and_revision() -> None:
     plugin = object.__new__(ImageStudioPlugin)
     plugin._settings = settings()
 
@@ -865,8 +864,11 @@ def test_capability_query_is_consumed_by_one_generation() -> None:
     second = asyncio.run(plugin.image_studio_generate(event, prompt="another tree"))
 
     assert not first.isError
-    assert second.isError
-    assert "必须先调用 image_studio_get_capabilities" in second.content[0].text
+    assert not second.isError
+    plugin._settings = replace(plugin._settings, revision=1)
+    stale = asyncio.run(plugin.image_studio_generate(event, prompt="another tree"))
+    assert stale.isError
+    assert "必须先调用 image_studio_get_capabilities" in stale.content[0].text
 
 
 def test_capability_query_supports_all_default_and_model() -> None:
@@ -1214,10 +1216,7 @@ def test_capabilities_only_lists_llm_enabled_models() -> None:
         "text2img": "provider:visible",
         "img2img": "",
     }
-    assert payload["asset_policy"]["return_mode"] == "preview"
-    assert payload["asset_policy"]["private_asset_handle"] == "asset_id"
-    assert "原图仍存在时可以继续复用" in payload["asset_policy"]["reuse"]
-    assert payload["asset_policy"]["delivery_tool"] == "image_studio_send_output"
+    assert payload["asset_policy"] == {"return_mode": "preview"}
     assert "temporary_retention_policy" not in payload["asset_policy"]
     assert "access_policy" not in payload["asset_policy"]
     assert "temporary_preview_path" not in payload["asset_policy"]
@@ -1276,6 +1275,7 @@ def test_registered_image_tool_descriptions_contain_routing_contract() -> None:
     generate = llm_tools.get_func("image_studio_generate")
     view_asset = llm_tools.get_func("image_studio_view_asset")
     send_output = llm_tools.get_func("image_studio_send_output")
+    task = llm_tools.get_func("image_studio_task")
     light_tools = llm_tools.get_full_tool_set().get_light_tool_set()
 
     assert llm_tools.get_func("image_gen_get_capabilities") is None
@@ -1284,6 +1284,8 @@ def test_registered_image_tool_descriptions_contain_routing_contract() -> None:
     assert generate is not None
     assert view_asset is not None
     assert send_output is not None
+    assert task is not None
+    assert set(task.parameters["properties"]) == {"task_id", "wait_seconds", "resume"}
     assert "必须先调用本工具" in capabilities.description
     assert "query_type" in capabilities.parameters["properties"]
     capability_parameters = capabilities.parameters["properties"]
@@ -1310,6 +1312,7 @@ def test_registered_image_tool_descriptions_contain_routing_contract() -> None:
         "model_ref",
         "parameters",
         "references",
+        "request_id",
     }
     assert "required" not in generate.parameters
     assert "当前会话" in view_asset.description
@@ -1375,57 +1378,28 @@ def test_agent_workflow_prompt_is_scoped_and_idempotent() -> None:
     assert request_without_tool.system_prompt == "保持不变"
 
 
-def test_agent_tool_send_adds_one_shot_continuation_prompt() -> None:
+def test_send_continuation_is_in_model_visible_tool_result() -> None:
     plugin = object.__new__(ImageStudioPlugin)
     plugin._settings = settings()
     request = SimpleNamespace(extra_user_content_parts=[])
     event = ToolEvent()
     event.set_extra("provider_request", request)
-    generated = mcp.types.CallToolResult(
-        content=[mcp.types.TextContent(type="text", text="asset")]
-    )
-    send_result = mcp.types.CallToolResult(
-        content=[mcp.types.TextContent(type="text", text="Message sent")]
-    )
 
-    asyncio.run(
-        plugin.observe_agent_tool_result(
+    async def fake_send(_event, _messages):
+        return 1
+
+    plugin._send_output_to_session = fake_send
+    result = asyncio.run(
+        plugin.image_studio_send_output(
             event,
-            SimpleNamespace(name="image_studio_generate"),
-            {},
-            generated,
+            destination="session",
+            messages=[{"type": "plain", "text": "完成一步"}],
         )
     )
-    assert event.get_extra(IMAGE_WORKFLOW_STATE_EXTRA_KEY) == {
-        "active": True,
-        "reminder_added": False,
-    }
-
-    asyncio.run(
-        plugin.observe_agent_tool_result(
-            event,
-            SimpleNamespace(name="image_studio_send_output"),
-            {"destination": "session", "messages": [{"type": "image"}]},
-            send_result,
-        )
-    )
-    assert len(request.extra_user_content_parts) == 1
-    reminder = request.extra_user_content_parts[0].text
-    assert IMAGE_WORKFLOW_CONTINUATION_MARKER in reminder
-    assert "普通 assistant 文本回复" in reminder
-    assert "llm.response" not in reminder
-    assert "pc_send_current_media" not in reminder
-    assert event.get_extra(IMAGE_WORKFLOW_STATE_EXTRA_KEY)["reminder_added"] is True
-
-    asyncio.run(
-        plugin.observe_agent_tool_result(
-            event,
-            SimpleNamespace(name="image_studio_send_output"),
-            {"destination": "session", "messages": [{"type": "image"}]},
-            send_result,
-        )
-    )
-    assert len(request.extra_user_content_parts) == 1
+    assert not result.isError
+    assert "继续剩余步骤" in result.content[0].text
+    assert "勿重复已发送文字" in result.content[0].text
+    assert request.extra_user_content_parts == []
 
 
 def test_llm_parameter_descriptor_omits_redundant_choice_fields() -> None:

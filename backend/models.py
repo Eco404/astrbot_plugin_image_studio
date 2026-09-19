@@ -86,8 +86,13 @@ NAI_DEFAULT_NEGATIVE = (
     "{shaka},{hang loose},{{rock on}},{shaka sign}"
 )
 NAI_TOOL_PROMPT_INSTRUCTIONS = (
-    "使用英文逗号分隔标签。必须完整描述主体数量、全身或半身范围、姿态、镜头距离、"
-    "视角、背景、光照和画面边界，避免残图；不得改变用户明确指定的主体、数量、动作和服装。"
+    "使用英文逗号分隔标签，保留用户指定的主体、数量、动作、服装与构图。"
+)
+NOVELAI_OFFICIAL_TOOL_PROMPT_INSTRUCTIONS = (
+    "使用英文逗号分隔标签，可结合自然语言补充关系与动作；保留用户明确指定的内容。"
+)
+NOVELAI_UNKNOWN_TOOL_PROMPT_INSTRUCTIONS = (
+    "优先使用英文逗号分隔标签；其他提示词格式请按所用模型的说明配置。"
 )
 
 NOVELAI_OFFICIAL_PARAMETERS: dict[str, dict[str, Any]] = {
@@ -405,6 +410,37 @@ class ImageModel:
         )
         return value if isinstance(value, str) else self.negative_prompt_default
 
+    def parameter_default(
+        self, name: str, *, source: str = "webui", fallback: Any = None
+    ) -> Any:
+        """Resolve the same schema/tool default for discovery and execution."""
+
+        if source == "llm_tool":
+            policies = self.tool.get("parameters")
+            policy = policies.get(name) if isinstance(policies, dict) else None
+            if isinstance(policy, dict):
+                for key in ("default_override", "default"):
+                    if key in policy:
+                        return policy[key]
+        return self.parameters.get(name, {}).get("default", fallback)
+
+    @property
+    def comfyui_reference_slots(self) -> list[dict[str, Any]]:
+        """Describe ordered caller inputs without exposing workflow node data."""
+
+        return [
+            {
+                "name": self.parameters.get(key, {}).get("label")
+                or binding.get("label")
+                or key,
+                "index": int(binding.get("reference_index", 0)),
+                "type": binding.get("type", "image"),
+                "required": bool(binding.get("required", False)),
+            }
+            for key, binding in self.comfyui.get("bindings", {}).items()
+            if binding.get("source") == "reference"
+        ]
+
     @property
     def llm_exposed_parameter_names(self) -> frozenset[str]:
         """Return schema keys that the LLM may override for this model."""
@@ -533,6 +569,7 @@ class ImageProvider:
                 supports_negative_prompt,
                 kind,
                 model_parameters=value.get("parameters"),
+                model_id=legacy_model_id,
             ),
             capability_source=_text(value.get("capability_source"), 32) or "manual",
             novelai_capabilities=model_capabilities(legacy_model_id)
@@ -805,6 +842,7 @@ class GenerationResult:
     generation_id: str = ""
     error: str = ""
     warning: str = ""
+    partial: bool = False
 
 
 def _provider_proxy(value: Any) -> str:
@@ -1084,6 +1122,7 @@ def _model_from_mapping(
             supports_negative_prompt,
             kind,
             model_parameters=value.get("parameters"),
+            model_id=model_id,
         ),
         capability_source=capability_source,
         novelai_capabilities=model_capabilities(model_id)
@@ -1105,6 +1144,7 @@ def _normalize_tool(
     kind: str,
     *,
     model_parameters: Any = None,
+    model_id: str = "",
 ) -> dict[str, Any]:
     """Normalize the LLM-facing model policy without changing model schema."""
 
@@ -1176,9 +1216,9 @@ def _normalize_tool(
         or (
             ""
             if comfy
-            else "仅在用户明确要求 NAI 或 NovelAI 风格标签生图时使用。"
+            else "使用英文标签生成插画。"
             if nai
-            else "使用 NovelAI 官方模型生成插画，支持标签或自然语言提示词。"
+            else "NovelAI 官方图像生成；参考用途以模型能力为准。"
             if official
             else "适合一般自然语言生图需求。"
         ),
@@ -1198,7 +1238,11 @@ def _normalize_tool(
             if comfy
             else NAI_TOOL_PROMPT_INSTRUCTIONS
             if nai
-            else "可使用标签或自然语言描述主体、构图、动作、背景与光照；保留用户明确要求的内容。"
+            else (
+                NOVELAI_OFFICIAL_TOOL_PROMPT_INSTRUCTIONS
+                if model_id in MODEL_NAMES
+                else NOVELAI_UNKNOWN_TOOL_PROMPT_INSTRUCTIONS
+            )
             if official
             else "使用清晰、连贯的自然语言描述，不要使用英文逗号分隔的 NAI tag 串。"
         ),

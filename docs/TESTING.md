@@ -9,15 +9,15 @@
 需要 Python 3.12+（同时满足所用 AstrBot 版本要求）、Git，以及 Node.js 20+。AstrBot 可以已安装在当前虚拟环境，也可以使用源码目录：
 
 ```bash
-# 当前目录为插件仓库，AstrBot 源码为同级目录时无需设置此变量。
-export ASTRBOT_ROOT="/path/to/AstrBot"
+# 当前目录为插件仓库。
+ASTRBOT_SOURCE="/path/to/AstrBot"
 
 # 使用已激活的虚拟环境。
-python -m pip install -r "$ASTRBOT_ROOT/requirements.txt"
+python -m pip install -r "$ASTRBOT_SOURCE/requirements.txt"
 python -m pip install -r requirements.txt pytest ruff fastapi uvicorn httpx
 ```
 
-也可以在调用验证脚本时使用 `--astrbot-root /path/to/AstrBot`。默认查找插件同级的 `AstrBot` 目录；现有 `PYTHONPATH` 会保留。
+调用验证脚本时使用 `--astrbot-root /path/to/AstrBot` 指定源码。默认查找插件同级的 `AstrBot` 目录；现有 `PYTHONPATH` 会保留。`ASTRBOT_ROOT` 是宿主的可写运行目录，不用于指定源码；验证脚本忽略继承值，替换为本次独立临时目录，防止宿主导入时迁移现有配置。单独运行 pytest 或宿主导入脚本时，也应在独立临时目录中执行并显式设置临时 `ASTRBOT_ROOT`。
 
 浏览器依赖通过仓库内的锁文件安装：
 
@@ -84,6 +84,8 @@ python scripts/verify.py --backend --webui comfy_workspace --browser chromium --
 图片元数据回归使用 `tests/fixtures/image_metadata.py` 生成最小合成样例，经 `tests/support/webui_fixtures.cjs` 提供给浏览器；NovelAI、ComfyUI、A1111 与 WebP 导入分支不再因本地 `data/image/` 缺少真实图片而跳过。私人图库样本仅用于另行授权的额外验证，不进入仓库或安装包。后端复用 ComfyUI 运行环境和图库图片生成器分别位于 `tests/support/comfy_runtime.py`、`gallery_images.py`，无需从其他测试文件导入这些公共夹具。
 
 ## 隔离、超时和结果
+
+对话工具回归覆盖默认模型选择、同轮能力复用、模式参数/中文字段/数值约束、ComfyUI 持久任务与会话鉴权、任务恢复和显式幂等、结果来源说明、资产登记重试及复制部分成功。ComfyUI 使用假客户端暂停和释放执行、注入错误，并检查实际提交次数；这不代表真实服务商生图或真实 LLM 选型已经验证。
 
 每个浏览器场景都启动自己的 `tests/support/webui_harness.py`，使用系统临时目录和自动分配的 `127.0.0.1` 端口；不复用运行中的部署服务。调用方已有的 `STUDIO_TEST_URL` 会被忽略。测试服务使用假图片提供方，场景中的远程接口采用固定结果或拦截，不需要真实 API Key。
 

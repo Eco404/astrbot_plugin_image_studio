@@ -6,7 +6,7 @@
 
 插件运行模块统一使用 `from astrbot.api import logger` 输出日志，以接入宿主日志管理；不自行通过 Python `logging.getLogger()` 创建日志器。
 
-当前开发版本为插件 `1.4.1-dev.1`，基于正式版 `1.4.0`。沿用正式数据库 **v4**：`PRAGMA user_version=4`，不新增 `schema_meta` 开发标记或结构迁移。旧正式库及最终开发库的升级路径保持 1.4.0 的约定。本阶段计划优化 LLM 工具指引、能力契约和任务交付链路，目前仅完成版本切换。ComfyUI 已完成基础真实生图测试；NovelAI 官方仍需可用账户完成成功生图验证。
+当前开发版本为插件 `1.4.1-dev.1`，基于正式版 `1.4.0`。沿用正式数据库 **v4**：`PRAGMA user_version=4`，不新增 `schema_meta` 开发标记或结构迁移。旧正式库及最终开发库的升级路径保持 1.4.0 的约定。本阶段优化 LLM 工具指引、能力契约、ComfyUI 对话任务查询与交付失败恢复；升级后需在当前人格启用新增的 `image_studio_task` 工具。ComfyUI 的既有基础能力已完成真实生图测试，本阶段新增链路使用隔离假客户端验证；NovelAI 官方仍需可用账户完成成功生图验证。
 
 官方协议构造与解析集中在 `backend/providers/novelai/protocol.py`，不依赖完整第三方 SDK。`GeneratedImage.effective_parameters` 通过 `generation_images.supplemental_json.effective_request` 保存经过记录策略过滤的实际参数；原始请求仍保留在生成记录上。图片元数据解析器版本为 12；ComfyUI 内置与用户规则的指纹独立于解析器版本，参与元数据缓存和导入编辑版本校验。
 

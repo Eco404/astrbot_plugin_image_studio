@@ -297,7 +297,41 @@ def test_all_and_default_keep_config_order_and_mode_contracts() -> None:
     ]
     selected, _ = select_capability_models(config, query_type="all")
     assert refs(selected) == ["first:edit", "second:text", "second:other"]
-    assert all(item[3] == [] and item[4] is None for item in selected)
+    assert [item[3] for item in selected] == [["img2img"], ["text2img"], []]
+    assert all(item[4] is None for item in selected)
+
+
+def test_search_and_model_queries_identify_mode_defaults_without_changing_ranking():
+    config = settings(
+        provider("main", model("ordinary"), model("chosen", edit=True)),
+        default_tool_text2img_model_ref="chosen",
+        default_tool_img2img_model_ref="main:chosen",
+    )
+    found = search_catalog(config, query_type="search")
+    assert [item["model_ref"] for item in found["models"]] == [
+        "main:ordinary",
+        "main:chosen",
+    ]
+    assert [item["default_for_modes"] for item in found["models"]] == [
+        [],
+        ["text2img", "img2img"],
+    ]
+    selected, _ = select_capability_models(
+        config, query_type="model", mode="img2img", model_refs=["main:chosen"]
+    )
+    assert selected[0][3] == ["img2img"]
+
+
+def test_ambiguous_default_is_not_falsely_marked_in_discovery():
+    config = settings(
+        provider("first", model("same")),
+        provider("second", model("same")),
+        default_tool_text2img_model_ref="same",
+    )
+    assert all(
+        not item["default_for_modes"]
+        for item in search_catalog(config, query_type="search")["models"]
+    )
 
 
 def test_shared_default_merges_both_modes() -> None:

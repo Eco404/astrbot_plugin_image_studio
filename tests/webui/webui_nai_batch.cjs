@@ -66,7 +66,7 @@ async function matrix(browser, width) {
       for (const [attribute, value] of Object.entries({ type: "number", min: "1", max: "16", step: "1" })) {
         assert.equal(await input.getAttribute(attribute), value, `${key}: ${attribute}`);
       }
-      assert.match(await input.locator("..").locator("label").getAttribute("data-tooltip"), /取值范围.*1.*16/);
+      assert.match(await input.locator("..").locator(".parameter-help-text").getAttribute("data-tooltip"), /取值范围.*1.*16/);
     }
     await frame.locator('[data-schema-default="count"]').fill("3");
     await frame.locator('[data-schema-default="count"]').blur();
@@ -74,6 +74,8 @@ async function matrix(browser, width) {
     await frame.locator('[data-model-field="max_concurrent_requests"]').blur();
     assert.equal(await frame.locator('[data-schema-default="concurrency"]').count(), 0);
     await frame.locator('[data-model-tab="tool"]').click();
+    assert.equal(await frame.locator('[data-model-field="tool_selection_description"]').inputValue(), "使用英文标签生成插画。");
+    assert.equal(await frame.locator('[data-model-field="tool_prompt_instructions"]').inputValue(), "使用英文逗号分隔标签，保留用户指定的主体、数量、动作、服装与构图。");
     for (const [key, value] of [["count", "4"]]) {
       await frame.locator(`[data-edit-tool-parameter="${key}"]`).click();
       assert.equal(await frame.locator("#toolParameterDefault").inputValue(), "");
