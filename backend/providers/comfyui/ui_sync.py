@@ -13,73 +13,19 @@ import copy
 import json
 from typing import Any
 
+from ...comfyui.catalog import node_adapter, positional_widget_slot
 
-# Core widget layouts include frontend controls, not just the Python inputs.
-# Require their complete serialized shape rather than accepting a matching
-# prefix of an unknown/customized layout. Third-party parsers' widget hints are
-# deliberately not used as authority to modify saved workflows.
-_WIDGET_LAYOUTS: dict[str, tuple[str, ...]] = {
-    "KSampler": (
-        "seed",
-        "control_after_generate",
-        "steps",
-        "cfg",
-        "sampler_name",
-        "scheduler",
-        "denoise",
-    ),
-    "KSamplerAdvanced": (
-        "add_noise",
-        "noise_seed",
-        "control_after_generate",
-        "steps",
-        "cfg",
-        "sampler_name",
-        "scheduler",
-        "start_at_step",
-        "end_at_step",
-        "return_with_leftover_noise",
-    ),
-    "RandomNoise": ("noise_seed", "control_after_generate"),
-    "CLIPTextEncode": ("text",),
-    "CLIPTextEncodeSDXL": (
-        "width",
-        "height",
-        "crop_w",
-        "crop_h",
-        "target_width",
-        "target_height",
-        "text_g",
-        "text_l",
-    ),
-    "CLIPTextEncodeSDXLRefiner": ("ascore", "width", "height", "text"),
-    "CheckpointLoaderSimple": ("ckpt_name",),
-    "UNETLoader": ("unet_name", "weight_dtype"),
-    "VAELoader": ("vae_name",),
-    "CLIPLoader": ("clip_name", "type", "device"),
-    "DualCLIPLoader": ("clip_name1", "clip_name2", "type", "device"),
-    "LoraLoader": ("lora_name", "strength_model", "strength_clip"),
-    "LoraLoaderModelOnly": ("lora_name", "strength_model"),
-    "EmptyLatentImage": ("width", "height", "batch_size"),
-    "EmptySD3LatentImage": ("width", "height", "batch_size"),
-    "LatentUpscaleBy": ("upscale_method", "scale_by"),
-    "LatentUpscale": ("upscale_method", "width", "height", "crop"),
-    "ImageScaleBy": ("upscale_method", "scale_by"),
-    "ImageScale": ("upscale_method", "width", "height", "crop"),
-    "SaveImage": ("filename_prefix",),
-    "ConditioningAverage": ("conditioning_to_strength",),
-    "ConditioningSetArea": ("width", "height", "x", "y", "strength"),
-    "ConditioningSetAreaPercentage": ("width", "height", "x", "y", "strength"),
-    "ConditioningSetMask": ("strength", "set_cond_area"),
-    "ConditioningSetTimestepRange": ("start", "end"),
-    "ConditioningSetAreaStrength": ("strength",),
-}
+
+def _check_writable_field(node: dict, name: str) -> None:
+    adapter = node_adapter(str(node.get("type")))
+    if name in adapter.get("display", {}).get("write_protected", []):
+        raise ValueError("该字段是运行时显示缓存，不能覆盖界面显示快照")
+    if name == "control_after_generate" or name.startswith("__"):
+        raise ValueError("该字段属于前端控件，不能作为 API 参数覆盖")
 
 
 def _widget_slot(node: dict, name: str) -> str | int:
-    kind = node.get("type")
-    if kind == "easy showAnything" and name == "text":
-        raise ValueError("该字段是运行时显示缓存，不能覆盖界面显示快照")
+    _check_writable_field(node, name)
     values = node.get("widgets_values")
     if isinstance(values, dict):
         if name in values:
@@ -87,24 +33,51 @@ def _widget_slot(node: dict, name: str) -> str | int:
         raise ValueError("界面控件中没有对应的具名字段")
     if not isinstance(values, list):
         raise ValueError("界面节点没有可定位的控件值")
-    if kind == "Seed (rgthree)" and name == "seed":
-        # rgthree serializes the seed then three frontend button values. Its
-        # Python node rewrites the sentinel in widgets_values after execution.
-        if len(values) == 4 and all(item == "" for item in values[1:]):
-            return 0
-        raise ValueError("rgthree 种子控件布局与已验证的格式不一致")
-    if kind == "LoadImage" and name == "image":
-        # The upload widget may be omitted (serialize:false), or persisted as
-        # the frontend's "image" selector. Neither is an API input field.
-        if len(values) == 1 or len(values) == 2 and values[1] == "image":
-            return 0
-        raise ValueError("加载图片控件布局与已验证的格式不一致")
-    layout = _WIDGET_LAYOUTS.get(str(kind))
-    if layout is None or name not in layout or name == "control_after_generate":
-        raise ValueError("尚无可靠的 API 字段与界面控件对应关系")
-    if len(values) != len(layout):
-        raise ValueError("界面控件数量与已验证的布局不一致")
-    return layout.index(name)
+    return positional_widget_slot(str(node.get("type")), values, name)
+
+
+def _widget_locations(
+    node: dict, name: str
+) -> tuple[list[tuple[str, str | int]], list[str]]:
+    """Find representations independently, preserving unknown positional arrays.
+
+    widgets_values_named is a sibling of the legacy array, not a replacement.
+    Current ComfyUI can restore either depending on frontend/node settings, so
+    every existing representation must be considered even after one succeeds.
+    """
+    _check_writable_field(node, name)
+    locations, problems = [], []
+    if "widgets_values" in node:
+        try:
+            locations.append(("widgets_values", _widget_slot(node, name)))
+        except ValueError as exc:
+            problems.append(str(exc))
+    if "widgets_values_named" in node:
+        named = node["widgets_values_named"]
+        if isinstance(named, dict) and name in named:
+            locations.append(("widgets_values_named", name))
+        elif isinstance(named, dict):
+            # A validated positional map independently identifies the widget.
+            # Add its absent key so named restoration cannot silently omit it.
+            if locations:
+                locations.append(("widgets_values_named", name))
+            else:
+                problems.append("界面具名控件没有该字段，不能推测名称")
+        else:
+            problems.append("界面具名控件格式无效")
+    if not locations and not problems:
+        problems.append("界面节点没有可定位的控件值")
+    return locations, problems
+
+
+def read_widget_values(node: dict, name: str) -> list[Any]:
+    """Read every represented value, failing closed for result repair checks."""
+    locations, problems = _widget_locations(node, name)
+    if problems or any(
+        slot not in node[key] for key, slot in locations if isinstance(node[key], dict)
+    ):
+        raise ValueError("；".join(problems) or "界面具名控件缺少对应字段")
+    return [copy.deepcopy(node[key][slot]) for key, slot in locations]
 
 
 def _check_unlinked(workflow: dict, node: dict, name: str) -> None:
@@ -138,6 +111,12 @@ def _check_unlinked(workflow: dict, node: dict, name: str) -> None:
             continue
         if str(target) == str(node.get("id")) and slot == index:
             raise ValueError("界面输入仍有连线，不能只改控件值")
+
+
+# Stable helpers used to validate metadata before allowing server seed hooks to
+# operate. Neither helper infers API links from UI primitives or widget values.
+widget_slot = _widget_slot
+check_unlinked = _check_unlinked
 
 
 def synchronize_workflow(
@@ -228,8 +207,11 @@ def synchronize_workflow(
             if node.get("type") != kind:
                 raise ValueError("执行图与界面节点类型不一致")
             _check_unlinked(workflow, node, name)
-            slot = _widget_slot(node, name)
-            node["widgets_values"][slot] = copy.deepcopy(value)
+            locations, problems = _widget_locations(node, name)
+            for key, slot in locations:
+                node[key][slot] = copy.deepcopy(value)
+            if problems:
+                raise ValueError("；".join(problems))
         except ValueError as exc:
             warnings.append(
                 f"节点 #{node_id} 的 {name} 未同步到界面工作流：{exc}；"

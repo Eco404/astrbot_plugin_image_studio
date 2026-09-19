@@ -44,7 +44,7 @@
         const key = seedTargetKey(node_id, input_name), warning = detected.get(key);
         if (bound.has(key) || !seedFields.has(input_name) && !warning) return [];
         if (!["string", "number"].includes(typeof value) || !/^[+]?\d+$/.test(String(value).trim())) return [];
-        return [{ ...warning, node_id, input_name, value, code: "fixed_seed", action: String(node.class_type).toLowerCase() === "seed (rgthree)" ? "set_fixed_random" : "bind_seed_source" }];
+        return [{ ...warning, node_id, input_name, value, code: "fixed_seed", action: warning?.action || "bind_seed_source" }];
       }));
     }
     function seedNoticeMarkup(warnings, definition, bindings, interactive = false) {

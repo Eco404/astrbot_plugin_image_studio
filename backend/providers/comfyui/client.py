@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import copy
 import inspect
 import io
 import json
 import time
 import uuid
-from dataclasses import replace
 from typing import Any
 from urllib.parse import quote, urlsplit, urlunsplit
 
@@ -17,6 +15,11 @@ import aiohttp
 from PIL import Image, ImageOps
 
 from ...models import GeneratedImage
+from .global_seed import prepare_global_seed
+from .output_metadata import (
+    image_workflow_snapshot,  # noqa: F401 - compatibility export
+    prepare_output,
+)
 from .ui_sync import synchronize_workflow
 from .workflows import (
     FIXED_OUTPUT_POLICY,
@@ -35,116 +38,15 @@ MAX_OUTPUT_IMAGES = 256
 MAX_IMAGE_PIXELS = 64_000_000
 
 
-def image_workflow_snapshot(image: GeneratedImage, submitted: dict) -> dict:
-    """Keep a per-image snapshot, accepting only narrowly verified writebacks.
-
-    rgthree resolves its negative seed sentinels inside ComfyUI and saves the
-    chosen seed to PNG prompt metadata. Arbitrary graph changes, including stale
-    prompts with matching topology, must not replace the submitted execution.
-    """
-    snapshot = copy.deepcopy(submitted)
-    original_graph = snapshot["api_graph"]
-    random_targets = {
-        (str(node_id), "seed")
-        for node_id, node in original_graph.items()
-        if str(node.get("class_type", "")).casefold() == "seed (rgthree)"
-        and node.get("inputs", {}).get("seed") in (-1, -2, -3)
+def prepare_submission_workflow(config, graph, targets=()):
+    synchronized = synchronize_workflow(config, graph, targets=targets)
+    global_seed = prepare_global_seed(config, graph, synchronized["workflow"])
+    return {
+        "workflow": global_seed["workflow"],
+        "warnings": list(
+            dict.fromkeys(synchronized["warnings"] + global_seed["warnings"])
+        ),
     }
-    recovered = set()
-    try:
-        with Image.open(io.BytesIO(image.data)) as source:
-            fields = source.text if source.format == "PNG" else {}
-            raw_prompt = fields.get("prompt", "")
-            raw_workflow = fields.get("workflow", "")
-        if len(raw_prompt.encode()) + len(raw_workflow.encode()) > 4 * 1024 * 1024:
-            raise ValueError("oversized metadata")
-        returned = json.loads(raw_prompt)
-        if not isinstance(returned, dict) or returned.keys() != original_graph.keys():
-            raise ValueError("different nodes")
-        clear_execution_cache_markers(returned)
-        expected = copy.deepcopy(original_graph)
-        for node_id, field in random_targets:
-            value = returned[node_id].get("inputs", {}).get(field)
-            if (
-                isinstance(value, int)
-                and not isinstance(value, bool)
-                and 0 <= value < 2**64
-            ):
-                expected[node_id]["inputs"][field] = value
-                recovered.add((node_id, field))
-        if returned != expected:
-            raise ValueError("unverified execution change")
-        if recovered:
-            synchronized = synchronize_workflow(snapshot, returned, targets=recovered)
-            snapshot.update(
-                api_graph=returned,
-                api_graph_json=json.dumps(returned, ensure_ascii=False),
-                workflow=synchronized["workflow"],
-                workflow_sync_warnings=list(
-                    dict.fromkeys(
-                        snapshot.get("workflow_sync_warnings", [])
-                        + synchronized["warnings"]
-                    )
-                ),
-            )
-        # Known display nodes update their UI text after executing. Preserve
-        # those snapshots only when the remainder of the returned UI matches
-        # the synchronized submission exactly, including every connection.
-        if raw_workflow and snapshot.get("workflow") is not None:
-            try:
-                returned_ui = json.loads(raw_workflow)
-                comparison = copy.deepcopy(returned_ui)
-                expected_ui = snapshot["workflow"]
-                if isinstance(comparison, dict) and isinstance(
-                    comparison.get("nodes"), list
-                ):
-                    originals = {
-                        str(node.get("id")): node
-                        for node in expected_ui.get("nodes", [])
-                    }
-                    for node in comparison["nodes"]:
-                        previous = originals.get(str(node.get("id")), {})
-                        widgets = node.get("widgets_values")
-                        if (
-                            node.get("type")
-                            == previous.get("type")
-                            == "easy showAnything"
-                            and isinstance(widgets, list)
-                            and all(
-                                isinstance(value, str)
-                                or (
-                                    isinstance(value, list)
-                                    and all(isinstance(text, str) for text in value)
-                                )
-                                for value in widgets
-                            )
-                        ):
-                            if "widgets_values" in previous:
-                                node["widgets_values"] = copy.deepcopy(
-                                    previous["widgets_values"]
-                                )
-                            else:
-                                node.pop("widgets_values", None)
-                    if comparison == expected_ui:
-                        snapshot["workflow"] = returned_ui
-            except (ValueError, TypeError, AttributeError, RecursionError):
-                pass
-    except (ValueError, TypeError, AttributeError, OSError, RecursionError):
-        recovered.clear()
-    if random_targets - recovered:
-        warning = (
-            "图片未提供可核实的实际随机种子回写；执行记录保留提交值，"
-            "再次运行工作流可能重新随机。"
-        )
-        snapshot["workflow_sync_warnings"] = list(
-            dict.fromkeys(snapshot.get("workflow_sync_warnings", []) + [warning])
-        )
-    snapshot["workflow_json"] = (
-        json.dumps(snapshot["workflow"], ensure_ascii=False)
-        if snapshot.get("workflow") is not None
-        else None
-    )
-    return snapshot
 
 
 class ComfyExecutionError(RuntimeError):
@@ -697,7 +599,7 @@ class ComfyClient:
                         if key in definition[1]
                     }
                 )
-        synchronized = synchronize_workflow(
+        synchronized = prepare_submission_workflow(
             config,
             graph,
             targets={
@@ -1182,7 +1084,9 @@ class ComfyClient:
             graph = prepare_graph(
                 config, request, references, written_inputs=written_inputs
             )
-            synchronized = synchronize_workflow(config, graph, targets=written_inputs)
+            synchronized = prepare_submission_workflow(
+                config, graph, targets=written_inputs
+            )
             prepared_snapshot = {
                 **config,
                 "api_graph": graph,
@@ -1272,16 +1176,6 @@ class ComfyClient:
         return images
 
     async def _images_with_workflow_snapshot(self, images, snapshot):
-        snapshots = await asyncio.to_thread(
-            lambda: [image_workflow_snapshot(image, snapshot) for image in images]
-        )
-        return tuple(
-            replace(
-                image,
-                effective_parameters={
-                    **image.effective_parameters,
-                    "_comfyui": image_snapshot,
-                },
-            )
-            for image, image_snapshot in zip(images, snapshots)
+        return await asyncio.to_thread(
+            lambda: tuple(prepare_output(image, snapshot) for image in images)
         )

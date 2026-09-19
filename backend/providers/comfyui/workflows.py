@@ -14,6 +14,8 @@ import re
 import secrets
 from typing import Any
 
+from ...comfyui.catalog import seed_policy
+
 MAX_GRAPH_BYTES = 16 * 1024 * 1024
 MAX_NODES = 10000
 FIXED_OUTPUT_POLICY = "fixed_outputs_v1"
@@ -670,7 +672,6 @@ def seed_warnings(config: Any, parameters: Any = None) -> list[dict[str, Any]]:
         for target in binding["targets"]
     }
     known_fields = {"seed", "noise_seed", "random_seed"}
-    native_nonnegative = {"KSampler", "KSamplerAdvanced", "RandomNoise"}
     warnings = []
 
     def integer(value):
@@ -691,7 +692,7 @@ def seed_warnings(config: Any, parameters: Any = None) -> list[dict[str, Any]]:
         if node_id not in active:
             continue
         kind = node["class_type"]
-        rgthree = kind.casefold() == "seed (rgthree)"
+        policy = seed_policy(kind)
         for name, literal in node["inputs"].items():
             if is_link(literal, graph):
                 continue
@@ -729,14 +730,16 @@ def seed_warnings(config: Any, parameters: Any = None) -> list[dict[str, Any]]:
             if numeric is None:
                 continue
             seed_bound = binding.get("source") == "seed"
+            field_policy = policy if policy.get("field") == name else {}
+            sentinels = field_policy.get("negative_sentinels", [])
+            nonnegative = field_policy.get("min", -1) >= 0
             if seed_bound and numeric == -1:
                 continue
-            # rgthree owns all three negative sentinels. They mean random,
-            # increment and decrement, not locked nonnegative seed values.
-            if rgthree and numeric in {-1, -2, -3}:
+            # Only verified node contracts can assign meaning to negative values.
+            if numeric in sentinels:
                 continue
             if numeric < 0:
-                if numeric != -1 or seed_bound or kind not in native_nonnegative:
+                if numeric != -1 or seed_bound or not nonnegative:
                     continue
                 code = "seed_requires_binding"
                 action = "bind_seed_source"
@@ -749,7 +752,7 @@ def seed_warnings(config: Any, parameters: Any = None) -> list[dict[str, Any]]:
                 if seed_bound:
                     action = "set_parameter_random"
                     guidance = f"如需恢复随机，请将参数“{label}”的默认值改为 -1。"
-                elif rgthree:
+                elif -1 in sentinels:
                     action = "set_parameter_random" if binding else "set_fixed_random"
                     guidance = (
                         f"如需恢复随机，可将参数“{label}”的默认值改为 -1。"
@@ -759,7 +762,7 @@ def seed_warnings(config: Any, parameters: Any = None) -> list[dict[str, Any]]:
                 else:
                     action = "bind_seed_source"
                     guidance = "如需恢复随机，请将此输入绑定为“种子”来源，并把参数默认值设为 -1。"
-                    if kind in native_nonnegative:
+                    if nonnegative:
                         guidance += f"{kind} 的原始 {name} 字段不接受 -1。"
                 message = f"检测到随机种子已锁定：节点 #{node_id} · {name} = {numeric}。{guidance}"
             warnings.append(
@@ -841,10 +844,12 @@ def _random_seed(key: str, binding: dict) -> int:
     )
     for target in binding.get("targets", []):
         kind = str(target.get("class_type", ""))
-        if kind.casefold() == "seed (rgthree)":
-            upper = min(upper, 1 << 50)
-        elif kind in {"KSampler", "KSamplerAdvanced", "RandomNoise"}:
-            upper = min(upper, (1 << 64) - 1)
+        policy = seed_policy(kind)
+        if policy.get("field") == target.get("input_name"):
+            if isinstance(policy.get("max"), int):
+                upper = min(upper, policy["max"])
+            if isinstance(policy.get("min"), int):
+                lower = max(lower, policy["min"])
     if lower > upper:
         raise ValueError(f"参数 {key} 没有可用的非负随机种子范围")
     return secrets.randbelow(upper - lower + 1) + lower
@@ -965,17 +970,18 @@ def prepare_graph(
         raise ValueError(
             "工作流没有绑定这些参考图：" + "、".join(str(i + 1) for i in sorted(unused))
         )
-    # rgthree's server-side random mode rewrites only matching sentinel widgets.
-    # Declare this exact writeback target even for older fixed-seed templates
-    # whose editor provenance was lost. Do not infer other edits from UI values.
+    # Known server-side seed modes rewrite matching sentinel widgets. Retain
+    # their exact target even when older templates lost editor provenance.
     for node_id, node in graph.items():
-        seed = node["inputs"].get("seed")
+        policy = seed_policy(node["class_type"])
+        field = policy.get("field")
+        seed = node["inputs"].get(field)
         if (
-            node["class_type"] == "Seed (rgthree)"
-            and isinstance(seed, int)
-            and seed in {-1, -2, -3}
+            policy.get("writeback") not in {None, "none"}
+            and type(seed) is int
+            and seed in policy.get("negative_sentinels", [])
         ):
-            written.add((node_id, "seed"))
+            written.add((node_id, field))
     if written_inputs is not None:
         written_inputs.update(written)
     return graph

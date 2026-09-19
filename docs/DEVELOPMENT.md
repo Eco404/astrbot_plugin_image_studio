@@ -75,7 +75,9 @@ data/plugin_data/astrbot_plugin_image_studio/backups/
 
 ## 后续开发版本
 
-ComfyUI 节点声明位于 `backend/metadata/rules/comfyui_nodes.json`，用户声明保存在插件数据目录的 `comfyui_parser_rules.json`（`version: 1` 与 `rules` 数组）。规则只允许有限文本操作，不接受执行代码、正反向标签或未知用途。工作流范围同时绑定工作流结构和节点；同类节点范围绑定端口签名及非选中控制项。每个匹配位置保留一条声明，不维护不同控制项组合的规则矩阵。
+ComfyUI 提示词解析声明位于 `backend/metadata/rules/comfyui_nodes.json`；共用的节点控件布局、读取字段、种子范围及特殊值契约集中在 `backend/comfyui/rules/node_adapters.json`，记录源码来源和验证约束，不再在同步器中维护另一份控件顺序。共用目录指纹也参与解析缓存失效。读取许可与写回许可分开，未知布局不因能读出一个值就获得写入权限。
+
+用户声明保存在插件数据目录的 `comfyui_parser_rules.json`（`version: 1` 与 `rules` 数组）。规则只允许有限文本操作，不接受执行代码、正反向标签或未知用途，也不能修改内置控件或种子策略。工作流范围同时绑定工作流结构和节点；同类节点范围绑定端口签名及非选中控制项。每个匹配位置保留一条声明，不维护不同控制项组合的规则矩阵。
 
 `node_rules.py` 负责规范化、端口核验和不可变规则集；使用 ContextVar 在每次仓储操作及 worker 线程中固定规则快照，不依赖全局可变用户配置。规则保存原子写入且检查请求 revision；同解析器版本的不同规则指纹也会使缓存过期。详情即时投影、后台维护持久化派生数据，不改写原图或人工覆盖。新增内置规则需提供来源依据与回归样例，不能仅根据一次显示值猜测复杂节点逻辑。
 

@@ -21,11 +21,11 @@ from ..executor import ProviderError, ProviderPartialResponseError
 from .client import (
     ComfyClient,
     ComfyExecutionError,
-    image_workflow_snapshot,
     normalize_workflow,
+    prepare_submission_workflow,
 )
 from .jobs import ComfyJobManager, ComfyJobStore
-from .ui_sync import synchronize_workflow
+from .output_metadata import prepare_output
 from .workflows import FIXED_OUTPUT_POLICY, migrate_fixed_outputs
 
 
@@ -246,7 +246,7 @@ class ComfyRuntime:
                     graph = prepare_graph(
                         config, request, uploaded, written_inputs=written_inputs
                     )
-                    synchronized = synchronize_workflow(
+                    synchronized = prepare_submission_workflow(
                         config, graph, targets=written_inputs
                     )
                     if (await runtime.store.get_job(job["id"]))[
@@ -384,21 +384,18 @@ class ComfyRuntime:
                 }
                 if (await runtime.store.get_job(job["id"]))["status"] == "cancelled":
                     raise asyncio.CancelledError
-                snapshots = await asyncio.to_thread(
-                    lambda: [
-                        image_workflow_snapshot(image, snapshot) for image in images
-                    ]
+                images = await asyncio.to_thread(
+                    lambda: tuple(prepare_output(image, snapshot) for image in images)
                 )
                 images = tuple(
                     replace(
                         image,
                         effective_parameters={
                             **image.effective_parameters,
-                            "_comfyui": image_snapshot,
                             "comfy_job_id": job["id"],
                         },
                     )
-                    for image, image_snapshot in zip(images, snapshots)
+                    for image in images
                 )
                 await runtime.store.save_outputs(job["id"], images)
                 if failure:

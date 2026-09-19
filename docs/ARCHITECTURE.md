@@ -23,6 +23,8 @@ backend/
     capabilities.py             完整能力载荷组装
   generation/service.py         生图校验、批次、并发、结果登记与复现
   generation/concurrency.py     服务商、模型与官方账号共享限流
+  comfyui/
+    catalog.py / rules/         共用节点身份、控件布局、种子契约与来源依据
   providers/
     executor.py                 通用服务商调度及 HTTP 适配
     comfyui/
@@ -31,6 +33,9 @@ backend/
       jobs.py                   任务/修订持久化与任务管理
       runtime.py                生图服务与可恢复任务的协调
       imports.py                图片/JSON 导入结果适配
+      ui_sync.py                仅同步明确写入的界面控件，兼容位置与具名值
+      global_seed.py            已知全局种子提交钩子的映射与回写核验
+      output_metadata.py        运行结果回写核验及 PNG 工作流元数据修正
     novelai/
       protocol.py               官方接口请求/响应处理
       catalog.py                模型能力目录
@@ -86,6 +91,8 @@ scripts/                       验证入口和发布包构建
 `routes.py` 仅集中登记现有路径、方法、处理函数和描述。处理函数继续经过插件入口的薄包装；不改变宿主提供的认证、上下文绑定或返回格式。
 
 `backend/` 子包的 `__init__.py` 保持轻量。内部调用使用明确的相对导入；测试引用相应的新模块，避免根目录转发层和模块别名掩盖循环依赖。
+
+`backend/comfyui/` 的声明不依赖 Provider 执行或图库解析器。读取元数据使用明确的读取字段，写回界面使用经过验证的布局和约束，二者共用来源而不共用写入权限。用户文本流向规则不获得控件写入或种子执行权限。
 
 ## 页面状态
 

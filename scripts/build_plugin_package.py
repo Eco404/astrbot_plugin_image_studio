@@ -23,9 +23,12 @@ RUNTIME_FILES = (
     "README.md",
     "docs/images/generate.png",
     "backend/metadata/rules/comfyui_nodes.json",
+    "backend/comfyui/rules/node_adapters.json",
 )
 REQUIRED_BACKEND_FILES = (
     "backend/__init__.py",
+    "backend/comfyui/__init__.py",
+    "backend/comfyui/catalog.py",
     "backend/api/__init__.py",
     "backend/api/comfyui.py",
     "backend/api/gallery.py",
@@ -78,6 +81,8 @@ REQUIRED_BACKEND_FILES = (
     "backend/providers/__init__.py",
     "backend/providers/comfyui/__init__.py",
     "backend/providers/comfyui/client.py",
+    "backend/providers/comfyui/global_seed.py",
+    "backend/providers/comfyui/output_metadata.py",
     "backend/providers/comfyui/imports.py",
     "backend/providers/comfyui/jobs.py",
     "backend/providers/comfyui/runtime.py",

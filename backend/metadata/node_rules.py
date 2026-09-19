@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from .common import MAX_METADATA_BYTES, MAX_NODES, _is_api_graph, _json
+from ..comfyui.catalog import catalog_fingerprint, metadata_widget_catalog
 
 RULE_FILE = "comfyui_parser_rules.json"
 CATALOG_PATH = Path(__file__).with_name("rules") / "comfyui_nodes.json"
@@ -69,7 +70,9 @@ class RuleSet:
 
     @property
     def catalog(self) -> dict:
-        return json.loads(_CATALOG_JSON)
+        catalog = json.loads(_CATALOG_JSON)
+        catalog["widgets"] = metadata_widget_catalog()
+        return catalog
 
     @property
     def user_rules(self) -> list[dict]:
@@ -142,7 +145,10 @@ def make_rules(user_rules: list[dict]) -> RuleSet:
             raise ValueError("文本节点规则标识重复")
         ids.add(rule["id"])
     encoded = _encode(user_rules)
-    return RuleSet(encoded, _digest([json.loads(_CATALOG_JSON), user_rules]))
+    return RuleSet(
+        encoded,
+        _digest([json.loads(_CATALOG_JSON), catalog_fingerprint(), user_rules]),
+    )
 
 
 _DEFAULT_RULES = make_rules([])

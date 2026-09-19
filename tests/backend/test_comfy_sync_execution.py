@@ -119,7 +119,12 @@ def executable(*, references=0):
     config["api_graph"]["3"]["inputs"]["seed"] = ["91", 0]
     config["workflow"]["nodes"] = [
         {"id": 1, "type": "CLIPTextEncode", "widgets_values": ["fixed prompt"]},
-        {"id": 91, "type": "Seed (rgthree)", "widgets_values": [123, "", "", ""]},
+        {
+            "id": 91,
+            "type": "Seed (rgthree)",
+            "widgets_values": [123, "", "", ""],
+            "widgets_values_named": {"seed": 123},
+        },
         *[
             {
                 "id": 10 + index,
@@ -232,6 +237,12 @@ def test_durable_submission_persists_synced_ui_and_recovers_without_resubmission
             restored = await recovered.result(done)
             snapshot = restored.images[0].effective_parameters["_comfyui"]
             assert node(snapshot, 91)["widgets_values"][0] == 3456
+            with Image.open(io.BytesIO(restored.images[0].data)) as original:
+                restored_ui = json.loads(original.text["workflow"])
+            assert (
+                node({"workflow": restored_ui}, 91)["widgets_values_named"]["seed"]
+                == 3456
+            )
             assert node(snapshot, 1)["widgets_values"] == ["changed prompt"]
             assert len(submitted_ui) == 1
             assert node(selected.models[0].comfyui, 91)["widgets_values"][0] == 123
@@ -340,6 +351,10 @@ def test_batch_children_keep_distinct_execution_seed_and_ui_snapshots(
             } == {9000, 9001, 9002}
             assert {
                 node(snapshot, 91)["widgets_values"][0] for snapshot in snapshots
+            } == {9000, 9001, 9002}
+            assert {
+                node(snapshot, 91)["widgets_values_named"]["seed"]
+                for snapshot in snapshots
             } == {9000, 9001, 9002}
             assert not result.warning
         finally:

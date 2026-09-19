@@ -31,6 +31,20 @@ def _workflow_graph(workflow: dict, result: dict) -> dict:
         widgets = node.get("widgets_values", [])
         if isinstance(widgets, list):
             inputs.update(zip(widget_names.get(kind, ()), widgets))
+        elif isinstance(widgets, dict):
+            inputs.update(
+                (name, widgets[name])
+                for name in widget_names.get(kind, ())
+                if name in widgets
+            )
+        named = node.get("widgets_values_named")
+        if isinstance(named, dict):
+            # Runtime nodes can write the executed value only to the positional
+            # array (e.g. rgthree), leaving a next-run sentinel in named values.
+            # Fill missing known inputs without overriding those observations.
+            for name in widget_names.get(kind, ()):
+                if name in named:
+                    inputs.setdefault(name, named[name])
         for entry in input_entries:
             if isinstance(entry, dict) and str(entry.get("link")) in links:
                 name = entry.get("name", "")
