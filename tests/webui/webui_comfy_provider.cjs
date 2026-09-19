@@ -145,7 +145,7 @@ async function matrix(browser, width, dark) {
     assert.equal(await frame.locator("#comfyJobs").evaluate(element => element.open), false, "task queue starts collapsed");
     assert.match(await frame.locator("#comfyJobsSummary").textContent(), /进行中 1/);
     assert.equal(await frame.locator("[data-job-dismiss]").count(), 0, "running tasks cannot be dismissed");
-    assert.match(await frame.locator("#comfyJobs").textContent(), /分批 0\/3/);
+    assert.match(await frame.locator("#comfyJobs").textContent(), /排队中 · 0\/3/);
     assert.equal(submitted.length, 1); assert.equal(submitted[0].prompt, "");
     assert.equal(submitted[0].count, 5, "total target is sent at request level");
     assert.equal(submitted[0].parameters.batch_size, 3, "node batch stays an independent ordinary parameter");

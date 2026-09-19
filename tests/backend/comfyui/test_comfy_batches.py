@@ -454,6 +454,60 @@ def test_parent_progress_updates_before_all_children_finish_and_survives_summary
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("count", [1, 3])
+def test_live_sampler_steps_reach_visible_job_before_workflow_finishes(
+    tmp_path, monkeypatch, count
+):
+    async def run():
+        runtime, _, provider, client = await fixture(
+            tmp_path, monkeypatch, native=1, model_limit=1, provider_limit=1
+        )
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        original_wait = client.wait
+
+        async def sampled_wait(selected_provider, remote_id, **kwargs):
+            await kwargs["on_progress"](
+                {
+                    "status": "running",
+                    "event": "progress",
+                    "node": "3",
+                    "value": 18,
+                    "max": 30,
+                }
+            )
+            # The next status-only poll used to erase these exact sampler steps.
+            await kwargs["on_progress"]({"status": "running"})
+            entered.set()
+            await release.wait()
+            return await original_wait(selected_provider, remote_id, **kwargs)
+
+        client.wait = sampled_wait
+        try:
+            job = await submit(runtime, provider, count)
+            await asyncio.wait_for(entered.wait(), 3)
+            visible = runtime.public_job(
+                await runtime.store.get_job(job["id"], light=True)
+            )
+            assert visible["progress"]["value"] == 18
+            assert visible["progress"]["max"] == 30
+            if count > 1:
+                assert visible["progress"]["current"] == 1
+                assert visible["progress"]["completed"] == 0
+                assert visible["progress"]["total"] == 3
+            else:
+                assert visible["progress"].get("total", 1) == 1
+            release.set()
+            assert (await asyncio.wait_for(runtime.manager.wait(job["id"]), 3))[
+                "status"
+            ] == "succeeded"
+        finally:
+            release.set()
+            await runtime.close()
+
+    asyncio.run(run())
+
+
 def alias_provider(provider, *, hidden_count=False):
     raw = provider.public_dict()
     definition = workflow()

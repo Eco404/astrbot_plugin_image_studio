@@ -508,18 +508,32 @@
       return true;
     }
 
+    function progressLabel(job) {
+      const progress = job.progress || {}, parts = [];
+      const valid = value => value != null && value !== "" && Number.isFinite(Number(value));
+      if (!terminal.has(job.status) && valid(progress.value) && valid(progress.max) && Number(progress.max) > 0 && Number(progress.value) >= 0) {
+        parts.push(`${progress.value}/${progress.max}`);
+      }
+      // The active run is independent of completed work, including concurrent
+      // runs. One workflow may produce several images; total counts workflows.
+      const current = terminal.has(job.status) ? progress.completed : progress.current ?? progress.completed;
+      if (valid(current) && valid(progress.total) && Number(progress.total) > 1 && Number(current) >= 0) {
+        parts.push(`${current}/${progress.total}`);
+      }
+      return parts.length ? ` · ${parts.join(" · ")}` : "";
+    }
+
     function renderJobs() {
       const host = $("comfyJobs"), list = $("comfyJobList"); if (!host || !list) return;
       host.hidden = !jobs.size;
       const labels = { created: "准备中", preparing: "准备输入", queued: "排队中", submitting: "提交中", submitted: "已提交", running: "执行中", downloading: "读取结果", finalizing: "保存结果", recovering: "恢复任务状态", completed: "已完成", succeeded: "已完成", success: "已完成", partial: "部分完成", failed: "失败", cancelled: "已取消", canceled: "已取消", interrupted: "已中断", submission_unknown: "提交结果待核实", unknown: "任务状态待核实", cancel_requested: "正在取消" };
-      const progressLabel = progress => progress?.completed != null && progress?.total ? ` · 分批 ${progress.completed}/${progress.total}` : progress?.value != null && progress?.max ? ` · ${progress.value}/${progress.max}` : "";
       const ordered = Array.from(jobs.values()).sort((a, b) => Number(b.created_at || 0) - Number(a.created_at || 0));
       const running = ordered.filter(job => !terminal.has(job.status)), problems = ordered.filter(job => problematic.has(job.status));
       $("comfyJobsSummary").textContent = [`${ordered.length} 项`, running.length ? `进行中 ${running.length}` : "", problems.length ? `异常 ${problems.length}` : ""].filter(Boolean).join(" · ");
       // Keep the details element mounted so refreshing progress never changes
       // the user's disclosure state; all retained errors remain accessible.
       const visible = [...running, ...ordered.filter(job => terminal.has(job.status))];
-      list.innerHTML = visible.map(job => `<div class="comfy-job"><div><strong>${escape(job.model_name || job.model || job.workflow_name || "ComfyUI 工作流")}</strong><span role="status">${escape(labels[job.status] || job.status || "处理中")}${escape(progressLabel(job.progress))}</span>${job.error ? `<p class="inline-error">${escape(typeof job.error === "string" ? job.error : job.error.message || JSON.stringify(job.error))}</p>` : ""}</div><div class="comfy-job-actions">${job.result || job.result_available ? `<button class="quiet-button" type="button" data-job-result="${escape(job.id)}">查看结果</button>` : ""}${!terminal.has(job.status) ? `<button class="quiet-button" type="button" data-job-cancel="${escape(job.id)}">取消</button>` : (["failed", "unknown"].includes(job.status) && (job.remote_id || job.prompt_id || job.can_resume) ? `<button class="quiet-button" type="button" data-job-resume="${escape(job.id)}">继续查询</button>` : "") + `<button class="quiet-button" type="button" data-job-dismiss="${escape(job.id)}">清除</button>`}</div></div>`).join("");
+      list.innerHTML = visible.map(job => `<div class="comfy-job"><div><strong>${escape(job.model_name || job.model || job.workflow_name || "ComfyUI 工作流")}</strong><span role="status">${escape(labels[job.status] || job.status || "处理中")}${escape(progressLabel(job))}</span>${job.error ? `<p class="inline-error">${escape(typeof job.error === "string" ? job.error : job.error.message || JSON.stringify(job.error))}</p>` : ""}</div><div class="comfy-job-actions">${job.result || job.result_available ? `<button class="quiet-button" type="button" data-job-result="${escape(job.id)}">查看结果</button>` : ""}${!terminal.has(job.status) ? `<button class="quiet-button" type="button" data-job-cancel="${escape(job.id)}">取消</button>` : (["failed", "unknown"].includes(job.status) && (job.remote_id || job.prompt_id || job.can_resume) ? `<button class="quiet-button" type="button" data-job-resume="${escape(job.id)}">继续查询</button>` : "") + `<button class="quiet-button" type="button" data-job-dismiss="${escape(job.id)}">清除</button>`}</div></div>`).join("");
       list.querySelectorAll("[data-job-result]").forEach(button => button.addEventListener("click", async () => {
         button.disabled = true;
         try {

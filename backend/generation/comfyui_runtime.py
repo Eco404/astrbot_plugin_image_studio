@@ -657,11 +657,7 @@ class ComfyRuntime:
                 await self.manager._start(child)
             children.append(child)
 
-        progress_lock = asyncio.Lock()
-        completed_count = 0
-
         async def wait_child(child):
-            nonlocal completed_count
             try:
                 completed_child = await self.manager.wait(child["id"])
             except asyncio.CancelledError:
@@ -676,24 +672,6 @@ class ComfyRuntime:
                 # plugin shutdown still propagates cancellation through waits.
                 if self.manager._closed:
                     raise
-            async with progress_lock:
-                completed_count += 1
-                current = await self.store.get_job(parent["id"], light=True)
-                if current["status"] not in {
-                    "succeeded",
-                    "partial",
-                    "failed",
-                    "cancelled",
-                    "unknown",
-                }:
-                    await self.store.update_progress(
-                        parent["id"],
-                        {
-                            "status": "running",
-                            "completed": completed_count,
-                            "total": len(sizes),
-                        },
-                    )
             return completed_child
 
         completed = await asyncio.gather(*(wait_child(child) for child in children))

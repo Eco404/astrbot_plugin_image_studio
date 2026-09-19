@@ -446,6 +446,7 @@ class ComfyJobStore:
                 + " WHERE id=?",
                 (*updates.values(), job_id),
             )
+            self._refresh_parent_progress(connection, row["parent_job_id"])
             return self._decode(
                 connection.execute(
                     "SELECT * FROM comfy_jobs WHERE id=?", (job_id,)
@@ -463,13 +464,27 @@ class ComfyJobStore:
         if status is not None and status not in JOB_STATUSES - TERMINAL_STATUSES:
             raise ValueError("ComfyUI 任务进度状态无效")
         with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT status FROM comfy_jobs WHERE id=?", (job_id,)
+                "SELECT status,parent_job_id,json_extract(result_json,'$.progress') AS progress "
+                "FROM comfy_jobs WHERE id=?",
+                (job_id,),
             ).fetchone()
             if row is None:
                 raise ValueError("ComfyUI 任务不存在")
             if row["status"] in TERMINAL_STATUSES:
                 return row["status"]
+            previous = json.loads(row["progress"] or "{}")
+            # Queue polling reports only running/queued state. A running poll
+            # must not erase the sampler's more precise websocket progress.
+            # Node changes and reconnect/queued events intentionally reset it.
+            if (
+                previous.get("status") == progress.get("status") == "running"
+                and not progress.get("event")
+                and "value" not in progress
+                and "max" not in progress
+            ):
+                progress = {**previous, **progress}
             updated = connection.execute(
                 "UPDATE comfy_jobs SET result_json=json_set(result_json,'$.progress',json(?)),"
                 "status=?,updated_at=? WHERE id=? AND status=?",
@@ -486,7 +501,60 @@ class ComfyJobStore:
                     "SELECT status FROM comfy_jobs WHERE id=?", (job_id,)
                 ).fetchone()
                 return latest["status"] if latest else "cancelled"
+            self._refresh_parent_progress(connection, row["parent_job_id"])
             return status or row["status"]
+
+    @staticmethod
+    def _refresh_parent_progress(connection, parent_id):
+        """Combine light child progress and completion counts atomically.
+
+        Concurrent children may finish in any order; the current workflow is
+        identified by its saved plan index, never inferred from completed count.
+        """
+        if not parent_id:
+            return
+        parent = connection.execute(
+            "SELECT status,json_extract(result_json,'$.progress') AS progress "
+            "FROM comfy_jobs WHERE id=?",
+            (parent_id,),
+        ).fetchone()
+        if parent is None or parent["status"] in TERMINAL_STATUSES:
+            return
+        previous = json.loads(parent["progress"] or "{}")
+        children = connection.execute(
+            "SELECT id,status,json_extract(request_json,'$.chunk_index') AS chunk_index,"
+            "json_extract(result_json,'$.progress') AS progress FROM comfy_jobs "
+            "WHERE parent_job_id=? ORDER BY updated_at DESC,id",
+            (parent_id,),
+        ).fetchall()
+        progress = {
+            "status": "running",
+            "completed": sum(
+                child["status"] in TERMINAL_STATUSES for child in children
+            ),
+            "total": previous.get("total") or len(children),
+        }
+        for child in children:
+            if child["status"] != "running":
+                continue
+            current = json.loads(child["progress"] or "{}")
+            if current.get("status") != "running":
+                continue
+            progress.update(
+                {
+                    key: current[key]
+                    for key in ("value", "max", "node")
+                    if key in current
+                }
+            )
+            if isinstance(child["chunk_index"], int):
+                progress["current"] = child["chunk_index"] + 1
+            break
+        connection.execute(
+            "UPDATE comfy_jobs SET result_json=json_set(result_json,'$.progress',json(?)),"
+            "updated_at=? WHERE id=?",
+            (_json_snapshot(progress), time.time(), parent_id),
+        )
 
     async def dismiss_job(self, job_id: str) -> dict[str, Any]:
         """Hide a terminal task from the WebUI queue without deleting its data."""
