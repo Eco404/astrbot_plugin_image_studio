@@ -307,7 +307,8 @@ def test_failed_session_delivery_does_not_mean_failed_generation():
         )
         assert result.isError
         assert payload(result)["status"] == "delivery_unknown"
-        assert "请勿重新生图" in payload(result)["message"]
+        assert "重发前核对当前会话是否已经收到" in payload(result)["message"]
+        assert "生成" not in payload(result)["message"]
 
     asyncio.run(run())
 

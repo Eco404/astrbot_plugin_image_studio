@@ -4,10 +4,14 @@ from typing import Any
 
 from ..config import RuntimeSettings
 from ..providers.comfyui.workflows import FIXED_OUTPUT_POLICY
-from .capability_catalog import (
-    MODEL_SELECTION_GUIDANCE,
-    search_catalog,
-    select_capability_models,
+from .capability_catalog import search_catalog, select_capability_models
+
+_CAPABILITY_REUSE_GUIDANCE = (
+    "在处理当前这条用户消息期间，使用本次查询成功的 model_ref 和该项 query_modes 中的模式时，"
+    "可按照本次返回的参数说明重复调用 image_studio_generate，无需重复查询。"
+    "修改 prompt 或 parameters 中的生成参数值不需要重新查询。"
+    "处理新的用户消息、使用尚未查询的模型或模式，或插件设置发生变化后，需要重新查询；"
+    "工具提示重新查询时请按提示操作。"
 )
 
 
@@ -162,7 +166,7 @@ def query_capabilities(
                 "format": prompt_profile,
                 "instruction": prompt_instructions,
                 "negative_prompt": (
-                    "仅在 parameters 返回该字段时使用。"
+                    "仅在本次返回的 parameters 中列出 negative_prompt 时，才可填写 parameters.negative_prompt。"
                     if model.llm_negative_prompt_enabled
                     else "不要传入 negative_prompt。"
                 ),
@@ -185,7 +189,8 @@ def query_capabilities(
                 and not prompt_instructions
             ):
                 entry["prompt_contract"]["instruction"] = (
-                    "此工作流没有主提示词入口，可省略 prompt；仅通过已开放 parameters 调整工作流输入。"
+                    "此工作流未绑定 image_studio_generate 的 prompt 参数，可以省略该参数。"
+                    "可修改的工作流参数见本次返回的 parameters。"
                 )
         if normalized_query_type == "model":
             entry.update(
@@ -198,22 +203,31 @@ def query_capabilities(
         entries_by_ref[ref] = entry
     if normalized_query_type == "default":
         next_action = (
-            MODEL_SELECTION_GUIDANCE
-            + "满足要求即可生成；有能力缺口时使用相同 mode 的 search，再用 model_refs 查询完整参数。"
+            "已返回默认模型在 Image Studio 中允许使用的生成模式、参数和提示词要求。"
+            "选择 default_for_modes 包含所需模式的模型，使用该项 model_ref 调用 image_studio_generate。"
         )
     elif normalized_query_type == "all":
-        next_action = MODEL_SELECTION_GUIDANCE + "已返回完整能力，无需再次 model 查询。"
+        next_action = (
+            "已返回各模型在 Image Studio 中允许使用的生成模式、参数和提示词要求。"
+            "请从 models 中选择所需模型，按照该项 prompt_contract 编写提示词，并使用 parameters 中列出的参数。"
+        )
     elif not entries:
-        next_action = "没有成功查询的模型；根据 errors 修正 model_refs，或使用 search 查找可用模型后重新查询。"
+        next_action = (
+            "没有成功查询的模型；根据 errors 中的原因修正 model_refs，"
+            '或设置 query_type="search" 查找可用模型。'
+        )
     elif capability_errors:
         next_action = (
-            MODEL_SELECTION_GUIDANCE
-            + "models 成功项可直接生成；errors 项修正后重新查询。"
+            "models 中的模型已成功查询，可按照各项 prompt_contract 和 parameters 调用 image_studio_generate。"
+            "未成功查询的输入及原因见 errors；使用这些模型前需修正 model_refs 后重新查询。"
         )
     else:
         next_action = (
-            MODEL_SELECTION_GUIDANCE + "按 prompt_contract 和 parameters 直接生成。"
+            "已返回所选模型在 Image Studio 中允许使用的生成模式、参数和提示词要求。"
+            "按照所选模型的 prompt_contract 编写提示词，并仅使用 parameters 中列出的参数。"
         )
+    if entries:
+        next_action += _CAPABILITY_REUSE_GUIDANCE
     return {
         "query_type": normalized_query_type,
         "next_action": next_action,
@@ -228,7 +242,7 @@ def query_capabilities(
         **({"errors": capability_errors} if normalized_query_type == "model" else {}),
         **(
             {
-                "input_mapping": "重复模型共用一份契约；input_indices 与 requested_refs 按顺序对应各次成功输入，input_index/requested_ref 为首次输入。"
+                "input_mapping": "同一模型只在 models 中返回一次。input_indices 与 requested_refs 一一对应，分别表示原始 model_refs 中的位置（从 0 开始）和输入字符串；input_index 和 requested_ref 对应首次成功输入。"
             }
             if normalized_query_type == "model"
             and any(len(entry["input_indices"]) > 1 for entry in entries)

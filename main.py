@@ -55,21 +55,6 @@ PLUGIN_NAME = "astrbot_plugin_image_studio"
 PAGE_PREFIX = f"/{PLUGIN_NAME}"
 LOG_TAG = "[ImageStudio]"
 CAPABILITY_QUERY_EXTRA_KEY = "_image_studio_capability_queries"
-AGENT_WORKFLOW_PROMPT_MARKER = "<!-- image_studio_agent_workflow_v2 -->"
-AGENT_WORKFLOW_PROMPT = (
-    "Image Studio 工具约定：生图前先调用 image_studio_get_capabilities。"
-    "用户指定模型/工作流时按名称 search，再用 model 查询完整参数；"
-    "未指定时先查 default，优先使用对应模式默认模型。仅有明确能力缺口时再查找替代；"
-    "画风或普通画面描述本身不是更换默认模型的理由。all 仅用于确需比较全部模型时。"
-    "完整能力在当前轮、配置未变时可复用；遵守返回的参数和提示词格式。"
-    "生图返回 pending 时用 image_studio_task 查询同一任务，勿重新提交。"
-    "生成结果图来自你调用的生图工具，不是用户上传的图片；生成只是当前任务的一步。"
-    "查看/发送已有资产无需查询模型。插件内使用 asset_id；"
-    "用 image_studio_send_output 发送原图或复制到 workspace 后交给外部工具。"
-    "data/temp/tool_images 是框架视觉缓存，不得发送、复制、编辑或用作参考图。"
-    "发送产物不代表本轮结束；继续剩余步骤，完成后给出普通 assistant 文本回复，勿重复已发送文字。"
-)
-IMAGE_WORKFLOW_STATE_EXTRA_KEY = "_image_studio_workflow_state"
 AGENT_RESULT_RECOVERY_EXTRA_KEY = "_image_studio_result_recovery"
 
 
@@ -618,27 +603,6 @@ class ImageStudioPlugin(Star):
             await append_reference(raw_ref)
         return result()
 
-    @filter.on_llm_request()
-    async def inject_agent_workflow_prompt(
-        self, event: AstrMessageEvent, req: Any
-    ) -> None:
-        """Keep final user-facing text on the Agent's final response path."""
-
-        del event
-        if (
-            not self._settings.enable_llm_tool
-            or req is None
-            or not _request_has_tool(req, "image_studio_generate")
-        ):
-            return
-        current_prompt = str(getattr(req, "system_prompt", "") or "")
-        if AGENT_WORKFLOW_PROMPT_MARKER in current_prompt:
-            return
-        req.system_prompt = (
-            f"{current_prompt}\n\n{AGENT_WORKFLOW_PROMPT_MARKER}\n"
-            f"{AGENT_WORKFLOW_PROMPT}"
-        ).strip()
-
     @filter.llm_tool(name="image_studio_get_capabilities")
     async def image_studio_get_capabilities(
         self,
@@ -652,17 +616,18 @@ class ImageStudioPlugin(Star):
         limit: int = 10,
         offset: int = 0,
     ) -> mcp.types.CallToolResult:
-        """生图前必须先调用本工具查询模型能力；同轮配置未变时可复用结果。
+        """查询模型或工作流在 Image Studio 中允许使用的生成模式、参数和提示词要求。
 
-        未指定模型时先查 default；指定名称时 search 后查 model。仅默认能力不满足时选择替代。
-        search/providers 只返回候选摘要；选定后使用 model 和 model_refs 获取完整参数。
-        default/all/model 返回完整能力。查看或发送已有资产不需要本工具。
+        准备生图时，用户未指定模型则先设置 query_type="default" 查询默认模型。
+        用户指定模型或工作流名称时，先设置 query_type="search" 搜索，再用 query_type="model" 和 model_refs 查询选定模型。
+        仅当默认模型不支持所需功能时查找其他模型；普通画风或画面描述不是更换默认模型的理由。
+        query_type="search" 或 "providers" 只返回目录信息，不包含可直接用于生成的参数说明。
 
         Args:
-            query_type(string): default(查询默认模型参数)/all(查询全部模型参数)/model(使用model_refs查询指定模型参数)/providers(查询服务商)/search(搜索模型或工作流); 默认 default
+            query_type(string): default(查询默认模型参数)/model(使用model_refs查询指定模型参数)/providers(查询服务商)/search(搜索模型或工作流)/all(需要比较全部模型时查询完整参数); 默认 default
             mode(string): 按 text2img/img2img 筛选；省略时查询两种模式
             model_refs(array[string]): 1 至 20 个 provider_id:model_id；query_type=model 时必填，各项独立返回成功结果或错误说明
-            query(string): 模型或工作流名称、ID、使用说明，或服务商名称、ID；仅 search/providers 使用，留空列出全部候选
+            query(string): 模型或工作流名称、ID、使用说明，或服务商名称、ID；仅 query_type="search" 或 "providers" 使用。留空时不按关键词筛选，结果仍按 limit 和 offset 分页返回
             provider_id(string): 限定服务商 ID；仅 search/providers 使用
             provider_kind(string): 限定服务商类型，例如 comfyui；仅 search/providers 使用
             limit(number): search/providers 每页数量，整数 1 至 50，默认 10
@@ -700,17 +665,19 @@ class ImageStudioPlugin(Star):
         references: list[dict[str, Any]] | None = None,
         request_id: str = "",
     ) -> mcp.types.CallToolResult:
-        """生成图片，并返回可继续处理的原图资产。
+        """生成图片或提交 ComfyUI 工作流，返回图片资产或任务状态。
 
-        ComfyUI 可能返回 pending 和 task_id，此时用 image_studio_task 查询，不要再次生成。
+        调用前须通过 image_studio_get_capabilities 查询目标模型在所选生成模式下可用的参数与提示词要求。
+        在处理当前这条用户消息期间，已查询过的模型和模式不必重复查询；修改 prompt 或 parameters 的值也不必重查。
+        处理新的用户消息、使用尚未查询的模型或模式，或插件设置发生变化后，需要重新查询。
 
         Args:
             prompt(string): 生图提示词，格式遵循能力查询结果
-            mode(string): text2img/img2img; 应明确指定，缺失时仅作容错推断
-            model_ref(string): provider_id:model_id; 省略时使用模式默认
-            parameters(object): 仅填写能力查询为该模型返回的参数
-            references(array[object]): 图生图参考，元素使用 asset_id 或当前 workspace 的 path
-            request_id(string): 可选 ComfyUI 请求标识；同一会话以相同标识和参数重试会复用任务，新生图应换标识；其他服务商不支持
+            mode(string): 请填写 text2img（文生图）或 img2img（图生图）
+            model_ref(string): 模型编号，格式为 provider_id:model_id；省略时使用 mode 对应的默认模型
+            parameters(object): 仅填写本次查询结果为该模型列出的参数，使用其中的字段名
+            references(array[object]): 参考图片列表；每项填写图片编号 asset_id，或当前工作区文件的路径 path，二者只能选一个
+            request_id(string): 可选，仅支持 ComfyUI；同一会话中以相同 request_id 和相同请求参数再次调用时，返回原任务而不新建任务；希望生成新图片时使用新的 request_id 或省略此参数
 
         Returns:
             Original asset metadata and optional MCP preview content for Agent workflows.
@@ -767,7 +734,9 @@ class ImageStudioPlugin(Star):
                 event, self._settings.revision, canonical_ref, normalized_mode
             ):
                 raise ValueError(
-                    "生成前必须先调用 image_studio_get_capabilities 查询当前模型能力和提示词格式"
+                    "生成前必须先调用 image_studio_get_capabilities，"
+                    f'使用 query_type="model"、model_refs={json.dumps([canonical_ref], ensure_ascii=False)}、mode="{normalized_mode}" 查询该模型可用的参数与提示词要求。'
+                    "查询成功后可再次调用 image_studio_generate。"
                 )
             if parameters is not None and not isinstance(parameters, dict):
                 raise ValueError("parameters 必须是对象")
@@ -885,17 +854,15 @@ class ImageStudioPlugin(Star):
                     "generation_id": result.generation_id,
                     "task_id": task_id,
                     "message": "图片已经生成，但原图资产保存失败；请勿重新生图。",
-                    "next_action": "使用 image_studio_task 和 task_id 重试取得已有结果。"
+                    "next_action": "调用 image_studio_task，并传入本次返回的 task_id，重试取得已生成图片的 asset_id；不会再次调用生图接口。"
                     + (
-                        "此恢复标识仅在当前轮有效。"
+                        "这个 result_ 开头的编号仅在处理当前这条用户消息期间有效。"
                         if task_id.startswith("result_")
                         else ""
                     ),
                 },
                 is_error=True,
             )
-        _protect_image_workflow_assets(event)
-
         if configured_return_mode == "original":
             visual_images = result.images
         elif configured_return_mode == "preview":
@@ -926,14 +893,6 @@ class ImageStudioPlugin(Star):
             }
             for asset in assets
         ]
-        if configured_return_mode == "preview":
-            visual_notice = "已附轻量预览；继续操作插件资产时使用 asset_id。"
-        elif configured_return_mode == "asset":
-            visual_notice = (
-                "未附视觉图；需要看图时使用 asset_id 调用 image_studio_view_asset。"
-            )
-        else:
-            visual_notice = "已附原图供查看；后续插件操作仍使用 asset_id。"
         content.insert(
             0,
             mcp.types.TextContent(
@@ -948,8 +907,8 @@ class ImageStudioPlugin(Star):
                             "return_mode": configured_return_mode,
                             "assets": manifest,
                             "warning": result.warning,
-                            "message": "这些图片由你调用生图工具生成，可继续用于当前任务；本次返回不会向用户发送图片。",
-                            "next_action": visual_notice,
+                            "message": "这些图片由你调用生图工具生成。本次调用未向当前会话发送图片。",
+                            "next_action": _asset_usage_notice(configured_return_mode),
                         },
                         ensure_ascii=False,
                         separators=(",", ":"),
@@ -969,10 +928,12 @@ class ImageStudioPlugin(Star):
     ) -> mcp.types.CallToolResult:
         """查询当前会话的 ComfyUI 任务或取得已有结果，不会新建生图请求。
 
+        使用已有任务编号 task_id 查询，无需先查询模型能力。
+
         Args:
-            task_id(string): generate 返回的任务编号；留空列出当前会话最近任务；result_ 开头的资产登记恢复编号仅在当前轮有效
-            wait_seconds(number): 等待已有任务的秒数，0 至 30，默认立即返回
-            resume(boolean): 是否继续同一已保存任务或取得已有结果，默认 false；提交状态不确定时不重复提交
+            task_id(string): image_studio_generate 返回的任务编号；留空时列出当前会话最近任务。result_ 开头的编号用于重试取得已生成图片的 asset_id，不会重新生图，且仅在处理当前这条用户消息期间有效
+            wait_seconds(number): 最多等待任务完成的秒数，范围 0 至 30；任务完成或等待时间到达后返回当前状态。默认 0，立即返回
+            resume(boolean): 是否尝试继续执行同一已保存任务或读取它的结果，默认 false；不会重复提交 ComfyUI 已接收的生成任务，无法确定是否已接收时也不重复提交
         """
         if not self._settings.enable_llm_tool:
             return _tool_error("Image Studio 的 LLM 生图工具已关闭。")
@@ -994,7 +955,7 @@ class ImageStudioPlugin(Star):
             saved = recovery.get(task_id)
             if saved is None:
                 return _tool_error(
-                    "当前轮没有这个待登记结果；请检查已保存的画廊记录，不要自动重新生成。"
+                    "当前消息的处理过程中没有这个可重试的图片结果；请检查已保存的画廊记录，不要自动重新生成。"
                 )
             result, generation_status = saved
             return await self._agent_generation_result(
@@ -1074,9 +1035,9 @@ class ImageStudioPlugin(Star):
                 "can_resume": summary.get("can_resume", False),
                 "error": summary.get("error") or "",
                 "next_action": (
-                    "使用 image_studio_task 查询同一 task_id，建议 wait_seconds=30 等待进度；不要重复提交。"
+                    "调用 image_studio_task，并传入同一 task_id；可设置 wait_seconds=30，最多等待 30 秒后返回任务状态。若尚未完成，可继续查询同一任务，不要重复提交。"
                     if pending
-                    else "可用 image_studio_task 的 resume=true 尝试恢复同一任务，不会重新提交已确认的工作流。"
+                    else "调用 image_studio_task，传入同一 task_id 并设置 resume=true，尝试继续执行或读取结果；不会重复提交 ComfyUI 已接收的生成任务。"
                     if summary.get("can_resume")
                     else "任务状态不确定，需核对 ComfyUI；不要自动重新提交。"
                     if status == "unknown"
@@ -1095,8 +1056,10 @@ class ImageStudioPlugin(Star):
     ) -> mcp.types.CallToolResult:
         """按需批量查看当前会话有权访问的 Image Studio 图片资产。
 
+        查看已有资产无需先查询模型能力，也不会向当前会话发送图片。
+
         Args:
-            asset_ids(array[string]): generate 返回的资产 ID，按输入顺序返回；每次 1 至 8 个。
+            asset_ids(array[string]): image_studio_generate 或 image_studio_task 返回的图片编号 asset_id 列表；每次 1 至 8 个，按输入顺序返回图片
             detail(string): preview 或 original; 默认 preview。
         """
 
@@ -1158,7 +1121,6 @@ class ImageStudioPlugin(Star):
             }
             for index, (asset_id, image) in enumerate(loaded_assets)
         ]
-        _protect_image_workflow_assets(event)
         return mcp.types.CallToolResult(
             content=[
                 mcp.types.TextContent(
@@ -1169,7 +1131,8 @@ class ImageStudioPlugin(Star):
                             "detail": normalized_detail,
                             "count": len(manifest),
                             "assets": manifest,
-                            "message": "这是已有资产的查看结果，本次没有生成新图片。后续操作使用 asset_id。",
+                            "message": "这是已有资产的查看结果，本次没有生成新图片，也未向当前会话发送图片。",
+                            "next_action": _asset_usage_notice(normalized_detail),
                         },
                         ensure_ascii=False,
                         separators=(",", ":"),
@@ -1193,7 +1156,9 @@ class ImageStudioPlugin(Star):
         destination: str,
         messages: list[dict[str, Any]],
     ) -> mcp.types.CallToolResult:
-        """向当前会话投递中途消息/产物，或将插件资产复制到当前 workspace；不会结束任务。
+        """向当前会话发送消息或产物，或将本插件原图资产复制到当前 workspace。
+
+        使用已有资产无需先查询模型能力；复制后的工作区文件可交给其他工具处理。
 
         Args:
             destination(string): session 或 workspace；必须明确填写
@@ -1212,9 +1177,13 @@ class ImageStudioPlugin(Star):
                 payload = await self._materialize_assets_to_workspace(event, messages)
                 return _tool_json(payload, is_error=payload["status"] != "succeeded")
             count = await self._send_output_to_session(event, messages)
-            return _tool_text_result(
-                f"已向当前会话投递 {count} 个消息组件；这不会结束本轮任务。"
-                "继续剩余步骤；完成后给出普通文本回复，勿重复已发送文字。"
+            return _tool_json(
+                {
+                    "status": "succeeded",
+                    "destination": "session",
+                    "component_count": count,
+                    "message": f"已向当前会话发送 {count} 个消息组件。",
+                }
             )
         except ValueError as exc:
             return _tool_error(str(exc))
@@ -1224,7 +1193,7 @@ class ImageStudioPlugin(Star):
                 {
                     "status": "delivery_unknown",
                     "destination": normalized_destination,
-                    "message": "投递未确认成功，原图资产不受影响。请勿重新生图；重发前核对会话中是否已经收到。",
+                    "message": "本次投递未确认成功；重发前核对当前会话是否已经收到。",
                 },
                 is_error=True,
             )
@@ -1257,11 +1226,13 @@ class ImageStudioPlugin(Star):
             if not isinstance(item, dict):
                 raise ValueError(f"messages[{index}] 必须是对象。")
             if str(item.get("type") or "image").strip().lower() != "image":
-                raise ValueError("workspace 目标只接受 Image Studio 图片资产。")
+                raise ValueError(
+                    'destination="workspace" 时，只能复制由 Image Studio 保存的图片。'
+                )
             asset_id = str(item.get("asset_id") or "").strip().lower()
             if not asset_id or item.get("path") or item.get("url") or item.get("text"):
                 raise ValueError(
-                    "workspace 目标的每一项只能填写 asset_id 和可选 name。"
+                    'destination="workspace" 时，messages 中的每一项只能使用 asset_id 指定图片，并可填写 name 设置文件名。'
                 )
             image, internal_path = await self._load_workflow_asset(event, asset_id)
             name = _safe_output_filename(item.get("name"), Path(internal_path).name)
@@ -1439,23 +1410,26 @@ def _workflow_asset_failure(index: int, asset_id: str, reason: str) -> dict[str,
     }
 
 
-def _protect_image_workflow_assets(event: Any) -> None:
-    state = _get_event_extra(event, IMAGE_WORKFLOW_STATE_EXTRA_KEY, {})
-    if not isinstance(state, dict):
-        state = {}
-    _set_event_extra(
-        event,
-        IMAGE_WORKFLOW_STATE_EXTRA_KEY,
-        {**state, "active": True, "assets_protected": True},
+def _asset_usage_notice(detail: str) -> str:
+    """Explain only the assets returned by this call, without global tool policy."""
+    visual = {
+        "preview": "本次附图是供你查看的预览图。",
+        "original": "本次附图为原图。",
+        "asset": "本次仅返回图片信息，没有附图；需要看图时，将 asset_id 放入 asset_ids 列表，调用 image_studio_view_asset。",
+    }[detail]
+    delivery = (
+        "在 Image Studio 工具中引用这些图片时，使用返回的图片编号 asset_id。"
+        '向用户发送原图时，调用 image_studio_send_output，将 destination 设置为 "session"，'
+        '在 messages 中填写 {"type":"image","asset_id":"对应的图片编号"}。'
+        '需要交给其他工具处理时，将 destination 设置为 "workspace"，使用相同的 messages 格式复制原图，再使用返回的文件路径。'
     )
-    request = _get_event_extra(event, "provider_request")
-    if request is None or not _request_has_tool(request, "image_studio_send_output"):
-        return
-    tool_set = getattr(request, "func_tool", None)
-    remover = getattr(tool_set, "remove_tool", None)
-    if callable(remover):
-        remover("send_message_to_user")
-        remover("pc_send_current_media")
+    cache = (
+        "AstrBot 在本次 Image Studio 附图旁显示的 [Image from tool ..., path='...'] 中，"
+        "path 是该附图的临时文件路径；发送、编辑或用作参考图时，请使用上述 asset_id 或复制到工作区后的文件路径。"
+        if detail != "asset"
+        else ""
+    )
+    return visual + delivery + cache
 
 
 def _agent_wait_budget(context: Any, event: Any, seconds: Any) -> float:
@@ -1675,7 +1649,8 @@ def _select_llm_tool_model(
     requested_ref = explicit_ref or settings.default_model_ref(mode, "llm_tool")
     if not requested_ref:
         raise ValueError(
-            "当前模式未设置默认 LLM 生图模型，请先用 search 查找模型，再用 model 查询完整能力并传入 model_ref"
+            '当前模式未设置默认 LLM 生图模型。请调用 image_studio_get_capabilities，设置 query_type="search" 查找模型，'
+            '再设置 query_type="model" 并填写 model_refs 查询选定模型的参数；生图时使用该模型的 model_ref。'
         )
     candidates = [
         (provider, candidate, f"{provider.id}:{candidate.id}")
@@ -1798,20 +1773,6 @@ def _iter_event_images(value: Any):
     if isinstance(value, (list, tuple)):
         for item in value:
             yield from _iter_event_images(item)
-
-
-def _request_has_tool(req: Any, tool_name: str) -> bool:
-    tool_set = getattr(req, "func_tool", None)
-    getter = getattr(tool_set, "get_tool", None)
-    if callable(getter):
-        try:
-            return getter(tool_name) is not None
-        except (AttributeError, KeyError, TypeError, ValueError):
-            getter = None
-    tools = getattr(tool_set, "tools", None)
-    if isinstance(tools, (list, tuple)):
-        return any(str(getattr(tool, "name", "") or "") == tool_name for tool in tools)
-    return False
 
 
 def _get_event_extra(event: Any, key: str, default: Any = None) -> Any:

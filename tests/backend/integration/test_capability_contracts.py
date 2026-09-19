@@ -34,6 +34,54 @@ def contract(provider, mode=""):
     )["models"][0]
 
 
+@pytest.mark.parametrize("query_type", ["default", "model", "all"])
+def test_successful_full_contract_guidance_allows_reuse_without_repeating_selection_rules(
+    query_type,
+):
+    provider = policy_provider()
+    payload = query_capabilities(
+        policy_settings(provider),
+        query_type=query_type,
+        **({"model_refs": ["policy:paint"]} if query_type == "model" else {}),
+    )
+    guidance = payload["next_action"]
+    assert "生成模式、参数和提示词要求" in guidance
+    assert "当前这条用户消息" in guidance
+    assert "model_ref" in guidance and "query_modes" in guidance
+    assert "修改 prompt 或 parameters 中的生成参数值不需要重新查询" in guidance
+    assert "处理新的用户消息" in guidance
+    assert "插件设置发生变化" in guidance
+    assert "能力缺口" not in guidance
+    assert "普通画面描述" not in guidance
+    assert payload["models"][0]["default_for_modes"] == ["text2img"]
+    assert "parameters" in payload["models"][0]
+
+
+def test_partial_model_contract_guidance_distinguishes_reusable_success_from_errors():
+    payload = query_capabilities(
+        policy_settings(policy_provider()),
+        query_type="model",
+        model_refs=["policy:paint", "policy:missing"],
+    )
+    assert payload["models"][0]["input_indices"] == [0]
+    assert payload["errors"][0]["input_index"] == 1
+    assert "models 中的模型已成功查询" in payload["next_action"]
+    assert "当前这条用户消息" in payload["next_action"]
+    assert "修正 model_refs 后重新查询" in payload["next_action"]
+
+
+def test_failed_model_queries_do_not_claim_reusable_capabilities():
+    payload = query_capabilities(
+        policy_settings(policy_provider()),
+        query_type="model",
+        model_refs=["policy:missing"],
+    )
+    assert not payload["models"]
+    assert payload["errors"][0]["input_index"] == 0
+    assert "errors" in payload["next_action"] and "model_refs" in payload["next_action"]
+    assert "复用" not in payload["next_action"]
+
+
 @pytest.mark.parametrize(
     "policy,expected",
     [({"default": 7}, 7), ({"default_override": 9, "default": 7}, 9), ({}, 20)],
@@ -266,6 +314,10 @@ def test_novelai_defaults_describe_format_without_overriding_model_selection(
     instruction = result["prompt_contract"]["instruction"]
     assert "英文逗号分隔标签" in instruction
     assert ("可结合自然语言" in instruction) is known_natural_language
+    if kind == "novelai_official":
+        assert ("novelai_capabilities" in result["selection_description"]) is (
+            "novelai_capabilities" in result
+        )
 
 
 @pytest.mark.parametrize("kind", ["nai_direct", "novelai_official"])

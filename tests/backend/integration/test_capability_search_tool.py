@@ -12,7 +12,6 @@ from astrbot.core.provider.register import llm_tools
 from astrbot_plugin_image_studio.backend.config import HistorySettings, RuntimeSettings
 from astrbot_plugin_image_studio.main import (
     CAPABILITY_QUERY_EXTRA_KEY,
-    IMAGE_WORKFLOW_STATE_EXTRA_KEY,
     ImageStudioPlugin,
 )
 from astrbot_plugin_image_studio.backend.models import (
@@ -229,7 +228,6 @@ def test_all_invalid_models_return_structured_result_without_authorizing_generat
         "unsupported_mode",
     ]
     assert event.get_extra(CAPABILITY_QUERY_EXTRA_KEY) is None
-    assert event.get_extra(IMAGE_WORKFLOW_STATE_EXTRA_KEY) is None
 
 
 @pytest.mark.parametrize(
@@ -288,7 +286,6 @@ def test_discovery_does_not_activate_image_workflow_or_disclose_secrets(query_ty
     assert '"parameters"' not in serialized
     assert '"prompt_contract"' not in serialized
     assert event.get_extra(CAPABILITY_QUERY_EXTRA_KEY) is None
-    assert event.get_extra(IMAGE_WORKFLOW_STATE_EXTRA_KEY) is None
     result = asyncio.run(
         plugin.image_studio_generate(
             event, mode="text2img", prompt="tree", model_ref="p1:alpha"

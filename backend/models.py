@@ -1218,7 +1218,11 @@ def _normalize_tool(
             if comfy
             else "使用英文标签生成插画。"
             if nai
-            else "NovelAI 官方图像生成；参考用途以模型能力为准。"
+            else (
+                "NovelAI 官方图像生成。参考图片支持哪些用途，请查看查询结果中的 novelai_capabilities。"
+                if model_id in MODEL_NAMES
+                else "NovelAI 官方图像生成。此模型的参考图片用途尚未核实。"
+            )
             if official
             else "适合一般自然语言生图需求。"
         ),
