@@ -5,13 +5,16 @@
   window.ImageStudioMetadataMarkup = function ({ escape, parameterRows, deferredDetailSection }) {
     const { serial } = window.ImageStudioPresentation;
     function promptStatusMarkup(status, prefix = "") {
-      const label = { declared: "按用户规则识别", snapshot: "由显示快照识别", summary: "组合或多阶段文本摘要", partial: "部分解析", missing: "未读取到文本" }[status];
+      const label = { declared: "按用户规则识别", summary: "组合或多阶段文本摘要", partial: "部分解析", missing: "未读取到文本" }[status];
       return label ? `<span class="comfy-summary-status">${escape(prefix)}${label}</span>` : "";
     }
 
     function comfyStageFields(stage) {
       const fields = { ...stage }; delete fields.node_id; delete fields.type;
-      for (const key of ["prompt_status", "negative_prompt_status"]) if (fields[key]) fields[key] = ({ exact: "直接文本", declared: "按用户规则识别", snapshot: "由显示快照识别", summary: "可读摘要，非等价条件", partial: "部分解析", missing: "未读取到文本" })[fields[key]] || fields[key];
+      for (const key of ["prompt_status", "negative_prompt_status"]) {
+        if (fields[key] === "snapshot") delete fields[key];
+        else if (fields[key]) fields[key] = ({ exact: "直接文本", declared: "按用户规则识别", summary: "可读摘要，非等价条件", partial: "部分解析", missing: "未读取到文本" })[fields[key]] || fields[key];
+      }
       return fields;
     }
 

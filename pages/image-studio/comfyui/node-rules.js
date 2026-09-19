@@ -11,7 +11,7 @@
     function candidatesMarkup(parsed, { disabled = false, editing = false } = {}) {
       const candidates = parsed?.normalized?.node_rule_candidates || [];
       if (!candidates.length) return "";
-      return `<div class="node-rule-candidates"><h4>文本节点识别</h4>${candidates.map((node) => `<button class="node-rule-candidate" type="button" data-node-rule-id="${escape(node.node_id)}" ${disabled || editing ? "disabled" : ""}><strong>${escape(node.node_type)} #${escape(node.node_id)}</strong><span>${escape(node.rule ? "已绑定用户规则 · 点击查看或修改" : node.reason || "尚未识别文本关系 · 点击手动绑定")}</span></button>`).join("")}${editing ? '<p class="field-hint">如需配置文本节点，请在导入页添加原图。当前图组的编辑内容不会受影响。</p>' : ""}</div>`;
+      return `<details class="node-rule-candidates" data-import-section="text-nodes"><summary>文本节点识别 · ${candidates.length} 项</summary><div class="node-rule-candidate-list">${candidates.map((node) => `<button class="node-rule-candidate" type="button" data-node-rule-id="${escape(node.node_id)}" ${disabled || editing ? "disabled" : ""}><strong>${escape(node.node_type)} #${escape(node.node_id)}</strong><span>${escape(node.rule ? "已绑定用户规则 · 点击查看或修改" : node.reason || "尚未识别文本关系 · 点击手动绑定")}</span></button>`).join("")}${editing ? '<p class="field-hint">如需配置文本节点，请在导入页添加原图。当前图组的编辑内容不会受影响。</p>' : ""}</div></details>`;
     }
 
     function portMarkup(node) {
@@ -28,7 +28,7 @@
 
     function resultMarkup(parsed) {
       const normalized = parsed?.normalized || {};
-      const statuses = { exact: "直接文本", declared: "按用户规则识别", snapshot: "由显示快照识别", summary: "组合或多阶段摘要", partial: "部分解析", missing: "未读取到文本" };
+      const statuses = { exact: "直接文本", declared: "按用户规则识别", summary: "组合或多阶段摘要", partial: "部分解析", missing: "未读取到文本" };
       const fields = [["prompt", "正向提示词"], ["negative_prompt", "反向提示词"]].map(([key, label]) => `<section><h4>${label}<span>${escape(statuses[normalized[`${key}_status`]] || "")}</span></h4><pre>${escape(normalized[key] || "（未读取到文本）")}</pre></section>`).join("");
       const stages = (normalized.stages || []).map((stage) => {
         const sources = [...(stage.prompt_sources || []).map((source) => ({ ...source, direction: "正向" })), ...(stage.negative_prompt_sources || []).map((source) => ({ ...source, direction: "反向" }))];

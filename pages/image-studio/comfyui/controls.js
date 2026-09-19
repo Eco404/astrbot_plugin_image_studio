@@ -105,10 +105,15 @@
       return `<section class="comfy-workflow-summary field-wide"><div class="field-label-row"><strong>工作流</strong><button type="button" id="comfyEditWorkflow" class="quiet-button">${Object.keys(definition.api_graph || {}).length ? "编辑工作流" : "导入工作流"}</button></div><p class="field-hint">${Object.keys(definition.api_graph || {}).length} 个节点 · ${Object.keys(definition.bindings || {}).length} 个输入绑定 · ${(definition.outputs || []).length} 个结果节点</p><p class="field-hint">本次总张数用于安排执行轮次，节点中的批次参数仍由工作流或对应的普通输入决定。</p><div class="comfy-check-actions"><button type="button" id="comfyCheckWorkflow" class="quiet-button">检查兼容性</button><span id="comfyCheckStatus" role="status"></span></div></section>`;
     }
 
-    function issuesMarkup(report) {
+    function issuesMarkup(report, findInput = () => null) {
       const issues = [...(report?.issues || []), ...(report?.warnings || []).map(item => typeof item === "string" ? { severity: "warning", message: item } : item)];
       const valid = report?.compatible ?? report?.valid ?? !issues.some(item => item.severity === "error");
-      return `<p class="comfy-check-result ${valid ? "is-success" : "is-error"}">${valid ? "已完成检查" : "存在未满足的依赖"}</p>${issues.length ? `<ul class="comfy-issues">${issues.map(issue => `<li>${escape([issue.node_id ? `节点 #${issue.node_id}` : "", issue.input_name || issue.input || "", issue.message || issue.detail || String(issue)].filter(Boolean).join(" · "))}</li>`).join("")}</ul>` : '<p class="field-hint">未发现已知缺失项。动态依赖仍以 ComfyUI 执行校验为准。</p>'}`;
+      const items = issues.map(issue => {
+        const nodeId = String(issue.node_id ?? ""), inputName = issue.input_name || issue.input || "";
+        const content = escape([nodeId ? `节点 #${nodeId}` : "", inputName, issue.message || issue.detail || String(issue)].filter(Boolean).join(" · "));
+        return `<li>${findInput(nodeId, inputName) ? `<button type="button" class="comfy-issue-link" data-issue-node="${escape(nodeId)}" data-issue-input="${escape(inputName)}">${content}</button>` : content}</li>`;
+      }).join("");
+      return `<p class="comfy-check-result ${valid ? "is-success" : "is-error"}">${valid ? "已完成检查" : "存在未满足的依赖"}</p>${items ? `<ul class="comfy-issues">${items}</ul>` : '<p class="field-hint">未发现已知缺失项。动态依赖仍以 ComfyUI 执行校验为准。</p>'}`;
     }
 
     function bindConfiguration(provider, model) {
@@ -292,6 +297,18 @@
         }, 220);
       };
       const clearReport = () => { report = null; if ($("comfyCompatibility")) $("comfyCompatibility").innerHTML = '<p class="field-hint">工作流有修改，应用或生成前将重新检查。</p>'; scheduleSeedWarnings(); };
+      const findFixedInput = (nodeId, inputName) => Array.from($("comfyFixedInputs")?.querySelectorAll("[data-fixed-input]") || []).find(input => input.dataset.fixedNode === nodeId && input.dataset.fixedInput === inputName);
+      const focusFixedInput = (nodeId, inputName) => {
+        if (busy) return;
+        const input = findFixedInput(nodeId, inputName);
+        if (!input) return;
+        $("comfyFixedInputs").closest("details").open = true;
+        input.closest("details").open = true;
+        const target = input.closest(".studio-select")?.querySelector(".studio-select-trigger") || input;
+        // Focus within the click gesture so iOS can activate the keyboard.
+        target.focus({ preventScroll: true });
+        target.scrollIntoView({ block: "center", behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth" });
+      };
       const render = () => {
         syncEditorState();
         const choices = inputChoices();
@@ -350,7 +367,7 @@
             });
           }
         });
-        $("comfyCompatibility").innerHTML = report ? issuesMarkup(report) : `<p class="field-hint">${options.temporary ? "应用到生图页面前必须通过兼容性检查。参考图可在生图页面补充。" : "可先保存工作流，执行前必须通过依赖检查。"}</p>`;
+        $("comfyCompatibility").innerHTML = report ? issuesMarkup(report, findFixedInput) : `<p class="field-hint">${options.temporary ? "应用到生图页面前必须通过兼容性检查。参考图可在生图页面补充。" : "可先保存工作流，执行前必须通过依赖检查。"}</p>`;
         renderSeedWarnings();
         $("comfyEditor").querySelectorAll("[data-studio-icon]").forEach(element => {
           const icons = window.StudioIcons;
@@ -418,16 +435,11 @@
         render();
         $("comfySeedWarnings").addEventListener("click", event => {
           const button = event.target.closest("[data-seed-node]");
-          if (!button || busy) return;
-          const fixedInputs = $("comfyFixedInputs");
-          const input = Array.from(fixedInputs.querySelectorAll("[data-fixed-input]")).find(input => input.dataset.fixedNode === button.dataset.seedNode && input.dataset.fixedInput === button.dataset.seedInput);
-          if (!input) return;
-          fixedInputs.closest("details").open = true;
-          input.closest("details").open = true;
-          const target = input.closest(".studio-select")?.querySelector(".studio-select-trigger") || input;
-          // Focus within the click gesture so iOS can activate the keyboard.
-          target.focus({ preventScroll: true });
-          target.scrollIntoView({ block: "center", behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth" });
+          if (button) focusFixedInput(button.dataset.seedNode, button.dataset.seedInput);
+        });
+        $("comfyCompatibility").addEventListener("click", event => {
+          const button = event.target.closest("[data-issue-node]");
+          if (button) focusFixedInput(button.dataset.issueNode, button.dataset.issueInput);
         });
         if (!imported?.suggestions) void identifyInputs();
         const modal = $("studioModal");

@@ -11,10 +11,10 @@
 .comfy-seed-notice ul { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; color: var(--warning); }
 .comfy-seed-notice li { display: flex; flex-wrap: wrap; gap: 0 8px; min-width: 0; }
 .comfy-seed-notice li > span, .comfy-seed-link > span { min-width: 0; }
-.comfy-seed-link { display: flex; flex: 1; flex-wrap: wrap; gap: 0 8px; min-width: 0; min-height: 32px; padding: 2px 4px; border: 0; border-radius: 6px; background: transparent; color: inherit; text-align: left; line-height: inherit; overflow-wrap: anywhere; box-shadow: none; }
-.comfy-seed-link:focus-visible { outline-color: var(--warning); background: var(--surface-hover); }
+.comfy-seed-link, .comfy-issue-link { display: flex; flex: 1; flex-wrap: wrap; gap: 0 8px; min-width: 0; min-height: 32px; padding: 2px 4px; border: 0; border-radius: 6px; background: transparent; color: inherit; text-align: left; line-height: inherit; overflow-wrap: anywhere; box-shadow: none; }
+.comfy-seed-link:focus-visible, .comfy-issue-link:focus-visible { outline-color: var(--warning); background: var(--surface-hover); }
 @media (hover: hover) {
-  .comfy-seed-link:hover { background: var(--surface-hover); }
+  .comfy-seed-link:hover, .comfy-issue-link:hover { background: var(--surface-hover); }
 }
 .comfy-seed-status { white-space: nowrap; }
 .comfy-seed-guidance { margin: 0; }
@@ -43,7 +43,8 @@
 .comfy-workflow-summary p { margin: 0; }
 .comfy-check-result.is-success { color: var(--success-text, var(--success)); }
 .comfy-check-result.is-error { color: var(--danger-text, var(--danger)); }
-.comfy-issues { padding-left: 20px; overflow-wrap: anywhere; }
+.comfy-issues { padding-left: 20px; color: var(--warning); overflow-wrap: anywhere; }
+.comfy-issue-link { display: block; width: 100%; }
 .comfy-issues li + li { margin-top: 8px; }
 .comfy-jobs { margin-bottom: 16px; padding: 8px 16px; }
 .comfy-jobs[hidden] { display: none; }

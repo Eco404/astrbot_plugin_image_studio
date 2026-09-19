@@ -102,7 +102,7 @@
       const outputChoice = saveOutputs.length > 1 ? `<div class="field field-wide"><label for="${item.id}-output">最终保存输出</label><div class="import-output-choice"><select id="${item.id}-output" data-import-output aria-label="最终保存输出"><option value="">请选择保存输出</option>${saveOutputs.map((entry) => `<option value="${escape(entry.node_id)}" ${String(entry.node_id) === String(item.outputNodeId || "") ? "selected" : ""}>${escape(entry.type)} #${escape(entry.node_id)}</option>`).join("")}</select><button class="quiet-button import-batch-button" data-batch-import-output type="button" aria-label="批量应用保存输出到全部匹配图片" data-tooltip="将保存输出选择应用到全部匹配图片（含当前图片）" ${batchChoiceDisabled(item, context) || !selectedOutput?.match_key ? "disabled" : ""}>${icon("CheckCheck")}</button></div></div>` : "";
       return `<article class="import-card glass ${item.duplicateReason ? "is-duplicate" : ""}" data-import-id="${item.id}" data-import-sha256="${item.sha256}">
         <div class="import-card-header"><button class="studio-icon-button import-sort-handle" data-sort-handle type="button" aria-label="调整第 ${index + 1} 张图片顺序：${escape(item.file.name)}" data-tooltip="拖动排序，也可聚焦后使用方向键" ${sortEnabled(context) ? "" : "disabled"}>${icon("GripVertical")}</button><span class="import-order" aria-label="第 ${index + 1} 张">${index + 1}</span><strong data-tooltip="${escape(item.file.name)}" data-tooltip-overflow>${escape(item.file.name)}</strong>${context.editing ? "" : `<button class="studio-icon-button is-danger" data-remove-import="${item.id}" type="button" aria-label="移除 ${escape(item.file.name)}" data-tooltip="移除图片" ${importing ? "disabled" : ""}>${icon("X")}</button>`}</div>
-        <div class="import-card-preview" data-sort-surface><img src="${escape(item.url)}" draggable="false" alt="${escape(item.file.name)}" /></div><div class="import-file-meta">${formatBytes(item.file.size)}${item.width ? ` · ${item.width} × ${item.height}` : ""}</div>
+        <div class="import-card-preview" data-sort-surface><img src="${escape(item.url)}" draggable="false" alt="${escape(item.file.name)}" /></div><div class="import-file-meta"><span>${formatBytes(item.file.size)}${item.width ? ` · ${item.width} × ${item.height}` : ""}</span><span class="import-card-status ${item.status === "error" || item.duplicateReason ? "is-error" : ""}" role="status">${escape(item.duplicateReason || (item.status === "reading" ? "正在识别图片参数…" : item.error || (item.parsed?.format && item.parsed.format !== "unknown" ? `已识别 ${engineLabel(item.parsed.format)}` : "未检测到生图参数，可手动填写")))}</span></div>
         <fieldset class="import-card-fields" ${disabled ? "disabled" : ""}>
           ${outputChoice}
           <label class="field">生图来源<select data-import-field="generation_engine">${options(ENGINES, data.generation_engine)}</select></label>
@@ -112,7 +112,7 @@
           <label class="field field-wide">正向提示词${item.editedFields.has("prompt") ? "" : promptStatusMarkup(item.parsed?.normalized?.prompt_status)}<textarea data-import-field="prompt" rows="3">${escape(data.prompt)}</textarea></label>
           <label class="field field-wide">反向提示词${item.editedFields.has("negative_prompt") ? "" : promptStatusMarkup(item.parsed?.normalized?.negative_prompt_status)}<textarea data-import-field="negative_prompt" rows="2">${escape(data.negative_prompt)}</textarea></label>
           <details class="field-wide advanced" ${context.editing ? 'data-import-deferred="parameters"' : ""}><summary>补充参数</summary>${context.editing ? "" : `<textarea data-import-field="parameters" rows="5" spellcheck="false" aria-label="补充参数 JSON">${escape(data.parameters)}</textarea>`}</details>
-        </fieldset>${promptCandidatesMarkup(item, context)}${context.editing && item.parsed?.normalized?.stages?.length ? `<details class="comfy-workflow-info" data-import-deferred="workflow"><summary>采样阶段与条件 · ${item.parsed.normalized.stages.length} 个阶段</summary></details>` : comfyDetailsMarkup(item.parsed)}<div class="import-card-status ${item.status === "error" || item.duplicateReason ? "is-error" : ""}" role="status">${escape(item.duplicateReason || (item.status === "reading" ? "正在识别图片参数…" : item.error || (item.parsed?.format && item.parsed.format !== "unknown" ? `已识别 ${engineLabel(item.parsed.format)}` : "未检测到生图参数，可手动填写")))}</div>${nodeRules.candidatesMarkup(item.parsed, { disabled, editing: context.editing })}${warnings.length ? `<div class="import-warnings">${warnings.map(escape).join("<br>")}</div>` : ""}</article>`;
+        </fieldset>${promptCandidatesMarkup(item, context)}${context.editing && item.parsed?.normalized?.stages?.length ? `<details class="comfy-workflow-info" data-import-deferred="workflow"><summary>采样阶段与条件 · ${item.parsed.normalized.stages.length} 个阶段</summary></details>` : comfyDetailsMarkup(item.parsed)}${nodeRules.candidatesMarkup(item.parsed, { disabled, editing: context.editing })}${warnings.length ? `<details class="import-warnings" data-import-section="warnings"><summary>需注意 ${warnings.length}</summary><ul>${warnings.map(warning => `<li>${escape(warning)}</li>`).join("")}</ul></details>` : ""}</article>`;
     }
 
     function hasPromptBlock(value, block) {
@@ -430,7 +430,7 @@
       context.sorter?.cancel();
       const expanded = new Set(Array.from(grid.querySelectorAll("[data-import-id] details[open]"), (entry) => {
         const card = entry.closest("[data-import-id]");
-        return `${card.dataset.importId}:${Array.from(card.querySelectorAll("details")).indexOf(entry)}`;
+        return `${card.dataset.importId}:${entry.dataset.importSection || Array.from(card.querySelectorAll("details")).indexOf(entry)}`;
       }));
       const focused = document.activeElement;
       const focusId = grid.contains(focused) ? focused?.closest?.("[data-import-id]")?.dataset.importId : null;
@@ -438,7 +438,7 @@
       const focusSort = focused?.hasAttribute?.("data-sort-handle");
       const selection = focusField && typeof focused.selectionStart === "number" ? [focused.selectionStart, focused.selectionEnd] : null;
       grid.innerHTML = context.items.map((item, index) => importCard(item, index, context)).join("");
-      grid.querySelectorAll("[data-import-id]").forEach((card) => card.querySelectorAll("details").forEach((entry, index) => { entry.open = expanded.has(`${card.dataset.importId}:${index}`); }));
+      grid.querySelectorAll("[data-import-id]").forEach((card) => card.querySelectorAll("details").forEach((entry, index) => { entry.open = expanded.has(`${card.dataset.importId}:${entry.dataset.importSection || index}`); }));
       window.ImageStudioSelect?.refresh(grid);
       if (focusId && (focusField || focusSort)) {
         const restored = grid.querySelector(`[data-import-id="${focusId}"] ${focusSort ? "[data-sort-handle]" : `[data-import-field="${focusField}"]`}`);
@@ -522,6 +522,7 @@
       }
       $("confirmImportButton").disabled = importing || importRulesBusy || !!importBatchJob || importAddJobs > 0 || !imports.length || imports.some((item) => item.status === "reading");
       $("importNodeRulesButton").disabled = importing || importRulesBusy || !!importBatchJob || importAddJobs > 0;
+      $("importNodeRulesButton").classList.toggle("is-hidden", !imports.some(item => item.parsed?.format === "comfyui"));
       $("cancelImportButton").disabled = importing; $("importDropzone").disabled = importing; $("importFiles").disabled = importing;
       $("importGroupOption").classList.toggle("is-hidden", imports.length < 2);
       $("importAsGroup").disabled = importing || !!importBatchJob || imports.length < 2;

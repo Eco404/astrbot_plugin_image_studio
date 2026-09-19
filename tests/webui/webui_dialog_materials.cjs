@@ -28,14 +28,14 @@ async function materials(frame) {
     };
     const reference = surface("#detailDrawer"), footer = surface(".detail-footer");
     const panels = ["#studioModal", "#confirmDialog", "#parameterDialog", ".image-preview__panel", ".appearance-reset-confirmation"];
-    const footers = ["#studioModalFooter", ".image-preview__actions", ".confirm-dialog__actions", ".parameter-dialog__actions"];
+    const footers = ["#studioModalFooter", ".image-preview__actions", ".parameter-dialog__actions"];
     const modal = document.getElementById("studioModal"), previousClass = modal.className;
     const variants = ["", "is-external-editor", "is-import-editor", "is-merge-picker"].map(variant => {
       modal.className = `studio-modal glass ${variant}`;
       return { variant, surface: surface("#studioModal"), footer: surface("#studioModalFooter") };
     });
     modal.className = previousClass;
-    return { reference, footer, scrim: surface(".scrim"), scrims: [".studio-modal-scrim", ".image-preview__backdrop"].map(surface), panels: panels.map(selector => ({ selector, ...surface(selector) })), footers: footers.map(selector => ({ selector, ...surface(selector) })), variants };
+    return { reference, footer, confirmationActions: surface(".confirm-dialog__actions"), scrim: surface(".scrim"), scrims: [".studio-modal-scrim", ".image-preview__backdrop"].map(surface), panels: panels.map(selector => ({ selector, ...surface(selector) })), footers: footers.map(selector => ({ selector, ...surface(selector) })), variants };
   });
 }
 
@@ -46,7 +46,8 @@ async function verify(browser, name, width) {
   page.on("pageerror", error => errors.push(error.message));
   try {
     await page.goto(base);
-    const frame = page.frames().find(item => item.url().includes("/ui/"));
+    const frame = await (await page.locator("#studio").elementHandle()).contentFrame();
+    await frame.waitForURL(/\/ui\//);
     await frame.locator("#runtimeStatus").filter({ hasText: "已加载" }).waitFor({ state: "attached" });
     await frame.evaluate(() => window.ImageStudioAppearance.ready);
     for (const preference of ["light", "dark"]) {
@@ -67,6 +68,7 @@ async function verify(browser, name, width) {
           assert.deepEqual(footer.color, state.footer.color, `${context}: ${footer.selector} adds only footer tint`);
           assert.equal(footer.filter, "none", `${context}: ${footer.selector} does not stack another blur layer`);
         }
+        assert.deepEqual(state.confirmationActions, { color: [0, 0, 0, 0], filter: "none" }, `${context}: compact confirmation uses its enclosing glass without an extra rectangular tint`);
         for (const variant of state.variants) {
           assert.deepEqual(variant.surface, state.reference, `${context}: ${variant.variant || "generic"}`);
           assert.deepEqual(variant.footer, state.footer, `${context}: ${variant.variant || "generic"} footer`);
@@ -77,6 +79,14 @@ async function verify(browser, name, width) {
     // Exercise the reported delete dialog and external editor through real UI.
     await frame.evaluate(() => window.ImageStudioAppearance.discard());
     await frame.locator('[data-view="gallery"]').click();
+    await frame.locator(".gallery-card .gallery-selection").first().click();
+    await frame.locator("#deleteButton").click();
+    await frame.locator("#confirmDialog:not(.is-hidden)").waitFor();
+    await settle(frame);
+    await page.screenshot({ path: path.join(output, `${name}-${width}-confirm.png`) });
+    await frame.locator("#confirmCancel").click();
+    await frame.locator("#confirmDialog.is-hidden").waitFor({ state: "attached" });
+    await frame.locator("#cancelSelectionButton").click();
     await frame.locator(".gallery-card .gallery-info").first().click();
     await frame.locator("#detailDelete").click();
     await frame.locator("#studioModalTitle").filter({ hasText: "删除图片" }).waitFor();

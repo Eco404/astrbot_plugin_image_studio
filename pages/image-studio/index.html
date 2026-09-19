@@ -28,19 +28,19 @@
     })();
   </script>
   <script src="/api/plugin/page/bridge-sdk.js"></script>
-  <script src="./appearance.js?v=1.4.0-dev.1-titles"></script>
+  <script src="./appearance.js?v=1.4.0-dev.1-import-spacing"></script>
   <link rel="stylesheet" href="./vendor/photoswipe/photoswipe.css?v=5.4.4" />
-  <link rel="stylesheet" href="./app.css?v=1.4.0-dev.1-titles" />
-  <link rel="stylesheet" href="./library.css?v=1.4.0-dev.1-titles" />
-  <link rel="stylesheet" href="./sortable.css?v=1.4.0-dev.1-titles" />
-  <link rel="stylesheet" href="./detail-swipe.css?v=1.4.0-dev.1-titles" />
-  <link rel="stylesheet" href="./select.css?v=1.4.0-dev.1-titles" />
-  <link rel="stylesheet" href="./appearance.css?v=1.4.0-dev.1-titles" />
-  <link rel="stylesheet" href="./controls.css?v=1.4.0-dev.1-titles" />
-  <link rel="stylesheet" href="./novelai/controls.css?v=1.4.0-dev.1-titles" />
-  <link rel="stylesheet" href="./comfyui/controls.css?v=1.4.0-dev.1-titles" />
-  <link rel="stylesheet" href="./comfyui/node-rules.css?v=1.4.0-dev.1-titles" />
-  <link rel="stylesheet" href="./tooltip.css?v=1.4.0-dev.1-titles" />
+  <link rel="stylesheet" href="./app.css?v=1.4.0-dev.1-import-spacing" />
+  <link rel="stylesheet" href="./library.css?v=1.4.0-dev.1-import-spacing" />
+  <link rel="stylesheet" href="./sortable.css?v=1.4.0-dev.1-import-spacing" />
+  <link rel="stylesheet" href="./detail-swipe.css?v=1.4.0-dev.1-import-spacing" />
+  <link rel="stylesheet" href="./select.css?v=1.4.0-dev.1-import-spacing" />
+  <link rel="stylesheet" href="./appearance.css?v=1.4.0-dev.1-import-spacing" />
+  <link rel="stylesheet" href="./controls.css?v=1.4.0-dev.1-import-spacing" />
+  <link rel="stylesheet" href="./novelai/controls.css?v=1.4.0-dev.1-import-spacing" />
+  <link rel="stylesheet" href="./comfyui/controls.css?v=1.4.0-dev.1-import-spacing" />
+  <link rel="stylesheet" href="./comfyui/node-rules.css?v=1.4.0-dev.1-import-spacing" />
+  <link rel="stylesheet" href="./tooltip.css?v=1.4.0-dev.1-import-spacing" />
 </head>
 <body>
   <main class="app-shell quiet-glass-background">
@@ -131,7 +131,6 @@
         <div class="import-toolbar">
           <span id="importSummary" role="status">尚未选择图片</span>
           <div class="import-options">
-            <button class="quiet-button" id="importNodeRulesButton" type="button">文本节点规则</button>
             <div class="import-group-option is-hidden" id="importGroupOption"><span id="importGroupLabel">作为图组导入</span><label class="toggle-control"><input id="importAsGroup" type="checkbox" aria-labelledby="importGroupLabel" /><span aria-hidden="true"></span></label></div>
             <div class="import-group-option is-hidden" id="importMergeOption"><span id="importMergeLabel">合并到已有图组</span><label class="toggle-control"><input id="importMergeExisting" type="checkbox" aria-labelledby="importMergeLabel" /><span aria-hidden="true"></span></label></div>
           </div>
@@ -139,7 +138,7 @@
         </div>
         <button class="import-dropzone" id="importDropzone" type="button" aria-label="添加待导入图片"><span data-studio-icon="Upload" aria-hidden="true"></span><span id="importDropzoneLabel">添加图片</span></button>
         <div class="import-grid" id="importGrid"></div>
-        <div class="import-floatingbar floatingbar"><span id="importProgress" role="status"></span><button class="quiet-button" id="cancelImportButton" type="button">取消</button><button class="primary-button" id="confirmImportButton" type="button" disabled>确认导入</button></div>
+        <div class="import-floatingbar floatingbar"><button class="quiet-button is-hidden" id="importNodeRulesButton" type="button">文本节点规则</button><span id="importProgress" role="status"></span><button class="quiet-button" id="cancelImportButton" type="button">取消</button><button class="primary-button" id="confirmImportButton" type="button" disabled>确认导入</button></div>
       </section>
 
       <section class="view" id="settingsView">
@@ -280,32 +279,32 @@
       window.__reportImageStudioPageError(false);
     });
   </script>
-  <script src="./tooltip.js?v=1.4.0-dev.1-titles" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./tooltip.js?v=1.4.0-dev.1-import-spacing" onerror="window.__reportImageStudioPageError(true)"></script>
   <script src="./vendor/photoswipe/photoswipe.umd.min.js?v=5.4.4"></script>
   <script src="./vendor/exifreader/exif-reader.js?v=4.44.1"></script>
   <script src="./vendor/lucide/icons.js?v=0.468.0-studio2"></script>
-  <script src="./image-placeholder.js?v=1.4.0-dev.1-titles" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./media-objects.js?v=1.4.0-dev.1-titles" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./image-placeholder.js?v=1.4.0-dev.1-import-spacing" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./media-objects.js?v=1.4.0-dev.1-import-spacing" onerror="window.__reportImageStudioPageError(true)"></script>
   <script src="./vendor/js-sha256/sha256.min.js?v=0.11.1"></script>
-  <script src="./hash.js?v=1.4.0-dev.1-titles" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./gallery-preferences.js?v=1.4.0-dev.1-titles" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./select.js?v=1.4.0-dev.1-titles" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./sortable.js?v=1.4.0-dev.1-titles" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./dialog-motion.js?v=1.4.0-dev.1-titles" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./components/presentation.js?v=1.4.0-dev.1-titles" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./components/modal.js?v=1.4.0-dev.1-titles" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./gallery/metadata.js?v=1.4.0-dev.1-titles" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./gallery/metadata-markup.js?v=1.4.0-dev.1-titles" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./comfyui/node-rules.js?v=1.4.0-dev.1-titles" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./gallery/imports.js?v=1.4.0-dev.1-titles" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./gallery/controller.js?v=1.4.0-dev.1-titles" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./detail-swipe.js?v=1.4.0-dev.1-titles" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./backdrop.js?v=1.4.0-dev.1-titles" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./viewer-backdrop.js?v=1.4.0-dev.1-titles" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./settings/external-sources.js?v=1.4.0-dev.1-titles" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./novelai/controls.js?v=1.4.0-dev.1-titles" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./comfyui/controls.js?v=1.4.0-dev.1-titles" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./settings/controller.js?v=1.4.0-dev.1-titles" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./app.js?v=1.4.0-dev.1-titles" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./hash.js?v=1.4.0-dev.1-import-spacing" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./gallery-preferences.js?v=1.4.0-dev.1-import-spacing" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./select.js?v=1.4.0-dev.1-import-spacing" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./sortable.js?v=1.4.0-dev.1-import-spacing" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./dialog-motion.js?v=1.4.0-dev.1-import-spacing" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./components/presentation.js?v=1.4.0-dev.1-import-spacing" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./components/modal.js?v=1.4.0-dev.1-import-spacing" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./gallery/metadata.js?v=1.4.0-dev.1-import-spacing" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./gallery/metadata-markup.js?v=1.4.0-dev.1-import-spacing" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./comfyui/node-rules.js?v=1.4.0-dev.1-import-spacing" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./gallery/imports.js?v=1.4.0-dev.1-import-spacing" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./gallery/controller.js?v=1.4.0-dev.1-import-spacing" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./detail-swipe.js?v=1.4.0-dev.1-import-spacing" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./backdrop.js?v=1.4.0-dev.1-import-spacing" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./viewer-backdrop.js?v=1.4.0-dev.1-import-spacing" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./settings/external-sources.js?v=1.4.0-dev.1-import-spacing" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./novelai/controls.js?v=1.4.0-dev.1-import-spacing" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./comfyui/controls.js?v=1.4.0-dev.1-import-spacing" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./settings/controller.js?v=1.4.0-dev.1-import-spacing" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./app.js?v=1.4.0-dev.1-import-spacing" onerror="window.__reportImageStudioPageError(true)"></script>
 </body>
 </html>

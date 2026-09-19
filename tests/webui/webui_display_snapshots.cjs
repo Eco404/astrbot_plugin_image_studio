@@ -77,7 +77,7 @@ async function assertStageSources(card, sourceRef, selector = ".comfy-stage") {
   const stage = card.locator(selector).first();
   if (!await stage.evaluate((node) => node.open)) await stage.locator(":scope > summary").click();
   await stage.locator(".detail-parameter-row").first().waitFor({ state: "attached" });
-  assert.match(await stage.textContent(), /由显示快照识别/);
+  assert.doesNotMatch(await stage.textContent(), /由显示快照识别/);
   // The shared markup keeps the full JSON evidence copyable in details and readable in imports.
   const rows = await stage.locator(".detail-parameter-row").evaluateAll((nodes) => Object.fromEntries(nodes.map((node) => [node.querySelector(".detail-parameter-label span")?.textContent, node.querySelector("pre")?.textContent])));
   const sources = JSON.parse(rows.prompt_sources);
@@ -166,7 +166,7 @@ async function verify(browser, name, width) {
         const chosen = await chooseOutput(page, card, "9");
         assert.equal(chosen.prompt_status, "snapshot");
         assert.equal(await prompt.inputValue(), next.b, "selecting a save branch adopts only its supported snapshot");
-        assert.match(await prompt.locator("..").textContent(), /由显示快照识别/);
+        assert.doesNotMatch(await prompt.locator("..").textContent(), /由显示快照识别/);
         const manual = `manual-${path.basename(output)}-${name}`;
         await prompt.fill(manual);
         assert.doesNotMatch(await prompt.locator("..").textContent(), /由显示快照识别/, "manual input no longer carries the automatic status");
@@ -191,7 +191,7 @@ async function verify(browser, name, width) {
         const detailStage = frame.locator("[data-comfy-stage]").filter({ visible: true }).first();
         await detailStage.locator(":scope > summary").click();
         await detailStage.locator(".detail-parameter-row").first().waitFor();
-        assert.match(await detailStage.textContent(), /由显示快照识别/);
+        assert.doesNotMatch(await detailStage.textContent(), /由显示快照识别/);
         assert.match(await detailStage.textContent(), /prompt_sources/);
         assert.match(await detailStage.textContent(), /unverified/);
         await detailStage.locator('[aria-label="复制 prompt_sources"]').click();
@@ -222,7 +222,7 @@ async function verify(browser, name, width) {
         assert.equal(normalized.prompt_status, "snapshot");
         assert.ok(displays[0].auto_applied_to?.some((entry) => entry.target === "prompt"));
         assert.match(visible, /已按明确链路用于正向提示词识别/);
-        assert.match(await prompt.locator("..").textContent(), /由显示快照识别/);
+        assert.doesNotMatch(await prompt.locator("..").textContent(), /由显示快照识别/);
         assert.match(visible, /未验证是否为本次结果/);
         assert.equal(await button(card, displays[0]).isDisabled(), true, "automatic adoption disables duplicate insertion");
         await assertStageSources(card, "3:0");

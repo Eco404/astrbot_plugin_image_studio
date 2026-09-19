@@ -68,6 +68,28 @@ async function followSeedWarning(frame, nodeId, keyboard = false) {
   assert.equal(await frame.locator("#comfyFixedInputs details[open]").count(), 1, "unrelated nodes remain collapsed");
   assert.equal(await input.inputValue(), value, "navigation keeps the seed value unchanged");
 }
+async function followCompatibilityIssue(frame, keyboard = false) {
+  const list = frame.locator("#comfyCompatibility .comfy-issues");
+  assert.equal(await list.locator("li").count(), 5);
+  assert.equal(await list.locator("button").count(), 1, "only issues with an exact editable field become navigation links");
+  await frame.locator("#comfyFixedInputs").evaluate(element => {
+    element.closest("details").open = false;
+    element.querySelectorAll("details").forEach(node => { node.open = false; });
+  });
+  const link = list.locator('[data-issue-node="1"][data-issue-input="ckpt_name"]');
+  if (keyboard) { await link.focus(); await link.press("Enter"); }
+  else await link.click();
+  await frame.waitForFunction(() => {
+    const input = document.querySelector('[data-fixed-node="1"][data-fixed-input="ckpt_name"]');
+    const target = input.closest(".studio-select").querySelector(".studio-select-trigger");
+    const bounds = target.getBoundingClientRect(), body = document.getElementById("studioModalBody").getBoundingClientRect();
+    return document.activeElement === target && bounds.top >= body.top && bounds.bottom <= body.bottom;
+  });
+  const input = frame.locator('[data-fixed-node="1"][data-fixed-input="ckpt_name"]');
+  assert.equal(await input.evaluate(element => element.closest("details").open && document.getElementById("comfyFixedInputs").closest("details").open), true);
+  assert.equal(await frame.locator("#comfyFixedInputs details[open]").count(), 1, "only the problem node expands");
+  assert.equal(await input.inputValue(), "missing.safetensors", "jumping to a dependency does not change its value");
+}
 async function captureThemes(page, frame, width, label, selector) {
   const original = await frame.evaluate(() => window.ImageStudioAppearance.get());
   try {
@@ -87,6 +109,12 @@ async function captureThemes(page, frame, width, label, selector) {
         return { viewport: document.documentElement.clientWidth, page: document.documentElement.scrollWidth, left: rect.left, right: rect.right, width: host.clientWidth, content: host.scrollWidth };
       }, selector);
       assert.ok(geometry.page <= geometry.viewport + 1 && geometry.left >= -1 && geometry.right <= geometry.viewport + 1 && geometry.content <= geometry.width + 1, `${preference} seed layout: ${JSON.stringify(geometry)}`);
+      if (label === "editor-issues") {
+        assert.equal(await frame.evaluate(() => {
+          const seedColor = getComputedStyle(document.querySelector("#comfySeedWarnings li")).color;
+          return Array.from(document.querySelectorAll("#comfyCompatibility li, #comfyCompatibility .comfy-issue-link")).every(element => getComputedStyle(element).color === seedColor);
+        }), true, `${preference}: compatibility entries use the same warning color as seed reminders`);
+      }
       await page.screenshot({ path: path.join(output, `${width}-${label}-${preference}.png`) });
     }
   } finally { await frame.evaluate(original => window.ImageStudioAppearance.set(original, false), original); }
@@ -142,7 +170,13 @@ async function verify(browser, width) {
   await page.route("**/comfy/inspect", async route => {
     const body = route.request().postDataJSON(); inspections.push(body);
     const config = body.comfyui, value = config.input_overrides?.find(item => item.node_id === "1" && item.input_name === "ckpt_name")?.value ?? config.api_graph["1"].inputs.ckpt_name;
-    await route.fulfill({ json: { compatible: value === "available.safetensors", issues: value === "available.safetensors" ? [] : [{ severity: "error", node_id: "1", input_name: "ckpt_name", message: "模型缺失：missing.safetensors" }], models: [{ node_id: "1", input_name: "ckpt_name", options: ["available.safetensors"] }] } });
+    await route.fulfill({ json: { compatible: value === "available.safetensors", issues: value === "available.safetensors" ? [] : [
+      { severity: "error", node_id: "1", input_name: "ckpt_name", message: "模型缺失：missing.safetensors" },
+      { severity: "warning", node_id: "missing", input_name: "value", message: "节点不存在" },
+      { severity: "warning", node_id: "1", input_name: "missing_input", message: "输入不存在" },
+      { severity: "warning", node_id: "2", input_name: "clip", message: "已连接端口无法通过固定值编辑" },
+      { severity: "warning", message: "动态依赖以执行时校验为准" },
+    ], models: [{ node_id: "1", input_name: "ckpt_name", options: ["available.safetensors"] }] } });
   });
   await page.route("**/comfy/jobs**", route => {
     if (route.request().method() === "POST") { submitted.push(route.request().postDataJSON()); currentJob = { id: "temporary-job", status: "running", model_name: "临时工作流", created_at: 1 }; return route.fulfill({ json: { job: currentJob } }); }
@@ -187,6 +221,8 @@ async function verify(browser, width) {
     await frame.locator("#studioModalError").filter({ hasText: "兼容性检查未通过" }).waitFor();
     assert.equal(submitted.length, 0); assert.equal(saves.length, 0);
     assert.equal(await frame.locator("#comfyEditor").isVisible(), true);
+    await captureThemes(page, frame, width, "editor-issues", "#comfyCompatibility");
+    await followCompatibilityIssue(frame);
     await frame.locator("#comfyFixedInputs").evaluate(element => { element.parentElement.open = true; element.querySelectorAll("details").forEach(node => { node.open = true; }); });
     const fixedSeed = frame.locator('[data-fixed-node="3"][data-fixed-input="seed"]');
     const fixedSeed9 = frame.locator('[data-fixed-node="9"][data-fixed-input="seed"]');
@@ -302,6 +338,9 @@ async function verify(browser, width) {
     assert.equal(await frame.locator("#comfyWorkflowName").isVisible(), true, "saved workflows retain the editable name");
     await assertSeedNotice(frame, "#comfySeedWarnings");
     await followSeedWarning(frame, "3");
+    await frame.locator("#comfyInspect").click();
+    await frame.locator("#comfyCompatibility").filter({ hasText: "模型缺失" }).waitFor();
+    await followCompatibilityIssue(frame, true);
     await frame.locator("#comfyApplyWorkflow").click(); await frame.waitForFunction(() => document.getElementById("studioModalRoot").classList.contains("is-hidden"));
     assert.match(await frame.locator("#settingsDirtyStatus").textContent(), /未保存/); assert.equal(saves.length, 0);
     await frame.locator('[data-view="gallery"]').click(); await frame.locator("#staySettingsButton").click(); assert.equal(await frame.evaluate(() => window.__galleryState.view), "settings");

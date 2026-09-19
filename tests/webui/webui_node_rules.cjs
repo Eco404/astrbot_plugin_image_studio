@@ -45,7 +45,8 @@ for index in range(2):
   source_node["outputs"][port]["links"].append(link_id)
  metadata=PngImagePlugin.PngInfo();metadata.add_text("prompt",json.dumps(graph));metadata.add_text("workflow",json.dumps({"nodes":nodes,"links":links,"version":0.4,"id":marker}))
  target=folder/f"{marker}-{index}.png";Image.new("RGB",(320,240),(175+index,204,210)).save(target,pnginfo=metadata);files.append(str(target))
-print(json.dumps(files))
+plain=folder/f"{marker}-plain.png";Image.new("RGB",(320,240),(160,180,190)).save(plain)
+print(json.dumps({"files":files,"plain":str(plain)}))
 `;
 
 async function until(check, message) {
@@ -58,7 +59,7 @@ async function choose(frame, id, value) {
 }
 async function run(browser, engine, width) {
   const marker = `${path.basename(output)}-${engine}-${width}`;
-  const files = JSON.parse(execFileSync(python, ["-c", fixtureScript, output, marker], { encoding: "utf8" }));
+  const { files, plain } = JSON.parse(execFileSync(python, ["-c", fixtureScript, output, marker], { encoding: "utf8" }));
   const page = await browser.newPage({ viewport: { width, height: width < 600 ? 844 : 1000 }, hasTouch: width < 600 });
   page.setDefaultTimeout(20000);
   const errors = [];
@@ -68,9 +69,29 @@ async function run(browser, engine, width) {
     const frame = page.frameLocator("#studio");
     await frame.locator("#runtimeStatus").filter({ hasText: "已加载" }).waitFor({ state: "attached" });
     await frame.locator('[data-view="import"]').click();
+    const rulesButton = frame.locator("#importNodeRulesButton");
+    assert.equal(await rulesButton.isVisible(), false, "No rule management button without ComfyUI images");
+    await frame.locator("#importFiles").setInputFiles(plain);
+    await frame.locator("#confirmImportButton:not(:disabled)").waitFor();
+    assert.equal(await rulesButton.isVisible(), false, "Plain images do not show ComfyUI rule actions");
+    await frame.locator("#cancelImportButton").click();
     await frame.locator("#importFiles").setInputFiles(files);
     await frame.locator("#confirmImportButton:not(:disabled)").waitFor();
     const first = frame.locator("#importGrid .import-card").nth(0), second = frame.locator("#importGrid .import-card").nth(1);
+    assert.equal(await rulesButton.isVisible(), true);
+    assert.equal(await rulesButton.evaluate(node => node.parentElement.classList.contains("import-floatingbar") && node.parentElement.firstElementChild === node), true);
+    const bounds = await rulesButton.evaluate(node => ({ right: node.getBoundingClientRect().right, next: document.getElementById("cancelImportButton").getBoundingClientRect().left, page: document.documentElement.scrollWidth, viewport: innerWidth }));
+    assert.ok(bounds.right < bounds.next && bounds.page <= bounds.viewport + 1, JSON.stringify(bounds));
+    const textNodes = first.locator(".node-rule-candidates"), warnings = first.locator("details.import-warnings");
+    assert.equal(await textNodes.evaluate(node => node.open), false, "Text node recognition starts collapsed");
+    assert.equal(await warnings.evaluate(node => node.open), false, "Import warnings start collapsed");
+    assert.equal(await warnings.locator(":scope > summary").textContent(), `需注意 ${await warnings.locator("li").count()}`);
+    assert.equal(await warnings.locator("li").first().isVisible(), false);
+    await warnings.locator(":scope > summary").click();
+    await warnings.locator("li").first().waitFor();
+    await warnings.locator(":scope > summary").click();
+    await page.screenshot({ path: path.join(output, `${engine}-${width}-collapsed.png`), fullPage: true });
+    await textNodes.locator(":scope > summary").click();
     assert.equal(await first.locator('[data-import-field="prompt"]').inputValue(), "");
     await second.locator('[data-import-field="prompt"]').fill("keep my manual prompt");
     await first.locator('[data-node-rule-id="10"]').click();
@@ -153,10 +174,20 @@ async function run(browser, engine, width) {
     assert.equal(await first.locator('[data-import-field="prompt"]').inputValue(), "landscape-0, daylight");
     assert.equal(await second.locator('[data-import-field="prompt"]').inputValue(), "keep my manual prompt");
     await frame.locator("#cancelImportButton").click();
+    assert.equal(await rulesButton.isVisible(), false, "Cancelling the batch hides ComfyUI actions");
+    await frame.locator("#importFiles").setInputFiles(files[0]);
+    await frame.locator("#confirmImportButton:not(:disabled)").waitFor();
     await frame.locator("#importNodeRulesButton").click();
     await frame.locator(".node-rule-list-item").filter({ hasText: `ManualTextDisplay-${marker}` }).waitFor();
     assert.equal(await frame.locator(".node-rule-list-item").filter({ hasText: `ManualTextDisplay-${marker}` }).count(), 1, "Cancel import must preserve independently saved rules");
     await page.screenshot({ path: path.join(output, `${engine}-${width}.png`), fullPage: true });
+    await frame.locator("#studioModalClose").click();
+    await frame.locator("#studioModalRoot").waitFor({ state: "hidden" });
+    await frame.locator("#importFiles").setInputFiles(plain);
+    await frame.locator("#confirmImportButton:not(:disabled)").waitFor();
+    await first.locator("[data-remove-import]").click();
+    assert.equal(await frame.locator("#importGrid .import-card").count(), 1);
+    assert.equal(await rulesButton.isVisible(), false, "Removing the last ComfyUI image hides the button even when plain images remain");
     assert.deepEqual(errors, []);
     console.log(`${engine}-${width}: manual binding, glass/ports, preview invalidation, rule persistence/delete, batch reparse, manual protection and custom observer passed`);
   } finally { await page.close(); }

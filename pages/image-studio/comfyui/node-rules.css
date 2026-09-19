@@ -1,5 +1,7 @@
-.node-rule-candidates { display: grid; gap: 7px; margin-top: 12px; }
-.node-rule-candidates h4, .node-rule-ports h4, .node-rule-preview h4 { margin: 0 0 7px; font-size: 12px; }
+.node-rule-candidates { margin-top: 12px; padding-block: 10px; border-top: 1px solid var(--line); }
+.node-rule-candidates > summary { cursor: pointer; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.node-rule-candidate-list { display: grid; gap: 7px; padding-top: 8px; }
+.node-rule-ports h4, .node-rule-preview h4 { margin: 0 0 7px; font-size: 12px; }
 .node-rule-candidate { display: grid; gap: 5px; width: 100%; min-width: 0; padding: 10px; border: 0; border-radius: 8px; background: transparent; color: var(--text); text-align: left; box-shadow: none; transition: background 150ms ease; overflow-wrap: anywhere; }
 .node-rule-candidate:hover:not(:disabled), .node-rule-candidate:focus-visible { background: var(--selection-fill); }
 .node-rule-candidate span, .node-rule-list-item span { color: var(--muted); font-size: 11px; font-weight: 400; }
