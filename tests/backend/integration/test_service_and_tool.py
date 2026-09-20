@@ -12,6 +12,7 @@ import mcp
 import pytest
 from astrbot.api.message_components import Image, Reply
 from astrbot.core.provider.register import llm_tools
+from astrbot.core.agent.tool import FunctionTool, ToolSet
 from astrbot.core.star.star_handler import EventType, star_handlers_registry
 from astrbot_plugin_image_studio.backend.config import HistorySettings, RuntimeSettings
 from astrbot_plugin_image_studio.backend.commands.parser import (
@@ -627,7 +628,9 @@ def test_capability_query_does_not_change_delivery_tools() -> None:
 
 
 @pytest.mark.parametrize("operation", ["generate", "view"])
-def test_returning_images_preserves_other_tools_and_request_context(operation) -> None:
+def test_only_generated_images_restrict_delivery_and_preserve_other_context(
+    operation,
+) -> None:
     class FakeService:
         async def generate(self, **kwargs):
             provider = settings().providers[0]
@@ -638,28 +641,23 @@ def test_returning_images_preserves_other_tools_and_request_context(operation) -
                 5,
             )
 
-    class MutableToolSet:
-        def __init__(self):
-            self.names = {
-                "image_studio_send_output",
-                "image_studio_generate",
-                "pc_send_current_media",
-                "send_message_to_user",
-            }
-
-        def get_tool(self, name):
-            return object() if name in self.names else None
-
-        def remove_tool(self, name):
-            self.names.discard(name)
-
     plugin = object.__new__(ImageStudioPlugin)
     plugin._settings = settings()
     plugin._service = FakeService()
     plugin.store = FakeAgentAssetStore()
     event = ToolEvent()
-    tool_set = MutableToolSet()
-    original_names = set(tool_set.names)
+    original_names = {
+        "image_studio_send_output",
+        "image_studio_generate",
+        "pc_send_current_media",
+        "send_message_to_user",
+    }
+    tool_set = ToolSet(
+        [
+            FunctionTool(name=name, description=name, parameters={})
+            for name in original_names
+        ]
+    )
     request = SimpleNamespace(
         func_tool=tool_set,
         system_prompt="当前人格与其他插件的规则",
@@ -673,7 +671,7 @@ def test_returning_images_preserves_other_tools_and_request_context(operation) -
         await plugin.image_studio_get_capabilities(
             event, query_type="default", mode="text2img"
         )
-        assert "pc_send_current_media" in tool_set.names
+        assert "pc_send_current_media" in tool_set.names()
         return await plugin.image_studio_generate(
             event, prompt="one tree", mode="text2img"
         )
@@ -681,7 +679,13 @@ def test_returning_images_preserves_other_tools_and_request_context(operation) -
     result = asyncio.run(run())
 
     assert not result.isError
-    assert tool_set.names == original_names
+    expected = (
+        original_names - {"send_message_to_user", "pc_send_current_media"}
+        if operation == "generate"
+        else original_names
+    )
+    assert set(request.func_tool.names()) == expected
+    assert set(tool_set.names()) == original_names
     assert request.system_prompt == "当前人格与其他插件的规则"
     assert request.extra_user_content_parts == [{"text": "其他工具的上下文"}]
     payload = json.loads(result.content[0].text)
@@ -791,6 +795,7 @@ def test_image_studio_sender_delivers_leased_asset_to_current_session(tmp_path) 
             "destination": "session",
             "component_count": 2,
             "message": "已向当前会话发送 2 个消息组件。",
+            "notice": "本次图片或文件及随附文字已发送给用户。后续回复或工具调用中，不要再次发送这些文字，也不要仅改写后重复表达相同内容。",
         }
 
     asyncio.run(run())
@@ -1374,6 +1379,9 @@ def test_registered_image_tool_descriptions_contain_routing_contract() -> None:
         == send_output.description
     )
     assert "session" not in send_output.parameters["properties"]
+    assert "不要把准备作为最终回复的完整正文放入 messages" in send_output.description
+    assert "普通最终回复应直接输出" in send_output.description
+    assert "必要附言" in send_output.parameters["properties"]["messages"]["description"]
     assert (
         "必须明确填写"
         in send_output.parameters["properties"]["destination"]["description"]
@@ -1433,6 +1441,7 @@ def test_send_result_reports_delivery_without_global_continuation_rules() -> Non
         "destination": "session",
         "component_count": 1,
         "message": "已向当前会话发送 1 个消息组件。",
+        "notice": "本次文字已发送给用户。后续回复或工具调用中，不要再次发送这些文字，也不要仅改写后重复表达相同内容。",
     }
     assert request.extra_user_content_parts == []
 

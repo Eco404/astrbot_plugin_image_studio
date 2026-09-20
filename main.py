@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import copy
 import hashlib
 import json
 import math
@@ -18,6 +19,7 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.message_components import File, Image, Plain, Record, Reply, Video
 from astrbot.api.star import Context, Star, StarTools, register
+from astrbot.core.agent.tool import ToolSet
 from astrbot.core.computer.computer_client import get_booter
 from astrbot.core.utils.quoted_message import extract_quoted_message_images
 from astrbot.core.workspace import (
@@ -56,13 +58,32 @@ PAGE_PREFIX = f"/{PLUGIN_NAME}"
 LOG_TAG = "[ImageStudio]"
 CAPABILITY_QUERY_EXTRA_KEY = "_image_studio_capability_queries"
 AGENT_RESULT_RECOVERY_EXTRA_KEY = "_image_studio_result_recovery"
+AGENT_DELIVERY_TOOLS_EXTRA_KEY = "_image_studio_delivery_tools"
+
+
+class _AgentDeliveryToolSet(ToolSet):
+    """Own the request's full, light and parameter-only tool list views."""
+
+    def __init__(self, tools):
+        super().__init__(list(tools))
+        self.views = [self]
+
+    def get_light_tool_set(self):
+        view = super().get_light_tool_set()
+        self.views.append(view)
+        return view
+
+    def get_param_only_tool_set(self):
+        view = super().get_param_only_tool_set()
+        self.views.append(view)
+        return view
 
 
 @register(
     PLUGIN_NAME,
     "econeco",
     "多服务商 AI 生图与图库工作台，支持 OpenAI、Gemini、ComfyUI 工作流、NovelAI 官方、NAI 第三方及自定义接口。支持对话生图改图、并发批量生成、图片参数导入与工作流复现，可扫描 nai-image 插件图库及自定义目录，统一浏览和管理图片。WebUI 适配桌面与手机。",
-    "1.4.1",
+    "1.4.2",
 )
 class ImageStudioPlugin(Star):
     """Own Image Studio configuration, generation, gallery, and tool APIs."""
@@ -603,6 +624,27 @@ class ImageStudioPlugin(Star):
             await append_reference(raw_ref)
         return result()
 
+    @filter.on_llm_request()
+    async def prepare_agent_delivery_tools(
+        self, event: AstrMessageEvent, req: Any
+    ) -> None:
+        """Retain an isolated full tool set before the runner creates light schemas.
+
+        This hook changes neither the available tool names nor prompt contents.
+        No tools are filtered until this message obtains generated image assets.
+        """
+        if not self._settings.enable_llm_tool:
+            return
+        tools = getattr(getattr(req, "func_tool", None), "tools", None)
+        if not isinstance(tools, list) or not any(
+            getattr(tool, "name", "") in {"image_studio_generate", "image_studio_task"}
+            for tool in tools
+        ):
+            return
+        owned = _AgentDeliveryToolSet(tools)
+        req.func_tool = owned
+        _set_event_extra(event, AGENT_DELIVERY_TOOLS_EXTRA_KEY, (req, owned))
+
     @filter.llm_tool(name="image_studio_get_capabilities")
     async def image_studio_get_capabilities(
         self,
@@ -863,6 +905,7 @@ class ImageStudioPlugin(Star):
                 },
                 is_error=True,
             )
+        _protect_generated_image_delivery(event)
         if configured_return_mode == "original":
             visual_images = result.images
         elif configured_return_mode == "preview":
@@ -1159,10 +1202,13 @@ class ImageStudioPlugin(Star):
         """向当前会话发送消息或产物，或将本插件原图资产复制到当前 workspace。
 
         使用已有资产无需先查询模型能力；复制后的工作区文件可交给其他工具处理。
+        向当前会话发送图片或其他文件时，plain 项仅用于必要的随附说明，
+        不要把准备作为最终回复的完整正文放入 messages；普通最终回复应直接输出。
+        随附文字发送成功后，不要在后续回复或工具调用中重复发送或仅改写后再表达相同内容。
 
         Args:
             destination(string): session 或 workspace；必须明确填写
-            messages(array[object]): 有序消息。session 支持 plain/image/record/video/file；plain 使用 text，媒体使用 asset_id/path/url 三选一并可填 name。workspace 仅接受带 asset_id 的图片项
+            messages(array[object]): 有序消息。session 支持 plain/image/record/video/file；plain 使用 text，仅填写必要附言，完整最终正文应直接回复。媒体使用 asset_id/path/url 三选一并可填 name。workspace 仅接受带 asset_id 的图片项
         """
 
         if not self._settings.enable_llm_tool:
@@ -1183,6 +1229,7 @@ class ImageStudioPlugin(Star):
                     "destination": "session",
                     "component_count": count,
                     "message": f"已向当前会话发送 {count} 个消息组件。",
+                    "notice": _session_delivery_notice(messages),
                 }
             )
         except ValueError as exc:
@@ -1408,6 +1455,55 @@ def _workflow_asset_failure(index: int, asset_id: str, reason: str) -> dict[str,
         "message": messages[normalized_reason],
         "retryable": normalized_reason == "storage_error",
     }
+
+
+def _protect_generated_image_delivery(event: Any) -> None:
+    """Restrict conflicting senders only after usable generated assets exist.
+
+    Keep the change on this ProviderRequest. Tool definitions and the original
+    set may also be used by other events; never change a global tool's active
+    flag or mutate another request's tool list.
+    """
+    request = _get_event_extra(event, "provider_request")
+    tool_set = getattr(request, "func_tool", None)
+    getter = getattr(tool_set, "get_tool", None)
+    tools = getattr(tool_set, "tools", None)
+    if not callable(getter) or not isinstance(tools, list):
+        return
+    sender = getter("image_studio_send_output")
+    if sender is None or not getattr(sender, "active", True):
+        return
+    blocked = {"send_message_to_user", "pc_send_current_media"}
+    if not any(getattr(tool, "name", "") in blocked for tool in tools):
+        return
+    prepared = _get_event_extra(event, AGENT_DELIVERY_TOOLS_EXTRA_KEY)
+    if isinstance(prepared, tuple) and len(prepared) == 2 and prepared[0] is request:
+        # In skills_like mode the runner resolves handlers from this original
+        # full set even after req.func_tool has become a light schema copy.
+        owned = prepared[1]
+        for view in owned.views:
+            view.tools = [
+                tool for tool in view.tools if getattr(tool, "name", "") not in blocked
+            ]
+        if any(view is tool_set for view in owned.views):
+            return
+    protected = copy.copy(tool_set)
+    protected.tools = [
+        tool for tool in tools if getattr(tool, "name", "") not in blocked
+    ]
+    request.func_tool = protected
+
+
+def _session_delivery_notice(messages: list[dict[str, Any]]) -> str:
+    kinds = {str(item.get("type") or "").strip().lower() for item in messages}
+    if "plain" in kinds:
+        content = "图片或文件及随附文字" if len(kinds) > 1 else "文字"
+        return (
+            f"本次{content}已发送给用户。后续回复或工具调用中，不要再次发送这些文字，"
+            "也不要仅改写后重复表达相同内容。"
+        )
+    content = "图片" if kinds == {"image"} else "媒体文件"
+    return f"本次{content}已发送给用户，无需再次发送相同内容。"
 
 
 def _asset_usage_notice(detail: str) -> str:
