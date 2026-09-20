@@ -32,6 +32,7 @@ from .backend.config import (
     runtime_settings,
 )
 from .backend.tools.capabilities import query_capabilities
+from .backend.tools.image_context import ImageContextAdapter, track_image_result
 from .backend.commands.handler import run_image_command
 from .backend.api.comfyui import ComfyAPI
 from .backend.api.settings import SettingsAPI
@@ -105,6 +106,7 @@ class ImageStudioPlugin(Star):
         self._settings, runtime_errors = runtime_settings(config, self._studio_settings)
         self._settings_errors = [*studio_errors, *runtime_errors]
         self._external_gallery = ExternalGalleryManager(self.store, Path(self.data_dir))
+        self._image_context_adapter = ImageContextAdapter(logger)
 
     async def initialize(self) -> None:
         """Initialize storage, HTTP resources, and Page API routes."""
@@ -131,6 +133,7 @@ class ImageStudioPlugin(Star):
         )
         self._register_web_apis()
         await self._external_gallery.start()
+        self._image_context_adapter.install()
         if self._settings_errors:
             logger.warning(
                 "%s 配置存在问题: %s", LOG_TAG, "; ".join(self._settings_errors)
@@ -145,6 +148,8 @@ class ImageStudioPlugin(Star):
     async def terminate(self) -> None:
         """Close plugin-owned HTTP resources during reload or shutdown."""
 
+        if getattr(self, "_image_context_adapter", None) is not None:
+            self._image_context_adapter.restore()
         await self._external_gallery.close()
         if self._comfy is not None:
             await self._comfy.close()
@@ -624,6 +629,15 @@ class ImageStudioPlugin(Star):
             await append_reference(raw_ref)
         return result()
 
+    @filter.on_agent_begin()
+    async def prepare_agent_image_context(
+        self, event: AstrMessageEvent, run_context: Any
+    ) -> None:
+        """Scope image caption adaptation to this plugin's current agent event."""
+        adapter = getattr(self, "_image_context_adapter", None)
+        if self._settings.enable_llm_tool and adapter is not None:
+            adapter.bind(event, run_context)
+
     @filter.on_llm_request()
     async def prepare_agent_delivery_tools(
         self, event: AstrMessageEvent, req: Any
@@ -959,7 +973,7 @@ class ImageStudioPlugin(Star):
                 ),
             ),
         )
-        return mcp.types.CallToolResult(content=content)
+        return track_image_result(event, mcp.types.CallToolResult(content=content))
 
     @filter.llm_tool(name="image_studio_task")
     async def image_studio_task(
@@ -1164,7 +1178,7 @@ class ImageStudioPlugin(Star):
             }
             for index, (asset_id, image) in enumerate(loaded_assets)
         ]
-        return mcp.types.CallToolResult(
+        response = mcp.types.CallToolResult(
             content=[
                 mcp.types.TextContent(
                     type="text",
@@ -1191,6 +1205,7 @@ class ImageStudioPlugin(Star):
                 for _asset_id, image in loaded_assets
             ]
         )
+        return track_image_result(event, response)
 
     @filter.llm_tool(name="image_studio_send_output")
     async def image_studio_send_output(
