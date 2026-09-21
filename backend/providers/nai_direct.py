@@ -20,7 +20,9 @@ async def generate(
     request: GenerationRequest,
 ) -> tuple[GeneratedImage, ...]:
     if request.mode != "text2img":
-        raise ProviderError("NAI 第三方 GET 服务仅支持文生图")
+        raise ProviderError(
+            "NAI 第三方 GET 服务仅支持文生图", request_status="not_submitted"
+        )
     endpoint = _join_url(provider.base_url, provider.generate_path or "/generate")
     query = _nai_query(provider, request)
     try:

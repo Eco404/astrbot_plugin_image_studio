@@ -33,6 +33,7 @@ from .backend.config import (
 )
 from .backend.tools.capabilities import query_capabilities
 from .backend.tools.image_context import ImageContextAdapter, track_image_result
+from .backend.tools.schemas import with_image_arguments
 from .backend.commands.handler import run_image_command
 from .backend.api.comfyui import ComfyAPI
 from .backend.api.settings import SettingsAPI
@@ -62,6 +63,16 @@ AGENT_RESULT_RECOVERY_EXTRA_KEY = "_image_studio_result_recovery"
 AGENT_DELIVERY_TOOLS_EXTRA_KEY = "_image_studio_delivery_tools"
 
 
+class _ReferenceInputError(ValueError):
+    """Identify an explicit reference that failed before generation submission."""
+
+    def __init__(self, index: int, field: str, reason: str, detail: str):
+        self.index = index
+        self.field = field
+        self.reason = reason
+        super().__init__(f"references[{index}].{field}：{detail}")
+
+
 class _AgentDeliveryToolSet(ToolSet):
     """Own the request's full, light and parameter-only tool list views."""
 
@@ -84,7 +95,7 @@ class _AgentDeliveryToolSet(ToolSet):
     PLUGIN_NAME,
     "econeco",
     "多服务商 AI 生图与图库工作台，支持 OpenAI、Gemini、ComfyUI 工作流、NovelAI 官方、NAI 第三方及自定义接口。支持对话生图改图、并发批量生成、图片参数导入与工作流复现，可扫描 nai-image 插件图库及自定义目录，统一浏览和管理图片。WebUI 适配桌面与手机。",
-    "1.4.2",
+    "1.5.0-dev.1",
 )
 class ImageStudioPlugin(Star):
     """Own Image Studio configuration, generation, gallery, and tool APIs."""
@@ -524,7 +535,9 @@ class ImageStudioPlugin(Star):
             getattr(self, "context", None),
         )
 
-        async def append_reference(raw_ref: str, *, required: bool = False) -> bool:
+        async def append_reference(
+            raw_ref: str, *, required: bool = False, input_index: int | None = None
+        ) -> bool:
             if len(references) >= read_limit:
                 return True
             try:
@@ -533,6 +546,15 @@ class ImageStudioPlugin(Star):
                     workspace_root=workspace_root,
                 )
             except Exception as exc:
+                if input_index is not None:
+                    detail = (
+                        str(exc)
+                        if isinstance(exc, (ValueError, OSError))
+                        else "读取失败"
+                    )
+                    raise _ReferenceInputError(
+                        input_index, "path", "reference_read_failed", detail
+                    ) from exc
                 if required:
                     raise ValueError("显式参考图无法读取或不在允许的目录内") from exc
                 logger.debug(
@@ -542,6 +564,13 @@ class ImageStudioPlugin(Star):
                 )
                 return False
             if reference is None:
+                if input_index is not None:
+                    raise _ReferenceInputError(
+                        input_index,
+                        "path",
+                        "reference_unavailable",
+                        "显式参考图不存在或不是有效图片；请沿用附件提供的完整文件名和扩展名。",
+                    )
                 if required:
                     raise ValueError("显式参考图不存在或不是有效图片")
                 return False
@@ -566,23 +595,39 @@ class ImageStudioPlugin(Star):
                 await append_reference(str(source or ""), required=required)
             return result()
 
-        for item in (explicit_references or [])[:read_limit]:
+        for input_index, item in enumerate((explicit_references or [])[:read_limit]):
             if isinstance(item, dict):
                 asset_id = str(item.get("asset_id") or "").strip().lower()
                 path = str(item.get("path") or "").strip()
                 if bool(asset_id) == bool(path):
-                    raise ValueError("参考图必须且只能填写 asset_id 或 path")
-                if asset_id:
-                    loaded = await self.store.load_workflow_image(
-                        asset_id,
-                        scope_id=_event_scope_id(event),
-                        detail="original",
-                        preview_max_edge=self._settings.asset_preview_max_edge,
-                        preview_quality=self._settings.asset_preview_quality,
+                    raise _ReferenceInputError(
+                        input_index,
+                        "asset_id/path",
+                        "invalid_reference",
+                        "参考图必须且只能填写 asset_id 或 path",
                     )
+                if asset_id:
+                    try:
+                        loaded = await self.store.load_workflow_image(
+                            asset_id,
+                            scope_id=_event_scope_id(event),
+                            detail="original",
+                            preview_max_edge=self._settings.asset_preview_max_edge,
+                            preview_quality=self._settings.asset_preview_quality,
+                        )
+                    except Exception as exc:
+                        raise _ReferenceInputError(
+                            input_index,
+                            "asset_id",
+                            "asset_read_failed",
+                            "参考图资产读取失败，请核对原图是否仍保留后重试读取。",
+                        ) from exc
                     if loaded is None:
-                        raise ValueError(
-                            "参考图资产不存在、原图无法读取或不属于当前会话"
+                        raise _ReferenceInputError(
+                            input_index,
+                            "asset_id",
+                            "asset_unavailable",
+                            "参考图资产不存在、原图无法读取或不属于当前会话",
                         )
                     image, internal_path = loaded
                     digest = hashlib.sha256(image.data).hexdigest()
@@ -596,9 +641,11 @@ class ImageStudioPlugin(Star):
                         )
                     )
                     continue
-                await append_reference(path, required=True)
+                await append_reference(path, required=True, input_index=input_index)
                 continue
-            await append_reference(str(item or ""), required=True)
+            await append_reference(
+                str(item or ""), required=True, input_index=input_index
+            )
         if not include_event_references:
             return result()
         message_chain = event.get_messages() if hasattr(event, "get_messages") else []
@@ -710,6 +757,7 @@ class ImageStudioPlugin(Star):
             )
         return _tool_json(payload)
 
+    @with_image_arguments
     @filter.llm_tool(name="image_studio_generate")
     async def image_studio_generate(
         self,
@@ -726,13 +774,15 @@ class ImageStudioPlugin(Star):
         调用前须通过 image_studio_get_capabilities 查询目标模型在所选生成模式下可用的参数与提示词要求。
         在处理当前这条用户消息期间，已查询过的模型和模式不必重复查询；修改 prompt 或 parameters 的值也不必重查。
         处理新的用户消息、使用尚未查询的模型或模式，或插件设置发生变化后，需要重新查询。
+        图生图未填写 references 时，依次读取当前消息图片、引用消息图片和本次模型请求附件，并按内容去除重复图片。
+        指定部分图片或顺序时填写 references；直接沿用附件路径，不必先用 Python 或 Shell 检查图片尺寸。
 
         Args:
             prompt(string): 生图提示词，格式遵循能力查询结果
             mode(string): 请填写 text2img（文生图）或 img2img（图生图）
             model_ref(string): 模型编号，格式为 provider_id:model_id；省略时使用 mode 对应的默认模型
             parameters(object): 仅填写本次查询结果为该模型列出的参数，使用其中的字段名
-            references(array[object]): 参考图片列表；每项填写图片编号 asset_id，或当前工作区文件的路径 path，二者只能选一个
+            references(array[object]): 按使用顺序填写参考图片；每项填写图片编号 asset_id，或消息附件/当前工作区文件的路径 path，二者只能选一个。路径必须与附件提供的文件名和扩展名一致。省略或空数组时自动读取本条消息及其引用中的图片
             request_id(string): 可选，仅支持 ComfyUI；同一会话中以相同 request_id 和相同请求参数再次调用时，返回原任务而不新建任务；希望生成新图片时使用新的 request_id 或省略此参数
 
         Returns:
@@ -741,6 +791,8 @@ class ImageStudioPlugin(Star):
 
         if not self._settings.enable_llm_tool:
             return _tool_error("Image Studio 的 LLM 生图工具已关闭。")
+        generation_attempted = False
+        comfy_submission_attempted = False
         try:
             model_ref = _generation_model_ref(model_ref)
             if references is None:
@@ -839,6 +891,7 @@ class ImageStudioPlugin(Star):
                     raise ValueError("ComfyUI 任务服务尚未就绪")
                 for key in ("provider_id", "model_ref", "model"):
                     values.pop(key)
+                generation_attempted = comfy_submission_attempted = True
                 job = await runtime.submit_agent(
                     scope_id=_event_scope_id(event),
                     request_id=request_id or None,
@@ -848,21 +901,38 @@ class ImageStudioPlugin(Star):
                     **values,
                 )
                 return await self._agent_comfy_result(event, runtime, job)
+            generation_attempted = True
             result = await service.generate(**values)
-        except (ValueError, ProviderError) as exc:
-            return mcp.types.CallToolResult(
-                content=[mcp.types.TextContent(type="text", text=f"生成失败：{exc}")],
-                isError=True,
-            )
-        except Exception as exc:
-            logger.warning("%s 生图调用状态未确认: %s", LOG_TAG, type(exc).__name__)
+        except _ReferenceInputError as exc:
             return _tool_json(
                 {
-                    "status": "generation_unknown",
-                    "message": "本次未取得确定的生图结果；不要自动重复生成。",
-                    "next_action": "ComfyUI 请用 image_studio_task 列出当前会话最近任务并查询；其他服务商请核对服务商与画廊记录。",
+                    "status": "validation_failed",
+                    "request_status": "not_submitted",
+                    "message": "参考图读取或校验失败，本次未调用生图接口。",
+                    "error": str(exc),
+                    "reference_index": exc.index,
+                    "reference_field": exc.field,
+                    "reason": exc.reason,
+                    "next_action": "核对这项参考图：附件路径需保留完整文件名和扩展名，已有插件图片可使用 asset_id。"
+                    "确认输入后可重新调用生成工具；不要省略必要的参考图或改用文生图来绕过错误。",
                 },
                 is_error=True,
+            )
+        except (ValueError, ProviderError) as exc:
+            request_status = (
+                getattr(exc, "request_status", "unknown")
+                if isinstance(exc, ProviderError)
+                else "unknown"
+                if comfy_submission_attempted
+                else "not_submitted"
+            )
+            return _generation_failure(exc, request_status, comfy_submission_attempted)
+        except Exception as exc:
+            logger.warning("%s 生图调用状态未确认: %s", LOG_TAG, type(exc).__name__)
+            return _generation_failure(
+                type(exc).__name__,
+                "unknown" if generation_attempted else "not_submitted",
+                comfy_submission_attempted,
             )
         return await self._agent_generation_result(
             event,
@@ -1024,13 +1094,25 @@ class ImageStudioPlugin(Star):
                 raise ValueError("ComfyUI 任务服务尚未就绪")
             if not task_id:
                 if resume or wait_seconds != 0:
-                    raise ValueError("等待或恢复任务时必须填写 task_id")
+                    raise ValueError(
+                        "等待或恢复任务时必须填写先前返回的 task_id；"
+                        "仅查询任务列表时请省略 wait_seconds 和 resume。查询不会提交生图。"
+                    )
+                tasks = await runtime.list_agent(scope_id=_event_scope_id(event))
                 return _tool_json(
                     {
-                        "tasks": await runtime.list_agent(
-                            scope_id=_event_scope_id(event)
+                        "tasks": tasks,
+                        "message": (
+                            "已列出当前会话的 ComfyUI 任务；本次查询未提交生图。"
+                            if tasks
+                            else "当前会话没有可查询的 ComfyUI 任务；本次查询未提交生图。"
                         ),
-                        "next_action": "按 task_id 查询原任务；不要因尚未取得结果而重复生成。",
+                        "next_action": (
+                            "需要查看任务结果时，使用列表中的 task_id 查询原任务，不要重新提交同一任务。"
+                            if tasks
+                            else "此列表不包含其他服务商的生图记录。核对之前的生成和发送工具结果；"
+                            "不能据此判断其他服务商是否已经生成图片。"
+                        ),
                     }
                 )
             job = await runtime.inspect_agent(
@@ -1207,6 +1289,7 @@ class ImageStudioPlugin(Star):
         )
         return track_image_result(event, response)
 
+    @with_image_arguments
     @filter.llm_tool(name="image_studio_send_output")
     async def image_studio_send_output(
         self,
@@ -1223,7 +1306,7 @@ class ImageStudioPlugin(Star):
 
         Args:
             destination(string): session 或 workspace；必须明确填写
-            messages(array[object]): 有序消息。session 支持 plain/image/record/video/file；plain 使用 text，仅填写必要附言，完整最终正文应直接回复。媒体使用 asset_id/path/url 三选一并可填 name。workspace 仅接受带 asset_id 的图片项
+            messages(array[object]): 有序消息。session 最多 40 项，支持 plain/image/record/video/file；plain 使用 text，仅填写必要附言，完整最终正文应直接回复。媒体使用 asset_id/path/url 三选一并可填 name。workspace 最多 20 项，仅接受带 asset_id 的图片项
         """
 
         if not self._settings.enable_llm_tool:
@@ -1367,7 +1450,11 @@ class ImageStudioPlugin(Star):
                 raise ValueError("session 单次最多投递 40 个消息组件。")
             for index, item in enumerate(messages):
                 if not isinstance(item, dict):
-                    raise ValueError(f"messages[{index}] 必须是对象。")
+                    raise ValueError(
+                        f"messages[{index}] 必须是对象，例如 "
+                        '{"type":"image","asset_id":"返回的图片编号"}。'
+                        "不要将对象编码为字符串，也不要将回复分段标记作为消息项。"
+                    )
                 kind = str(item.get("type") or "").strip().lower()
                 if kind == "plain":
                     text = str(item.get("text") or "").strip()
@@ -1507,6 +1594,42 @@ def _protect_generated_image_delivery(event: Any) -> None:
         tool for tool in tools if getattr(tool, "name", "") not in blocked
     ]
     request.func_tool = protected
+
+
+def _generation_failure(
+    error: Any, request_status: str, comfy: bool
+) -> mcp.types.CallToolResult:
+    """Describe only the submission state established by the failure boundary."""
+    if request_status == "not_submitted":
+        status = "validation_failed"
+        message = "生图请求准备或校验失败，本次未调用生图接口。"
+        next_action = "根据错误修正参数或参考图后再调用 image_studio_generate。"
+    elif request_status == "rejected":
+        status = "upstream_rejected"
+        message = "上游明确拒绝了本次生图请求，未取得可用图片。"
+        next_action = (
+            "根据错误核对请求和服务商限制；不要自动重试相同请求。"
+            "不要自行去掉参考图、改用文生图或更换模型来绕过拒绝；需要改变用户要求时先说明并确认。"
+        )
+    else:
+        request_status = "unknown"
+        status = "generation_unknown"
+        message = "本次未取得确定的生图结果，可能已被服务商接收或消耗额度。"
+        next_action = (
+            "使用 image_studio_task 列出当前会话的 ComfyUI 任务，核对原任务状态；不要重新提交。"
+            if comfy
+            else "核对服务商与画廊记录，不要自动重复生成。image_studio_task 的任务列表仅包含 ComfyUI 任务。"
+        )
+    return _tool_json(
+        {
+            "status": status,
+            "request_status": request_status,
+            "message": message,
+            "error": str(error),
+            "next_action": next_action,
+        },
+        is_error=True,
+    )
 
 
 def _session_delivery_notice(messages: list[dict[str, Any]]) -> str:

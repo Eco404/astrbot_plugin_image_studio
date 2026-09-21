@@ -39,17 +39,24 @@ class NovelAIClient:
         self, provider: ImageProvider, request: GenerationRequest
     ) -> tuple[GeneratedImage, ...]:
         if not provider.enabled:
-            raise ProviderError("NovelAI 官方服务商未启用")
+            raise ProviderError(
+                "NovelAI 官方服务商未启用", request_status="not_submitted"
+            )
         if not provider.api_key.strip():
-            raise ProviderError("NovelAI 官方服务商尚未配置 Persistent API Token")
+            raise ProviderError(
+                "NovelAI 官方服务商尚未配置 Persistent API Token",
+                request_status="not_submitted",
+            )
         if request.mode == "img2img" and not provider.get_model(request.model).img2img:
-            raise ProviderError("所选 NovelAI 模型尚未启用图生图")
+            raise ProviderError(
+                "所选 NovelAI 模型尚未启用图生图", request_status="not_submitted"
+            )
         try:
             payload, effective, vibes = await asyncio.to_thread(
                 prepare_generation_payload, request, request.model or provider.model
             )
         except ValueError as exc:
-            raise ProviderError(str(exc)) from exc
+            raise ProviderError(str(exc), request_status="not_submitted") from exc
         if vibes:
             # Validate and prepare the whole request before incurring encoding fees.
             payload["parameters"]["reference_image_multiple"] = [
@@ -70,7 +77,12 @@ class NovelAIClient:
             ) as response:
                 if response.status not in {200, 201}:
                     raise ProviderError(
-                        await _novelai_generation_error(response, provider)
+                        await _novelai_generation_error(response, provider),
+                        request_status=(
+                            "rejected"
+                            if 400 <= response.status < 500 and response.status != 408
+                            else "unknown"
+                        ),
                     )
                 raw = await _bounded_response_body(response, MAX_RESPONSE_BYTES)
                 content_type = str(response.headers.get("Content-Type") or "")

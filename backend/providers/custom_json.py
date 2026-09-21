@@ -33,7 +33,10 @@ async def generate(
         try:
             template = json.loads(provider.request_template)
         except json.JSONDecodeError as exc:
-            raise ProviderError("自定义 Provider 的请求模板不是合法 JSON") from exc
+            raise ProviderError(
+                "自定义 Provider 的请求模板不是合法 JSON",
+                request_status="not_submitted",
+            ) from exc
         payload = _substitute_template(template, {**payload, "count": request.count})
     async with session.post(
         endpoint,

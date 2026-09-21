@@ -203,29 +203,28 @@ def query_capabilities(
         entries_by_ref[ref] = entry
     if normalized_query_type == "default":
         next_action = (
-            "已返回默认模型在 Image Studio 中允许使用的生成模式、参数和提示词要求。"
-            "选择 default_for_modes 包含所需模式的模型，使用该项 model_ref 调用 image_studio_generate。"
-        )
-    elif normalized_query_type == "all":
-        next_action = (
-            "已返回各模型在 Image Studio 中允许使用的生成模式、参数和提示词要求。"
-            "请从 models 中选择所需模型，按照该项 prompt_contract 编写提示词，并使用 parameters 中列出的参数。"
+            "用户要求生图时，选择 default_for_modes 包含所需模式的模型，"
+            "按该项 prompt_contract 和 parameters 调用 image_studio_generate，并填写该项 model_ref。"
         )
     elif not entries:
         next_action = (
             "没有成功查询的模型；根据 errors 中的原因修正 model_refs，"
             '或设置 query_type="search" 查找可用模型。'
         )
-    elif capability_errors:
-        next_action = (
-            "models 中的模型已成功查询，可按照各项 prompt_contract 和 parameters 调用 image_studio_generate。"
-            "未成功查询的输入及原因见 errors；使用这些模型前需修正 model_refs 后重新查询。"
-        )
     else:
         next_action = (
-            "已返回所选模型在 Image Studio 中允许使用的生成模式、参数和提示词要求。"
-            "按照所选模型的 prompt_contract 编写提示词，并仅使用 parameters 中列出的参数。"
+            "用户要求生图时，从 models 中选择所需模型，"
+            "按该项 prompt_contract 和 parameters 调用 image_studio_generate，并填写该项 model_ref。"
         )
+        if capability_errors:
+            next_action += (
+                "models 中的模型已成功查询；未成功查询的输入及原因见 errors，"
+                "使用这些模型前需修正 model_refs 后重新查询。"
+            )
+    next_action = (
+        "本次仅查询模型允许使用的生成模式、参数和提示词要求，未生成图片或提交任务。"
+        + next_action
+    )
     if entries:
         next_action += _CAPABILITY_REUSE_GUIDANCE
     return {

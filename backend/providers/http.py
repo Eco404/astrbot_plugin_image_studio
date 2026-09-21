@@ -29,7 +29,12 @@ class ImageResponseReader:
         if response.status >= 400:
             detail = raw.decode("utf-8", errors="replace")[:500]
             raise ProviderError(
-                f"上游返回 HTTP {response.status}: {detail or '无错误详情'}"
+                f"上游返回 HTTP {response.status}: {detail or '无错误详情'}",
+                request_status=(
+                    "rejected"
+                    if 400 <= response.status < 500 and response.status != 408
+                    else "unknown"
+                ),
             )
         if content_type.startswith("image/"):
             if not raw:

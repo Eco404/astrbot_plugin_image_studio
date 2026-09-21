@@ -179,13 +179,18 @@ def test_catalog_guidance_only_points_to_its_next_discovery_step(
     )
     payload = search_catalog(config, query_type=query_type)
     guidance = payload["next_action"]
+    assert guidance.startswith("本次仅查询服务商或模型目录，未生成图片或提交任务。")
     assert f'query_type="{next_query}"' in guidance
     assert argument in guidance
+    assert "image_studio_generate" not in guidance
     assert "直接生成" not in guidance
     assert "同轮" not in guidance
     assert "能力缺口" not in guidance
     if query_type == "search":
+        assert "需要生图时，先设置" in guidance
         assert payload["models"][0]["default_for_modes"] == ["text2img"]
+    else:
+        assert "需要查找模型时" in guidance
 
 
 @pytest.mark.parametrize("query_type", ["providers", "search"])
@@ -201,6 +206,8 @@ def test_empty_catalog_guidance_distinguishes_no_matches_from_page_overflow(quer
     assert beyond[collection] == [] and beyond["total"] == 1
     assert "offset" in beyond["next_action"] and "total" in beyond["next_action"]
     for payload in (unmatched, beyond):
+        assert payload["next_action"].startswith("本次仅查询")
+        assert "未生成图片或提交任务" in payload["next_action"]
         assert not payload["has_more"]
         assert "所选" not in payload["next_action"]
 

@@ -297,6 +297,10 @@ class ImageGenerationService:
             images = exc.images
             batch_failures = exc.failures
             warning = str(exc)
+        except ValueError as exc:
+            # Adapter response parsing can raise ValueError after a paid request.
+            # Only validation above the execution boundary is known unsubmitted.
+            raise ProviderError(str(exc)) from exc
         if (
             len(images) != request.count
             and not batch_failures
@@ -420,8 +424,9 @@ class ImageGenerationService:
                 and not model.comfyui_capabilities["count_bound"]
                 and request.count != 1
             ):
-                raise ValueError(
-                    "此工作流未绑定数量参数；一次运行保留工作流原有的全部输出"
+                raise ProviderError(
+                    "此工作流未绑定数量参数；一次运行保留工作流原有的全部输出",
+                    request_status="not_submitted",
                 )
             if (
                 fixed_outputs or model.comfyui_capabilities["count_bound"]
@@ -431,7 +436,10 @@ class ImageGenerationService:
                     not request.local_parameters.get("_comfy_job_id")
                     or managed_batch is None
                 ):
-                    raise ValueError("超出原生批次的 ComfyUI 请求需要持久化任务管理器")
+                    raise ProviderError(
+                        "超出原生批次的 ComfyUI 请求需要持久化任务管理器",
+                        request_status="not_submitted",
+                    )
                 # Only child executions acquire slots. Holding a parent slot
                 # while waiting for children would deadlock a single-slot model.
                 return await managed_batch(provider, request)
@@ -458,6 +466,7 @@ class ImageGenerationService:
         pending = iter(enumerate(request_sizes))
         results: list[tuple[GeneratedImage, ...]] = [()] * len(request_sizes)
         failures: dict[int, str] = {}
+        failure_states: dict[int, str] = {}
         response_counts = [0] * len(request_sizes)
 
         async def worker() -> None:
@@ -474,13 +483,24 @@ class ImageGenerationService:
                     results[index] = exc.images
                     response_counts[index] = len(exc.images)
                     failures[index + 1] = str(exc)
-                except (ProviderError, aiohttp.ClientError, TimeoutError) as exc:
+                    failure_states[index + 1] = "unknown"
+                except (
+                    ProviderError,
+                    aiohttp.ClientError,
+                    TimeoutError,
+                    ValueError,
+                ) as exc:
                     failures[index + 1] = (
                         str(exc)[:500]
-                        if isinstance(exc, ProviderError)
+                        if isinstance(exc, (ProviderError, ValueError))
                         else "请求超时"
                         if isinstance(exc, TimeoutError)
                         else "无法连接服务商"
+                    )
+                    failure_states[index + 1] = (
+                        exc.request_status
+                        if isinstance(exc, ProviderError)
+                        else "unknown"
                     )
 
         # Shared model slots are acquired before provider slots so queued work
@@ -504,6 +524,7 @@ class ImageGenerationService:
                 tuple(sorted(failures.items())),
                 request_sizes=request_sizes,
                 actual_response_counts=tuple(response_counts),
+                failure_states=tuple(sorted(failure_states.items())),
             )
         return images
 

@@ -118,6 +118,7 @@ REQUIRED_BACKEND_FILES = (
     "backend/tools/capabilities.py",
     "backend/tools/capability_catalog.py",
     "backend/tools/image_context.py",
+    "backend/tools/schemas.py",
     "backend/ui/__init__.py",
     "backend/ui/appearance.py",
     "backend/ui/gallery_preferences.py",
