@@ -4,17 +4,39 @@
 
 代码分区和依赖边界见 [目录结构](ARCHITECTURE.md)，统一检查及隔离浏览器验证见 [测试入口](TESTING.md)。后端实现位于 `backend/`，插件注册仍在根目录 `main.py`；移动内部 Python 模块不改变配置、数据库或 Web API 格式。
 
-插件运行模块统一使用 `from astrbot.api import logger` 输出日志，以接入宿主日志管理；不自行通过 Python `logging.getLogger()` 创建日志器。
+插件运行诊断统一使用 `from astrbot.api import logger` 输出，以接入宿主日志管理；不自行通过 Python `logging.getLogger()` 创建日志器。WebUI 可查询的业务日志由 `backend/observability/` 单独写入受控的每日文件，不替换宿主日志器，也不将整个宿主日志复制进插件。
 
-当前开发版本为插件 `1.5.0-dev.1`，最新正式版本为 `1.4.2`。沿用 1.4.0 的正式数据库 **v4**：`PRAGMA user_version=4`，不新增 `schema_meta` 开发标记或结构迁移。旧正式库及最终开发库的升级路径保持 1.4.0 的约定。本次开发明确能力查询与实际提交的区别，补全本插件图片工具的嵌套参数 schema、参考图错误位置和生成失败阶段，不增加去重或强制生成机制，不修改宿主权限。沿用五个工具、`/istudio` 命令，以及 1.4.2 的生图成功后发送入口限制和工具附图来源适配。
+当前开发版本为插件 `1.5.0-dev.1`，最新正式版本为 `1.4.2`。沿用 1.4.0 的正式数据库 **v4**：`PRAGMA user_version=4`，不新增 `schema_meta` 开发标记或结构迁移。旧正式库及最终开发库的升级路径保持 1.4.0 的约定。本次开发明确能力查询与实际提交的区别，补全本插件图片工具的嵌套参数 schema、参考图错误位置和生成失败阶段，并增加 Agnes Provider、模式参数配置和结构化日志；不增加去重或强制生成机制，不修改宿主权限。沿用五个工具、`/istudio` 命令，以及 1.4.2 的生图成功后发送入口限制和工具附图来源适配。
 
-历史正式版 1.4.2 完成 2496 项自动化回归，并在 AstrBot 4.27.4、普通工具模式及真实插件上下文中完成一次文生图与 QQ 私聊投递测试。直接采集逐次模型请求验证工具屏蔽时机和图片说明替换；测试由事件队列注入，不覆盖 QQ 入站解析。本次开发版使用隔离回归，未执行真实模型、生图或投递请求。两阶段工具模式中其他插件再次复制工具集合的兼容性限制尚未修复，详见 [测试说明](TESTING.md)。ComfyUI 的既有基础能力已完成真实生图测试；NovelAI 官方仍需可用账户完成成功生图验证。
+历史正式版 1.4.2 完成 2496 项自动化回归，并在 AstrBot 4.27.4、普通工具模式及真实插件上下文中完成一次文生图与 QQ 私聊投递测试。直接采集逐次模型请求验证工具屏蔽时机和图片说明替换；测试由事件队列注入，不覆盖 QQ 入站解析。本次新增的 Agnes、模式参数和日志功能使用隔离回归，没有调用真实生图接口或聊天投递。两阶段工具模式中其他插件再次复制工具集合的兼容性限制尚未修复，详见 [测试说明](TESTING.md)。ComfyUI 的既有基础能力已完成真实生图测试；NovelAI 官方和 Agnes 仍需可用账户完成成功生图验证。
 
 官方协议构造与解析集中在 `backend/providers/novelai/protocol.py`，不依赖完整第三方 SDK。`GeneratedImage.effective_parameters` 通过 `generation_images.supplemental_json.effective_request` 保存经过记录策略过滤的实际参数；原始请求仍保留在生成记录上。图片元数据解析器版本为 12；ComfyUI 内置与用户规则的指纹独立于解析器版本，参与元数据缓存和导入编辑版本校验。
 
 官方资料、与 NAI2API 的差异和待验证项见 [NovelAI 官方接口核对](NOVELAI_API_REVIEW.md)。
 
 ComfyUI 架构、工作流绑定、任务恢复与范围见 [ComfyUI 接入](COMFYUI_IMPLEMENTATION.md)。`backend/providers/comfyui/client.py` 负责原生协议，`backend/providers/comfyui/workflows.py` 负责执行图和绑定，`backend/providers/comfyui/job_store.py` 保存修订/任务/临时文件，`backend/generation/comfyui_runtime.py` 接入现有生成与图库流程。运行中任务不受浏览器连接生命周期影响。
+
+## 模式参数与 Agnes 协议
+
+参数解析以 `backend/models.py` 的模式解析函数为入口，前端对应 `pages/image-studio/parameters.js`。先依据公共描述符的 `modes` 筛选，再合并对应 `mode_overrides`，最后应用来源默认值、校验和 `request_key` 映射。覆盖逐个替换描述符属性，数组和对象默认值整体替换；缺失属性继承公共配置，显式 `null` 保留，不能在覆盖对象内改变 `modes`。旧的无模式 Schema 继续适用两种模式，不需要数据库迁移。
+
+模式隔离必须贯穿 WebUI 草稿、模型默认值、LLM 能力与默认值、真实请求、参数复制和历史回填。两个互斥模式可以映射到同一请求键，不能在合并请求值后再删除另一模式的键。工具侧默认值覆盖仍高于模型默认值；新增调用点应传入当前模式，避免退回公共默认值。
+
+`backend/providers/agnes.py` 负责内置能力预设与实际请求构造；`build_payload()` 同时用于协议测试，发送直接使用该结果。按[官方文档](https://www.agnes-ai.cn/zh-Hans/docs/agnes-image-25-flash.md)，两种模式均提交 `/v1/images/generations`；文生图 Base64 使用 `return_base64: true`，图生图 Base64 使用 `extra_body.response_format: "b64_json"`，参考图始终为 `extra_body.image` 数组。URL 使用 `extra_body.response_format: "url"`。不发送未经证实的 `n` 多张字段，队列强制按单张请求拆分，模型列表查询返回内置预设，不请求未知的远端模型接口。
+
+Agnes 测试覆盖两种模式与两种返回格式、单张及多张参考图、URL 下载和代理、HTTP 提交状态以及 WebUI／指令／工具分批。没有可用凭据时不宣称完成真实上游验证；仍需验证账户权限、官方参考图限制、真实错误响应和成功出图。
+
+自定义 JSON 的 `request_templates.text2img`／`request_templates.img2img` 优先于原 `request_template`。`backend/providers/custom_json.py` 的 `build_payload()` 先校验模板为对象，再做一次占位符替换。精确占位符保留 JSON 类型，嵌入文本的非字符串值按 JSON 序列化；对象字段和数组索引只能读值，不读取 Python 属性。未知路径、越界索引、动态字段名或占位符语法错误都返回 `request_status=not_submitted`。不对替换得到的参数值递归求值，避免将提示词中的双花括号或 Schema 文本当作模板。
+
+## 结构化日志
+
+`backend/observability/store.py` 管理 `logs/YYYY-MM-DD.log` 的 JSON Lines 写入、查询、脱敏、大小限制和清理；`http.py` 包装插件使用的 HTTP 会话，在实际发送位置记录已构造请求，避免维护第二份预览协议。`integration.py` 记录页面写操作，不记录高频只读轮询和日志页面自身操作。`backend/api/logs.py` 提供查询和需要显式确认的清空接口，前端由 `logs.js`／`logs.css` 展示。
+
+配置保存在 `studio_config.json` 的 `logging` 对象：`enabled=true`、`level="INFO"`、`retention_days=7`，0 天表示不自动过期。记录所选等级及以上事件；DEBUG 额外包含脱敏后的请求和已读取的响应内容，INFO 记录状态、耗时与业务结果。图片、二进制及 Base64 只记录摘要，不为获取日志额外读取上传流或响应流。敏感字段、认证头和 URL 凭据在落盘前处理，单条记录的对象节点数、嵌套深度和字节数均有限制；日志失败不应阻断生成或页面操作。
+
+日期分文件、保留期和筛选采用 UTC；7 天包含当天和此前 6 个日期。浏览器条目时间显示本地时区。关闭后停止追加并隐藏侧边栏入口，保留已有文件供保留规则或显式清空处理；清空仅操作受控日志文件，不写入“已清空”记录使空列表立即回填。文件不进入数据库，存储健康单独统计日志占用；日志配置不提升数据库或配置格式版本。
+
+新增日志调用需提供有限的业务字段，不直接序列化插件、配置对象、请求上下文或会话历史。DEBUG 可包含用户提示词与普通请求参数；自动脱敏不是对任意自由文本的敏感信息检测。发布包继续排除运行日志与真实数据。
 
 ## 当前版本与数据格式
 
