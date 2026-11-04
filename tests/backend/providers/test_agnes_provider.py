@@ -210,7 +210,8 @@ def test_invalid_request_is_not_submitted(changes, message):
 
 
 @pytest.mark.parametrize(
-    "status,expected", [(400, "rejected"), (429, "rejected"), (408, "unknown"), (503, "unknown")]
+    "status,expected",
+    [(400, "rejected"), (429, "rejected"), (408, "unknown"), (503, "unknown")],
 )
 def test_upstream_error_preserves_submission_status(status, expected):
     session = Session(response=Response({"error": "failed"}, status=status))
