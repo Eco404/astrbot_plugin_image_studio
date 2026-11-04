@@ -18,6 +18,7 @@ from astrbot_plugin_image_studio.backend.models import (
 )
 from astrbot_plugin_image_studio.backend.providers.agnes import (
     AGNES_BASE_URL,
+    AGNES_EXACT_SIZES,
     AGNES_IMAGE_PATH,
     AGNES_MODEL_ID,
     AGNES_RATIOS,
@@ -107,26 +108,43 @@ class Session:
 
 @pytest.mark.parametrize("mode", ["text2img", "img2img"])
 @pytest.mark.parametrize("response_format", ["url", "b64_json"])
-def test_mode_response_switch_and_image_placement(mode, response_format):
+@pytest.mark.parametrize(
+    "model_id, size, ratio",
+    [
+        ("agnes-image-2.0-flash", "1024x768", None),
+        ("agnes-image-2.1-flash", "2k", "16:9"),
+        ("agnes-image-2.5-flash", "2k", "16:9"),
+    ],
+)
+def test_mode_response_switch_and_image_placement(
+    mode, response_format, model_id, size, ratio
+):
     references = tuple(
         ReferenceImage(str(index), f"{index}.png", png(color), "image/png")
         for index, color in enumerate(("red", "blue"))
     )
     original_parameters = {
         "response_format": response_format,
-        "ratio": "16:9",
         "n": 9,
         "count": 9,
         "return_base64": False,
         "references": ["stale-top-level-image"],
         "extra_body": {"image": ["stale-image"], "response_format": "stale"},
     }
-    configured = provider()
+    if ratio is not None:
+        original_parameters["ratio"] = ratio
+    configured = provider(model=model_id)
     session = Session()
     result = asyncio.run(
         ProviderExecutor(session).generate(
             configured,
-            request(mode=mode, references=references, parameters=original_parameters),
+            request(
+                mode=mode,
+                model=model_id,
+                size=size,
+                references=references,
+                parameters=original_parameters,
+            ),
         )
     )
     assert result[0].data == session.image
@@ -138,10 +156,13 @@ def test_mode_response_switch_and_image_placement(mode, response_format):
     assert sent["timeout"].total == configured.timeout_seconds
     assert sent["proxy"] is None
     body = sent["json"]
-    assert body["model"] == AGNES_MODEL_ID
+    assert body["model"] == model_id
     assert body["prompt"] == "a small orange cat"
-    assert body["size"] == "2K"
-    assert body["ratio"] == "16:9"
+    assert body["size"] == (size if ratio is None else size.upper())
+    if ratio is None:
+        assert "ratio" not in body
+    else:
+        assert body["ratio"] == ratio
     assert not {"n", "count", "image", "references", "response_format"} & body.keys()
     extra = body.get("extra_body", {})
     if mode == "img2img":
@@ -225,17 +246,45 @@ def test_catalog_is_builtin_and_does_not_make_a_remote_models_request():
     session = Session()
     result = asyncio.run(ProviderExecutor(session).discover_models(provider()))
     assert session.calls == []
-    assert len(result) == 1
+    assert {model["id"]: model["name"] for model in result} == {
+        "agnes-image-2.0-flash": "Agnes Image 2.0 Flash",
+        "agnes-image-2.1-flash": "Agnes Image 2.1 Flash",
+        "agnes-image-2.5-flash": "Agnes Image 2.5 Flash",
+    }
+    for model in result:
+        assert model["supports_text2img"] and model["supports_img2img"]
+        assert not model["supports_negative_prompt"]
+        assert model["native_batch_size"] == 1
+        assert model["capability_source"] == "builtin"
+        if model["id"] == "agnes-image-2.0-flash":
+            assert model["parameters"]["size"]["choices"] == list(AGNES_EXACT_SIZES)
+            assert "ratio" not in model["parameters"]
+        else:
+            assert model["parameters"]["size"]["choices"] == list(AGNES_SIZES)
+            assert model["parameters"]["ratio"]["choices"] == list(AGNES_RATIOS)
     model = result[0]
-    assert model["id"] == AGNES_MODEL_ID
-    assert model["supports_text2img"] and model["supports_img2img"]
-    assert not model["supports_negative_prompt"]
-    assert model["native_batch_size"] == 1
-    assert model["capability_source"] == "builtin"
-    assert model["parameters"]["size"]["choices"] == list(AGNES_SIZES)
-    assert model["parameters"]["ratio"]["choices"] == list(AGNES_RATIOS)
     model["parameters"]["size"]["choices"].append("bad-size")
     assert "bad-size" not in agnes_model_presets()[0]["parameters"]["size"]["choices"]
+    assert "bad-size" not in result[1]["parameters"]["size"]["choices"]
+
+
+@pytest.mark.parametrize(
+    "model_id, default_size, default_ratio",
+    [
+        ("agnes-image-2.0-flash", "1024x1024", None),
+        ("agnes-image-2.1-flash", "1K", "1:1"),
+        ("agnes-image-2.5-flash", "1K", "1:1"),
+    ],
+)
+def test_model_default_schema_and_wire_defaults(model_id, default_size, default_ratio):
+    configured = ImageProvider.from_mapping(
+        {"kind": "agnes", "models": [{"id": model_id}]}
+    )
+    assert configured.models[0].parameters["size"]["default"] == default_size
+    body = build_payload(configured, request(model=model_id, size="", parameters={}))
+    assert body["model"] == model_id
+    assert body["size"] == default_size
+    assert body.get("ratio") == default_ratio
 
 
 def test_default_schema_is_independent_and_contains_only_supported_controls():

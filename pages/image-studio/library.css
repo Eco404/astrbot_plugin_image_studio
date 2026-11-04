@@ -387,7 +387,8 @@ html[data-gallery-card-info="false"] #galleryGrid .gallery-info { display: none;
   .selection-bar { justify-content: space-between; }
   .selection-bar #selectionCount { flex-basis: 100%; }
 }
-.detail-references > .field-hint { grid-column: 1 / -1; }
+.detail-references > .field-hint, .detail-references-empty { grid-column: 1 / -1; }
+.detail-references:has(> .detail-references-empty) { grid-template-columns: minmax(0, 1fr); }
 @media (prefers-reduced-motion: reduce) { .studio-modal, .import-card, .studio-icon-button { animation: none !important; transition: none !important; } }
 
 .image-studio-pswp { --pswp-placeholder-bg: transparent; }

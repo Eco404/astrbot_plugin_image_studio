@@ -513,14 +513,21 @@
     });
   }
 
-  function parameterValuesForModel(model, values, { forReproduction = false } = {}) {
+  function parameterValuesForModel(model, values, { forReproduction = false, fromModelChange = false } = {}) {
     const source = values && typeof values === "object" ? values : {};
     const result = {}, supplied = new Set();
     effectiveModelParameters(model).forEach(([name, descriptor]) => {
       if (Object.prototype.hasOwnProperty.call(descriptor, "default")) result[name] = descriptor.default;
       if (descriptor.webui_visible === false || forReproduction && descriptor.refill_from_history === false) return;
-      if (Object.prototype.hasOwnProperty.call(source, name)) { result[name] = source[name]; supplied.add(name); }
-      else if (descriptor.request_key && Object.prototype.hasOwnProperty.call(source, descriptor.request_key)) { result[name] = source[descriptor.request_key]; supplied.add(name); }
+      const sourceKey = Object.prototype.hasOwnProperty.call(source, name) ? name : descriptor.request_key && Object.prototype.hasOwnProperty.call(source, descriptor.request_key) ? descriptor.request_key : undefined;
+      if (sourceKey === undefined) return;
+      const value = source[sourceKey];
+      // A shared field name does not imply shared options: NAI's size labels,
+      // for example, cannot replace an OpenAI model's pixel dimensions.
+      if (fromModelChange && ["select", "preset"].includes(String(descriptor.type).toLowerCase()) && Array.isArray(descriptor.choices)
+        && !(value === null && descriptor.nullable)
+        && !descriptor.choices.some(choice => String(choice && typeof choice === "object" ? choice.value : choice) === String(value))) return;
+      result[name] = value; supplied.add(name);
     });
     effectiveModelParameters(model).forEach(([name, descriptor]) => {
       if (String(descriptor.type).toLowerCase() !== "preset" || !descriptor.target) return;
@@ -559,7 +566,7 @@
         }
       }
     }
-    state.parameterValues = parameterValuesForModel(selectedModel(), carried);
+    state.parameterValues = parameterValuesForModel(selectedModel(), carried, { fromModelChange: true });
     const nextModel = selectedModel(); if (nextModel?.supports_negative_prompt) { els.negativePrompt.value = state.hasNegativePromptCarry ? state.negativePromptCarry : (nextModel.negative_prompt_default || ""); state.negativePromptCarry = els.negativePrompt.value; state.hasNegativePromptCarry = true; }
     document.querySelectorAll(".segment").forEach((button) => button.classList.toggle("is-active", button.dataset.mode === state.mode));
     renderModelChoices();
@@ -951,7 +958,7 @@
   }
 
   function detailReferenceMarkup(refs) {
-    return refs.length ? refs.map((item) => item.available ? item.data_url ? `<article class="detail-reference"><img src="${escape(item.data_url)}" alt="${escape(item.filename)}" data-detail-reference="${item.id}" /><div>${escape(item.filename)}<br>${formatBytes(item.size_bytes)}</div><button class="danger-button" data-reference-delete="${item.id}" type="button">删除参考图</button></article>` : `<article class="detail-reference" data-reference-load="${item.id}"><div>${escape(item.filename)}<br>参考图正在加载…</div></article>` : `<article class="detail-reference"><div>参考图已删除</div></article>`).join("") : "<span>该记录没有保留参考图</span>";
+    return refs.length ? refs.map((item) => item.available ? item.data_url ? `<article class="detail-reference"><img src="${escape(item.data_url)}" alt="${escape(item.filename)}" data-detail-reference="${item.id}" /><div>${escape(item.filename)}<br>${formatBytes(item.size_bytes)}</div><button class="danger-button" data-reference-delete="${item.id}" type="button">删除参考图</button></article>` : `<article class="detail-reference" data-reference-load="${item.id}"><div>${escape(item.filename)}<br>参考图正在加载…</div></article>` : `<article class="detail-reference"><div>参考图已删除</div></article>`).join("") : '<span class="detail-references-empty">该记录没有保留参考图</span>';
   }
 
   function watchDetailReferences(detail) {

@@ -68,7 +68,7 @@ https://github.com/Eco404/astrbot_plugin_image_studio
 | -------------- | ---------------------------------- | ------------------------------------------------------------------------------------ |
 | OpenAI Images  | 官方或兼容 Images API 的服务       | 支持能力以具体模型和服务商为准                                                       |
 | Gemini         | `generateContent` 图片输出模型   | 需要使用支持图片输出的模型                                                           |
-| Agnes AI       | Agnes 官方文生图、图生图与多图合成 | 内置 Image 2.5 Flash 预设，自动处理参考图和两种模式的返回格式 |
+| Agnes AI       | Agnes 官方文生图、图生图与多图合成 | 内置 Image 2.0、2.1、2.5 Flash 预设，自动处理参考图和两种模式的返回格式 |
 | NovelAI 官方 | 直接连接 `image.novelai.net` | 填写完整 Persistent API Token；免费试用验证码暂不支持，成功生图仍待可用账户验证 |
 | NAI 第三方 GET | `nai.sta1n.cn` 及同协议服务      | 填写站点的`toUserId` Token，**不是 NovelAI 官方 API 密钥**；当前仅支持文生图 |
 | ComfyUI | 自建 ComfyUI 或其反代地址 | 每个“模型”代表一份工作流；需要可执行 API 图及服务器已安装的节点和模型 |
@@ -79,11 +79,11 @@ https://github.com/Eco404/astrbot_plugin_image_studio
 Agnes AI 接入方式：
 
 1. 新增「Agnes AI」服务商，填写 API Key。默认地址为 `https://api.agnes-ai.cn/v1`，文生图、图生图均调用 `/images/generations`。
-2. 添加内置模型 `agnes-image-2.5-flash`。尺寸预填 `1K`，支持 `1K`、`2K`、`3K`、`4K`；宽高比支持 `1:1`、`3:4`、`4:3`、`16:9`、`9:16`、`2:3`、`3:2`、`21:9`。
+2. 可添加内置模型 `agnes-image-2.0-flash`、`agnes-image-2.1-flash`、`agnes-image-2.5-flash`。2.0 按官方文档预填精确尺寸 `1024x1024`，可选 `1024x768`、`768x1024`；2.1 和 2.5 预填 `1K`，支持 `1K`、`2K`、`3K`、`4K`，并提供 `1:1`、`3:4`、`4:3`、`16:9`、`9:16`、`2:3`、`3:2`、`21:9` 宽高比。
 3. 图生图继续使用现有参考图上传或聊天附件。插件将图片编码为 Data URI 数组并放入 `extra_body.image`，无需自行上传到公共图床或填写 Base64。
 4. 「返回格式」可选 `url` 或 `b64_json`。插件按模式使用对应协议字段；URL 结果会自动下载，返回格式不改变画廊和工具中的图片使用方式。
 
-Agnes 每次接口请求按一张图片处理，多张任务由现有队列拆分；不向上游发送未经确认的原生多张参数。模型列表来自插件内置预设，不代表已查询账户可用能力。预设最多接收 8 张参考图是插件侧的输入上限，不代表官方承诺的接口限制。当前按[官方文档](https://www.agnes-ai.cn/zh-Hans/docs/agnes-image-25-flash)完成了协议构造与隔离测试，尚未使用有效账户验证真实文生图、图生图及多图合成。
+Agnes 每次接口请求按一张图片处理，多张任务由现有队列拆分；不向上游发送未经确认的原生多张参数。模型列表来自插件内置预设，不代表已查询账户可用能力。预设最多接收 8 张参考图是插件侧的输入上限，不代表官方承诺的接口限制。当前按官方 [2.0](https://wiki.agnes-ai.cn/zh-Hans/docs/agnes-image-20-flash)、[2.1](https://wiki.agnes-ai.cn/zh-Hans/docs/agnes-image-21-flash)、[2.5](https://wiki.agnes-ai.cn/zh-Hans/docs/agnes-image-25-flash) 文档完成了协议构造与隔离测试，尚未使用有效账户验证真实文生图、图生图及多图合成。
 
 NovelAI 官方接口的使用方式：
 

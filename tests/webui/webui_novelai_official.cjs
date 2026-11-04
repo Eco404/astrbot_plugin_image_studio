@@ -85,7 +85,7 @@ async function matrix(browser, width) {
     assert.equal(await frame.locator('[data-provider-field="max_concurrent_generations"]').inputValue(), "1");
     assert.equal(await frame.locator('[data-provider-field="max_concurrent_generations"]').isDisabled(), true);
     assert.equal(await frame.locator("#discoverModelsButton").count(), 0);
-    assert.match(await frame.locator("#providerForm").textContent(), /完整 Persistent API Token/);
+    assert.match(await frame.locator("#providerForm").textContent(), /NovelAI 完整 API Token/);
     assert.equal(await frame.locator('[data-provider-field="api_key"]').getAttribute("type"), "text");
     assert.deepEqual(await frame.locator("#newModelChoices option").evaluateAll(options => options.map(option => option.value)), modelIds);
     for (const modelId of modelIds) {

@@ -24,6 +24,8 @@ ComfyUI 架构、工作流绑定、任务恢复与范围见 [ComfyUI 接入](COM
 
 `backend/providers/agnes.py` 负责内置能力预设与实际请求构造；`build_payload()` 同时用于协议测试，发送直接使用该结果。按[官方文档](https://www.agnes-ai.cn/zh-Hans/docs/agnes-image-25-flash.md)，两种模式均提交 `/v1/images/generations`；文生图 Base64 使用 `return_base64: true`，图生图 Base64 使用 `extra_body.response_format: "b64_json"`，参考图始终为 `extra_body.image` 数组。URL 使用 `extra_body.response_format: "url"`。不发送未经证实的 `n` 多张字段，队列强制按单张请求拆分，模型列表查询返回内置预设，不请求未知的远端模型接口。
 
+内置 `agnes-image-2.0-flash`、`agnes-image-2.1-flash`、`agnes-image-2.5-flash` 三个模型。2.0 的公开文档仅声明精确尺寸，因此预设使用 `1024x1024` 等尺寸，不默认发送 `ratio`；2.1、2.5 使用文档明确支持的 `1K`–`4K` 档位和宽高比。无自定义 schema 时，默认参数同样按模型 ID 选择。
+
 Agnes 测试覆盖两种模式与两种返回格式、单张及多张参考图、URL 下载和代理、HTTP 提交状态以及 WebUI／指令／工具分批。没有可用凭据时不宣称完成真实上游验证；仍需验证账户权限、官方参考图限制、真实错误响应和成功出图。
 
 自定义 JSON 的 `request_templates.text2img`／`request_templates.img2img` 优先于原 `request_template`。`backend/providers/custom_json.py` 的 `build_payload()` 先校验模板为对象，再做一次占位符替换。精确占位符保留 JSON 类型，嵌入文本的非字符串值按 JSON 序列化；对象字段和数组索引只能读值，不读取 Python 属性。未知路径、越界索引、动态字段名或占位符语法错误都返回 `request_status=not_submitted`。不对替换得到的参数值递归求值，避免将提示词中的双花括号或 Schema 文本当作模板。

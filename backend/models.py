@@ -292,7 +292,7 @@ def _model_parameters(
     if kind == "agnes" and not value:
         from .providers.agnes import agnes_parameter_schema
 
-        value = agnes_parameter_schema()
+        value = agnes_parameter_schema(model_id)
     if kind == "novelai_official" and not value:
         value = copy.deepcopy(NOVELAI_OFFICIAL_PARAMETERS)
         value["steps"]["default"] = 23
