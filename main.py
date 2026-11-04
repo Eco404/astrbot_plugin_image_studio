@@ -37,6 +37,10 @@ from .backend.tools.schemas import with_image_arguments
 from .backend.commands.handler import run_image_command
 from .backend.api.comfyui import ComfyAPI
 from .backend.api.settings import SettingsAPI
+from .backend.api.logs import LogsAPI
+from .backend.observability.store import StructuredLogStore
+from .backend.observability.http import LoggedSession
+from .backend.observability.integration import observe_tool
 from .backend.api.gallery import GalleryAPI
 from .backend.api.imports import ImportsAPI
 from .backend.api.generation import GenerationAPI
@@ -115,6 +119,9 @@ class ImageStudioPlugin(Star):
         self._maintenance_task: asyncio.Task[None] | None = None
         self._studio_settings, studio_errors = load_studio_settings(Path(self.data_dir))
         self._settings, runtime_errors = runtime_settings(config, self._studio_settings)
+        self._logs = StructuredLogStore(
+            Path(self.data_dir), **self._studio_settings["logging"]
+        )
         self._settings_errors = [*studio_errors, *runtime_errors]
         self._external_gallery = ExternalGalleryManager(self.store, Path(self.data_dir))
         self._image_context_adapter = ImageContextAdapter(logger)
@@ -130,8 +137,9 @@ class ImageStudioPlugin(Star):
         )
         self._service = ImageGenerationService(
             settings=self._settings,
-            executor=ProviderExecutor(self._session),
+            executor=ProviderExecutor(LoggedSession(self._session, self._logs)),
             store=self.store,
+            logs=self._logs,
         )
         self._comfy = ComfyRuntime(self._service)
         self._service.comfy_runtime = self._comfy
@@ -145,6 +153,15 @@ class ImageStudioPlugin(Star):
         self._register_web_apis()
         await self._external_gallery.start()
         self._image_context_adapter.install()
+        await self._logs.record(
+            "WARNING" if self._settings_errors else "INFO",
+            "system",
+            "插件已初始化",
+            data={
+                "providers": len(self._settings.providers),
+                "configuration_errors": self._settings_errors,
+            },
+        )
         if self._settings_errors:
             logger.warning(
                 "%s 配置存在问题: %s", LOG_TAG, "; ".join(self._settings_errors)
@@ -159,6 +176,8 @@ class ImageStudioPlugin(Star):
     async def terminate(self) -> None:
         """Close plugin-owned HTTP resources during reload or shutdown."""
 
+        if getattr(self, "_logs", None) is not None:
+            await self._logs.record("INFO", "system", "插件正在关闭")
         if getattr(self, "_image_context_adapter", None) is not None:
             self._image_context_adapter.restore()
         await self._external_gallery.close()
@@ -196,11 +215,23 @@ class ImageStudioPlugin(Star):
                 raise
             except Exception as exc:
                 logger.warning("%s 定时存储维护失败: %s", LOG_TAG, type(exc).__name__)
+                if getattr(self, "_logs", None) is not None:
+                    await self._logs.record(
+                        "ERROR",
+                        "system",
+                        "定时存储维护失败",
+                        data={
+                            "error": str(exc),
+                            "error_type": type(exc).__name__,
+                        },
+                    )
 
     async def _run_storage_maintenance(self, *, deep: bool = False) -> dict[str, Any]:
         """One cleanup order for startup, scheduled runs and the settings action."""
 
         async with self._storage_maintenance_lock:
+            if getattr(self, "_logs", None) is not None:
+                await self._logs.cleanup()
             removed = 0
             if getattr(self, "_comfy", None) is not None:
                 removed = await self._comfy.store.cleanup_terminal_files(
@@ -235,6 +266,14 @@ class ImageStudioPlugin(Star):
         self._studio_settings = studio
         self._settings, self._settings_errors = runtime_settings(self.config, studio)
         self._service_or_raise().update_settings(self._settings)
+        if getattr(self, "_logs", None) is not None:
+            self._logs.configure(**studio["logging"])
+
+    async def _api_logs_query(self):
+        return await LogsAPI(get_logs=lambda: self._logs)._api_logs_query()
+
+    async def _api_logs_clear(self):
+        return await LogsAPI(get_logs=lambda: self._logs)._api_logs_clear()
 
     def _settings_api(self):
         return SettingsAPI(
@@ -707,6 +746,7 @@ class ImageStudioPlugin(Star):
         _set_event_extra(event, AGENT_DELIVERY_TOOLS_EXTRA_KEY, (req, owned))
 
     @filter.llm_tool(name="image_studio_get_capabilities")
+    @observe_tool
     async def image_studio_get_capabilities(
         self,
         event: AstrMessageEvent,
@@ -759,6 +799,7 @@ class ImageStudioPlugin(Star):
 
     @with_image_arguments
     @filter.llm_tool(name="image_studio_generate")
+    @observe_tool
     async def image_studio_generate(
         self,
         event: AstrMessageEvent,
@@ -838,6 +879,7 @@ class ImageStudioPlugin(Star):
                 normalized_mode,
                 model_ref=model_ref,
             )
+            selected_model = selected_model.for_mode(normalized_mode)
             if not _has_capability_query(
                 event, self._settings.revision, canonical_ref, normalized_mode
             ):
@@ -1046,6 +1088,7 @@ class ImageStudioPlugin(Star):
         return track_image_result(event, mcp.types.CallToolResult(content=content))
 
     @filter.llm_tool(name="image_studio_task")
+    @observe_tool
     async def image_studio_task(
         self,
         event: AstrMessageEvent,
@@ -1187,6 +1230,7 @@ class ImageStudioPlugin(Star):
         )
 
     @filter.llm_tool(name="image_studio_view_asset")
+    @observe_tool
     async def image_studio_view_asset(
         self,
         event: AstrMessageEvent,
@@ -1291,6 +1335,7 @@ class ImageStudioPlugin(Star):
 
     @with_image_arguments
     @filter.llm_tool(name="image_studio_send_output")
+    @observe_tool
     async def image_studio_send_output(
         self,
         event: AstrMessageEvent,

@@ -1,9 +1,13 @@
 """Public Page API route registration for the Image Studio plugin."""
 
+from ..observability.integration import observe_api
+
 
 def register_web_apis(plugin, page_prefix: str) -> None:
     """Register the public routes without changing their addresses or methods."""
     routes = (
+        ("logs", plugin._api_logs_query, ["GET"], "Image Studio: query logs"),
+        ("logs/clear", plugin._api_logs_clear, ["POST"], "Image Studio: clear logs"),
         (
             "comfy/import",
             plugin._api_comfy_import,
@@ -344,5 +348,8 @@ def register_web_apis(plugin, page_prefix: str) -> None:
     )
     for suffix, handler, methods, description in routes:
         plugin.context.register_web_api(
-            f"{page_prefix}/{suffix}", handler, methods, description
+            f"{page_prefix}/{suffix}",
+            observe_api(plugin, handler, suffix, methods),
+            methods,
+            description,
         )

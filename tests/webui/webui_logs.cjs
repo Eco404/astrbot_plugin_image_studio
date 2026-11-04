@@ -70,6 +70,7 @@ async function verifyIntegration(browser, width) {
     let frame = page.frames().find(item => item.url().includes("/ui/"));
     await frame.locator("#runtimeStatus").filter({ hasText: "已加载" }).waitFor({ state: "attached" });
     assert.equal(await frame.locator("#logsNav").isVisible(), true);
+    assert.equal(await frame.locator("#logsNav svg").count(), 1, "log navigation must use a bundled icon or explicit SVG fallback");
     await frame.locator("#logsNav").click();
     assert.equal(await frame.locator("#logsCategory option").count(), 5);
     await frame.locator("#logsPage").filter({ hasText: "条" }).waitFor();

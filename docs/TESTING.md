@@ -64,6 +64,9 @@ python scripts/verify.py --webui gallery_titles gallery_card_info
 
 # 可同时执行后端、选定的浏览器场景和打包
 python scripts/verify.py --backend --webui comfy_workspace --browser chromium --package
+
+# 分模式参数默认值、实际提交值、日志筛选与关闭后的入口隐藏
+python scripts/verify.py --webui mode_defaults logs parameter_policy --browser chromium
 ```
 
 `--webui` 接受去掉 `webui_` 和 `.cjs` 的场景名，也接受完整文件名。多次传入同一场景只执行一次。

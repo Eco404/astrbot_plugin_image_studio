@@ -262,6 +262,7 @@ class LoggedSession:
         return self.request("DELETE", url, **kwargs)
 
     def head(self, url: Any, **kwargs):
+        kwargs.setdefault("allow_redirects", False)
         return self.request("HEAD", url, **kwargs)
 
     def ws_connect(self, url: Any, **kwargs):

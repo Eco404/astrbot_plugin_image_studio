@@ -41,6 +41,7 @@
   <link rel="stylesheet" href="./comfyui/controls.css?v=1.5.0-dev.1" />
   <link rel="stylesheet" href="./comfyui/node-rules.css?v=1.5.0-dev.1" />
   <link rel="stylesheet" href="./tooltip.css?v=1.5.0-dev.1" />
+  <link rel="stylesheet" href="./logs.css?v=1.5.0-dev.1" />
 </head>
 <body>
   <main class="app-shell quiet-glass-background">
@@ -51,6 +52,7 @@
         <button class="nav-item" data-view="gallery" type="button" aria-label="画廊"><span class="nav-icon nav-icon-gallery" aria-hidden="true"><span></span></span><span>画廊</span></button>
         <button class="nav-item" data-view="import" type="button" aria-label="导入"><span class="nav-icon" data-studio-icon="FolderInput" aria-hidden="true"></span><span>导入</span></button>
         <button class="nav-item" data-view="settings" type="button" aria-label="设置"><span class="nav-icon nav-icon-settings" aria-hidden="true">⚙︎</span><span>设置</span></button>
+        <button class="nav-item is-hidden" id="logsNav" data-view="logs" type="button" aria-label="日志"><span class="nav-icon" data-studio-icon="FileText" aria-hidden="true"></span><span>日志</span></button>
       </nav>
       <div class="sidebar-footer" id="runtimeStatus">正在读取配置</div>
     </aside>
@@ -192,6 +194,12 @@
             <div class="section-actions maintenance-actions"><button class="quiet-button" id="runMaintenanceButton" type="button">立即检查</button><button class="quiet-button" id="runDeepMaintenanceButton" type="button">深度检查</button></div>
           </section>
           <section class="settings-panel glass" id="appearanceSettings" aria-label="主题与显示设置"></section>
+          <section class="settings-panel glass">
+            <div class="section-heading"><div><h2>日志</h2><p>记录生图、接口请求与插件操作，便于排查问题。</p></div></div>
+            <div class="toggle-row"><label for="loggingEnabled">启用日志</label><label class="toggle-control"><input id="loggingEnabled" type="checkbox" /><span aria-hidden="true"></span></label></div>
+            <div class="field"><label for="loggingLevel">记录等级</label><select id="loggingLevel"><option value="DEBUG">DEBUG · 调试</option><option value="INFO">INFO · 信息</option><option value="WARNING">WARNING · 警告</option><option value="ERROR">ERROR · 错误</option></select><span class="field-hint">记录所选等级及更高等级。DEBUG 包含脱敏后的请求内容；图片数据仅记录摘要。</span></div>
+            <div class="field"><label for="loggingRetentionDays">保留天数（0 表示一直保留）</label><input id="loggingRetentionDays" type="number" min="0" step="1" value="7" /></div>
+          </section>
         </div>
         <section class="provider-settings glass">
           <div class="section-heading"><div><h2>生图服务商</h2><p>这里只配置连接方式、地址和鉴权；模型能力在下方单独配置。</p></div><button class="primary-button" id="addProviderButton" type="button">新增服务商</button></div>
@@ -202,6 +210,20 @@
           <div class="model-settings-layout"><div class="model-list" id="settingsModelList"></div><form id="modelForm" class="model-editor"></form></div>
         </section>
         <div class="settings-savebar floatingbar"><span class="inline-error" id="settingsError" role="alert"></span><span id="settingsDirtyStatus" role="status"></span><button class="primary-button" id="saveSettingsButton" type="button">保存全部设置</button></div>
+      </section>
+      <section class="view" id="logsView">
+        <section class="settings-panel glass logs-panel">
+          <div class="section-heading"><div><h2>日志</h2><p>按 UTC 日期查询；详细请求内容需启用 DEBUG 记录等级。</p></div><div class="section-actions"><button class="quiet-button" id="logsRefresh" type="button">刷新</button><button class="danger-button" id="logsClear" type="button">清空日志</button></div></div>
+          <p class="field-hint" id="logsEnabledNotice" hidden>日志已关闭，可在设置中重新开启。</p>
+          <div class="logs-toolbar">
+            <label class="field">类型<select id="logsCategory"><option value="">全部</option></select></label>
+            <label class="field">等级<select id="logsLevel"><option value="">全部</option><option value="DEBUG">DEBUG</option><option value="INFO">INFO</option><option value="WARNING">WARNING</option><option value="ERROR">ERROR</option></select></label>
+            <label class="field">开始日期<input id="logsDateFrom" type="date" /></label>
+            <label class="field">结束日期<input id="logsDateTo" type="date" /></label>
+          </div>
+          <div id="logsList" aria-live="polite"></div>
+          <div class="logs-pagination"><button class="quiet-button" id="logsPrevious" type="button">上一页</button><span id="logsPage"></span><button class="quiet-button" id="logsNext" type="button">下一页</button></div>
+        </section>
       </section>
     </section>
   </main>
@@ -305,6 +327,8 @@
   <script src="./novelai/controls.js?v=1.5.0-dev.1" onerror="window.__reportImageStudioPageError(true)"></script>
   <script src="./comfyui/controls.js?v=1.5.0-dev.1" onerror="window.__reportImageStudioPageError(true)"></script>
   <script src="./settings/controller.js?v=1.5.0-dev.1" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./parameters.js?v=1.5.0-dev.1" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./logs.js?v=1.5.0-dev.1" onerror="window.__reportImageStudioPageError(true)"></script>
   <script src="./app.js?v=1.5.0-dev.1" onerror="window.__reportImageStudioPageError(true)"></script>
 </body>
 </html>

@@ -169,7 +169,7 @@ class GenerationAPI:
     def _test_request(provider: ImageProvider, model_id: str):
         from ..models import GenerationRequest
 
-        model = provider.get_model(model_id)
+        model = provider.get_model(model_id).for_mode("text2img")
         size = "竖图" if provider.kind == "nai_direct" else "1024x1024"
         parameters: dict[str, Any] = {}
         for name, descriptor in model.active_parameters.items():
