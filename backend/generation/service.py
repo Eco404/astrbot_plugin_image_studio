@@ -7,8 +7,10 @@ import hashlib
 import math
 import re
 import time
+import uuid
 from dataclasses import replace
 from decimal import Decimal, InvalidOperation
+from functools import wraps
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -38,7 +40,72 @@ from ..providers.executor import (
 )
 from ..gallery.store import GenerationStore
 from ..media.images import detect_mime_type
+from ..observability.store import StructuredLogStore, log_context
 from .concurrency import GenerationConcurrency
+
+
+def _logged_generation(function):
+    """Include rejected inputs and ComfyUI delegation in the same operation log."""
+
+    @wraps(function)
+    async def run(self, **arguments):
+        logs = self.logs
+        if logs is None or not logs.enabled:
+            return await function(self, **arguments)
+        identity = {
+            "source": arguments.get("source", "webui"),
+            "mode": arguments.get("mode"),
+            "provider_id": arguments.get("provider_id"),
+            "model": arguments.get("model"),
+            "model_ref": arguments.get("model_ref"),
+            "requested_count": arguments.get("count"),
+            **(
+                {"comfy_job_id": arguments["_comfy_job_id"]}
+                if arguments.get("_comfy_job_id")
+                else {}
+            ),
+        }
+        started = time.perf_counter()
+        with log_context(operation_id=uuid.uuid4().hex, **identity):
+            await logs.record("INFO", "generation", "开始处理生图请求", identity)
+            try:
+                result = await function(self, **arguments)
+            except asyncio.CancelledError:
+                await logs.record("WARNING", "generation", "生图请求已取消", identity)
+                raise
+            except Exception as exc:
+                await logs.record(
+                    "ERROR",
+                    "generation",
+                    "生图请求失败",
+                    {
+                        **identity,
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                        "duration_ms": round((time.perf_counter() - started) * 1000),
+                    },
+                )
+                raise
+            await logs.record(
+                "WARNING" if result.partial or result.warning else "INFO",
+                "generation",
+                "生图部分完成" if result.partial else "生图完成",
+                {
+                    **identity,
+                    "provider_id": result.provider.id,
+                    "model": result.request.model,
+                    "model_ref": f"{result.provider.id}:{result.request.model}",
+                    "count": result.request.count,
+                    "image_count": len(result.images),
+                    "generation_id": result.generation_id,
+                    "partial": result.partial,
+                    "warning": result.warning,
+                    "duration_ms": round((time.perf_counter() - started) * 1000),
+                },
+            )
+            return result
+
+    return run
 
 
 class ImageGenerationService:
@@ -51,10 +118,12 @@ class ImageGenerationService:
         executor: ProviderExecutor,
         store: GenerationStore,
         concurrency: GenerationConcurrency | None = None,
+        logs: StructuredLogStore | None = None,
     ) -> None:
         self.settings = settings
         self.executor = executor
         self.store = store
+        self.logs = logs
         self._owns_concurrency = concurrency is None
         self.concurrency = (
             concurrency if concurrency is not None else GenerationConcurrency()
@@ -69,6 +138,7 @@ class ImageGenerationService:
         if self._owns_concurrency:
             self.concurrency.update_settings(settings)
 
+    @_logged_generation
     async def generate(
         self,
         *,
@@ -133,6 +203,9 @@ class ImageGenerationService:
             normalized_mode,
             mode_default_ref,
         )
+        # Resolve the schema before defaults, validation, control extraction and
+        # request-key mapping. Different modes may legitimately share a wire key.
+        selected_model = selected_model.for_mode(normalized_mode)
         selection_source = (
             "explicit"
             if str(model_ref or model or "").strip()
@@ -237,9 +310,6 @@ class ImageGenerationService:
             advanced_parameters, selected_model, source=source
         )
         model_parameters = _wire_parameters(parameter_values, selected_model)
-        model_parameters = _parameters_for_mode(
-            model_parameters, selected_model, normalized_mode
-        )
         if source == "command":
             model_parameters = {
                 key: value
@@ -1019,10 +1089,12 @@ def _parameters(value: Any, *, declared_names: Any = ()) -> dict[str, Any]:
 
 
 def _parameters_for_model(
-    value: Any, model: ImageModel, *, source: str = "webui"
+    value: Any, model: ImageModel, *, source: str = "webui", mode: str | None = None
 ) -> dict[str, Any]:
     """Map friendly schema names to provider request keys at the trust boundary."""
 
+    if mode is not None:
+        model = model.for_mode(mode)
     return _wire_parameters(_resolved_model_values(value, model, source=source), model)
 
 
@@ -1032,7 +1104,9 @@ def _resolved_model_values(
     raw = _parameters(value, declared_names=model.active_parameters)
     values: dict[str, Any] = {}
     active_parameters = model.active_parameters
-    inactive = set(model.parameters) - set(active_parameters)
+    inactive = (set(model.parameters) - set(active_parameters)) | set(
+        model.excluded_parameter_names
+    )
     missing = object()
     for name in active_parameters:
         default = model.parameter_default(name, source=source, fallback=missing)
@@ -1070,10 +1144,18 @@ def _resolved_model_values(
 def _parameters_for_mode(
     values: dict[str, Any], model: ImageModel, mode: str
 ) -> dict[str, Any]:
+    # Compatibility for callers holding an already mapped payload. Generation
+    # resolves the schema before mapping, which also prevents default collisions.
+    included = {
+        str(descriptor.get("request_key") or name)
+        for name, descriptor in model.for_mode(mode).active_parameters.items()
+    }
     excluded = {
         str(descriptor.get("request_key") or name)
         for name, descriptor in model.active_parameters.items()
-        if isinstance(descriptor.get("modes"), list) and mode not in descriptor["modes"]
+        if isinstance(descriptor.get("modes"), list)
+        and mode not in descriptor["modes"]
+        and str(descriptor.get("request_key") or name) not in included
     }
     return {key: value for key, value in values.items() if key not in excluded}
 

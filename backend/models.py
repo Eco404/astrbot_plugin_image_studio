@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
@@ -16,6 +16,40 @@ from .providers.novelai.catalog import (
 )
 
 GenerationMode = Literal["text2img", "img2img"]
+
+
+def resolve_mode_parameters(
+    parameters: dict[str, dict[str, Any]], mode: str
+) -> dict[str, dict[str, Any]]:
+    """Select mode fields before resolving defaults or mapping request keys.
+
+    Overrides replace individual descriptor properties, including whole defaults
+    and choice lists. A missing override inherits the shared descriptor; an
+    explicit null remains null. Applicability is always controlled by ``modes``
+    on the shared descriptor, not by properties inside an override.
+    """
+    if mode not in {"text2img", "img2img"}:
+        raise ValueError("生成模式必须为 text2img 或 img2img")
+    result = {}
+    for name, descriptor in parameters.items():
+        if not isinstance(descriptor, dict):
+            continue
+        modes = descriptor.get("modes")
+        if isinstance(modes, list) and mode not in modes:
+            continue
+        resolved = copy.deepcopy(descriptor)
+        overrides = resolved.pop("mode_overrides", None)
+        override = overrides.get(mode) if isinstance(overrides, dict) else None
+        if isinstance(override, dict):
+            resolved.update(
+                {
+                    key: value
+                    for key, value in override.items()
+                    if key not in {"modes", "mode_overrides"}
+                }
+            )
+        result[name] = resolved
+    return result
 
 
 def browser_safe_integers(value: Any) -> Any:
@@ -170,6 +204,10 @@ NOVELAI_OFFICIAL_PARAMETERS: dict[str, dict[str, Any]] = {
 def _model_parameters(
     value: Any, kind: str, model_id: str = ""
 ) -> dict[str, dict[str, Any]]:
+    if kind == "agnes" and not value:
+        from .providers.agnes import agnes_parameter_schema
+
+        value = agnes_parameter_schema()
     if kind == "novelai_official" and not value:
         value = copy.deepcopy(NOVELAI_OFFICIAL_PARAMETERS)
         value["steps"]["default"] = 23
@@ -236,6 +274,12 @@ def _model_parameters(
 
 
 PROVIDER_TRANSPORT_DEFAULTS: dict[str, dict[str, str]] = {
+    "agnes": {
+        "base_url": "https://api.agnes-ai.cn/v1",
+        "generate_path": "/images/generations",
+        "edit_path": "/images/generations",
+        "edit_request_format": "json_data_url",
+    },
     "comfyui": {
         "base_url": "http://127.0.0.1:8188",
         "generate_path": "/prompt",
@@ -294,6 +338,33 @@ class ImageModel:
     native_batch_size_source: str = "default"
     novelai_capabilities: dict[str, Any] = field(default_factory=dict)
     comfyui: dict[str, Any] = field(default_factory=dict)
+    excluded_parameter_names: frozenset[str] = field(
+        default_factory=frozenset, repr=False
+    )
+
+    def for_mode(self, mode: str) -> ImageModel:
+        """Return an independent effective schema and tool policy for one mode."""
+        parameters = resolve_mode_parameters(self.parameters, mode)
+        active_keys = {
+            str(item.get("request_key") or name) for name, item in parameters.items()
+        }
+        excluded = set(self.parameters) - set(parameters)
+        excluded.update(
+            str(item.get("request_key") or name)
+            for name, item in self.parameters.items()
+            if name not in parameters
+            and str(item.get("request_key") or name) not in active_keys
+            and str(item.get("request_key") or name) not in parameters
+        )
+        tool = copy.deepcopy(self.tool)
+        if isinstance(tool.get("parameters"), dict):
+            tool["parameters"] = resolve_mode_parameters(tool["parameters"], mode)
+        return replace(
+            self,
+            parameters=parameters,
+            tool=tool,
+            excluded_parameter_names=self.excluded_parameter_names | excluded,
+        )
 
     @property
     def comfyui_capabilities(self) -> dict[str, Any]:
@@ -405,6 +476,8 @@ class ImageModel:
         if not self.negative_prompt:
             return ""
         policy = self.llm_negative_prompt_policy
+        if policy.get("use_model_default") is True:
+            return self.negative_prompt_default
         value = policy.get(
             "default_override", policy.get("default", self.negative_prompt_default)
         )
@@ -419,6 +492,8 @@ class ImageModel:
             policies = self.tool.get("parameters")
             policy = policies.get(name) if isinstance(policies, dict) else None
             if isinstance(policy, dict):
+                if policy.get("use_model_default") is True:
+                    return self.parameters.get(name, {}).get("default", fallback)
                 for key in ("default_override", "default"):
                     if key in policy:
                         return policy[key]
@@ -518,6 +593,11 @@ class ImageProvider:
     models_path: str = ""
     discovered_models: tuple[dict[str, Any], ...] = ()
     proxy: str = field(default="", repr=False)
+    request_templates: dict[str, str] = field(default_factory=dict)
+
+    def request_template_for_mode(self, mode: str) -> str:
+        """Use a configured mode template, falling back to the legacy template."""
+        return self.request_templates.get(mode) or self.request_template
 
     @classmethod
     def from_mapping(
@@ -541,11 +621,11 @@ class ImageProvider:
                 "max_reference_images", 1
             )
         img2img = kind != "nai_direct" and _as_bool(
-            value.get("supports_img2img"), kind == "novelai_official"
+            value.get("supports_img2img"), kind in {"novelai_official", "agnes"}
         )
         supports_negative_prompt = (
             False
-            if kind == "gemini"
+            if kind in {"gemini", "agnes"}
             else _as_bool(
                 value.get("supports_negative_prompt"),
                 kind in {"nai_direct", "novelai_official"},
@@ -648,6 +728,15 @@ class ImageProvider:
             edit_request_format=_text(value.get("edit_request_format"), 24)
             or transport_defaults["edit_request_format"],
             request_template=str(value.get("request_template") or ""),
+            request_templates={
+                mode: template
+                for mode, template in (
+                    value.get("request_templates", {}).items()
+                    if isinstance(value.get("request_templates"), dict)
+                    else ()
+                )
+                if mode in {"text2img", "img2img"} and isinstance(template, str)
+            },
             response_image_path=_text(value.get("response_image_path"), 240),
             max_concurrent_generations=max(
                 1, min(16, _as_int(value.get("max_concurrent_generations"), 2))
@@ -684,6 +773,7 @@ class ImageProvider:
             "supports_negative_prompt": self.capabilities.negative_prompt,
             "edit_request_format": self.edit_request_format,
             "request_template": self.request_template,
+            "request_templates": self.request_templates,
             "response_image_path": self.response_image_path,
             "max_concurrent_generations": self.max_concurrent_generations,
             "models_path": self.models_path,
@@ -927,7 +1017,7 @@ def positive_batch_size(value: Any) -> int | None:
 def _native_batch_fields(
     value: dict[str, Any], kind: str, discovered: dict[str, Any] | None = None
 ) -> tuple[int, str]:
-    if kind == "nai_direct":
+    if kind in {"nai_direct", "agnes"}:
         return 1, "fixed"
     configured = positive_batch_size(value.get("native_batch_size"))
     source = str(value.get("native_batch_size_source") or "")
@@ -1033,7 +1123,7 @@ def _model_from_mapping(
             comfy = value["comfyui"]
     native_size, native_source = _native_batch_fields(value, kind, discovered)
     img2img = kind != "nai_direct" and _as_bool(
-        value.get("supports_img2img"), kind == "novelai_official"
+        value.get("supports_img2img"), kind in {"novelai_official", "agnes"}
     )
     capability_source = _text(value.get("capability_source"), 32) or "manual"
     max_reference_images = max(1, min(8, _as_int(value.get("max_reference_images"), 1)))
@@ -1043,7 +1133,7 @@ def _model_from_mapping(
         )
     supports_negative_prompt = (
         False
-        if kind == "gemini"
+        if kind in {"gemini", "agnes"}
         else _as_bool(
             value.get("supports_negative_prompt"),
             kind in {"nai_direct", "novelai_official"},

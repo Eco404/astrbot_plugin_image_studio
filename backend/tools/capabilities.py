@@ -3,6 +3,7 @@
 from typing import Any
 
 from ..config import RuntimeSettings
+from ..models import ImageModel
 from ..providers.comfyui.workflows import FIXED_OUTPUT_POLICY
 from .capability_catalog import search_catalog, select_capability_models
 
@@ -94,63 +95,7 @@ def query_capabilities(
             if model.supports(candidate)
         ]
         tool = model.tool
-        exposed_parameters: dict[str, Any] = {}
-        configured_parameters = tool.get("parameters")
-        exposed_parameter_names = model.llm_exposed_parameter_names
-        for name, descriptor in model.parameters.items():
-            # This dedicated field uses tool policy, not model schema.
-            if name == "negative_prompt":
-                continue
-            if name not in exposed_parameter_names:
-                continue
-            parameter_modes = descriptor.get("modes")
-            if isinstance(parameter_modes, list) and not any(
-                candidate in parameter_modes for candidate in query_modes
-            ):
-                continue
-            request_key = str(descriptor.get("request_key") or name)
-            if (
-                provider.kind == "comfyui"
-                and request_key in {"count", "n", "size"}
-                and (
-                    request_key == "size"
-                    or model.comfyui.get("execution_policy") != FIXED_OUTPUT_POLICY
-                )
-            ):
-                source = (
-                    "count"
-                    if str(descriptor.get("request_key") or name) in {"count", "n"}
-                    else "width"
-                )
-                if not any(
-                    item["source"] == source
-                    for item in model.comfyui.get("bindings", {}).values()
-                ):
-                    continue
-            policy = (
-                configured_parameters.get(name)
-                if isinstance(configured_parameters, dict)
-                else None
-            )
-            policy = policy if isinstance(policy, dict) else {}
-            visible = _llm_parameter_descriptor(descriptor, policy)
-            missing = object()
-            default = model.parameter_default(name, source="llm_tool", fallback=missing)
-            if default is not missing:
-                visible["default"] = default
-            exposed_parameters[name] = visible
-        if model.llm_negative_prompt_enabled:
-            exposed_parameters["negative_prompt"] = _llm_parameter_descriptor(
-                {
-                    "type": "string",
-                    "description": (
-                        "专用反向提示词，只填写不希望出现在画面中的内容；"
-                        "省略时使用此处的默认值。"
-                    ),
-                    "default": model.llm_negative_prompt_default,
-                },
-                model.llm_negative_prompt_policy,
-            )
+        exposed_parameters = _parameters_contract(model, provider.kind, query_modes)
         prompt_profile = tool.get("prompt_profile", "natural_language")
         prompt_instructions = tool.get("prompt_instructions", "")
         entry = {
@@ -172,6 +117,17 @@ def query_capabilities(
                 ),
             },
             "parameters": exposed_parameters,
+            **(
+                {
+                    "parameter_mode_guidance": (
+                        "parameters 中的 modes 表示参数适用的生成模式；"
+                        "mode_overrides 中当前 mode 对应的属性覆盖同一参数的公共属性。"
+                        "请按要调用的 mode 使用对应默认值、类型和可选值。"
+                    )
+                }
+                if any("mode_overrides" in item for item in exposed_parameters.values())
+                else {}
+            ),
             **(
                 {"novelai_capabilities": model.novelai_capabilities}
                 if model.novelai_capabilities
@@ -248,6 +204,80 @@ def query_capabilities(
             else {}
         ),
     }
+
+
+def _parameters_contract(
+    model: ImageModel, provider_kind: str, modes: list[str]
+) -> dict[str, Any]:
+    """Project effective contracts without advertising one mode's default for both."""
+    variants: dict[str, dict[str, dict[str, Any]]] = {}
+    for mode in modes:
+        effective = model.for_mode(mode)
+        configured = effective.tool.get("parameters")
+        for name, descriptor in effective.parameters.items():
+            if (
+                name == "negative_prompt"
+                or name not in effective.llm_exposed_parameter_names
+            ):
+                continue
+            request_key = str(descriptor.get("request_key") or name)
+            if (
+                provider_kind == "comfyui"
+                and request_key in {"count", "n", "size"}
+                and (
+                    request_key == "size"
+                    or effective.comfyui.get("execution_policy") != FIXED_OUTPUT_POLICY
+                )
+            ):
+                source = "count" if request_key in {"count", "n"} else "width"
+                if not any(
+                    item["source"] == source
+                    for item in effective.comfyui.get("bindings", {}).values()
+                ):
+                    continue
+            policy = configured.get(name) if isinstance(configured, dict) else None
+            visible = _llm_parameter_descriptor(
+                descriptor, policy if isinstance(policy, dict) else {}
+            )
+            missing = object()
+            default = effective.parameter_default(
+                name, source="llm_tool", fallback=missing
+            )
+            if default is not missing:
+                visible["default"] = default
+            variants.setdefault(name, {})[mode] = visible
+        if effective.llm_negative_prompt_enabled:
+            variants.setdefault("negative_prompt", {})[mode] = (
+                _llm_parameter_descriptor(
+                    {
+                        "type": "string",
+                        "description": (
+                            "专用反向提示词，只填写不希望出现在画面中的内容；"
+                            "省略时使用此处的默认值。"
+                        ),
+                        "default": effective.llm_negative_prompt_default,
+                    },
+                    effective.llm_negative_prompt_policy,
+                )
+            )
+    result = {}
+    for name, by_mode in variants.items():
+        first = next(iter(by_mode.values()))
+        common = {
+            key: value
+            for key, value in first.items()
+            if all(key in item and item[key] == value for item in by_mode.values())
+        }
+        if len(by_mode) != len(modes):
+            common["modes"] = list(by_mode)
+        overrides = {
+            mode: {key: value for key, value in item.items() if key not in common}
+            for mode, item in by_mode.items()
+        }
+        if any(overrides.values()):
+            common["mode_overrides"] = overrides
+        result[name] = common
+    return result
 
 
 def _llm_parameter_descriptor(

@@ -574,6 +574,7 @@ class ComfyRuntime:
                 else self.service.store
             ),
             concurrency=self.service.concurrency,
+            logs=self.service.logs,
         )
         result = await isolated.generate(
             **values,
