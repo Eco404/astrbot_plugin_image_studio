@@ -1161,7 +1161,7 @@ def resolve_parameters(
             descriptor.get("nullable") is True
             or ("default" in descriptor and descriptor["default"] is None)
         ):
-            pass
+            valid = True
         elif kind in {"number", "int", "integer", "float"}:
             try:
                 number = float(value)

@@ -9,7 +9,6 @@ import re
 import time
 import uuid
 from dataclasses import replace
-from decimal import Decimal, InvalidOperation
 from functools import wraps
 from pathlib import Path
 from typing import Any
@@ -31,6 +30,7 @@ from ..models import (
     ImageProvider,
     InvocationSource,
     ReferenceImage,
+    validate_parameter_value as _validate_parameter_value,
 )
 from ..providers.executor import (
     ProviderBatchError,
@@ -1138,6 +1138,14 @@ def _resolved_model_values(
     # This also protects explicit empty artist strings, regardless of key order.
     _expand_parameter_presets(supplied, model, protected=set(supplied))
     values.update(supplied)
+    for name, item in values.items():
+        descriptor = active_parameters.get(name)
+        if (
+            descriptor
+            and not descriptor.get("ui_only")
+            and descriptor.get("request_key") not in {"count", "n"}
+        ):
+            _validate_parameter_value(name, item, descriptor)
     return values
 
 
@@ -1221,49 +1229,6 @@ def _control_parameter_value(
     ):
         return raw[name]
     return model.parameter_default(name, source=source, fallback="")
-
-
-def _validate_parameter_value(
-    name: str, value: Any, descriptor: dict[str, Any] | None
-) -> None:
-    if not isinstance(descriptor, dict):
-        return
-    choices = descriptor.get("choices")
-    if isinstance(choices, list):
-        values = {
-            str(choice.get("value")) if isinstance(choice, dict) else str(choice)
-            for choice in choices
-        }
-        if str(value) not in values:
-            raise ValueError(f"参数 {name} 的值不在可选范围内")
-    if value is None and (
-        descriptor.get("nullable") is True
-        or ("default" in descriptor and descriptor["default"] is None)
-    ):
-        return
-    parameter_type = str(descriptor.get("type") or "").lower()
-    if parameter_type in {"number", "int", "integer", "float"}:
-        try:
-            if isinstance(value, bool):
-                raise ValueError
-            numeric = Decimal(str(value))
-            if not numeric.is_finite():
-                raise ValueError
-        except (TypeError, ValueError, InvalidOperation) as exc:
-            raise ValueError(f"参数 {name} 必须是有限数字") from exc
-        if (
-            parameter_type in {"int", "integer"}
-            and numeric != numeric.to_integral_value()
-        ):
-            raise ValueError(f"参数 {name} 必须是整数")
-        if descriptor.get("min") is not None and numeric < Decimal(
-            str(descriptor["min"])
-        ):
-            raise ValueError(f"参数 {name} 不能小于 {descriptor['min']}")
-        if descriptor.get("max") is not None and numeric > Decimal(
-            str(descriptor["max"])
-        ):
-            raise ValueError(f"参数 {name} 不能大于 {descriptor['max']}")
 
 
 def _as_int(value: Any, default: int) -> int:

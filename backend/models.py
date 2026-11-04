@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 from dataclasses import dataclass, field, replace
+from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
@@ -50,6 +51,90 @@ def resolve_mode_parameters(
             )
         result[name] = resolved
     return result
+
+
+def validate_parameter_value(
+    name: str, value: Any, descriptor: dict[str, Any] | None
+) -> None:
+    """Use the same scalar/structured contract for defaults and supplied values."""
+    if not isinstance(descriptor, dict):
+        return
+    if value is None and (
+        descriptor.get("nullable") is True
+        or ("default" in descriptor and descriptor["default"] is None)
+    ):
+        return
+    choices = descriptor.get("choices")
+    if isinstance(choices, list):
+        values = {
+            str(choice.get("value")) if isinstance(choice, dict) else str(choice)
+            for choice in choices
+        }
+        if str(value) not in values:
+            raise ValueError(f"参数 {name} 的值不在可选范围内")
+    kind = str(descriptor.get("type") or "").lower()
+    if kind in {"boolean", "bool"} and not isinstance(value, bool):
+        raise ValueError(f"参数 {name} 必须是布尔值")
+    if kind in {"json", "object"} and not isinstance(value, (dict, list)):
+        raise ValueError(f"参数 {name} 必须是 JSON 对象或数组")
+    if kind in {"text", "string", "textarea"} and not isinstance(
+        value, (str, int, float)
+    ):
+        raise ValueError(f"参数 {name} 必须是文本或数字")
+    if kind in {"number", "int", "integer", "float"}:
+        try:
+            if isinstance(value, bool):
+                raise ValueError
+            numeric = Decimal(str(value))
+            if not numeric.is_finite():
+                raise ValueError
+        except (TypeError, ValueError, InvalidOperation) as exc:
+            raise ValueError(f"参数 {name} 必须是有限数字") from exc
+        if kind in {"int", "integer"} and numeric != numeric.to_integral_value():
+            raise ValueError(f"参数 {name} 必须是整数")
+        for bound, wording in (("min", "小于"), ("max", "大于")):
+            if descriptor.get(bound) is None:
+                continue
+            try:
+                if isinstance(descriptor[bound], bool):
+                    raise ValueError
+                limit = Decimal(str(descriptor[bound]))
+                if not limit.is_finite():
+                    raise ValueError
+            except (TypeError, ValueError, InvalidOperation) as exc:
+                raise ValueError(f"参数 {name} 的 {bound} 必须是有限数字") from exc
+            if (bound == "min" and numeric < limit) or (
+                bound == "max" and numeric > limit
+            ):
+                raise ValueError(f"参数 {name} 不能{wording} {descriptor[bound]}")
+
+
+def validate_parameter_request_keys(
+    parameters: dict[str, dict[str, Any]], mode: str
+) -> None:
+    """Reject ambiguous wire aliases, while allowing mode-disjoint descriptors."""
+    seen: dict[str, str] = {}
+    field_names = {
+        name
+        for name, descriptor in parameters.items()
+        if not descriptor.get("ui_only") and name not in MODEL_SCHEDULING_KEYS
+    }
+    for name, descriptor in parameters.items():
+        if descriptor.get("ui_only"):
+            continue
+        key = str(descriptor.get("request_key") or name)[:96]
+        if name in MODEL_SCHEDULING_KEYS or key in MODEL_SCHEDULING_KEYS:
+            continue
+        if key != name and key in field_names:
+            raise ValueError(
+                f"参数 {name} 的 request_key：{key} 与另一个参数名冲突；请使用不同的字段名或请求键"
+            )
+        if key in seen:
+            label = "文生图" if mode == "text2img" else "图生图"
+            raise ValueError(
+                f"{label}参数 {seen[key]} 和 {name} 使用相同 request_key：{key}；请保留一个或限定不同模式"
+            )
+        seen[key] = name
 
 
 def browser_safe_integers(value: Any) -> Any:
@@ -345,6 +430,7 @@ class ImageModel:
     def for_mode(self, mode: str) -> ImageModel:
         """Return an independent effective schema and tool policy for one mode."""
         parameters = resolve_mode_parameters(self.parameters, mode)
+        validate_parameter_request_keys(parameters, mode)
         active_keys = {
             str(item.get("request_key") or name) for name, item in parameters.items()
         }
@@ -365,6 +451,28 @@ class ImageModel:
             tool=tool,
             excluded_parameter_names=self.excluded_parameter_names | excluded,
         )
+
+    def validate_parameters(self) -> None:
+        """Check saved mode contracts without discarding a provider during load."""
+        for mode in ("text2img", "img2img"):
+            if not self.supports(mode):
+                continue
+            effective = self.for_mode(mode)
+            for name, descriptor in effective.active_parameters.items():
+                # Scheduling controls have their own bounds/clamping rules,
+                # and presets only populate the provider's real fields.
+                if descriptor.get("ui_only") or descriptor.get("request_key") in {
+                    "count",
+                    "n",
+                }:
+                    continue
+                for source in ("webui", "llm_tool"):
+                    missing = object()
+                    default = effective.parameter_default(
+                        name, source=source, fallback=missing
+                    )
+                    if default is not missing:
+                        validate_parameter_value(name, default, descriptor)
 
     @property
     def comfyui_capabilities(self) -> dict[str, Any]:
@@ -1053,7 +1161,9 @@ def _normalize_parameters(value: Any) -> dict[str, dict[str, Any]]:
         if not name or not isinstance(descriptor, dict):
             continue
         item = dict(descriptor)
-        item["type"] = _text(item.get("type"), 16) or "text"
+        item["type"] = _text(item.get("type"), 16) or (
+            "json" if isinstance(item.get("default"), (dict, list)) else "text"
+        )
         item["label"] = _text(item.get("label"), 96) or name
         item["request_key"] = _text(item.get("request_key"), 96) or name
         if (
