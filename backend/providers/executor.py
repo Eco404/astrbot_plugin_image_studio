@@ -7,7 +7,7 @@ from typing import Any
 import aiohttp
 
 from ..models import GeneratedImage, GenerationRequest, ImageProvider
-from . import custom_json, discovery, gemini, nai_direct, openai_images
+from . import agnes, custom_json, discovery, gemini, nai_direct, openai_images
 from .errors import ProviderBatchError, ProviderError, ProviderPartialResponseError
 from .http import ImageResponseReader
 from .novelai.client import NovelAIClient
@@ -48,6 +48,8 @@ class ProviderExecutor:
             return await openai_images.generate(
                 self.session, self._images, provider, request
             )
+        if provider.kind == "agnes":
+            return await agnes.generate(self.session, self._images, provider, request)
         if provider.kind == "gemini":
             return await gemini.generate(self.session, self._images, provider, request)
         if provider.kind == "nai_direct":
