@@ -27,6 +27,7 @@ from astrbot_plugin_image_studio.backend.generation.service import (
     ImageGenerationService,
 )
 from astrbot_plugin_image_studio.backend.gallery.store import GenerationStore
+from astrbot_plugin_image_studio.backend.observability import StructuredLogStore
 from astrbot_plugin_image_studio.tests.support.paths import PLUGIN_ROOT
 
 
@@ -367,6 +368,7 @@ async def create_app(data_dir: Path, seed: bool = True) -> FastAPI:
     plugin._settings, plugin._settings_errors = runtime_settings(
         plugin.config, plugin._studio_settings
     )
+    plugin._logs = StructuredLogStore(data_dir, **plugin._studio_settings["logging"])
     plugin._settings_lock = asyncio.Lock()
     plugin._storage_maintenance_lock = asyncio.Lock()
     from astrbot_plugin_image_studio.backend.gallery.external import (
@@ -377,7 +379,10 @@ async def create_app(data_dir: Path, seed: bool = True) -> FastAPI:
     await plugin._configure_external_gallery()
     plugin._session, plugin._maintenance_task = None, None
     plugin._service = ImageGenerationService(
-        settings=plugin._settings, executor=FakeExecutor(), store=plugin.store
+        settings=plugin._settings,
+        executor=FakeExecutor(),
+        store=plugin.store,
+        logs=plugin._logs,
     )
     from contextlib import asynccontextmanager
 

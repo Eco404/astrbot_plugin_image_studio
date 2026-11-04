@@ -1,0 +1,43 @@
+#logsView { padding-bottom: calc(28px + env(safe-area-inset-bottom)); }
+.logs-panel { padding: 16px; min-width: 0; }
+.logs-panel .section-actions { display: flex; flex: 0 0 auto; gap: 8px; }
+.logs-toolbar { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; margin-bottom: 14px; }
+.logs-toolbar > .field { flex: 1 1 150px; min-width: 0; }
+.logs-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; }
+.logs-toolbar button { flex-shrink: 0; white-space: nowrap; }
+.logs-hint, #logsEnabledNotice { color: var(--muted); font-size: 12px; line-height: 1.55; }
+#logsList { display: grid; gap: 8px; min-width: 0; margin-block: 16px; }
+.logs-empty { display: grid; min-height: 160px; place-items: center; color: var(--muted); font-size: 13px; }
+.log-entry { min-width: 0; border-radius: 10px; background: var(--surface); }
+.log-entry > summary { display: flex; align-items: flex-start; gap: 12px; padding: 13px 12px; cursor: pointer; list-style: none; border-radius: inherit; }
+.log-entry > summary::-webkit-details-marker { display: none; }
+.log-entry > summary::after { content: "›"; flex: 0 0 auto; color: var(--muted); font-size: 20px; line-height: 20px; transition: transform .15s ease; }
+.log-entry[open] > summary::after { transform: rotate(90deg); }
+.log-entry > summary:hover { background: var(--surface-hover); }
+.log-entry > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.log-level { flex: 0 0 auto; min-width: 38px; padding: 3px 6px; border-radius: 6px; font-size: 11px; line-height: 16px; text-align: center; background: var(--surface); color: var(--muted); }
+.log-level--info { color: var(--accent-strong); background: var(--accent-soft); }
+.log-level--warning { color: var(--warning, #9a6b28); background: var(--warning-soft, rgba(180, 135, 64, .14)); }
+.log-level--error { color: var(--danger); background: var(--danger-soft); }
+.log-summary { display: grid; flex: 1 1 auto; min-width: 0; gap: 4px; line-height: 1.55; }
+.log-message { color: var(--text); font-size: 13px; overflow-wrap: anywhere; }
+.log-request { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.log-meta { display: grid; flex: 0 0 auto; gap: 4px; color: var(--muted); font-size: 11px; line-height: 1.55; text-align: right; }
+.log-detail { margin: 0; padding: 12px; max-height: 440px; overflow: auto; border-top: 1px solid var(--line); color: var(--text); font: 12px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; tab-size: 2; }
+.logs-pagination { display: flex; justify-content: center; align-items: center; gap: 12px; padding-top: 6px; }
+#logsPage { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+@media (min-width: 901px) {
+  .sidebar .nav-list { display: flex; flex: 1 0 auto; flex-direction: column; }
+  #logsNav { margin-top: auto; }
+}
+@media (max-width: 600px) {
+  .logs-panel { padding: 12px; }
+  .logs-toolbar { gap: 10px; }
+  .logs-toolbar > .field { flex-basis: calc(50% - 5px); }
+  .logs-actions { margin-left: auto; }
+  .log-entry > summary { flex-wrap: wrap; gap: 8px; padding: 11px 10px; }
+  .log-summary { flex-basis: calc(100% - 74px); }
+  .log-meta { display: flex; flex-basis: 100%; gap: 10px; padding-left: 46px; text-align: left; }
+  .log-entry > summary::after { position: absolute; right: 10px; }
+  .log-entry > summary { position: relative; padding-right: 26px; }
+}
