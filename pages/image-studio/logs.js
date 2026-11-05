@@ -8,12 +8,93 @@
     const $ = id => document.getElementById(id);
     let enabled = true, bound = false, page = 1, pages = 1, revision = 0, busy = false, entries = [];
     const pageSize = 50;
+    const pageCardPitch = 52;
+    let pagePickerRange = "";
+
+    function closePagePicker(restoreFocus = false) {
+      const picker = $("logsPagePicker");
+      if (picker.hidden) return;
+      picker.hidden = true;
+      $("logsPage").setAttribute("aria-expanded", "false");
+      if (restoreFocus) $("logsPage").focus({ preventScroll: true });
+    }
+
+    function renderPageCards() {
+      const strip = $("logsPageCards"), track = $("logsPageTrack");
+      // Retained logs can span many pages; render only the visible strip.
+      const first = Math.max(0, Math.floor(strip.scrollLeft / pageCardPitch) - 4);
+      const last = Math.min(pages, first + Math.ceil(strip.clientWidth / pageCardPitch) + 9);
+      const range = `${first}:${last}:${page}:${pages}`;
+      if (range === pagePickerRange) return;
+      pagePickerRange = range;
+      track.style.width = `${pages * pageCardPitch}px`;
+      track.innerHTML = Array.from({ length: last - first }, (_, offset) => {
+        const number = first + offset + 1;
+        return `<button type="button" class="gallery-page-card" data-log-page="${number}" style="left:${(number - 1) * pageCardPitch}px" aria-label="第 ${number} 页"${number === page ? ' aria-current="page"' : ""}>${number}</button>`;
+      }).join("");
+    }
+
+    function openPagePicker() {
+      if (!enabled || busy || pages <= 1) return;
+      window.ImageStudioSelect?.close();
+      const bar = document.querySelector(".logs-floatingbar").getBoundingClientRect();
+      $("logsPagePicker").style.bottom = `${window.innerHeight - bar.top + 8}px`;
+      $("logsPagePicker").hidden = false;
+      $("logsPage").setAttribute("aria-expanded", "true");
+      const input = $("logsPageInput"), strip = $("logsPageCards");
+      input.max = String(pages); input.value = String(page);
+      pagePickerRange = ""; renderPageCards();
+      strip.scrollLeft = Math.max(0, (page - 1) * pageCardPitch - (strip.clientWidth - pageCardPitch) / 2);
+      renderPageCards();
+    }
+
+    function jumpPage(value) {
+      if (!enabled || busy) return;
+      const target = Math.max(1, Math.min(pages, Math.trunc(Number(value)) || 1));
+      closePagePicker(true);
+      if (target !== page) { page = target; void load(); }
+    }
+
+    function bindPagePicker() {
+      const picker = $("logsPagePicker"), strip = $("logsPageCards");
+      $("logsPage").addEventListener("click", () => picker.hidden ? openPagePicker() : closePagePicker());
+      strip.addEventListener("scroll", renderPageCards, { passive: true });
+      picker.addEventListener("click", event => {
+        const button = event.target.closest("[data-log-page]");
+        if (button) jumpPage(button.dataset.logPage);
+      });
+      $("logsPageJump").addEventListener("submit", event => { event.preventDefault(); if ($("logsPageInput").value) jumpPage($("logsPageInput").value); });
+      picker.addEventListener("keydown", event => {
+        if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closePagePicker(true); return; }
+        const button = event.target.closest("[data-log-page]");
+        if (!button || !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+        event.preventDefault();
+        const current = Number(button.dataset.logPage);
+        const target = Math.max(1, Math.min(pages, event.key === "Home" ? 1 : event.key === "End" ? pages : current + (event.key === "ArrowRight" ? 1 : -1)));
+        strip.scrollLeft = Math.max(0, (target - 1) * pageCardPitch - (strip.clientWidth - pageCardPitch) / 2);
+        renderPageCards();
+        strip.querySelector(`[data-log-page="${target}"]`)?.focus({ preventScroll: true });
+      });
+      document.addEventListener("pointerdown", event => { if (!picker.hidden && !picker.contains(event.target) && !$("logsPage").contains(event.target)) closePagePicker(); }, { passive: true });
+      document.addEventListener("keydown", event => { if (!picker.hidden && event.key === "Escape") { event.preventDefault(); closePagePicker(true); } });
+      document.addEventListener("scroll", event => { if (!picker.hidden && !picker.contains(event.target)) closePagePicker(); }, { passive: true, capture: true });
+      window.addEventListener("resize", () => closePagePicker(), { passive: true });
+      let touchStart = null;
+      $("logsView").addEventListener("touchstart", event => {
+        touchStart = !picker.hidden && !picker.contains(event.target) && event.touches.length === 1 ? event.touches[0].clientY : null;
+      }, { passive: true });
+      $("logsView").addEventListener("touchmove", event => {
+        if (touchStart !== null && event.touches.length === 1 && Math.abs(event.touches[0].clientY - touchStart) > 8) { closePagePicker(); touchStart = null; }
+      }, { passive: true });
+    }
 
     function controls() {
       if ($("logsRefresh")) $("logsRefresh").disabled = !enabled || busy;
       if ($("logsClear")) $("logsClear").disabled = !enabled || busy;
       if ($("logsPrevious")) $("logsPrevious").disabled = !enabled || busy || page <= 1;
       if ($("logsNext")) $("logsNext").disabled = !enabled || busy || page >= pages;
+      $("logsPage").disabled = !enabled || busy || pages <= 1;
+      if (!enabled || busy || pages <= 1) closePagePicker();
       if ($("logsList")) $("logsList").setAttribute("aria-busy", String(busy));
     }
 
@@ -48,6 +129,7 @@
 
     async function load() {
       if (!enabled) return;
+      closePagePicker();
       const requestRevision = ++revision;
       const from = $("logsDateFrom")?.value || "", to = $("logsDateTo")?.value || "";
       if (from && to && from > to) {
@@ -95,13 +177,14 @@
     function bind() {
       if (bound) return;
       bound = true;
+      bindPagePicker();
       if ($("logsCategory")) $("logsCategory").innerHTML = '<option value="">全部类型</option>' + Object.entries(categories).map(([value, label]) => `<option value="${value}">${label}</option>`).join("");
       if ($("logsLevel")) $("logsLevel").innerHTML = '<option value="">全部等级</option>' + Object.entries(levels).map(([value, label]) => `<option value="${value}">${label} · ${value}</option>`).join("");
       for (const id of ["logsCategory", "logsLevel", "logsDateFrom", "logsDateTo"]) $(id)?.addEventListener("change", () => { page = 1; void load(); });
       $("logsRefresh")?.addEventListener("click", () => { void load(); });
       $("logsClear")?.addEventListener("click", () => { void clear(); });
-      $("logsPrevious")?.addEventListener("click", () => { if (page > 1) { page--; void load(); } });
-      $("logsNext")?.addEventListener("click", () => { if (page < pages) { page++; void load(); } });
+      $("logsPrevious")?.addEventListener("click", () => jumpPage(page - 1));
+      $("logsNext")?.addEventListener("click", () => jumpPage(page + 1));
       $("logsList")?.addEventListener("toggle", event => {
         const details = event.target;
         if (!enabled || !details.matches("details[data-log-index]") || !details.open || details.querySelector("pre")) return;
@@ -115,7 +198,7 @@
       setEnabled(enabled);
     }
 
-    return { load, setEnabled, bind };
+    return { load, setEnabled, bind, closePagePicker };
   }
 
   window.ImageStudioLogs = { create };

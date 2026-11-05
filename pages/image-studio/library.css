@@ -49,7 +49,7 @@ html { scroll-padding-top: 112px; scroll-padding-bottom: calc(100px + env(safe-a
 .gallery-page-picker:not([hidden]) { animation: studio-view-enter var(--motion-base) ease backwards; }
 .studio-icon-button, .external-source-entry, .external-source-status, .gallery-page-label, .gallery-page-card { transition: color var(--motion-fast) ease, background-color var(--motion-fast) ease, border-color var(--motion-fast) ease, box-shadow var(--motion-fast) ease; }
 .gallery-page-cards { flex: 1 1 auto; min-width: 0; overflow-x: auto; overflow-y: hidden; overscroll-behavior: contain; touch-action: pan-x; padding-block: 3px; scrollbar-width: thin; }
-#galleryPageTrack { position: relative; height: 44px; min-width: 100%; }
+#galleryPageTrack, #logsPageTrack { position: relative; height: 44px; min-width: 100%; }
 .gallery-page-card { position: absolute; top: 0; display: grid; place-items: center; width: 44px; min-width: 44px; height: 44px; padding: 0; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); color: var(--text); font: inherit; font-size: 12px; font-variant-numeric: tabular-nums; }
 .gallery-page-card[aria-current="page"] { border-color: transparent; background: var(--selection-fill, var(--accent-soft)); color: var(--accent-strong); }
 .gallery-page-jump { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; margin: 0; color: var(--muted); font-size: 12px; }

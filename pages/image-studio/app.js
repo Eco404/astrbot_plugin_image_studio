@@ -324,6 +324,7 @@
   function showView(view) {
     if (view === "logs" && $("logsNav").classList.contains("is-hidden")) view = "generate";
     window.ImageStudioSelect?.close();
+    logs.closePagePicker();
     state.view = view;
     if (view !== "gallery") stopGalleryPreviews();
     document.querySelectorAll(".nav-item").forEach((button) => button.classList.toggle("is-active", button.dataset.view === view));
