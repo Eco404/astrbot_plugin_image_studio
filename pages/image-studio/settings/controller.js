@@ -115,15 +115,32 @@
           { label: "留在设置页面", primary: true, id: "staySettingsButton", action: () => false },
         ], { focus: "staySettingsButton" });
         if (!discard) return;
-        // Restore every editor from the last successful save, without requiring
-        // another network request or losing drafts when choosing to stay.
-        if (savedSettingsPayload && !await loadSettings(true, structuredClone(savedSettingsPayload))) return;
-        window.ImageStudioAppearance.discard();
-        gallerySortDraft = hooks.getGallerySort();
-        if ($("gallerySort")) { $("gallerySort").value = gallerySortDraft; window.ImageStudioSelect?.refresh($("gallerySort")); }
-        updateSettingsDirty();
+        if (!await restoreSavedSettings()) return;
         hooks.showView(view);
-      } finally { settingsNavigationPending = false; }
+      } finally { settingsNavigationPending = false; updateSettingsDirty(); }
+    }
+
+    async function restoreSavedSettings() {
+      // Restore the acknowledged snapshot locally, including browser settings.
+      // This also preserves the last successful portion of a partial save.
+      if (savedSettingsPayload && !await loadSettings(true, structuredClone(savedSettingsPayload))) return false;
+      window.ImageStudioAppearance.discard();
+      gallerySortDraft = hooks.getGallerySort();
+      if ($("gallerySort")) { $("gallerySort").value = gallerySortDraft; window.ImageStudioSelect?.refresh($("gallerySort")); }
+      updateSettingsDirty();
+      return true;
+    }
+
+    async function discardSettingsChanges() {
+      if (settingsSaving || settingsNavigationPending || !settingsDirty()) return;
+      settingsNavigationPending = true; updateSettingsDirty();
+      try {
+        const discard = await library.openModal("放弃更改？", "<p>将恢复最近保存的设置，包括主题与显示设置。尚未保存的更改将丢失。</p>", [
+          { label: "取消", id: "cancelDiscardSettingsButton", action: () => false },
+          { label: "放弃更改", danger: true, id: "confirmDiscardSettingsButton", action: () => true },
+        ], { focus: "cancelDiscardSettingsButton" });
+        if (discard) await restoreSavedSettings();
+      } finally { settingsNavigationPending = false; updateSettingsDirty(); }
     }
 
     function populateDefaultModelSelect(select, models, selectedRef) {
@@ -397,7 +414,7 @@
       const common = `${field("id", "ID", provider.id)}${field("name", "名称", provider.name)}${selectField("kind", "供应类型", kind, PROVIDER_KINDS)}${field("base_url", "接口地址（Base URL）", provider.base_url)}${credentialField}${field("timeout_seconds", "超时秒数", provider.timeout_seconds, "number")}${field("max_concurrent_generations", "Provider 最大并发", provider.max_concurrent_generations ?? 2, "number", official, "", concurrencyHint)}${proxyField}${headersField}`;
       const typeFields = kind === "agnes" ? `${field("generate_path", "文生图路径", provider.generate_path)}${field("edit_path", "图生图路径", provider.edit_path)}` : kind === "openai_images" ? `${field("generate_path", "文生图路径", provider.generate_path)}${field("edit_path", "图生图路径", provider.edit_path)}${field("models_path", "模型列表路径", provider.models_path || "/models")}${selectField("edit_request_format", "图生图请求格式", provider.edit_request_format, [["multipart", "multipart"], ["json_data_url", "JSON data URL"]])}` : kind === "gemini" ? `${field("generate_path", "generateContent 路径（支持 {model}）", provider.generate_path)}${field("models_path", "模型列表路径", provider.models_path || "/v1beta/models")}` : kind === "nai_direct" ? `${field("generate_path", "生成路径", provider.generate_path)}<div class="field field-wide"><span class="field-hint">第三方服务协议：GET /generate；Token 作为 token 查询参数发送。该类型不是 NovelAI 官方 API，且仅支持文生图。</span></div>` : `${field("generate_path", "文生图路径", provider.generate_path)}${field("edit_path", "图生图路径", provider.edit_path)}${field("models_path", "模型列表路径", provider.models_path || "/models")}${customJSONConfiguration(provider)}`;
       const officialFields = `${field("generate_path", "文生图路径", provider.generate_path)}${field("edit_path", "图生图路径", provider.edit_path)}<div class="field field-wide"><span class="field-hint">V4.5 支持单底图、精确角色 / 风格参考、Vibe、多角色与局部重绘；V5 支持单底图、多角色、透明背景与局部重绘。V5 精选版局部重绘使用 V4.5 精选版。</span></div>`;
-      const discoveryButton = builtinProviderModels(provider) || kind === "comfyui" ? "" : '<button class="quiet-button" id="discoverModelsButton" type="button">获取模型</button>';
+      const discoveryButton = kind === "custom_json" ? '<button class="quiet-button" id="previewRequestButton" type="button">预览请求</button>' : builtinProviderModels(provider) || kind === "comfyui" ? "" : '<button class="quiet-button" id="discoverModelsButton" type="button">获取模型</button>';
       const heading = `<div class="provider-editor-heading"><h3>${escape(provider.name || "生图服务商")}</h3><label class="toggle-control"><input data-provider-field="enabled" type="checkbox" aria-label="启用生图服务商" ${provider.enabled ? "checked" : ""} /><span aria-hidden="true"></span></label></div>`;
       const comfyFields = '<div class="field field-wide"><span class="field-hint">连接自建 ComfyUI 原生服务。API Key 可留空；受保护的服务可填写请求头。下方每个工作流独立配置输入绑定及结果节点。</span></div>';
       const agnesFields = field("generate_path", "生图路径（两种模式共用）", provider.generate_path);
@@ -408,6 +425,7 @@
       });
       $("removeProviderButton")?.addEventListener("click", async () => { if (!await confirmAction("删除此生图服务商？历史记录不会删除。")) return; state.settings.webui.providers = state.settings.webui.providers.filter((item) => item !== provider); state.selectedSettingsProvider = state.settings.webui.providers[0] || null; state.selectedSettingsModel = null; renderSettingsProviders(); showNotice("已从设置草稿中删除，保存全部设置后生效。", "success"); });
       $("discoverModelsButton")?.addEventListener("click", () => void discoverProviderModels(provider));
+      $("previewRequestButton")?.addEventListener("click", () => void previewProviderRequest(provider));
       window.ImageStudioSelect?.refresh(els.providerForm);
     }
     function fieldLabel(label, tooltip = "") { return tooltip ? `<span class="schema-parameter-label"><button type="button" class="parameter-help-text" data-tooltip="${escape(tooltip)}" data-tooltip-toggle aria-label="查看${escape(label)}说明"><span>${escape(label)}</span></button></span>` : `<label>${label}</label>`; }
@@ -438,6 +456,56 @@
       }
       refreshSettingsDefaultModels();
     }
+    async function previewProviderRequest(provider) {
+      const selectedIndex = Math.max(0, (provider.models || []).indexOf(currentSettingsModel()));
+      const snapshot = structuredClone(provider), models = snapshot.models || [];
+      const invalid = els.providerForm.querySelector(":invalid") || els.modelForm.querySelector(":invalid");
+      let open = true, sequence = 0;
+      const body = `<p class="field-hint">使用当前配置及模型默认参数，提示词和参考图为示例。仅预览，不发送生图请求；凭据已隐藏。</p>${models.length ? `<div class="request-preview-controls"><label class="field" for="requestPreviewModel">模型<select id="requestPreviewModel">${models.map((model, index) => `<option value="${index}"${index === selectedIndex ? " selected" : ""}>${escape(model.name || model.id)} · ${escape(model.id)}</option>`).join("")}</select></label><label class="field" for="requestPreviewMode">生成模式<select id="requestPreviewMode"></select></label></div>` : ""}<p class="field-hint request-preview-status" id="requestPreviewStatus" role="status"></p><div class="request-preview-content" id="requestPreviewContent"></div>`;
+      const refreshModes = () => {
+        const model = models[Number($("requestPreviewModel").value)];
+        const select = $("requestPreviewMode"), preferred = select.value || state.defaultsMode;
+        const modes = [["text2img", "文生图"], ["img2img", "图生图"]].filter(([mode]) => model?.[`supports_${mode}`]);
+        select.innerHTML = modes.map(([mode, label]) => `<option value="${mode}">${label}</option>`).join("");
+        select.value = modes.some(([mode]) => mode === preferred) ? preferred : modes[0]?.[0] || "";
+        select.disabled = !modes.length;
+        window.ImageStudioSelect?.refresh(select);
+      };
+      const refresh = async () => {
+        const revision = ++sequence;
+        const status = $("requestPreviewStatus"), content = $("requestPreviewContent");
+        content.replaceChildren(); status.classList.remove("is-error");
+        if (invalid) { status.textContent = "请先修正当前配置中的无效输入。"; status.classList.add("is-error"); return; }
+        if (!models.length) { status.textContent = "请先为此服务商添加模型，以使用其默认参数预览请求。"; return; }
+        const mode = $("requestPreviewMode").value;
+        if (!mode) { status.textContent = "此模型尚未启用文生图或图生图。"; return; }
+        status.textContent = "正在构造预览…";
+        try {
+          const preview = await apiPost("provider/preview", { provider: snapshot, model_index: Number($("requestPreviewModel").value), mode });
+          if (!open || revision !== sequence) return;
+          status.textContent = `总计 ${preview.requested_count} 张 · ${preview.request_count} 次请求`;
+          content.innerHTML = preview.batches.map((batch, index) => {
+            const request = `${batch.method} ${batch.url}\n${batch.proxy ? `代理：${batch.proxy}\n` : ""}\n请求头\n${JSON.stringify(batch.headers, null, 2)}\n\n请求体\n${JSON.stringify(batch.body, null, 2)}`;
+            return `<section class="request-preview-batch"><h3>${preview.batches.length > 1 ? `请求类型 ${index + 1} · ` : ""}每次 ${batch.count} 张${batch.repeat > 1 ? ` · 执行 ${batch.repeat} 次` : ""}</h3><pre tabindex="0">${escape(request)}</pre></section>`;
+          }).join("") + (preview.notes || []).map(note => `<p class="field-hint">${escape(note)}</p>`).join("");
+        } catch (error) {
+          if (!open || revision !== sequence) return;
+          status.textContent = errorMessage(error, "无法构造请求预览"); status.classList.add("is-error");
+        }
+      };
+      await library.openModal("请求预览", body, [{ label: "关闭", action: () => true }], {
+        onOpen: () => {
+          if (models.length) {
+            refreshModes();
+            $("requestPreviewModel").addEventListener("change", () => { refreshModes(); void refresh(); });
+            $("requestPreviewMode").addEventListener("change", () => void refresh());
+          }
+          void refresh();
+        },
+        onClose: () => { open = false; sequence++; },
+      });
+    }
+
     async function discoverProviderModels(provider) { const button = $("discoverModelsButton"); if (button) { button.disabled = true; button.textContent = "获取中…"; } try { const payload = await apiPost("provider/models", { provider }); provider.discovered_models = payload.models || []; for (const model of provider.models || []) { const discovered = provider.discovered_models.find((item) => item.id === model.id); if (discovered && model.native_batch_size_source !== "manual") { model.native_batch_size = Number(discovered.native_batch_size) || 1; model.native_batch_size_source = discovered.native_batch_size_source || "default"; } } renderModelEditor(); updateSettingsDirty(); showNotice(`已获取 ${provider.discovered_models.length} 个模型，可在新增模型时选择。`, "success"); } catch (error) { showNotice(errorMessage(error, "获取模型失败"), "error"); } finally { if (button) { button.disabled = false; button.textContent = "获取模型"; } } }
     function renderNewModelChoices(provider = currentSettingsProvider()) { const builtin = builtinProviderModels(provider), models = builtin || provider?.discovered_models || []; els.newModelChoices.innerHTML = models.map((item) => `<option value="${escape(item.id)}">${escape(item.name || item.id)}${item.capability_source === "unknown" ? " · 能力未知" : ""}</option>`).join(""); els.newModelChoice.value = ""; els.newModelChoice.placeholder = provider?.kind === "agnes" ? "选择 Agnes 模型或输入 ID" : provider?.kind === "novelai_official" ? "选择 NovelAI 官方模型" : builtin ? "选择 NAI 模型或手动输入 ID" : "选择或输入模型 ID"; }
 
@@ -764,13 +832,13 @@
       state.selectedSettingsModel = provider.models.at(-1); renderModelEditor(); showNotice("已新增模型，请填写能力和参数 schema。", "success");
     }
     async function saveSettings() {
-      if (settingsSaving) return;
+      if (settingsSaving || settingsNavigationPending) return;
       if (!await loadSettings()) return;
       await window.ImageStudioAppearance.ready;
-      if (settingsSaving) return;
+      if (settingsSaving || settingsNavigationPending) return;
       const invalid = $("settingsView").querySelector('input:invalid, textarea:invalid, select:invalid, [aria-invalid="true"]');
       if (invalid) { invalid.reportValidity?.(); setError(els.settingsError, "请先修正无效的设置项。"); return; }
-      settingsSaving = true; setError(els.settingsError, "正在保存设置…"); els.saveSettingsButton.disabled = true; library.setCommandLabel("saveSettingsButton", "保存中…");
+      settingsSaving = true; updateSettingsDirty(); setError(els.settingsError, "正在保存设置…"); els.saveSettingsButton.disabled = true; library.setCommandLabel("saveSettingsButton", "保存中…");
       const draft = settingsDraft(); const submitted = settingsFingerprint(draft); const webui = draft.studio;
       const appearance = window.ImageStudioAppearance;
       const appearanceSnapshot = appearance.get(), saveAppearance = appearance.isDirty();
@@ -896,6 +964,8 @@
 
     function updateSettingsDirty() {
       const dirty = settingsDirty();
+      $("discardSettingsChangesButton").classList.toggle("is-hidden", !dirty);
+      $("discardSettingsChangesButton").disabled = settingsSaving || settingsNavigationPending;
       els.saveSettingsButton.classList.toggle("is-dirty", dirty); $("settingsDirtyStatus").textContent = dirty ? "有未保存的更改" : state.settings ? "已保存" : "";
       $("settingsDirtyStatus").classList.toggle("is-saved", !dirty && !!state.settings);
       renderStorageQuotas();
@@ -928,6 +998,7 @@
       els.agentImageReturnMode.addEventListener("change", syncAgentImageSettings);
       els.runMaintenanceButton.addEventListener("click", () => void runStorageMaintenance(false)); els.runDeepMaintenanceButton.addEventListener("click", () => void runStorageMaintenance(true));
       $("parameterDialogCancel").addEventListener("click", closeToolParameterDialog); $("parameterDialogApply").addEventListener("click", applyToolParameterDialog); els.addProviderButton.addEventListener("click", () => void addProvider()); els.addModelButton.addEventListener("click", () => void addModel()); els.saveSettingsButton.addEventListener("click", () => void saveSettings());
+      $("discardSettingsChangesButton").addEventListener("click", () => void discardSettingsChanges());
     }
 
     return { bind, layoutSettingsPanels, loadSettings, loadStorageHealth, updateSettingsDirty, currentSettingsModel, renderModelEditor, prepareComfyWorkflowSettings, addComfyWorkflowDraft, closeToolParameterDialog, leaveSettings, settingsDirty,

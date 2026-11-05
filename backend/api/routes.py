@@ -262,6 +262,12 @@ def register_web_apis(plugin, page_prefix: str) -> None:
             "Image Studio: discover provider models",
         ),
         (
+            "provider/preview",
+            plugin._api_provider_preview,
+            ["POST"],
+            "Image Studio: preview Custom JSON request",
+        ),
+        (
             "gallery/list",
             plugin._api_gallery_list,
             ["GET"],

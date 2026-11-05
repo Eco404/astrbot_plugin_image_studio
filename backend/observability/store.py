@@ -33,7 +33,7 @@ _DATA_URI = re.compile(r"data:([^;,\s]+)?;base64,([A-Za-z0-9+/=_\-\r\n]+)", re.I
 _URL = re.compile(r"(?:https?|wss?)://[^\s<>\"']+", re.I)
 _INLINE_SECRET = re.compile(
     r"((?:authorization|api[-_ ]?key|password|access[-_]?token|secret)[\"']?\s*[:=]\s*[\"']?)"
-    r"(?:Bearer\s+)?[^\s,;\"'}]+",
+    r"(?:Bearer\s+)?[^\s,;\"'}&]+",
     re.I,
 )
 _CONTEXT = contextvars.ContextVar("image_studio_log_context", default={})
@@ -81,14 +81,25 @@ def _safe_url(value: str) -> str:
         return "[invalid URL omitted]"
 
 
-def sanitize(value: Any, *, max_chars: int = 128 * 1024) -> Any:
+def sanitize(
+    value: Any, *, max_chars: int = 128 * 1024, secrets: tuple[str, ...] = ()
+) -> Any:
     """Never serialize credentials, binary images, streams, or unbounded objects.
 
     Limits apply to the complete tree, including nested dictionaries. Unknown
     objects are described by class name rather than repr(), which may hold keys.
+    Known credentials can also be removed when embedded under arbitrary keys.
     """
     remaining = max_chars
     nodes = 0
+    secrets = tuple(
+        sorted({value for value in secrets if value}, key=len, reverse=True)
+    )
+
+    def hide_known(text: str) -> str:
+        for secret in secrets:
+            text = text.replace(secret, "[redacted]")
+        return text
 
     def visit(item: Any, depth: int = 0, field: str = "") -> Any:
         nonlocal remaining, nodes
@@ -125,6 +136,7 @@ def sanitize(value: Any, *, max_chars: int = 128 * 1024) -> Any:
             text = re.sub(
                 r"\bBearer\s+[A-Za-z0-9._~+/=-]+", "Bearer [redacted]", text, flags=re.I
             )
+            text = hide_known(text)
             limit = max(0, min(16384, remaining))
             if len(text) > limit:
                 text = text[:limit] + "… [truncated]"
@@ -136,7 +148,7 @@ def sanitize(value: Any, *, max_chars: int = 128 * 1024) -> Any:
                 if index >= 300 or remaining <= 0 or nodes > 10000:
                     result["_truncated"] = True
                     break
-                key = str(key)[:256]
+                key = hide_known(str(key))[:256]
                 remaining -= len(key) + 8
                 if field.lower() == "headers" and key.lower() not in _SAFE_HEADERS:
                     result[key] = "[redacted]"

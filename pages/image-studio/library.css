@@ -150,6 +150,12 @@ html[data-gallery-card-info="false"] #galleryGrid .gallery-info { display: none;
 .gallery-missing-image { display: grid; place-content: center; justify-items: center; gap: 8px; aspect-ratio: 1; background: var(--surface); color: var(--muted); }
 .settings-savebar { margin: 0; }
 .settings-savebar .inline-error { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+#discardSettingsChangesButton { flex: 0 0 auto; white-space: nowrap; }
+.request-preview-controls { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+.request-preview-content { min-width: 0; }
+.request-preview-batch h3 { margin: 16px 0 8px; font-size: 13px; }
+.request-preview-batch pre { margin: 0; padding: 12px; border-radius: 8px; background: var(--surface); font-size: 12px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+.request-preview-status.is-error { color: var(--danger); }
 #settingsDirtyStatus { flex: 0 1 auto; color: var(--warning); font-size: 12px; white-space: nowrap; }
 #settingsDirtyStatus.is-saved { color: var(--success); }
 #saveSettingsButton.is-dirty { color: var(--warning); background: var(--warning-soft); box-shadow: var(--warning-shadow); }
@@ -354,6 +360,10 @@ html[data-gallery-card-info="false"] #galleryGrid .gallery-info { display: none;
   .selection-bar .danger-button, .selection-bar #cancelSelectionButton { min-height: 44px; padding: 0; }
   .settings-savebar { flex-wrap: wrap; }
   .settings-savebar .inline-error:not(:empty) { flex-basis: 100%; }
+  .settings-savebar .inline-error { order: -1; }
+  .settings-savebar .inline-error:empty { display: none; }
+  #discardSettingsChangesButton { min-height: 44px; padding-inline: 10px; }
+  .request-preview-controls { grid-template-columns: minmax(0, 1fr); }
   #settingsDirtyStatus { margin-right: auto; }
   #saveSettingsButton { width: 44px; min-height: 44px; }
   .import-grid { grid-template-columns: minmax(0, 1fr); }

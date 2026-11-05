@@ -523,16 +523,15 @@ class ImageGenerationService:
                         exc.images[: request.count], exc.failures
                     ) from exc
                 return images[: request.count] if fixed_outputs else images
-        count = _batch_integer(request.count, "count")
-        native_size = _batch_integer(model.native_batch_size, "native_batch_size")
         request_sizes = tuple(
-            min(native_size, count - offset) for offset in range(0, count, native_size)
+            size
+            for size, repeat in _provider_batch_groups(
+                request.count, model.native_batch_size
+            )
+            for _ in range(repeat)
         )
-        parameters = {
-            key: value
-            for key, value in request.parameters.items()
-            if key not in MODEL_SCHEDULING_KEYS and key not in {"count", "n"}
-        }
+        count = _batch_integer(request.count, "count")
+        parameters = _provider_batch_parameters(request)
         pending = iter(enumerate(request_sizes))
         results: list[tuple[GeneratedImage, ...]] = [()] * len(request_sizes)
         failures: dict[int, str] = {}
@@ -1044,6 +1043,27 @@ def _batch_integer(value: Any, name: str) -> int:
     except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError(f"批次参数 {name} 必须为正整数") from exc
     return int(numeric)
+
+
+def _provider_batch_groups(count: Any, native_size: Any) -> tuple[tuple[int, int], ...]:
+    """Return (images per request, repetitions), without expanding large counts."""
+    count = _batch_integer(count, "count")
+    native_size = _batch_integer(native_size, "native_batch_size")
+    complete, remaining = divmod(count, native_size)
+    return tuple(
+        (size, repeat)
+        for size, repeat in ((native_size, complete), (remaining, int(remaining > 0)))
+        if repeat
+    )
+
+
+def _provider_batch_parameters(request: GenerationRequest) -> dict[str, Any]:
+    """Scheduling controls stay local; each submitted batch supplies its own count."""
+    return {
+        key: value
+        for key, value in request.parameters.items()
+        if key not in MODEL_SCHEDULING_KEYS and key not in {"count", "n"}
+    }
 
 
 def _size(value: str, provider_kind: str = "") -> str:

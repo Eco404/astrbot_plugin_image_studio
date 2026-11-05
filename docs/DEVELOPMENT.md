@@ -22,6 +22,8 @@ ComfyUI 架构、工作流绑定、任务恢复与范围见 [ComfyUI 接入](COM
 
 模式隔离必须贯穿 WebUI 草稿、模型默认值、LLM 能力与默认值、真实请求、参数复制和历史回填。两个互斥模式可以映射到同一请求键，不能在合并请求值后再删除另一模式的键。工具侧默认值覆盖仍高于模型默认值；新增调用点应传入当前模式，避免退回公共默认值。
 
+自定义 JSON 请求预览通过 `POST provider/preview` 接收当前服务商草稿、`model_index` 和 `mode`，按数组位置选择模型，允许草稿中的临时重复 ID。`backend/generation/preview.py` 复用生成参数解析、分批和 `backend/providers/custom_json.py` 的 HTTP 请求构造函数，仅返回脱敏结果，不调用执行器、上传图片或保存设置。预览使用示例提示词和参考图，不代表上游已接受请求。
+
 `backend/providers/agnes.py` 负责内置能力预设与实际请求构造；`build_payload()` 同时用于协议测试，发送直接使用该结果。按[官方文档](https://www.agnes-ai.cn/zh-Hans/docs/agnes-image-25-flash.md)，两种模式均提交 `/v1/images/generations`；文生图 Base64 使用 `return_base64: true`，图生图 Base64 使用 `extra_body.response_format: "b64_json"`，参考图始终为 `extra_body.image` 数组。URL 使用 `extra_body.response_format: "url"`。不发送未经证实的 `n` 多张字段，队列强制按单张请求拆分，模型列表查询返回内置预设，不请求未知的远端模型接口。
 
 内置 `agnes-image-2.0-flash`、`agnes-image-2.1-flash`、`agnes-image-2.5-flash` 三个模型。2.0 的公开文档仅声明精确尺寸，因此预设使用 `1024x1024` 等尺寸，不默认发送 `ratio`；2.1、2.5 使用文档明确支持的 `1K`–`4K` 档位和宽高比。无自定义 schema 时，默认参数同样按模型 ID 选择。

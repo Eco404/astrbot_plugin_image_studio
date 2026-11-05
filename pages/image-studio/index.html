@@ -206,7 +206,7 @@
           <div class="section-heading"><div><h2>模型配置</h2><p>同一服务商可以配置多个模型，每个模型独立声明模式、参考图和参数。</p></div><div class="section-actions"><input id="newModelChoice" list="newModelChoices" aria-label="选择或输入模型 ID" placeholder="选择或输入模型 ID" autocomplete="off" /><datalist id="newModelChoices"></datalist><button class="primary-button" id="addModelButton" type="button">新增模型</button></div></div>
           <div class="model-settings-layout"><div class="model-list" id="settingsModelList"></div><form id="modelForm" class="model-editor"></form></div>
         </section>
-        <div class="settings-savebar floatingbar"><span class="inline-error" id="settingsError" role="alert"></span><span id="settingsDirtyStatus" role="status"></span><button class="primary-button" id="saveSettingsButton" type="button">保存全部设置</button></div>
+        <div class="settings-savebar floatingbar"><button class="quiet-button is-hidden" id="discardSettingsChangesButton" type="button">放弃更改</button><span class="inline-error" id="settingsError" role="alert"></span><span id="settingsDirtyStatus" role="status"></span><button class="primary-button" id="saveSettingsButton" type="button">保存全部设置</button></div>
       </section>
       <section class="view" id="logsView">
         <section class="settings-panel glass logs-panel">

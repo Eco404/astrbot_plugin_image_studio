@@ -453,6 +453,9 @@ class ImageStudioPlugin(Star):
     async def _api_provider_models(self) -> Any:
         return await self._generation_api()._api_provider_models()
 
+    async def _api_provider_preview(self) -> Any:
+        return await self._generation_api()._api_provider_preview()
+
     async def _api_provider_quota(self) -> Any:
         return await self._generation_api()._api_provider_quota()
 

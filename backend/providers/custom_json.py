@@ -51,19 +51,28 @@ async def generate(
     provider: ImageProvider,
     request: GenerationRequest,
 ) -> tuple[GeneratedImage, ...]:
-    endpoint = _join_url(
-        provider.base_url,
-        provider.generate_path if request.mode == "text2img" else provider.edit_path,
-    )
-    payload = build_payload(provider, request)
     async with session.post(
-        endpoint,
-        headers=_headers(provider, bearer=True),
-        proxy=provider.proxy or None,
-        json=payload,
+        **build_request(provider, request),
         timeout=aiohttp.ClientTimeout(total=provider.timeout_seconds),
     ) as response:
         return await responses.read_images(response, provider)
+
+
+def build_request(
+    provider: ImageProvider, request: GenerationRequest
+) -> dict[str, Any]:
+    """Build the same HTTP arguments for execution and the offline preview."""
+    return {
+        "url": _join_url(
+            provider.base_url,
+            provider.generate_path
+            if request.mode == "text2img"
+            else provider.edit_path,
+        ),
+        "headers": _headers(provider, bearer=True),
+        "proxy": provider.proxy or None,
+        "json": build_payload(provider, request),
+    }
 
 
 def _substitute_template(template: Any, values: dict[str, Any]) -> Any:
