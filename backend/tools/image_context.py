@@ -1,4 +1,4 @@
-"""Adapt AstrBot's image captions only for results produced in this agent run."""
+"""Own the host step boundary for delivery binding and current image captions."""
 
 from __future__ import annotations
 
@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any
 
 from mcp.types import CallToolResult, ImageContent, TextContent
+
+from .delivery import bind_delivery_runner
 
 STATE_KEY = "_image_studio_image_context"
 WRAPPER_KEY = "_image_studio_image_context_adapter"
@@ -87,6 +89,7 @@ class ImageContextAdapter:
         self._original = None
         self._wrapper = None
         self._warned = False
+        self._delivery_warned = False
 
     def _warn(self, reason: str) -> None:
         if not self._warned:
@@ -122,6 +125,16 @@ class ImageContextAdapter:
 
             @wraps(original)
             async def adapted_step(runner):
+                if self.active:
+                    try:
+                        bind_delivery_runner(runner)
+                    except Exception as exc:
+                        if not self._delivery_warned:
+                            self.logger.warning(
+                                "[ImageStudio] Agent delivery tool binding skipped: %s",
+                                type(exc).__name__,
+                            )
+                            self._delivery_warned = True
                 source = original(runner)
                 completed = False
                 try:

@@ -70,6 +70,9 @@ python scripts/verify.py --webui mode_defaults logs parameter_policy --browser c
 
 # 请求预览、放弃更改、重复 ID 草稿隔离与尺寸默认值
 python scripts/verify.py --webui request_preview settings_discard settings_identity size_defaults --browser chromium
+
+# 日志分页、模式参数和设置／画廊布局；使用各场景声明的浏览器矩阵
+python scripts/verify.py --webui logs mode_defaults parameter_policy settings_masonry gallery_display
 ```
 
 `--webui` 接受去掉 `webui_` 和 `.cjs` 的场景名，也接受完整文件名。多次传入同一场景只执行一次。
@@ -132,7 +135,30 @@ Chromium 的 `mode_defaults`、`logs`、`parameter_policy`、`request_preview`�
 
 本次只生成一张图片。模型最初跳过能力查询，由校验拦下并补查，没有额外调用生图服务。测试后恢复临时采集包装并移除辅助插件及其接口；私人会话、原始 trace 与测试辅助代码不进入仓库或发布包。自动化验证共 2496 项通过，静态检查与安装包构建通过。
 
-上述实机样本不能保证模型以后始终正确理解图片来源，也不等同于客户端送达或已读回执。`skills_like` 两阶段模式已通过独立工具集合的隔离回归，但其他插件在请求钩子之后再次浅复制该集合时，宿主的原始执行副本可能未被过滤，旧工具调用仍可能执行；此组合尚未修复，不属于本次实机验证范围。旧会话中的提示词不自动清理。
+上述实机样本不能保证模型以后始终正确理解图片来源，也不等同于客户端送达或已读回执。当时 `skills_like` 两阶段模式只覆盖独立工具集合，其他插件在请求钩子之后重建集合可能遗漏实际执行副本；该限制在 1.5.1 中通过绑定实际 runner 加固，不计入这次历史实机验证。旧会话中的提示词不自动清理。
+
+### 1.5.1 回归范围
+
+2026-11-05 发布验证：完整 Python 回归 **2721 项通过**；239 个 Python 文件的静态与格式检查、126 个 JavaScript 文件的语法检查通过。仅出现宿主 `audioop` 和插件注册装饰器的两条既有弃用警告。
+
+五组浏览器场景全部通过：`logs`、`settings_masonry`、`gallery_display` 使用 Chromium 与 WebKit；`mode_defaults`、`parameter_policy` 使用 Chromium。日志覆盖 320／390／768／1440px，画廊覆盖桌面和 360／390px 窄屏，设置布局覆盖单列、双列、动态内容和窗口尺寸变化。检查包括页码选择条、日期框布局、折叠条目圆角、关闭日志后的入口隐藏、参数适用模式及卡片顺序；浏览器模拟不等同于真实手机验证。
+
+验证使用独立运行目录与模拟服务，不调用真实 LLM、生图或聊天投递。正式安装包检查版本一致性、运行资源完整性和运行数据排除规则；数据库沿用 v4。Agnes 与 NovelAI 官方的成功生图仍待可用账户验证。
+
+`test_skills_like_contract.py` 使用真实 AstrBot 的参数专用 ToolSet 及 OpenAI、Anthropic、Gemini schema 转换，检查工具总说明被移除后，默认模型选择、搜索后查参数、用户要求生图才继续生成、能力复用范围和附件路径说明仍然保留。
+
+`test_agent_delivery_rebuild.py` 配合既有 `test_agent_delivery_scope.py`、`test_agent_image_context.py`，使用真实宿主 runner 与假提供方、假执行器检查工具集合被复制后的展示、参数和执行行为，以及当前事件隔离。发送限制在成功登记资产时生效，不能仅依赖参数 schema 或 `on_using_llm_tool` 抛异常；宿主会捕获后者并继续执行。本轮回归没有真实 LLM、生图接口或聊天发送，不证明模型一定继续生成或正确选型。
+
+### 陪伴插件兼容性核查
+
+2026-11-05 检查陪伴插件 7.1.0（提交 `527bd907`）源码及隔离模拟，未修改陪伴代码或发送真实消息：
+
+- 陪伴的请求钩子优先级为 `250000`，在 Image Studio 之前完成工具注入及原生发送包装。其 runner 实例包装继续调用原方法，可与 Image Studio 的类级 `step` 包装串联；包装后的发送工具仍叫 `send_message_to_user`，名称过滤有效。
+- 使用陪伴真实实例包装与 Image Studio 新逻辑共同运行 `full`、`skills_like` 的隔离模拟，生成与专用发送可执行，同批旧发送工具被拒绝，共享目录未改变。另检查三种响应形态及流式／非流式共六个场景：第二阶段直接答复时，陪伴会清除旧草稿，没有额外释放；宿主允许这一阶段返回文字，因此只查能力后停止仍可能与模型选择有关。
+- 陪伴群聊 `group_tool_profile=lean` 主动清空第三方工具，查询、生成及资产发送都会不可用。默认 `full` 和 `standard` 保留这些工具；这与 AstrBot 的 `skills_like` 是不同设置，Image Studio 不绕过该策略。
+- 陪伴自身图片工具启用时，系统说明要求生成图通过缓存路径和 `send_message_to_user` 投递，尚未明确限定自身 `image.*` 结果。与 Image Studio 成功后使用 `asset_id` 和 `image_studio_send_output` 的约定存在冲突。语音提示也可能继续引用最初存在、随后被隐藏的原生发送工具。应在陪伴侧限定说明适用范围，而不是由 Image Studio 改写其他插件提示。
+- 陪伴的发送保护激活后，群聊 `skip` 或图文附言命中禁词可静默丢弃整条消息并返回 `None`；隔离模拟已复现。Image Studio 目前无法据此识别未投递，因为正常 AstrBot 发送也可能返回 `None`。普通工具执行阶段该保护通常尚未激活，此项是有条件的回执兼容问题，不是常规纯图发送必然失败；本次未增加跨插件回执协议。
+- 未发现陪伴将 Image Studio 工具附图当作新的用户附件，或改写正常配对的工具结果来源说明的逻辑。陪伴的相邻文字去重不覆盖图片及图文混合消息，也不能作为 Image Studio 的重复发送保证。
 
 每个浏览器场景都启动自己的 `tests/support/webui_harness.py`，使用系统临时目录和自动分配的 `127.0.0.1` 端口；不复用运行中的部署服务。调用方已有的 `STUDIO_TEST_URL` 会被忽略。测试服务使用假图片提供方，场景中的远程接口采用固定结果或拦截，不需要真实 API Key。
 

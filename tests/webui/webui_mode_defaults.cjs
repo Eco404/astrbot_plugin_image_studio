@@ -146,6 +146,50 @@ async function run(browser, width) {
     });
     assert.equal(await frame.locator('[data-defaults-scope="model"]').count(), 0, "single-mode models do not show the switch");
     assert.equal(await frame.locator('[data-schema-default="steps"]').inputValue(), "9");
+    async function closePolicy(label = "保存") {
+      await frame.locator("#studioModalFooter button").filter({ hasText: label }).click();
+      await frame.locator("#studioModalRoot").waitFor({ state: "hidden" });
+    }
+    await frame.locator('[data-edit-schema-policy="edit_body"]').click();
+    assert.equal(await frame.locator("#schemaPolicy-modes").count(), 0, "image-only models do not offer parameter mode selection");
+    await frame.locator("#schemaPolicy-record_in_history").evaluate(element => {
+      element.checked = false;
+      element.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await closePolicy();
+    let draft = JSON.parse(await frame.locator("#modelParametersSchema").inputValue());
+    assert.deepEqual(draft.edit_body.modes, ["img2img"], "editing other policies preserves hidden mode restrictions");
+    assert.equal(draft.edit_body.record_in_history, false);
+    async function capability(name, enabled) {
+      await frame.locator(`[data-model-field="supports_${name}"]`).evaluate((element, checked) => {
+        element.checked = checked;
+        element.dispatchEvent(new Event("change", { bubbles: true }));
+      }, enabled);
+    }
+    await capability("img2img", false);
+    await frame.locator('[data-edit-schema-policy="steps"]').click();
+    assert.equal(await frame.locator("#schemaPolicy-modes").count(), 0, "models without either capability do not offer mode selection");
+    await closePolicy();
+    await capability("text2img", true);
+    await frame.locator('[data-edit-schema-policy="text_body"]').click();
+    assert.equal(await frame.locator("#schemaPolicy-modes").count(), 0, "text-only models do not offer mode selection");
+    await closePolicy();
+    draft = JSON.parse(await frame.locator("#modelParametersSchema").inputValue());
+    assert.deepEqual(draft.text_body.modes, ["text2img"]);
+    assert.equal(draft.steps.modes, undefined, "saving a hidden selector does not add a mode restriction");
+    await capability("img2img", true);
+    await pick("text2img");
+    await frame.locator('[data-edit-schema-policy="text_body"]').click();
+    assert.equal(await frame.locator("#schemaPolicy-modes").inputValue(), "text2img", "both capabilities restore the selector with its original value");
+    await closePolicy("取消");
+    const policySave = page.waitForResponse(item => item.url().endsWith("/settings/save") && item.request().method() === "POST");
+    await frame.locator("#saveSettingsButton").click();
+    assert.equal((await policySave).status(), 200);
+    const policySettings = await (await page.request.get(`${api}/settings/get`)).json();
+    const policies = policySettings.webui.providers.find(item => item.id === providerId).models[0].parameters;
+    assert.deepEqual(policies.edit_body.modes, ["img2img"]);
+    assert.equal(policies.edit_body.record_in_history, false);
+    assert.deepEqual(policies.text_body.modes, ["text2img"]);
     assert.deepEqual(errors, []);
     console.log(`${engine}-${width}: mode defaults, applicability, tool overrides and persistence passed`);
   } finally {
