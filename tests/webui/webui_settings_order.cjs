@@ -44,11 +44,11 @@ async function verify(browser, engine, width) {
     };
   });
   let frame;
-  const providerOrder = () => frame.locator("#settingsProviderList > [data-settings-order-id]").evaluateAll(items => items.map(item => item.dataset.settingsOrderId));
-  const modelOrder = () => frame.locator("#settingsModelList > [data-settings-order-id]").evaluateAll(items => items.map(item => item.dataset.settingsOrderId));
-  const row = (kind, id) => frame.locator(`${kind === "provider" ? "#settingsProviderList" : "#settingsModelList"} > [data-settings-order-id="${id}"]`);
+  const providerOrder = () => frame.locator("#settingsProviderList [data-settings-provider]").evaluateAll(items => items.map(item => item.dataset.settingsProvider));
+  const modelOrder = () => frame.locator("#settingsModelList [data-settings-model]").evaluateAll(items => items.map(item => item.dataset.settingsModel));
+  const row = (kind, id) => frame.locator(`${kind === "provider" ? "#settingsProviderList" : "#settingsModelList"} > [data-settings-order-id]`).filter({ has: frame.locator(`[data-settings-${kind}="${id}"]`) });
   const handle = (kind, id) => row(kind, id).locator("[data-sort-handle]");
-  const selected = kind => frame.locator(`${kind === "provider" ? "#settingsProviderList" : "#settingsModelList"} > .is-active`).getAttribute("data-settings-order-id");
+  const selected = kind => frame.locator(`${kind === "provider" ? "#settingsProviderList" : "#settingsModelList"} > .is-active [data-settings-${kind}]`).getAttribute(`data-settings-${kind}`);
   const open = async () => {
     // Let settings follow-up reads finish before navigating the iframe; a
     // WebKit-aborted host bridge request otherwise looks like a CORS failure.

@@ -8,7 +8,15 @@
     const $ = id => document.getElementById(id);
     const { icon, positionBalancedGrid } = window.ImageStudioPresentation;
     const { modelForMode } = window.ImageStudioParameters;
-    const state = { settings: null, selectedSettingsProviderId: "", selectedSettingsModelId: "", modelEditorTab: "model", defaultsMode: "text2img", toolDefaultsMode: "text2img", editingToolParameter: "", editingToolDefaultChoices: [] };
+    const state = { settings: null, selectedSettingsProvider: null, selectedSettingsModel: null, modelEditorTab: "model", defaultsMode: "text2img", toolDefaultsMode: "text2img", editingToolParameter: "", editingToolDefaultChoices: [] };
+    // IDs are editable draft values. Keep selection and row identity separate
+    // so temporary duplicate/empty IDs never redirect edits to another item.
+    const settingsRowKeys = new WeakMap();
+    let settingsRowSequence = 0;
+    function settingsRowKey(item) {
+      if (!settingsRowKeys.has(item)) settingsRowKeys.set(item, `settings-row-${++settingsRowSequence}`);
+      return settingsRowKeys.get(item);
+    }
     const els = Object.fromEntries(["addModelButton", "addProviderButton", "agentImageReturnMode", "agentPreviewMaxEdge", "agentPreviewQuality", "filter", "find", "flatMap", "historyEnabled", "historyMegabytes", "historyRecords", "length", "map", "modelForm", "newModelChoice", "newModelChoices", "parameterDialog", "providerForm", "push", "recordInvocationIdentity", "retainReferences", "runDeepMaintenanceButton", "runMaintenanceButton", "saveSettingsButton", "settingPageDefaultImageModel", "settingPageDefaultTextModel", "settingTool", "settingToolDefaultImageModel", "settingToolDefaultTextModel", "settingsError", "settingsModelList", "settingsProviderList", "some", "storageHealthAssets", "storageHealthCheckedAt", "storageHealthDuration", "storageHealthGenerations", "storageHealthLeases", "storageHealthStatus", "toolParameterChoices", "toolParameterDefault", "toolParameterDefaultChoice", "toolParameterDefaultHint", "toolParameterDescription", "toolParameterExposed"].map(id => [id, $(id)]));
     const MODEL_DEFAULT_CHOICE = "__model_default__";
     let bound = false;
@@ -212,6 +220,7 @@
           if (!payload?.base || !payload?.webui || !Array.isArray(payload.webui.providers)) throw new Error("设置接口返回的数据格式无效");
           normalizeSettingsModelDefaults(payload);
           savedSettingsPayload = structuredClone(payload);
+          const previousProviderId = currentSettingsProvider()?.id;
           state.settings = payload;
           if (Array.isArray(payload.novelai_models)) novelaiModels = payload.novelai_models;
           if (Array.isArray(payload.agnes_models)) agnesModels = payload.agnes_models;
@@ -224,8 +233,8 @@
           const llmPolicy = payload.webui.llm_policy || {}; const assetPolicy = payload.webui.asset_policy || {}; els.agentImageReturnMode.value = ["asset", "preview", "original"].includes(llmPolicy.image_return_mode) ? llmPolicy.image_return_mode : "preview"; els.agentPreviewMaxEdge.value = Number(assetPolicy.preview_max_edge || 768); els.agentPreviewQuality.value = Number(assetPolicy.preview_quality || 80); syncAgentImageSettings();
           const history = payload.webui.history; els.historyEnabled.checked = !!history.enabled; els.retainReferences.checked = !!history.retain_reference_images; els.recordInvocationIdentity.checked = !!history.record_invocation_identity; els.historyRecords.value = history.max_records; els.historyMegabytes.value = history.max_megabytes;
           refreshSettingsDefaultModels(payload.webui.generation_defaults || {});
-          if (!payload.webui.providers.some((item) => item.id === state.selectedSettingsProviderId)) state.selectedSettingsProviderId = payload.webui.providers[0]?.id || "";
-          state.selectedSettingsModelId = "";
+          state.selectedSettingsProvider = payload.webui.providers.find(item => item.id === previousProviderId) || payload.webui.providers[0] || null;
+          state.selectedSettingsModel = null;
           renderSettingsProviders();
           hooks.externalSources().settingsLoaded();
           window.ImageStudioSelect?.refresh($("settingsView"));
@@ -329,11 +338,11 @@
       if (provider.kind === "comfyui") model.parameters = hooks.comfyui().totalParameters(model.parameters);
       else if (!Object.entries(model.parameters).some(([name, descriptor]) => modelParameterMatches(name, descriptor, ["count", "n"]))) model.parameters.count = JSON.parse(JSON.stringify(BATCH_PRESET.count));
     }
-    function currentSettingsProvider() { return state.settings?.webui.providers.find((item) => item.id === state.selectedSettingsProviderId) || null; }
+    function currentSettingsProvider() { return state.settings?.webui.providers.includes(state.selectedSettingsProvider) ? state.selectedSettingsProvider : null; }
     function settingsOrderRow(item, kind, selected, status, movable) {
       const name = item.name || item.id;
       const grip = '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true"><circle cx="9" cy="5" r="1.5"/><circle cx="15" cy="5" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="19" r="1.5"/><circle cx="15" cy="19" r="1.5"/></svg>';
-      return `<div class="provider-row settings-sortable-row ${selected ? "is-active" : ""}" data-settings-order-id="${escape(item.id)}" role="listitem"><button class="settings-row-select" type="button" data-settings-${kind}="${escape(item.id)}" data-sort-surface aria-pressed="${selected}" data-tooltip="${escape(name)}" data-tooltip-overflow="strong"><strong>${escape(name)}</strong><span>${escape(status)}</span></button><button class="settings-sort-handle" data-sort-handle type="button" aria-label="调整 ${escape(name)} 的顺序" data-tooltip="拖动排序，也可使用方向键或 Home / End"${movable ? "" : " disabled"}>${grip}</button></div>`;
+      return `<div class="provider-row settings-sortable-row ${selected ? "is-active" : ""}" data-settings-order-id="${settingsRowKey(item)}" role="listitem"><button class="settings-row-select" type="button" data-settings-${kind}="${escape(item.id)}" data-sort-surface aria-pressed="${selected}" data-tooltip="${escape(name)}" data-tooltip-overflow="strong"><strong>${escape(name)}</strong><span>${escape(status)}</span></button><button class="settings-sort-handle" data-sort-handle type="button" aria-label="调整 ${escape(name)} 的顺序" data-tooltip="拖动排序，也可使用方向键或 Home / End"${movable ? "" : " disabled"}>${grip}</button></div>`;
     }
 
     function bindSettingsOrder(list, kind, provider = null) {
@@ -343,15 +352,15 @@
       const canSort = () => hooks.getView() === "settings" && !settingsSaving && !settingsNavigationPending && !hooks.confirmationOpen() && !library.modalOpen() && els.parameterDialog.classList.contains("is-hidden");
       window.ImageStudioSortable.bind(list, {
         itemSelector: "[data-settings-order-id]", getId: item => item.dataset.settingsOrderId,
-        getLabel: item => { const value = values().find(value => value.id === item.dataset.settingsOrderId); return value?.name || value?.id || itemName; },
+        getLabel: item => { const value = values().find(value => settingsRowKey(value) === item.dataset.settingsOrderId); return value?.name || value?.id || itemName; },
         itemName, itemUnit: "项", isEnabled: canSort,
         onReorder: ids => {
-          const items = values(), byId = new Map(items.map(item => [item.id, item]));
+          const items = values(), byId = new Map(items.map(item => [settingsRowKey(item), item]));
           if (!canSort() || ids.length !== items.length || new Set(ids).size !== ids.length || ids.some(id => !byId.has(id))) return;
           const reordered = ids.map(id => byId.get(id));
           if (kind === "provider") state.settings.webui.providers = reordered;
           else provider.models = reordered;
-          // Only the order changes. Existing editor nodes, selected IDs and
+          // Only the order changes. Existing editor nodes, selected items and
           // typed values remain mounted; explicit default model refs stay put.
           refreshSettingsDefaultModels(); updateSettingsDirty();
         },
@@ -361,14 +370,16 @@
     function updateSettingsRowId(list, kind, id) {
       const row = list.querySelector(".provider-row.is-active");
       if (!row) return;
-      row.dataset.settingsOrderId = id;
       const select = row.querySelector(`[data-settings-${kind}]`);
       if (select) select.dataset[kind === "provider" ? "settingsProvider" : "settingsModel"] = id;
     }
 
     function renderSettingsProviders() {
-      const providers = state.settings?.webui.providers || []; els.settingsProviderList.innerHTML = providers.length ? providers.map(item => settingsOrderRow(item, "provider", item.id === state.selectedSettingsProviderId, item.enabled ? "启用" : "停用", providers.length > 1)).join("") : '<div class="provider-empty">尚未添加生图服务商</div>';
-      els.settingsProviderList.querySelectorAll("[data-settings-provider]").forEach((button) => button.addEventListener("click", () => { state.selectedSettingsProviderId = button.dataset.settingsProvider; state.selectedSettingsModelId = ""; renderSettingsProviders(); }));
+      const providers = state.settings?.webui.providers || []; els.settingsProviderList.innerHTML = providers.length ? providers.map(item => settingsOrderRow(item, "provider", item === state.selectedSettingsProvider, item.enabled ? "启用" : "停用", providers.length > 1)).join("") : '<div class="provider-empty">尚未添加生图服务商</div>';
+      els.settingsProviderList.querySelectorAll("[data-settings-provider]").forEach((button) => {
+        const provider = providers.find(item => settingsRowKey(item) === button.parentElement.dataset.settingsOrderId);
+        button.addEventListener("click", () => { state.selectedSettingsProvider = provider; state.selectedSettingsModel = null; renderSettingsProviders(); });
+      });
       bindSettingsOrder(els.settingsProviderList, "provider");
       renderProviderEditor();
       renderModelEditor();
@@ -391,8 +402,11 @@
       const comfyFields = '<div class="field field-wide"><span class="field-hint">连接自建 ComfyUI 原生服务。API Key 可留空；受保护的服务可填写请求头。下方每个工作流独立配置输入绑定及结果节点。</span></div>';
       const agnesFields = field("generate_path", "生图路径（两种模式共用）", provider.generate_path);
       els.providerForm.innerHTML = `${heading}${common}${kind === "agnes" ? agnesFields : kind === "comfyui" ? comfyFields : official ? officialFields : typeFields}<div class="provider-editor-actions"><button class="danger-button" id="removeProviderButton" type="button">删除服务商</button>${discoveryButton}</div>`;
-      els.providerForm.querySelectorAll("[data-provider-field]").forEach((input) => input.addEventListener("input", () => updateProviderField(input))); els.providerForm.querySelectorAll("[data-provider-field]").forEach((input) => input.addEventListener("change", () => updateProviderField(input)));
-      $("removeProviderButton")?.addEventListener("click", async () => { if (!await confirmAction("删除此生图服务商？历史记录不会删除。")) return; state.settings.webui.providers = state.settings.webui.providers.filter((item) => item.id !== provider.id); state.selectedSettingsProviderId = state.settings.webui.providers[0]?.id || ""; renderSettingsProviders(); showNotice("已从设置草稿中删除，保存全部设置后生效。", "success"); });
+      els.providerForm.querySelectorAll("[data-provider-field]").forEach((input) => {
+        input.addEventListener("input", () => updateProviderField(input, provider));
+        input.addEventListener("change", () => updateProviderField(input, provider));
+      });
+      $("removeProviderButton")?.addEventListener("click", async () => { if (!await confirmAction("删除此生图服务商？历史记录不会删除。")) return; state.settings.webui.providers = state.settings.webui.providers.filter((item) => item !== provider); state.selectedSettingsProvider = state.settings.webui.providers[0] || null; state.selectedSettingsModel = null; renderSettingsProviders(); showNotice("已从设置草稿中删除，保存全部设置后生效。", "success"); });
       $("discoverModelsButton")?.addEventListener("click", () => void discoverProviderModels(provider));
       window.ImageStudioSelect?.refresh(els.providerForm);
     }
@@ -408,11 +422,26 @@
       return `<details class="provider-request-details"><summary>请求与响应配置</summary><div class="provider-request-fields">${textAreaField("request_template", "公共 JSON 模板", provider.request_template, commonHint)}${textAreaField("request_template_text2img", "文生图 JSON 模板", provider.request_templates?.text2img || "", textHint)}${textAreaField("request_template_img2img", "图生图 JSON 模板", provider.request_templates?.img2img || "", imageHint)}${field("response_image_path", "响应图片路径（可选）", provider.response_image_path, "text", false, "", responseHint)}</div></details>`;
     }
     function selectField(key, label, value, options) { return `<div class="field"><label>${label}</label><select data-provider-field="${key}">${options.map(([id, name]) => `<option value="${id}" ${id === value ? "selected" : ""}>${name}</option>`).join("")}</select></div>`; }
-    function updateProviderField(input) { const provider = currentSettingsProvider(); if (!provider) return; const key = input.dataset.providerField; const value = input.type === "checkbox" ? input.checked : input.type === "number" ? Number(input.value) : input.value; if (key.startsWith("request_template_")) { provider.request_templates = { ...(provider.request_templates || {}), [key.slice("request_template_".length)]: value }; return; } if (key === "kind" && value !== provider.kind) { Object.assign(provider, providerDefaults(value)); provider.kind = value; state.selectedSettingsModelId = ""; renderProviderEditor(); renderModelEditor(); return; } provider[key] = value; if (key === "id") { state.selectedSettingsProviderId = input.value; updateSettingsRowId(els.settingsProviderList, "provider", input.value); const activeRow = els.settingsProviderList.querySelector(".provider-row.is-active"); if (activeRow && !provider.name) activeRow.querySelector("strong").textContent = input.value; } refreshSettingsDefaultModels(); }
+    function updateProviderField(input, provider) {
+      // Replacing a focused editor can emit change after selection has moved,
+      // while its old input is still connected. Never redirect that event.
+      if (provider !== currentSettingsProvider() || !input.isConnected) return;
+      const key = input.dataset.providerField;
+      const value = input.type === "checkbox" ? input.checked : input.type === "number" ? Number(input.value) : input.value;
+      if (key.startsWith("request_template_")) { provider.request_templates = { ...(provider.request_templates || {}), [key.slice("request_template_".length)]: value }; return; }
+      if (key === "kind" && value !== provider.kind) { Object.assign(provider, providerDefaults(value)); provider.kind = value; state.selectedSettingsModel = null; renderProviderEditor(); renderModelEditor(); return; }
+      provider[key] = value;
+      if (key === "id") {
+        updateSettingsRowId(els.settingsProviderList, "provider", input.value);
+        const activeRow = els.settingsProviderList.querySelector(".provider-row.is-active");
+        if (activeRow && !provider.name) activeRow.querySelector("strong").textContent = input.value;
+      }
+      refreshSettingsDefaultModels();
+    }
     async function discoverProviderModels(provider) { const button = $("discoverModelsButton"); if (button) { button.disabled = true; button.textContent = "获取中…"; } try { const payload = await apiPost("provider/models", { provider }); provider.discovered_models = payload.models || []; for (const model of provider.models || []) { const discovered = provider.discovered_models.find((item) => item.id === model.id); if (discovered && model.native_batch_size_source !== "manual") { model.native_batch_size = Number(discovered.native_batch_size) || 1; model.native_batch_size_source = discovered.native_batch_size_source || "default"; } } renderModelEditor(); updateSettingsDirty(); showNotice(`已获取 ${provider.discovered_models.length} 个模型，可在新增模型时选择。`, "success"); } catch (error) { showNotice(errorMessage(error, "获取模型失败"), "error"); } finally { if (button) { button.disabled = false; button.textContent = "获取模型"; } } }
     function renderNewModelChoices(provider = currentSettingsProvider()) { const builtin = builtinProviderModels(provider), models = builtin || provider?.discovered_models || []; els.newModelChoices.innerHTML = models.map((item) => `<option value="${escape(item.id)}">${escape(item.name || item.id)}${item.capability_source === "unknown" ? " · 能力未知" : ""}</option>`).join(""); els.newModelChoice.value = ""; els.newModelChoice.placeholder = provider?.kind === "agnes" ? "选择 Agnes 模型或输入 ID" : provider?.kind === "novelai_official" ? "选择 NovelAI 官方模型" : builtin ? "选择 NAI 模型或手动输入 ID" : "选择或输入模型 ID"; }
 
-    function currentSettingsModel() { const provider = currentSettingsProvider(); return provider?.models?.find((item) => item.id === state.selectedSettingsModelId) || null; }
+    function currentSettingsModel() { return currentSettingsProvider()?.models?.includes(state.selectedSettingsModel) ? state.selectedSettingsModel : null; }
     function renderModelEditor() {
       const provider = currentSettingsProvider();
       const comfy = provider?.kind === "comfyui";
@@ -424,9 +453,12 @@
       if (comfy) els.newModelChoice.placeholder = "工作流 ID（可自动生成）";
       if (!provider) { els.settingsModelList.innerHTML = '<div class="provider-empty">请先选择服务商</div>'; els.modelForm.innerHTML = '<div class="provider-empty">选择服务商后配置模型能力。</div>'; return; }
       provider.models = Array.isArray(provider.models) ? provider.models : [];
-      if (!provider.models.some((item) => item.id === state.selectedSettingsModelId)) state.selectedSettingsModelId = provider.models[0]?.id || "";
-      els.settingsModelList.innerHTML = provider.models.length ? provider.models.map(item => settingsOrderRow(item, "model", item.id === state.selectedSettingsModelId, referenceLimitForModel(item) > 0 ? "图生图" : item.supports_text2img ? "文生图" : "未开放", provider.models.length > 1)).join("") : '<div class="provider-empty">该服务商尚未添加模型</div>';
-      els.settingsModelList.querySelectorAll("[data-settings-model]").forEach((button) => button.addEventListener("click", () => { state.selectedSettingsModelId = button.dataset.settingsModel; renderModelEditor(); }));
+      if (!currentSettingsModel()) state.selectedSettingsModel = provider.models[0] || null;
+      els.settingsModelList.innerHTML = provider.models.length ? provider.models.map(item => settingsOrderRow(item, "model", item === state.selectedSettingsModel, referenceLimitForModel(item) > 0 ? "图生图" : item.supports_text2img ? "文生图" : "未开放", provider.models.length > 1)).join("") : '<div class="provider-empty">该服务商尚未添加模型</div>';
+      els.settingsModelList.querySelectorAll("[data-settings-model]").forEach((button) => {
+        const model = provider.models.find(item => settingsRowKey(item) === button.parentElement.dataset.settingsOrderId);
+        button.addEventListener("click", () => { state.selectedSettingsModel = model; renderModelEditor(); });
+      });
       bindSettingsOrder(els.settingsModelList, "model", provider);
       const model = currentSettingsModel();
       if (!model) { els.modelForm.innerHTML = '<div class="provider-empty">点击“新增模型”开始配置。</div>'; return; }
@@ -497,7 +529,7 @@
         state[button.dataset.defaultsScope === "tool" ? "toolDefaultsMode" : "defaultsMode"] = button.dataset.defaultsMode;
         renderModelEditor();
       }));
-      els.modelForm.querySelectorAll("[data-model-field]").forEach((input) => { input.addEventListener("input", () => updateModelField(input)); input.addEventListener("change", () => updateModelField(input, true)); });
+      els.modelForm.querySelectorAll("[data-model-field]").forEach((input) => { input.addEventListener("input", () => updateModelField(input, model)); input.addEventListener("change", () => updateModelField(input, model, true)); });
       els.modelForm.querySelectorAll("[data-schema-default]").forEach((input) => input.addEventListener("change", () => {
         const descriptor = schemaDefaultTarget(model, input.dataset.schemaDefault);
         if (input.dataset.schemaJson) { try { descriptor.default = JSON.parse(input.value); input.setCustomValidity(""); } catch { input.setCustomValidity("默认值必须是合法 JSON"); return; } }
@@ -520,7 +552,7 @@
         renderModelEditor();
         updateSettingsDirty();
       }));
-      $("removeModelButton")?.addEventListener("click", async () => { if (!await confirmAction("删除此模型？历史记录不会删除。")) return; provider.models = provider.models.filter((item) => item.id !== model.id); state.selectedSettingsModelId = provider.models[0]?.id || ""; renderModelEditor(); showNotice("已从设置草稿中删除模型，保存全部设置后生效。", "success"); });
+      $("removeModelButton")?.addEventListener("click", async () => { if (!await confirmAction("删除此模型？历史记录不会删除。")) return; provider.models = provider.models.filter((item) => item !== model); state.selectedSettingsModel = provider.models[0] || null; renderModelEditor(); showNotice("已从设置草稿中删除模型，保存全部设置后生效。", "success"); });
       $("testModelButton")?.addEventListener("click", () => void testModel(provider, model));
     }
     function modelField(key, label, value, type = "text") { return `<div class="field"><label>${label}</label><input data-model-field="${key}" type="${type}" value="${escape(value)}" /></div>`; }
@@ -541,8 +573,8 @@
       }
       return result;
     }
-    function updateModelField(input, commit = false) {
-      const model = currentSettingsModel(); if (!model) return;
+    function updateModelField(input, model, commit = false) {
+      if (model !== currentSettingsModel() || !input.isConnected) return;
       const key = input.dataset.modelField;
       if (key === "parameters") { try { model.parameters = input.value.trim() ? JSON.parse(input.value) : {}; input.setCustomValidity(""); } catch { input.setCustomValidity("参数 schema 必须是合法 JSON"); } return; }
       if (key.startsWith("tool_")) { const toolKey = key.slice(5); model.tool[toolKey] = input.type === "checkbox" ? input.checked : input.value; if (toolKey === "enabled") refreshSettingsDefaultModels(); return; }
@@ -567,7 +599,6 @@
           const preset = novelaiModels.find(item => item.id === input.value);
           if (preset) { model.novelai_capabilities = structuredClone(preset.novelai_capabilities); model.max_reference_images = preset.max_reference_images; model.tool.max_reference_images = Math.min(model.tool.max_reference_images, model.max_reference_images); model.parameters = reconcileOfficialParameters(model.parameters, preset); }
         }
-        state.selectedSettingsModelId = input.value;
         updateSettingsRowId(els.settingsModelList, "model", input.value);
         const activeRow = els.settingsModelList.querySelector(".provider-row.is-active");
         if (activeRow && !model.name) activeRow.querySelector("strong").textContent = input.value;
@@ -590,7 +621,7 @@
       if (!value || currentSettingsModel() !== model || !input.isConnected) return;
       if (!Array.from(input.options).some(option => option.value === value)) input.add(new Option(value, value));
       input.value = value;
-      updateModelField(input, true);
+      updateModelField(input, model, true);
       window.ImageStudioSelect?.refresh(input);
       updateSettingsDirty();
     }
@@ -703,7 +734,7 @@
       if (!state.settings && !await loadSettings()) return;
       const id = `provider_${Date.now().toString(36)}`;
       state.settings.webui.providers.push({ id, name: "新服务商", enabled: true, kind: "openai_images", ...providerDefaults("openai_images"), api_key: "", proxy: "", custom_headers: "", timeout_seconds: 180, discovered_models: [], models: [] });
-      state.selectedSettingsProviderId = id; state.selectedSettingsModelId = ""; renderSettingsProviders(); showNotice("已新增生图服务商，请填写连接配置并添加模型。", "success");
+      state.selectedSettingsProvider = state.settings.webui.providers.at(-1); state.selectedSettingsModel = null; renderSettingsProviders(); showNotice("已新增生图服务商，请填写连接配置并添加模型。", "success");
     }
     async function addModel() {
       if (!state.settings && !await loadSettings()) return;
@@ -715,7 +746,7 @@
         if (provider.models.some(item => item.id === requestedId)) { showNotice("该服务商中已经存在相同工作流 ID。", "error"); return; }
         const result = await hooks.comfyui().edit(provider, { id: requestedId, name: requestedId });
         if (!result) return;
-        provider.models.push(result.model); state.selectedSettingsModelId = requestedId;
+        provider.models.push(result.model); state.selectedSettingsModel = result.model;
         renderModelEditor(); updateSettingsDirty(); showNotice("工作流已加入草稿，请保存全部设置。", "success"); return;
       }
       const requestedId = els.newModelChoice.value.trim();
@@ -730,7 +761,7 @@
       const capabilityKnown = !!chosen?.capability_source && chosen.capability_source !== "unknown";
       const maxRefs = capabilityKnown ? configuredReferenceLimit(chosen.max_reference_images) : 1;
       provider.models.push({ id: requestedId, name: chosen?.name || requestedId, native_batch_size: provider.kind === "nai_direct" ? 1 : Number(chosen?.native_batch_size) || 1, native_batch_size_source: provider.kind === "nai_direct" ? "fixed" : chosen?.native_batch_size_source || "default", max_concurrent_requests: 8, supports_text2img: chosen ? !!chosen.supports_text2img : true, supports_img2img: provider.kind !== "nai_direct" && capabilityKnown ? !!chosen.supports_img2img : false, supports_negative_prompt: chosen ? !!chosen.supports_negative_prompt : provider.kind === "nai_direct", negative_prompt_default: provider.kind === "nai_direct" ? NAI_DEFAULT_NEGATIVE : "", max_reference_images: maxRefs, capability_source: chosen?.capability_source || "manual", ...(chosen?.novelai_capabilities ? { novelai_capabilities: structuredClone(chosen.novelai_capabilities) } : {}), parameters: modelPreset(provider.kind, requestedId), tool: { enabled: true, max_reference_images: maxRefs } });
-      state.selectedSettingsModelId = requestedId; renderModelEditor(); showNotice("已新增模型，请填写能力和参数 schema。", "success");
+      state.selectedSettingsModel = provider.models.at(-1); renderModelEditor(); showNotice("已新增模型，请填写能力和参数 schema。", "success");
     }
     async function saveSettings() {
       if (settingsSaving) return;
@@ -834,7 +865,7 @@
       if (!await loadSettings()) throw new Error("设置读取失败，尚未添加工作流，请重试。");
       const provider = state.settings.webui.providers.find(item => item.id === providerId && item.kind === "comfyui");
       if (!provider) throw new Error("设置草稿中已没有此 ComfyUI 服务商，请重新选择。");
-      state.selectedSettingsProviderId = providerId; state.selectedSettingsModelId = ""; state.modelEditorTab = "model";
+      state.selectedSettingsProvider = provider; state.selectedSettingsModel = null; state.modelEditorTab = "model";
       closeDetail(); switchView("settings"); renderSettingsProviders();
       return provider;
     }
@@ -845,7 +876,7 @@
       provider.models = Array.isArray(provider.models) ? provider.models : [];
       if (provider.models.some(item => item.id === result.model.id)) throw new Error("工作流 ID 已存在，请使用其他 ID。");
       const model = structuredClone(result.model); ensureToolConfig(model, provider); provider.models.push(model);
-      state.selectedSettingsProviderId = provider.id; state.selectedSettingsModelId = model.id; state.modelEditorTab = "model";
+      state.selectedSettingsProvider = provider; state.selectedSettingsModel = model; state.modelEditorTab = "model";
       renderSettingsProviders(); updateSettingsDirty();
       showNotice("工作流已加入设置草稿，点击保存全部设置后生效。", "success");
     }
