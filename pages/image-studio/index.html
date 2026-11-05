@@ -219,8 +219,10 @@
             <label class="field">结束日期<input id="logsDateTo" type="date" /></label>
           </div>
           <div id="logsList" aria-live="polite"></div>
-          <div class="logs-pagination"><button class="quiet-button" id="logsPrevious" type="button">上一页</button><span id="logsPage"></span><button class="quiet-button" id="logsNext" type="button">下一页</button></div>
         </section>
+        <div class="logs-floatingbar floatingbar">
+          <nav class="logs-pagination" aria-label="日志分页"><button class="quiet-button" id="logsPrevious" type="button">上一页</button><span id="logsPage" aria-live="polite"></span><button class="quiet-button" id="logsNext" type="button">下一页</button></nav>
+        </div>
       </section>
     </section>
   </main>

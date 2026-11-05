@@ -5,12 +5,36 @@ const path = require("node:path");
 const playwright = require(process.env.STUDIO_PLAYWRIGHT || "playwright");
 const { pagePath } = require("../support/webui_paths.cjs");
 
+async function checkDateLayout(page) {
+  const dates = await page.locator('.logs-toolbar input[type="date"]').evaluateAll(inputs => inputs.map(input => ({
+    input: input.getBoundingClientRect().toJSON(), field: input.parentElement.getBoundingClientRect().toJSON(),
+  })));
+  for (const { input, field } of dates) {
+    assert.ok(input.width > 0 && input.left >= field.left - 1 && input.right <= field.right + 1, JSON.stringify({ input, field }));
+  }
+  if (Math.abs(dates[0].input.top - dates[1].input.top) < 1) {
+    assert.ok(dates[0].input.right < dates[1].input.left, "date inputs must leave a gap instead of overlapping");
+  }
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), false);
+}
+
+async function checkEntryCorners(page, expanded) {
+  const corners = await page.locator("#logsList summary").first().evaluate(summary => {
+    const style = getComputedStyle(summary);
+    return [style.borderTopLeftRadius, style.borderTopRightRadius, style.borderBottomLeftRadius, style.borderBottomRightRadius].map(parseFloat);
+  });
+  assert.ok(corners.slice(0, 2).every(radius => radius > 0), "entry headers keep both outer top corners rounded");
+  assert.ok(corners.slice(2).every(radius => expanded ? radius === 0 : radius > 0), `collapsed highlights must keep four rounded corners: ${corners}`);
+}
+
 async function verify(browser, width) {
-  const page = await browser.newPage({ viewport: { width, height: 850 } });
+  const mobile = width <= 600;
+  const page = await browser.newPage({ viewport: { width, height: 850 }, isMobile: mobile, hasTouch: mobile });
   try {
-    await page.setContent(`<section id="logsView" class="logs-panel"><p id="logsEnabledNotice" hidden>日志未开启</p><div class="logs-toolbar"><label class="field">类型<select id="logsCategory"></select></label><label class="field">等级<select id="logsLevel"></select></label><label class="field">开始日期<input id="logsDateFrom" type="date"></label><label class="field">结束日期<input id="logsDateTo" type="date"></label><div class="logs-actions"><button id="logsRefresh">刷新</button><button id="logsClear">清空日志</button></div></div><p class="logs-hint">日期筛选按 UTC，显示时间采用浏览器时区。</p><div id="logsList"></div><div class="logs-pagination"><button id="logsPrevious">上一页</button><span id="logsPage"></span><button id="logsNext">下一页</button></div></section>`);
-    await page.addStyleTag({ content: fs.readFileSync(pagePath("app.css"), "utf8") });
-    await page.addStyleTag({ content: fs.readFileSync(pagePath("logs.css"), "utf8") });
+    const index = fs.readFileSync(pagePath("index.html"), "utf8");
+    const markup = index.match(/<section class="view" id="logsView">[\s\S]*?<\/section>\s*<\/section>/)[0].replace('class="view"', 'class="view is-active"');
+    await page.setContent(`<meta name="viewport" content="width=device-width, initial-scale=1"><main class="app-shell"><aside></aside><section class="workspace">${markup}</section></main>`);
+    for (const link of index.matchAll(/href="\.\/([^"?]+\.css)/g)) await page.addStyleTag({ path: pagePath(link[1]) });
     await page.addScriptTag({ path: pagePath("logs.js") });
     await page.evaluate(() => {
       window.calls = []; window.confirmed = false; window.delay = false;
@@ -27,11 +51,30 @@ async function verify(browser, width) {
     assert.equal(await page.locator("#logsList details").count(), 1);
     assert.equal(await page.locator("#logsList img").count(), 0);
     assert.equal(await page.locator("#logsList pre").count(), 0, "detail JSON is rendered only on demand");
-    await page.locator("#logsList summary").click();
+    await checkDateLayout(page);
+    const summary = page.locator("#logsList summary");
+    await summary.hover();
+    await checkEntryCorners(page, false);
+    await summary[mobile ? "tap" : "click"]();
     await page.locator("#logsList pre").waitFor();
+    await checkEntryCorners(page, true);
     assert.match(await page.locator("#logsList pre").textContent(), /"prompt": "cat"/);
     assert.equal(await page.evaluate(() => Boolean(window.injected)), false);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), false);
+    await summary[mobile ? "tap" : "click"]();
+    await checkEntryCorners(page, false);
+    await page.evaluate(async () => {
+      payload.items = Array.from({ length: 50 }, (_, index) => ({ ...payload.items[0], id: String(index), message: `日志 ${index + 1}` }));
+      await controller.load();
+    });
+    const bar = page.locator(".logs-floatingbar");
+    const before = await bar.boundingBox();
+    assert.ok(before.y >= 750 && before.y + before.height <= 850, "pagination stays near the viewport bottom");
+    await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+    const after = await bar.boundingBox();
+    assert.ok(Math.abs(after.y - before.y) < 1, "pagination must remain fixed while the log list scrolls");
+    const last = await page.locator("#logsList details").last().boundingBox();
+    assert.ok(last.y + last.height <= after.y, "bottom spacing must keep the last log clear of the floating bar");
     await page.locator("#logsNext").click();
     await page.waitForFunction(() => calls.at(-1).params.page === 2);
     await page.locator("#logsCategory").selectOption("request");
@@ -41,6 +84,10 @@ async function verify(browser, width) {
     await page.locator("#logsDateFrom").fill("2026-11-01");
     await page.locator("#logsDateFrom").dispatchEvent("change");
     await page.waitForFunction(() => calls.at(-1).params.date_from === "2026-11-01");
+    await page.locator("#logsDateTo").fill("2026-11-05");
+    await page.locator("#logsDateTo").dispatchEvent("change");
+    await page.waitForFunction(() => calls.at(-1).params.date_to === "2026-11-05");
+    await checkDateLayout(page);
     await page.locator("#logsClear").click();
     assert.equal(await page.evaluate(() => calls.some(call => call.path === "logs/clear")), false);
     await page.evaluate(() => { confirmed = true; });
@@ -54,14 +101,14 @@ async function verify(browser, width) {
     assert.equal(await page.locator("#logsClear").isDisabled(), true);
     assert.equal(await page.locator("#logsEnabledNotice").isVisible(), true);
     assert.equal(await page.evaluate(() => calls.filter(call => call.path === "logs/clear").length), 1);
-    console.log(`logs ${width}: filters, confirmation, pagination, safe/lazy details and disabled stale-response guard passed`);
+    console.log(`logs ${width}: responsive dates, hover/touch corners, floating pagination, filters, safe/lazy details and disabled stale-response guard passed`);
   } finally { await page.close(); }
 }
 
 async function verifyIntegration(browser, width) {
   const base = process.env.STUDIO_TEST_URL;
   if (!base) return;
-  const page = await browser.newPage({ viewport: { width, height: 900 } });
+  const page = await browser.newPage({ viewport: { width, height: 900 }, isMobile: width <= 600, hasTouch: width <= 600 });
   page.setDefaultTimeout(15000);
   const errors = [];
   page.on("pageerror", error => errors.push(error.message));
@@ -71,10 +118,17 @@ async function verifyIntegration(browser, width) {
     await frame.locator("#runtimeStatus").filter({ hasText: "已加载" }).waitFor({ state: "attached" });
     assert.equal(await frame.locator("#logsNav").isVisible(), true);
     assert.equal(await frame.locator("#logsNav svg").count(), 1, "log navigation must use a bundled icon or explicit SVG fallback");
+    await frame.locator('[data-view="gallery"]').click();
+    await frame.locator(".gallery-card").first().waitFor();
+    const galleryBar = await frame.locator(".gallery-floatingbar").boundingBox();
     await frame.locator("#logsNav").click();
     assert.equal(await frame.locator("#logsCategory option").count(), 5);
     await frame.locator("#logsPage").filter({ hasText: "条" }).waitFor();
+    const logsBar = await frame.locator(".logs-floatingbar").boundingBox();
+    for (const key of ["x", "y", "width", "height"]) assert.ok(Math.abs(logsBar[key] - galleryBar[key]) < 1, `log pagination must align with gallery: ${key}`);
+    await checkDateLayout(frame);
     await frame.locator('[data-view="settings"]').click();
+    assert.equal(await frame.locator(".logs-floatingbar").isVisible(), false, "the floating bar belongs only to the log page");
     await frame.locator("#loggingEnabled").waitFor({ state: "attached" });
     await frame.waitForFunction(() => !document.getElementById("saveSettingsButton").disabled);
     const save = async () => {
@@ -133,7 +187,10 @@ async function verifyIntegration(browser, width) {
 (async () => {
   for (const engine of (process.env.STUDIO_BROWSER ? [process.env.STUDIO_BROWSER] : ["chromium", "webkit"])) {
     const browser = await playwright[engine].launch({ headless: true });
-    try { for (const width of [390, 1440]) { await verify(browser, width); await verifyIntegration(browser, width); } }
+    try {
+      for (const width of [320, 390, 768, 1440]) await verify(browser, width);
+      for (const width of [390, 1440]) await verifyIntegration(browser, width);
+    }
     finally { await browser.close(); }
   }
 })().catch(error => { console.error(error); process.exitCode = 1; });
