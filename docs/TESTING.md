@@ -67,6 +67,9 @@ python scripts/verify.py --backend --webui comfy_workspace --browser chromium --
 
 # 分模式参数默认值、实际提交值、日志筛选与关闭后的入口隐藏
 python scripts/verify.py --webui mode_defaults logs parameter_policy --browser chromium
+
+# 请求预览、放弃更改、重复 ID 草稿隔离与尺寸默认值
+python scripts/verify.py --webui request_preview settings_discard settings_identity size_defaults --browser chromium
 ```
 
 `--webui` 接受去掉 `webui_` 和 `.cjs` 的场景名，也接受完整文件名。多次传入同一场景只执行一次。
@@ -96,9 +99,11 @@ python scripts/verify.py --webui mode_defaults logs parameter_policy --browser c
 
 查看 LLM trace 时，应检查工具执行后下一次模型请求的消息列表（Provider 接口参数为 `contexts`）。AstrBot 的工具日志及中间 `tool_call_result` 事件在包装修正前产生，仍显示旧说明不等于模型收到旧说明。自动化回归使用模拟结果，不调用真实 LLM、生图或发送服务；实机证据单独记录如下。
 
-### 1.5.0-dev.1 回归范围
+### 1.5.0 回归范围
 
-本轮完整回归 2554 项通过，静态检查和开发版安装包构建通过。
+2026-11-05 发布验证：完整 Python 回归 **2691 项通过**；236 个 Python 文件的静态与格式检查、126 个 JavaScript 文件的语法检查通过。出现两条既有弃用警告（宿主 `audioop` 和插件注册装饰器），无测试失败。
+
+Chromium 的 `mode_defaults`、`logs`、`parameter_policy`、`request_preview`、`settings_discard`、`settings_identity`、`size_defaults` 七组浏览器场景全部通过，覆盖桌面与手机宽度；请求预览和放弃更改另覆盖 320px 窄屏。这些浏览器结果不代替真实 iPhone Safari 验证。正式安装包由构建脚本检查版本、必需运行文件、前端资源和数据排除规则。
 
 本次验证使用隔离的 AstrBot 运行目录与模拟 Provider，不执行真实模型、生图或消息投递，也不修改宿主权限或旧会话。检查范围包括：
 
@@ -107,8 +112,12 @@ python scripts/verify.py --webui mode_defaults logs parameter_policy --browser c
 - 参考图错误包含对应索引和字段；错误路径不触发生图，不静默丢弃无效的显式参考项。
 - ComfyUI 空列表只报告当前会话的任务范围；没有原任务时不要求查询原任务，不声称其他服务商也没有生成。
 - 生图 HTTP 拒绝、提交前检查、超时、响应解析与结果下载失败返回各自的 `request_status`；批次综合失败证据，保留部分成功图片，执行阶段 `ValueError` 不误报成提交前失败。工具返回区分 `validation_failed`、`upstream_rejected`、`generation_unknown`，并保留资产登记、投递未确认的既有边界。
+- Agnes 三组模型预设、按模式构造请求和解析 URL／Base64 结果、参考图 Data URI、单张拆分、代理与失败状态。
+- 分模式 Schema 默认值、类型与枚举覆盖，WebUI、能力查询、指令和执行保持一致；互斥模式使用同一请求键时不互相删除有效值，切换模型后尺寸回退到有效默认值。
+- 自定义 JSON 的分模式模板、占位符及非法输入校验；请求预览复用实际构造、脱敏并展示分批，不调用上游生成接口。
+- 日志等级、日期与类型筛选、分页、脱敏、保留清理及关闭后隐藏入口；放弃更改的确认与取消、主题恢复、列表排序以及重复 ID 的草稿隔离。
 
-专用入口包括 `test_capability_contracts.py`、`test_capability_catalog.py`、`test_provider_failure_state.py` 及工具集成测试。这些回归验证代码行为和返回说明，不能证明真实 LLM 不再提前结束或使用无权限的代码工具；未新增内容去重或强制生图机制。下面的 1.4.2 测试数量和实机记录属于历史版本，不计作本次开发版验收。
+专用入口包括 `test_capability_contracts.py`、`test_capability_catalog.py`、`test_provider_failure_state.py`、`test_agnes_provider.py`、`test_mode_parameters.py`、`test_custom_json_preview.py`、`tests/backend/observability/` 及工具集成测试。这些回归验证代码行为和返回说明，不能证明真实 LLM 不再提前结束或使用无权限的代码工具；未新增内容去重或强制生图机制。Agnes 与 NovelAI 官方仍待可用账户完成成功生图验证。下面的 1.4.2 测试数量和实机记录属于历史版本，不计作本次正式版验收。
 
 ### 1.4.2 实机验证与限制
 
