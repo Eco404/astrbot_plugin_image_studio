@@ -1329,7 +1329,7 @@ def test_registered_image_tool_descriptions_contain_routing_contract() -> None:
         capability_parameters
     )
     assert (
-        "default(查询默认模型参数)"
+        "default 查询默认模型参数"
         in capabilities.parameters["properties"]["query_type"]["description"]
     )
     assert "生成图片" in generate.description

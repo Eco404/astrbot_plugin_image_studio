@@ -2,7 +2,6 @@
 
 import asyncio
 import base64
-import copy
 import hashlib
 import json
 import math
@@ -19,7 +18,6 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.message_components import File, Image, Plain, Record, Reply, Video
 from astrbot.api.star import Context, Star, StarTools, register
-from astrbot.core.agent.tool import ToolSet
 from astrbot.core.computer.computer_client import get_booter
 from astrbot.core.utils.quoted_message import extract_quoted_message_images
 from astrbot.core.workspace import (
@@ -33,6 +31,10 @@ from .backend.config import (
 )
 from .backend.tools.capabilities import query_capabilities
 from .backend.tools.image_context import ImageContextAdapter, track_image_result
+from .backend.tools.delivery import (
+    prepare_delivery_tools,
+    protect_generated_image_delivery as _protect_generated_image_delivery,
+)
 from .backend.tools.schemas import with_image_arguments
 from .backend.commands.handler import run_image_command
 from .backend.api.comfyui import ComfyAPI
@@ -64,7 +66,6 @@ PAGE_PREFIX = f"/{PLUGIN_NAME}"
 LOG_TAG = "[ImageStudio]"
 CAPABILITY_QUERY_EXTRA_KEY = "_image_studio_capability_queries"
 AGENT_RESULT_RECOVERY_EXTRA_KEY = "_image_studio_result_recovery"
-AGENT_DELIVERY_TOOLS_EXTRA_KEY = "_image_studio_delivery_tools"
 
 
 class _ReferenceInputError(ValueError):
@@ -75,24 +76,6 @@ class _ReferenceInputError(ValueError):
         self.field = field
         self.reason = reason
         super().__init__(f"references[{index}].{field}：{detail}")
-
-
-class _AgentDeliveryToolSet(ToolSet):
-    """Own the request's full, light and parameter-only tool list views."""
-
-    def __init__(self, tools):
-        super().__init__(list(tools))
-        self.views = [self]
-
-    def get_light_tool_set(self):
-        view = super().get_light_tool_set()
-        self.views.append(view)
-        return view
-
-    def get_param_only_tool_set(self):
-        view = super().get_param_only_tool_set()
-        self.views.append(view)
-        return view
 
 
 @register(
@@ -738,16 +721,9 @@ class ImageStudioPlugin(Star):
         """
         if not self._settings.enable_llm_tool:
             return
-        tools = getattr(getattr(req, "func_tool", None), "tools", None)
-        if not isinstance(tools, list) or not any(
-            getattr(tool, "name", "") in {"image_studio_generate", "image_studio_task"}
-            for tool in tools
-        ):
-            return
-        owned = _AgentDeliveryToolSet(tools)
-        req.func_tool = owned
-        _set_event_extra(event, AGENT_DELIVERY_TOOLS_EXTRA_KEY, (req, owned))
+        prepare_delivery_tools(event, req)
 
+    @with_image_arguments
     @filter.llm_tool(name="image_studio_get_capabilities")
     @observe_tool
     async def image_studio_get_capabilities(
@@ -766,13 +742,13 @@ class ImageStudioPlugin(Star):
 
         准备生图时，用户未指定模型则先设置 query_type="default" 查询默认模型。
         用户指定模型或工作流名称时，先设置 query_type="search" 搜索，再用 query_type="model" 和 model_refs 查询选定模型。
-        仅当默认模型不支持所需功能时查找其他模型；普通画风或画面描述不是更换默认模型的理由。
+        用户未指定模型时，仅当默认模型不支持所需功能才查找其他模型；普通画风或画面描述不是更换默认模型的理由。
         query_type="search" 或 "providers" 只返回目录信息，不包含可直接用于生成的参数说明。
 
         Args:
-            query_type(string): default(查询默认模型参数)/model(使用model_refs查询指定模型参数)/providers(查询服务商)/search(搜索模型或工作流)/all(需要比较全部模型时查询完整参数); 默认 default
+            query_type(string): default 查询默认模型参数：用户未指定模型时优先使用，只有默认模型不支持所需功能才另选模型，普通画风或画面描述不是更换理由；model 使用 model_refs 查询指定模型参数；search 搜索用户指定的名称，选定后再用 model 查询参数；providers 查询服务商目录；all 仅在需要比较全部模型时查询完整参数
             mode(string): 按 text2img/img2img 筛选；省略时查询两种模式
-            model_refs(array[string]): 1 至 20 个 provider_id:model_id；query_type=model 时必填，各项独立返回成功结果或错误说明
+            model_refs(array[string]): 1 至 20 个 provider_id:model_id；query_type=model 时必填，使用查询返回的编号而非显示名称，各项独立返回成功结果或错误说明
             query(string): 模型或工作流名称、ID、使用说明，或服务商名称、ID；仅 query_type="search" 或 "providers" 使用。留空时不按关键词筛选，结果仍按 limit 和 offset 分页返回
             provider_id(string): 限定服务商 ID；仅 search/providers 使用
             provider_kind(string): 限定服务商类型，例如 comfyui；仅 search/providers 使用
@@ -824,9 +800,9 @@ class ImageStudioPlugin(Star):
         Args:
             prompt(string): 生图提示词，格式遵循能力查询结果
             mode(string): 请填写 text2img（文生图）或 img2img（图生图）
-            model_ref(string): 模型编号，格式为 provider_id:model_id；省略时使用 mode 对应的默认模型
+            model_ref(string): 使用能力查询返回的 provider_id:model_id，不填模型或工作流的显示名称；省略时使用 mode 对应的默认模型，也须先查询该默认模型在所选模式下的参数
             parameters(object): 仅填写本次查询结果为该模型列出的参数，使用其中的字段名
-            references(array[object]): 按使用顺序填写参考图片；每项填写图片编号 asset_id，或消息附件/当前工作区文件的路径 path，二者只能选一个。路径必须与附件提供的文件名和扩展名一致。省略或空数组时自动读取本条消息及其引用中的图片
+            references(array[object]): 按使用顺序填写参考图片；每项填写图片编号 asset_id，或消息附件/当前工作区文件的路径 path，二者只能选一个。直接使用附件提供的完整路径，保留文件名和扩展名，不必先用 Python 或 Shell 检查路径或图片尺寸。图生图省略或空数组时自动读取当前消息图片、引用消息图片和本次模型请求附件
             request_id(string): 可选，仅支持 ComfyUI；同一会话中以相同 request_id 和相同请求参数再次调用时，返回原任务而不新建任务；希望生成新图片时使用新的 request_id 或省略此参数
 
         Returns:
@@ -1605,43 +1581,6 @@ def _workflow_asset_failure(index: int, asset_id: str, reason: str) -> dict[str,
         "message": messages[normalized_reason],
         "retryable": normalized_reason == "storage_error",
     }
-
-
-def _protect_generated_image_delivery(event: Any) -> None:
-    """Restrict conflicting senders only after usable generated assets exist.
-
-    Keep the change on this ProviderRequest. Tool definitions and the original
-    set may also be used by other events; never change a global tool's active
-    flag or mutate another request's tool list.
-    """
-    request = _get_event_extra(event, "provider_request")
-    tool_set = getattr(request, "func_tool", None)
-    getter = getattr(tool_set, "get_tool", None)
-    tools = getattr(tool_set, "tools", None)
-    if not callable(getter) or not isinstance(tools, list):
-        return
-    sender = getter("image_studio_send_output")
-    if sender is None or not getattr(sender, "active", True):
-        return
-    blocked = {"send_message_to_user", "pc_send_current_media"}
-    if not any(getattr(tool, "name", "") in blocked for tool in tools):
-        return
-    prepared = _get_event_extra(event, AGENT_DELIVERY_TOOLS_EXTRA_KEY)
-    if isinstance(prepared, tuple) and len(prepared) == 2 and prepared[0] is request:
-        # In skills_like mode the runner resolves handlers from this original
-        # full set even after req.func_tool has become a light schema copy.
-        owned = prepared[1]
-        for view in owned.views:
-            view.tools = [
-                tool for tool in view.tools if getattr(tool, "name", "") not in blocked
-            ]
-        if any(view is tool_set for view in owned.views):
-            return
-    protected = copy.copy(tool_set)
-    protected.tools = [
-        tool for tool in tools if getattr(tool, "name", "") not in blocked
-    ]
-    request.func_tool = protected
 
 
 def _generation_failure(
