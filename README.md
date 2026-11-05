@@ -80,7 +80,7 @@ https://github.com/Eco404/astrbot_plugin_image_studio
 
 Agnes AI 接入方式：
 
-1. 新增「Agnes AI」服务商，填写 API Key。默认地址为 `https://api.agnes-ai.cn/v1`，文生图、图生图均调用 `/images/generations`。
+1. 新增「Agnes AI」服务商，填写 API Key。接口地址默认填入 `https://api.agnes-ai.cn/v1`，可通过下拉选项快捷填写 `.cn` 或 `.com` 地址，也可自由输入。文生图、图生图均调用 `/images/generations`。
 2. 可添加内置模型 `agnes-image-2.0-flash`、`agnes-image-2.1-flash`、`agnes-image-2.5-flash`。2.0 按官方文档预填精确尺寸 `1024x1024`，可选 `1024x768`、`768x1024`；2.1 和 2.5 预填 `1K`，支持 `1K`、`2K`、`3K`、`4K`，并提供 `1:1`、`3:4`、`4:3`、`16:9`、`9:16`、`2:3`、`3:2`、`21:9` 宽高比。
 3. 图生图继续使用现有参考图上传或聊天附件。插件将图片编码为 Data URI 数组并放入 `extra_body.image`，无需自行上传到公共图床或填写 Base64。
 4. 「返回格式」可选 `url` 或 `b64_json`。插件按模式使用对应协议字段；URL 结果会自动下载，返回格式不改变画廊和工具中的图片使用方式。
