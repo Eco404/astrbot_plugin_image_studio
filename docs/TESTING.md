@@ -70,6 +70,9 @@ python scripts/verify.py --webui mode_defaults logs parameter_policy --browser c
 
 # 请求预览、放弃更改、重复 ID 草稿隔离与尺寸默认值
 python scripts/verify.py --webui request_preview settings_discard settings_identity size_defaults --browser chromium
+
+# 日志分页、模式参数和设置／画廊布局；使用各场景声明的浏览器矩阵
+python scripts/verify.py --webui logs mode_defaults parameter_policy settings_masonry gallery_display
 ```
 
 `--webui` 接受去掉 `webui_` 和 `.cjs` 的场景名，也接受完整文件名。多次传入同一场景只执行一次。
@@ -132,9 +135,15 @@ Chromium 的 `mode_defaults`、`logs`、`parameter_policy`、`request_preview`�
 
 本次只生成一张图片。模型最初跳过能力查询，由校验拦下并补查，没有额外调用生图服务。测试后恢复临时采集包装并移除辅助插件及其接口；私人会话、原始 trace 与测试辅助代码不进入仓库或发布包。自动化验证共 2496 项通过，静态检查与安装包构建通过。
 
-上述实机样本不能保证模型以后始终正确理解图片来源，也不等同于客户端送达或已读回执。当时 `skills_like` 两阶段模式只覆盖独立工具集合，其他插件在请求钩子之后重建集合可能遗漏实际执行副本；该限制在 1.5.1-dev.1 中通过绑定实际 runner 加固，不计入这次历史实机验证。旧会话中的提示词不自动清理。
+上述实机样本不能保证模型以后始终正确理解图片来源，也不等同于客户端送达或已读回执。当时 `skills_like` 两阶段模式只覆盖独立工具集合，其他插件在请求钩子之后重建集合可能遗漏实际执行副本；该限制在 1.5.1 中通过绑定实际 runner 加固，不计入这次历史实机验证。旧会话中的提示词不自动清理。
 
-### 1.5.1-dev.1 两阶段工具回归
+### 1.5.1 回归范围
+
+2026-11-05 发布验证：完整 Python 回归 **2721 项通过**；239 个 Python 文件的静态与格式检查、126 个 JavaScript 文件的语法检查通过。仅出现宿主 `audioop` 和插件注册装饰器的两条既有弃用警告。
+
+五组浏览器场景全部通过：`logs`、`settings_masonry`、`gallery_display` 使用 Chromium 与 WebKit；`mode_defaults`、`parameter_policy` 使用 Chromium。日志覆盖 320／390／768／1440px，画廊覆盖桌面和 360／390px 窄屏，设置布局覆盖单列、双列、动态内容和窗口尺寸变化。检查包括页码选择条、日期框布局、折叠条目圆角、关闭日志后的入口隐藏、参数适用模式及卡片顺序；浏览器模拟不等同于真实手机验证。
+
+验证使用独立运行目录与模拟服务，不调用真实 LLM、生图或聊天投递。正式安装包检查版本一致性、运行资源完整性和运行数据排除规则；数据库沿用 v4。Agnes 与 NovelAI 官方的成功生图仍待可用账户验证。
 
 `test_skills_like_contract.py` 使用真实 AstrBot 的参数专用 ToolSet 及 OpenAI、Anthropic、Gemini schema 转换，检查工具总说明被移除后，默认模型选择、搜索后查参数、用户要求生图才继续生成、能力复用范围和附件路径说明仍然保留。
 
