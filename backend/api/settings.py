@@ -13,6 +13,7 @@ from astrbot.api.web import request as web_request
 
 from ..config import normalize_webui_settings, save_studio_settings
 from ..models import novelai_model_presets
+from ..providers.agnes import agnes_model_presets
 
 LOG_TAG = "[ImageStudio]"
 
@@ -115,6 +116,8 @@ class SettingsAPI:
                     for model in provider.models
                 ],
                 "modes": ["text2img", "img2img"],
+                "logging": self.get_studio().get("logging", {"enabled": True}),
+                "agnes_models": agnes_model_presets(),
                 "novelai_models": novelai_model_presets(),
             }
         )
@@ -128,6 +131,7 @@ class SettingsAPI:
                 },
                 "studio": studio,
                 "webui": studio,
+                "agnes_models": agnes_model_presets(),
                 "novelai_models": novelai_model_presets(),
                 "validation_errors": errors,
             }

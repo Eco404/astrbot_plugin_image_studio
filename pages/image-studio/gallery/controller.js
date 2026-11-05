@@ -140,7 +140,7 @@
         if (detailActionsReady) return;
       }
       const providerKind = String(detail?.provider_kind || "").trim().toLowerCase();
-      const providerEngine = ["nai_direct", "novelai_official", "openai_images", "gemini", "custom_json", "comfyui"].includes(providerKind) ? providerKind : "";
+      const providerEngine = ["nai_direct", "novelai_official", "openai_images", "gemini", "agnes", "custom_json", "comfyui"].includes(providerKind) ? providerKind : "";
       const engineHint = [image?.supplemental?.generation_engine, detail?.generation_engine, providerEngine, image?.metadata?.format].map(value => String(value || "").trim().toLowerCase()).find(value => value && !["unknown", "mixed"].includes(value));
       const engine = ["nai", "nai_direct", "novelai_official"].includes(engineHint) ? "novelai" : engineHint;
       // A transferable prompt does not mean this plugin can reproduce its
@@ -148,7 +148,7 @@
       // Preparation validates snapshots and can re-read original image bytes
       // when the cached metadata has no API graph. Report precise failures there.
       const comfyReproduction = engine === "comfyui";
-      const supportsReproduction = metadataReady && (["novelai", "openai_images", "gemini", "custom_json"].includes(engine) || comfyReproduction);
+      const supportsReproduction = metadataReady && (["novelai", "openai_images", "gemini", "agnes", "custom_json"].includes(engine) || comfyReproduction);
       const formats = supportsReproduction && !comfyReproduction && providerKind !== "comfyui" ? { studio: "Image Studio 参数" } : {};
       if (["nai", "novelai"].includes(engine) || image?.metadata?.format === "novelai") {
         if (providerKind !== "novelai_official") formats.nai = "NAI 请求参数";

@@ -26,6 +26,7 @@ _CATEGORIES = (
     "database",
     "backups",
     "temporary",
+    "logs",
     "other",
 )
 
@@ -68,6 +69,8 @@ def _category(relative: Path) -> str:
         return "database"
     if parts and parts[0] == "backups":
         return "backups"
+    if parts and parts[0] == "logs":
+        return "logs"
     if parts and parts[0] in {
         "staging_references",
         "import_staging",

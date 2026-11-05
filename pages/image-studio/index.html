@@ -28,19 +28,20 @@
     })();
   </script>
   <script src="/api/plugin/page/bridge-sdk.js"></script>
-  <script src="./appearance.js?v=1.4.2"></script>
+  <script src="./appearance.js?v=1.5.0"></script>
   <link rel="stylesheet" href="./vendor/photoswipe/photoswipe.css?v=5.4.4" />
-  <link rel="stylesheet" href="./app.css?v=1.4.2" />
-  <link rel="stylesheet" href="./library.css?v=1.4.2" />
-  <link rel="stylesheet" href="./sortable.css?v=1.4.2" />
-  <link rel="stylesheet" href="./detail-swipe.css?v=1.4.2" />
-  <link rel="stylesheet" href="./select.css?v=1.4.2" />
-  <link rel="stylesheet" href="./appearance.css?v=1.4.2" />
-  <link rel="stylesheet" href="./controls.css?v=1.4.2" />
-  <link rel="stylesheet" href="./novelai/controls.css?v=1.4.2" />
-  <link rel="stylesheet" href="./comfyui/controls.css?v=1.4.2" />
-  <link rel="stylesheet" href="./comfyui/node-rules.css?v=1.4.2" />
-  <link rel="stylesheet" href="./tooltip.css?v=1.4.2" />
+  <link rel="stylesheet" href="./app.css?v=1.5.0" />
+  <link rel="stylesheet" href="./library.css?v=1.5.0" />
+  <link rel="stylesheet" href="./sortable.css?v=1.5.0" />
+  <link rel="stylesheet" href="./detail-swipe.css?v=1.5.0" />
+  <link rel="stylesheet" href="./select.css?v=1.5.0" />
+  <link rel="stylesheet" href="./appearance.css?v=1.5.0" />
+  <link rel="stylesheet" href="./controls.css?v=1.5.0" />
+  <link rel="stylesheet" href="./novelai/controls.css?v=1.5.0" />
+  <link rel="stylesheet" href="./comfyui/controls.css?v=1.5.0" />
+  <link rel="stylesheet" href="./comfyui/node-rules.css?v=1.5.0" />
+  <link rel="stylesheet" href="./tooltip.css?v=1.5.0" />
+  <link rel="stylesheet" href="./logs.css?v=1.5.0" />
 </head>
 <body>
   <main class="app-shell quiet-glass-background">
@@ -51,6 +52,7 @@
         <button class="nav-item" data-view="gallery" type="button" aria-label="画廊"><span class="nav-icon nav-icon-gallery" aria-hidden="true"><span></span></span><span>画廊</span></button>
         <button class="nav-item" data-view="import" type="button" aria-label="导入"><span class="nav-icon" data-studio-icon="FolderInput" aria-hidden="true"></span><span>导入</span></button>
         <button class="nav-item" data-view="settings" type="button" aria-label="设置"><span class="nav-icon nav-icon-settings" aria-hidden="true">⚙︎</span><span>设置</span></button>
+        <button class="nav-item is-hidden" id="logsNav" data-view="logs" type="button" aria-label="日志"><span class="nav-icon" data-studio-icon="FileText" aria-hidden="true"></span><span>日志</span></button>
       </nav>
       <div class="sidebar-footer" id="runtimeStatus">正在读取配置</div>
     </aside>
@@ -183,15 +185,18 @@
             <div class="section-heading"><div><h2>存储健康</h2><p>每小时检查图片与数据库，清理过期任务缓存，并保留最近 3 份有效升级备份。</p></div><span class="health-status" id="storageHealthStatus">未检查</span></div>
             <div class="storage-health-grid" id="storageHealthGrid"><div><span>最近检查</span><strong id="storageHealthCheckedAt">尚未执行</strong></div><div><span>耗时</span><strong id="storageHealthDuration">-</strong></div><div><span>原图 / 预览</span><strong id="storageHealthAssets">-</strong></div><div><span>临时保留记录</span><strong id="storageHealthLeases">-</strong></div><div><span>生成记录</span><strong id="storageHealthGenerations">-</strong></div><div><span>总占用</span><strong id="storageHealthAllocated">-</strong></div></div>
             <div class="storage-health-grid storage-space-breakdown" id="storageHealthBreakdown"></div>
-            <p class="field-hint">分类显示文件大小；磁盘实际分配会受共享文件和文件系统影响。数据库空闲页可供后续写入复用，深度检查会在空间充足且适合整理时缩减数据库文件。</p>
             <div class="storage-quota is-hidden" id="storageQuotaRecords"><div class="storage-quota-label"><label for="storageQuotaRecordsProgress">数量限额</label><span id="storageQuotaRecordsLabel"></span></div><progress id="storageQuotaRecordsProgress" value="0" max="1"></progress><span class="storage-quota-exempt" id="storageQuotaRecordsExempt"></span></div>
             <div class="storage-quota is-hidden" id="storageQuotaBytes"><div class="storage-quota-label"><label for="storageQuotaBytesProgress">容量限额</label><span id="storageQuotaBytesLabel"></span></div><progress id="storageQuotaBytesProgress" value="0" max="1"></progress><span class="storage-quota-exempt" id="storageQuotaBytesExempt"></span></div>
             <div class="is-hidden" id="storageExternalSources"></div>
-            <p class="maintenance-report" id="storageHealthErrors">暂无异常。</p>
-            <p class="maintenance-report is-hidden" id="storageHealthRepaired"></p>
             <div class="section-actions maintenance-actions"><button class="quiet-button" id="runMaintenanceButton" type="button">立即检查</button><button class="quiet-button" id="runDeepMaintenanceButton" type="button">深度检查</button></div>
           </section>
           <section class="settings-panel glass" id="appearanceSettings" aria-label="主题与显示设置"></section>
+          <section class="settings-panel glass">
+            <div class="section-heading"><div><h2>日志</h2><p>记录生图、接口请求与插件操作，便于排查问题。</p></div></div>
+            <div class="toggle-row"><label for="loggingEnabled">启用日志</label><label class="toggle-control"><input id="loggingEnabled" type="checkbox" /><span aria-hidden="true"></span></label></div>
+            <div class="field"><label for="loggingLevel">记录等级</label><select id="loggingLevel"><option value="DEBUG">DEBUG · 调试</option><option value="INFO">INFO · 信息</option><option value="WARNING">WARNING · 警告</option><option value="ERROR">ERROR · 错误</option></select><span class="field-hint">记录所选等级及更高等级。DEBUG 包含脱敏后的请求内容；图片数据仅记录摘要。</span></div>
+            <div class="field"><label for="loggingRetentionDays">保留天数（0 表示一直保留）</label><input id="loggingRetentionDays" type="number" min="0" step="1" value="7" /></div>
+          </section>
         </div>
         <section class="provider-settings glass">
           <div class="section-heading"><div><h2>生图服务商</h2><p>这里只配置连接方式、地址和鉴权；模型能力在下方单独配置。</p></div><button class="primary-button" id="addProviderButton" type="button">新增服务商</button></div>
@@ -201,7 +206,21 @@
           <div class="section-heading"><div><h2>模型配置</h2><p>同一服务商可以配置多个模型，每个模型独立声明模式、参考图和参数。</p></div><div class="section-actions"><input id="newModelChoice" list="newModelChoices" aria-label="选择或输入模型 ID" placeholder="选择或输入模型 ID" autocomplete="off" /><datalist id="newModelChoices"></datalist><button class="primary-button" id="addModelButton" type="button">新增模型</button></div></div>
           <div class="model-settings-layout"><div class="model-list" id="settingsModelList"></div><form id="modelForm" class="model-editor"></form></div>
         </section>
-        <div class="settings-savebar floatingbar"><span class="inline-error" id="settingsError" role="alert"></span><span id="settingsDirtyStatus" role="status"></span><button class="primary-button" id="saveSettingsButton" type="button">保存全部设置</button></div>
+        <div class="settings-savebar floatingbar"><button class="danger-button is-hidden" id="discardSettingsChangesButton" type="button">放弃更改</button><span class="inline-error" id="settingsError" role="alert"></span><span id="settingsDirtyStatus" role="status"></span><button class="primary-button" id="saveSettingsButton" type="button">保存全部设置</button></div>
+      </section>
+      <section class="view" id="logsView">
+        <section class="settings-panel glass logs-panel">
+          <div class="section-heading"><div><h2>日志</h2><p>按 UTC 日期查询；详细请求内容需启用 DEBUG 记录等级。</p></div><div class="section-actions"><button class="quiet-button" id="logsRefresh" type="button">刷新</button><button class="danger-button" id="logsClear" type="button">清空日志</button></div></div>
+          <p class="field-hint" id="logsEnabledNotice" hidden>日志已关闭，可在设置中重新开启。</p>
+          <div class="logs-toolbar">
+            <label class="field">类型<select id="logsCategory"><option value="">全部</option></select></label>
+            <label class="field">等级<select id="logsLevel"><option value="">全部</option><option value="DEBUG">DEBUG</option><option value="INFO">INFO</option><option value="WARNING">WARNING</option><option value="ERROR">ERROR</option></select></label>
+            <label class="field">开始日期<input id="logsDateFrom" type="date" /></label>
+            <label class="field">结束日期<input id="logsDateTo" type="date" /></label>
+          </div>
+          <div id="logsList" aria-live="polite"></div>
+          <div class="logs-pagination"><button class="quiet-button" id="logsPrevious" type="button">上一页</button><span id="logsPage"></span><button class="quiet-button" id="logsNext" type="button">下一页</button></div>
+        </section>
       </section>
     </section>
   </main>
@@ -279,32 +298,34 @@
       window.__reportImageStudioPageError(false);
     });
   </script>
-  <script src="./tooltip.js?v=1.4.2" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./tooltip.js?v=1.5.0" onerror="window.__reportImageStudioPageError(true)"></script>
   <script src="./vendor/photoswipe/photoswipe.umd.min.js?v=5.4.4"></script>
   <script src="./vendor/exifreader/exif-reader.js?v=4.44.1"></script>
   <script src="./vendor/lucide/icons.js?v=0.468.0-studio2"></script>
-  <script src="./image-placeholder.js?v=1.4.2" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./media-objects.js?v=1.4.2" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./image-placeholder.js?v=1.5.0" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./media-objects.js?v=1.5.0" onerror="window.__reportImageStudioPageError(true)"></script>
   <script src="./vendor/js-sha256/sha256.min.js?v=0.11.1"></script>
-  <script src="./hash.js?v=1.4.2" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./gallery-preferences.js?v=1.4.2" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./select.js?v=1.4.2" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./sortable.js?v=1.4.2" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./dialog-motion.js?v=1.4.2" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./components/presentation.js?v=1.4.2" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./components/modal.js?v=1.4.2" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./gallery/metadata.js?v=1.4.2" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./gallery/metadata-markup.js?v=1.4.2" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./comfyui/node-rules.js?v=1.4.2" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./gallery/imports.js?v=1.4.2" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./gallery/controller.js?v=1.4.2" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./detail-swipe.js?v=1.4.2" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./backdrop.js?v=1.4.2" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./viewer-backdrop.js?v=1.4.2" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./settings/external-sources.js?v=1.4.2" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./novelai/controls.js?v=1.4.2" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./comfyui/controls.js?v=1.4.2" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./settings/controller.js?v=1.4.2" onerror="window.__reportImageStudioPageError(true)"></script>
-  <script src="./app.js?v=1.4.2" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./hash.js?v=1.5.0" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./gallery-preferences.js?v=1.5.0" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./select.js?v=1.5.0" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./sortable.js?v=1.5.0" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./dialog-motion.js?v=1.5.0" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./components/presentation.js?v=1.5.0" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./components/modal.js?v=1.5.0" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./gallery/metadata.js?v=1.5.0" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./gallery/metadata-markup.js?v=1.5.0" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./comfyui/node-rules.js?v=1.5.0" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./gallery/imports.js?v=1.5.0" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./gallery/controller.js?v=1.5.0" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./detail-swipe.js?v=1.5.0" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./backdrop.js?v=1.5.0" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./viewer-backdrop.js?v=1.5.0" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./settings/external-sources.js?v=1.5.0" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./novelai/controls.js?v=1.5.0" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./comfyui/controls.js?v=1.5.0" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./settings/controller.js?v=1.5.0" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./parameters.js?v=1.5.0" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./logs.js?v=1.5.0" onerror="window.__reportImageStudioPageError(true)"></script>
+  <script src="./app.js?v=1.5.0" onerror="window.__reportImageStudioPageError(true)"></script>
 </body>
 </html>

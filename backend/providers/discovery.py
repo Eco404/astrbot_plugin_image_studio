@@ -18,6 +18,10 @@ async def discover_models(
 ) -> list[dict[str, Any]]:
     """Best-effort model discovery for the provider settings page."""
 
+    if provider.kind == "agnes":
+        from .agnes import agnes_model_presets
+
+        return agnes_model_presets()
     if provider.kind == "nai_direct":
         raise ProviderError("NAI 第三方接口不支持获取模型列表")
     if provider.kind == "novelai_official":

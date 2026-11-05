@@ -7,8 +7,9 @@ import hashlib
 import math
 import re
 import time
+import uuid
 from dataclasses import replace
-from decimal import Decimal, InvalidOperation
+from functools import wraps
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -29,6 +30,7 @@ from ..models import (
     ImageProvider,
     InvocationSource,
     ReferenceImage,
+    validate_parameter_value as _validate_parameter_value,
 )
 from ..providers.executor import (
     ProviderBatchError,
@@ -38,7 +40,72 @@ from ..providers.executor import (
 )
 from ..gallery.store import GenerationStore
 from ..media.images import detect_mime_type
+from ..observability.store import StructuredLogStore, log_context
 from .concurrency import GenerationConcurrency
+
+
+def _logged_generation(function):
+    """Include rejected inputs and ComfyUI delegation in the same operation log."""
+
+    @wraps(function)
+    async def run(self, **arguments):
+        logs = self.logs
+        if logs is None or not logs.enabled:
+            return await function(self, **arguments)
+        identity = {
+            "source": arguments.get("source", "webui"),
+            "mode": arguments.get("mode"),
+            "provider_id": arguments.get("provider_id"),
+            "model": arguments.get("model"),
+            "model_ref": arguments.get("model_ref"),
+            "requested_count": arguments.get("count"),
+            **(
+                {"comfy_job_id": arguments["_comfy_job_id"]}
+                if arguments.get("_comfy_job_id")
+                else {}
+            ),
+        }
+        started = time.perf_counter()
+        with log_context(operation_id=uuid.uuid4().hex, **identity):
+            await logs.record("INFO", "generation", "开始处理生图请求", identity)
+            try:
+                result = await function(self, **arguments)
+            except asyncio.CancelledError:
+                await logs.record("WARNING", "generation", "生图请求已取消", identity)
+                raise
+            except Exception as exc:
+                await logs.record(
+                    "ERROR",
+                    "generation",
+                    "生图请求失败",
+                    {
+                        **identity,
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                        "duration_ms": round((time.perf_counter() - started) * 1000),
+                    },
+                )
+                raise
+            await logs.record(
+                "WARNING" if result.partial or result.warning else "INFO",
+                "generation",
+                "生图部分完成" if result.partial else "生图完成",
+                {
+                    **identity,
+                    "provider_id": result.provider.id,
+                    "model": result.request.model,
+                    "model_ref": f"{result.provider.id}:{result.request.model}",
+                    "count": result.request.count,
+                    "image_count": len(result.images),
+                    "generation_id": result.generation_id,
+                    "partial": result.partial,
+                    "warning": result.warning,
+                    "duration_ms": round((time.perf_counter() - started) * 1000),
+                },
+            )
+            return result
+
+    return run
 
 
 class ImageGenerationService:
@@ -51,10 +118,12 @@ class ImageGenerationService:
         executor: ProviderExecutor,
         store: GenerationStore,
         concurrency: GenerationConcurrency | None = None,
+        logs: StructuredLogStore | None = None,
     ) -> None:
         self.settings = settings
         self.executor = executor
         self.store = store
+        self.logs = logs
         self._owns_concurrency = concurrency is None
         self.concurrency = (
             concurrency if concurrency is not None else GenerationConcurrency()
@@ -69,6 +138,7 @@ class ImageGenerationService:
         if self._owns_concurrency:
             self.concurrency.update_settings(settings)
 
+    @_logged_generation
     async def generate(
         self,
         *,
@@ -133,6 +203,9 @@ class ImageGenerationService:
             normalized_mode,
             mode_default_ref,
         )
+        # Resolve the schema before defaults, validation, control extraction and
+        # request-key mapping. Different modes may legitimately share a wire key.
+        selected_model = selected_model.for_mode(normalized_mode)
         selection_source = (
             "explicit"
             if str(model_ref or model or "").strip()
@@ -237,9 +310,6 @@ class ImageGenerationService:
             advanced_parameters, selected_model, source=source
         )
         model_parameters = _wire_parameters(parameter_values, selected_model)
-        model_parameters = _parameters_for_mode(
-            model_parameters, selected_model, normalized_mode
-        )
         if source == "command":
             model_parameters = {
                 key: value
@@ -297,6 +367,10 @@ class ImageGenerationService:
             images = exc.images
             batch_failures = exc.failures
             warning = str(exc)
+        except ValueError as exc:
+            # Adapter response parsing can raise ValueError after a paid request.
+            # Only validation above the execution boundary is known unsubmitted.
+            raise ProviderError(str(exc)) from exc
         if (
             len(images) != request.count
             and not batch_failures
@@ -420,8 +494,9 @@ class ImageGenerationService:
                 and not model.comfyui_capabilities["count_bound"]
                 and request.count != 1
             ):
-                raise ValueError(
-                    "此工作流未绑定数量参数；一次运行保留工作流原有的全部输出"
+                raise ProviderError(
+                    "此工作流未绑定数量参数；一次运行保留工作流原有的全部输出",
+                    request_status="not_submitted",
                 )
             if (
                 fixed_outputs or model.comfyui_capabilities["count_bound"]
@@ -431,7 +506,10 @@ class ImageGenerationService:
                     not request.local_parameters.get("_comfy_job_id")
                     or managed_batch is None
                 ):
-                    raise ValueError("超出原生批次的 ComfyUI 请求需要持久化任务管理器")
+                    raise ProviderError(
+                        "超出原生批次的 ComfyUI 请求需要持久化任务管理器",
+                        request_status="not_submitted",
+                    )
                 # Only child executions acquire slots. Holding a parent slot
                 # while waiting for children would deadlock a single-slot model.
                 return await managed_batch(provider, request)
@@ -445,19 +523,19 @@ class ImageGenerationService:
                         exc.images[: request.count], exc.failures
                     ) from exc
                 return images[: request.count] if fixed_outputs else images
-        count = _batch_integer(request.count, "count")
-        native_size = _batch_integer(model.native_batch_size, "native_batch_size")
         request_sizes = tuple(
-            min(native_size, count - offset) for offset in range(0, count, native_size)
+            size
+            for size, repeat in _provider_batch_groups(
+                request.count, model.native_batch_size
+            )
+            for _ in range(repeat)
         )
-        parameters = {
-            key: value
-            for key, value in request.parameters.items()
-            if key not in MODEL_SCHEDULING_KEYS and key not in {"count", "n"}
-        }
+        count = _batch_integer(request.count, "count")
+        parameters = _provider_batch_parameters(request)
         pending = iter(enumerate(request_sizes))
         results: list[tuple[GeneratedImage, ...]] = [()] * len(request_sizes)
         failures: dict[int, str] = {}
+        failure_states: dict[int, str] = {}
         response_counts = [0] * len(request_sizes)
 
         async def worker() -> None:
@@ -474,13 +552,24 @@ class ImageGenerationService:
                     results[index] = exc.images
                     response_counts[index] = len(exc.images)
                     failures[index + 1] = str(exc)
-                except (ProviderError, aiohttp.ClientError, TimeoutError) as exc:
+                    failure_states[index + 1] = "unknown"
+                except (
+                    ProviderError,
+                    aiohttp.ClientError,
+                    TimeoutError,
+                    ValueError,
+                ) as exc:
                     failures[index + 1] = (
                         str(exc)[:500]
-                        if isinstance(exc, ProviderError)
+                        if isinstance(exc, (ProviderError, ValueError))
                         else "请求超时"
                         if isinstance(exc, TimeoutError)
                         else "无法连接服务商"
+                    )
+                    failure_states[index + 1] = (
+                        exc.request_status
+                        if isinstance(exc, ProviderError)
+                        else "unknown"
                     )
 
         # Shared model slots are acquired before provider slots so queued work
@@ -504,6 +593,7 @@ class ImageGenerationService:
                 tuple(sorted(failures.items())),
                 request_sizes=request_sizes,
                 actual_response_counts=tuple(response_counts),
+                failure_states=tuple(sorted(failure_states.items())),
             )
         return images
 
@@ -955,6 +1045,27 @@ def _batch_integer(value: Any, name: str) -> int:
     return int(numeric)
 
 
+def _provider_batch_groups(count: Any, native_size: Any) -> tuple[tuple[int, int], ...]:
+    """Return (images per request, repetitions), without expanding large counts."""
+    count = _batch_integer(count, "count")
+    native_size = _batch_integer(native_size, "native_batch_size")
+    complete, remaining = divmod(count, native_size)
+    return tuple(
+        (size, repeat)
+        for size, repeat in ((native_size, complete), (remaining, int(remaining > 0)))
+        if repeat
+    )
+
+
+def _provider_batch_parameters(request: GenerationRequest) -> dict[str, Any]:
+    """Scheduling controls stay local; each submitted batch supplies its own count."""
+    return {
+        key: value
+        for key, value in request.parameters.items()
+        if key not in MODEL_SCHEDULING_KEYS and key not in {"count", "n"}
+    }
+
+
 def _size(value: str, provider_kind: str = "") -> str:
     raw = str(value or "").strip()
     if provider_kind == "nai_direct" and raw in {
@@ -998,10 +1109,12 @@ def _parameters(value: Any, *, declared_names: Any = ()) -> dict[str, Any]:
 
 
 def _parameters_for_model(
-    value: Any, model: ImageModel, *, source: str = "webui"
+    value: Any, model: ImageModel, *, source: str = "webui", mode: str | None = None
 ) -> dict[str, Any]:
     """Map friendly schema names to provider request keys at the trust boundary."""
 
+    if mode is not None:
+        model = model.for_mode(mode)
     return _wire_parameters(_resolved_model_values(value, model, source=source), model)
 
 
@@ -1011,7 +1124,9 @@ def _resolved_model_values(
     raw = _parameters(value, declared_names=model.active_parameters)
     values: dict[str, Any] = {}
     active_parameters = model.active_parameters
-    inactive = set(model.parameters) - set(active_parameters)
+    inactive = (set(model.parameters) - set(active_parameters)) | set(
+        model.excluded_parameter_names
+    )
     missing = object()
     for name in active_parameters:
         default = model.parameter_default(name, source=source, fallback=missing)
@@ -1043,16 +1158,32 @@ def _resolved_model_values(
     # This also protects explicit empty artist strings, regardless of key order.
     _expand_parameter_presets(supplied, model, protected=set(supplied))
     values.update(supplied)
+    for name, item in values.items():
+        descriptor = active_parameters.get(name)
+        if (
+            descriptor
+            and not descriptor.get("ui_only")
+            and descriptor.get("request_key") not in {"count", "n"}
+        ):
+            _validate_parameter_value(name, item, descriptor)
     return values
 
 
 def _parameters_for_mode(
     values: dict[str, Any], model: ImageModel, mode: str
 ) -> dict[str, Any]:
+    # Compatibility for callers holding an already mapped payload. Generation
+    # resolves the schema before mapping, which also prevents default collisions.
+    included = {
+        str(descriptor.get("request_key") or name)
+        for name, descriptor in model.for_mode(mode).active_parameters.items()
+    }
     excluded = {
         str(descriptor.get("request_key") or name)
         for name, descriptor in model.active_parameters.items()
-        if isinstance(descriptor.get("modes"), list) and mode not in descriptor["modes"]
+        if isinstance(descriptor.get("modes"), list)
+        and mode not in descriptor["modes"]
+        and str(descriptor.get("request_key") or name) not in included
     }
     return {key: value for key, value in values.items() if key not in excluded}
 
@@ -1118,49 +1249,6 @@ def _control_parameter_value(
     ):
         return raw[name]
     return model.parameter_default(name, source=source, fallback="")
-
-
-def _validate_parameter_value(
-    name: str, value: Any, descriptor: dict[str, Any] | None
-) -> None:
-    if not isinstance(descriptor, dict):
-        return
-    choices = descriptor.get("choices")
-    if isinstance(choices, list):
-        values = {
-            str(choice.get("value")) if isinstance(choice, dict) else str(choice)
-            for choice in choices
-        }
-        if str(value) not in values:
-            raise ValueError(f"参数 {name} 的值不在可选范围内")
-    if value is None and (
-        descriptor.get("nullable") is True
-        or ("default" in descriptor and descriptor["default"] is None)
-    ):
-        return
-    parameter_type = str(descriptor.get("type") or "").lower()
-    if parameter_type in {"number", "int", "integer", "float"}:
-        try:
-            if isinstance(value, bool):
-                raise ValueError
-            numeric = Decimal(str(value))
-            if not numeric.is_finite():
-                raise ValueError
-        except (TypeError, ValueError, InvalidOperation) as exc:
-            raise ValueError(f"参数 {name} 必须是有限数字") from exc
-        if (
-            parameter_type in {"int", "integer"}
-            and numeric != numeric.to_integral_value()
-        ):
-            raise ValueError(f"参数 {name} 必须是整数")
-        if descriptor.get("min") is not None and numeric < Decimal(
-            str(descriptor["min"])
-        ):
-            raise ValueError(f"参数 {name} 不能小于 {descriptor['min']}")
-        if descriptor.get("max") is not None and numeric > Decimal(
-            str(descriptor["max"])
-        ):
-            raise ValueError(f"参数 {name} 不能大于 {descriptor['max']}")
 
 
 def _as_int(value: Any, default: int) -> int:

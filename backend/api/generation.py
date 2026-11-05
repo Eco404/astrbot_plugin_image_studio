@@ -13,6 +13,7 @@ from ..media.images import (
     image_data_url,
 )
 from ..providers.executor import ProviderError
+from ..generation.preview import preview_custom_request, sanitize_preview
 
 LOG_TAG = "[ImageStudio]"
 
@@ -142,6 +143,21 @@ class GenerationAPI:
             return error_response(str(exc), status_code=400)
         return json_response({"models": models, "provider_id": provider.id})
 
+    async def _api_provider_preview(self) -> Any:
+        body = await web_request.json(default={})
+        if not isinstance(body, dict) or not isinstance(body.get("provider"), dict):
+            return error_response("需要服务商配置", status_code=400)
+        draft = body["provider"]
+        try:
+            preview = preview_custom_request(
+                draft, body.get("model_index"), body.get("mode")
+            )
+        except (ValueError, ProviderError) as exc:
+            return error_response(sanitize_preview(str(exc), draft), status_code=400)
+        response = json_response(preview)
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
     async def _api_provider_quota(self) -> Any:
         provider_id = str(web_request.query.get("provider_id", "")).strip()
         if not provider_id:
@@ -169,7 +185,7 @@ class GenerationAPI:
     def _test_request(provider: ImageProvider, model_id: str):
         from ..models import GenerationRequest
 
-        model = provider.get_model(model_id)
+        model = provider.get_model(model_id).for_mode("text2img")
         size = "竖图" if provider.kind == "nai_direct" else "1024x1024"
         parameters: dict[str, Any] = {}
         for name, descriptor in model.active_parameters.items():

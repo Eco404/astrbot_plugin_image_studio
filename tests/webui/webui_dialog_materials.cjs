@@ -28,14 +28,14 @@ async function materials(frame) {
     };
     const reference = surface("#detailDrawer"), footer = surface(".detail-footer");
     const panels = ["#studioModal", "#confirmDialog", "#parameterDialog", ".image-preview__panel", ".appearance-reset-confirmation"];
-    const footers = ["#studioModalFooter", ".image-preview__actions", ".parameter-dialog__actions"];
+    const footers = ["#studioModalFooter", ".image-preview__actions"];
     const modal = document.getElementById("studioModal"), previousClass = modal.className;
     const variants = ["", "is-external-editor", "is-import-editor", "is-merge-picker"].map(variant => {
       modal.className = `studio-modal glass ${variant}`;
       return { variant, surface: surface("#studioModal"), footer: surface("#studioModalFooter") };
     });
     modal.className = previousClass;
-    return { reference, footer, confirmationActions: surface(".confirm-dialog__actions"), scrim: surface(".scrim"), scrims: [".studio-modal-scrim", ".image-preview__backdrop"].map(surface), panels: panels.map(selector => ({ selector, ...surface(selector) })), footers: footers.map(selector => ({ selector, ...surface(selector) })), variants };
+    return { reference, footer, confirmationActions: surface(".confirm-dialog__actions"), parameterActions: surface(".parameter-dialog__actions"), scrim: surface(".scrim"), scrims: [".studio-modal-scrim", ".image-preview__backdrop"].map(surface), panels: panels.map(selector => ({ selector, ...surface(selector) })), footers: footers.map(selector => ({ selector, ...surface(selector) })), variants };
   });
 }
 
@@ -69,6 +69,7 @@ async function verify(browser, name, width) {
           assert.equal(footer.filter, "none", `${context}: ${footer.selector} does not stack another blur layer`);
         }
         assert.deepEqual(state.confirmationActions, { color: [0, 0, 0, 0], filter: "none" }, `${context}: compact confirmation uses its enclosing glass without an extra rectangular tint`);
+        assert.deepEqual(state.parameterActions, state.confirmationActions, `${context}: inset tool parameter actions reuse the enclosing glass`);
         for (const variant of state.variants) {
           assert.deepEqual(variant.surface, state.reference, `${context}: ${variant.variant || "generic"}`);
           assert.deepEqual(variant.footer, state.footer, `${context}: ${variant.variant || "generic"} footer`);

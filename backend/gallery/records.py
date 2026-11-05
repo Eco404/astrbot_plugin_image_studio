@@ -144,6 +144,9 @@ class GenerationRecords:
                 }
             )
             model = provider.get_model(request.model)
+            # Imported/history-only records may have an undetermined mode.
+            if request.mode in {"text2img", "img2img"}:
+                model = model.for_mode(request.mode)
             denied: set[str] = set()
             for name, descriptor in model.parameters.items():
                 if not parameter_flag(descriptor, "record_in_history"):

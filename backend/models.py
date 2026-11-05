@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import copy
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
@@ -16,6 +17,124 @@ from .providers.novelai.catalog import (
 )
 
 GenerationMode = Literal["text2img", "img2img"]
+
+
+def resolve_mode_parameters(
+    parameters: dict[str, dict[str, Any]], mode: str
+) -> dict[str, dict[str, Any]]:
+    """Select mode fields before resolving defaults or mapping request keys.
+
+    Overrides replace individual descriptor properties, including whole defaults
+    and choice lists. A missing override inherits the shared descriptor; an
+    explicit null remains null. Applicability is always controlled by ``modes``
+    on the shared descriptor, not by properties inside an override.
+    """
+    if mode not in {"text2img", "img2img"}:
+        raise ValueError("生成模式必须为 text2img 或 img2img")
+    result = {}
+    for name, descriptor in parameters.items():
+        if not isinstance(descriptor, dict):
+            continue
+        modes = descriptor.get("modes")
+        if isinstance(modes, list) and mode not in modes:
+            continue
+        resolved = copy.deepcopy(descriptor)
+        overrides = resolved.pop("mode_overrides", None)
+        override = overrides.get(mode) if isinstance(overrides, dict) else None
+        if isinstance(override, dict):
+            resolved.update(
+                {
+                    key: value
+                    for key, value in override.items()
+                    if key not in {"modes", "mode_overrides"}
+                }
+            )
+        result[name] = resolved
+    return result
+
+
+def validate_parameter_value(
+    name: str, value: Any, descriptor: dict[str, Any] | None
+) -> None:
+    """Use the same scalar/structured contract for defaults and supplied values."""
+    if not isinstance(descriptor, dict):
+        return
+    if value is None and (
+        descriptor.get("nullable") is True
+        or ("default" in descriptor and descriptor["default"] is None)
+    ):
+        return
+    choices = descriptor.get("choices")
+    if isinstance(choices, list):
+        values = {
+            str(choice.get("value")) if isinstance(choice, dict) else str(choice)
+            for choice in choices
+        }
+        if str(value) not in values:
+            raise ValueError(f"参数 {name} 的值不在可选范围内")
+    kind = str(descriptor.get("type") or "").lower()
+    if kind in {"boolean", "bool"} and not isinstance(value, bool):
+        raise ValueError(f"参数 {name} 必须是布尔值")
+    if kind in {"json", "object"} and not isinstance(value, (dict, list)):
+        raise ValueError(f"参数 {name} 必须是 JSON 对象或数组")
+    if kind in {"text", "string", "textarea"} and not isinstance(
+        value, (str, int, float)
+    ):
+        raise ValueError(f"参数 {name} 必须是文本或数字")
+    if kind in {"number", "int", "integer", "float"}:
+        try:
+            if isinstance(value, bool):
+                raise ValueError
+            numeric = Decimal(str(value))
+            if not numeric.is_finite():
+                raise ValueError
+        except (TypeError, ValueError, InvalidOperation) as exc:
+            raise ValueError(f"参数 {name} 必须是有限数字") from exc
+        if kind in {"int", "integer"} and numeric != numeric.to_integral_value():
+            raise ValueError(f"参数 {name} 必须是整数")
+        for bound, wording in (("min", "小于"), ("max", "大于")):
+            if descriptor.get(bound) is None:
+                continue
+            try:
+                if isinstance(descriptor[bound], bool):
+                    raise ValueError
+                limit = Decimal(str(descriptor[bound]))
+                if not limit.is_finite():
+                    raise ValueError
+            except (TypeError, ValueError, InvalidOperation) as exc:
+                raise ValueError(f"参数 {name} 的 {bound} 必须是有限数字") from exc
+            if (bound == "min" and numeric < limit) or (
+                bound == "max" and numeric > limit
+            ):
+                raise ValueError(f"参数 {name} 不能{wording} {descriptor[bound]}")
+
+
+def validate_parameter_request_keys(
+    parameters: dict[str, dict[str, Any]], mode: str
+) -> None:
+    """Reject ambiguous wire aliases, while allowing mode-disjoint descriptors."""
+    seen: dict[str, str] = {}
+    field_names = {
+        name
+        for name, descriptor in parameters.items()
+        if not descriptor.get("ui_only") and name not in MODEL_SCHEDULING_KEYS
+    }
+    for name, descriptor in parameters.items():
+        if descriptor.get("ui_only"):
+            continue
+        key = str(descriptor.get("request_key") or name)[:96]
+        if name in MODEL_SCHEDULING_KEYS or key in MODEL_SCHEDULING_KEYS:
+            continue
+        if key != name and key in field_names:
+            raise ValueError(
+                f"参数 {name} 的 request_key：{key} 与另一个参数名冲突；请使用不同的字段名或请求键"
+            )
+        if key in seen:
+            label = "文生图" if mode == "text2img" else "图生图"
+            raise ValueError(
+                f"{label}参数 {seen[key]} 和 {name} 使用相同 request_key：{key}；请保留一个或限定不同模式"
+            )
+        seen[key] = name
 
 
 def browser_safe_integers(value: Any) -> Any:
@@ -170,6 +289,10 @@ NOVELAI_OFFICIAL_PARAMETERS: dict[str, dict[str, Any]] = {
 def _model_parameters(
     value: Any, kind: str, model_id: str = ""
 ) -> dict[str, dict[str, Any]]:
+    if kind == "agnes" and not value:
+        from .providers.agnes import agnes_parameter_schema
+
+        value = agnes_parameter_schema(model_id)
     if kind == "novelai_official" and not value:
         value = copy.deepcopy(NOVELAI_OFFICIAL_PARAMETERS)
         value["steps"]["default"] = 23
@@ -236,6 +359,12 @@ def _model_parameters(
 
 
 PROVIDER_TRANSPORT_DEFAULTS: dict[str, dict[str, str]] = {
+    "agnes": {
+        "base_url": "https://api.agnes-ai.cn/v1",
+        "generate_path": "/images/generations",
+        "edit_path": "/images/generations",
+        "edit_request_format": "json_data_url",
+    },
     "comfyui": {
         "base_url": "http://127.0.0.1:8188",
         "generate_path": "/prompt",
@@ -294,6 +423,56 @@ class ImageModel:
     native_batch_size_source: str = "default"
     novelai_capabilities: dict[str, Any] = field(default_factory=dict)
     comfyui: dict[str, Any] = field(default_factory=dict)
+    excluded_parameter_names: frozenset[str] = field(
+        default_factory=frozenset, repr=False
+    )
+
+    def for_mode(self, mode: str) -> ImageModel:
+        """Return an independent effective schema and tool policy for one mode."""
+        parameters = resolve_mode_parameters(self.parameters, mode)
+        validate_parameter_request_keys(parameters, mode)
+        active_keys = {
+            str(item.get("request_key") or name) for name, item in parameters.items()
+        }
+        excluded = set(self.parameters) - set(parameters)
+        excluded.update(
+            str(item.get("request_key") or name)
+            for name, item in self.parameters.items()
+            if name not in parameters
+            and str(item.get("request_key") or name) not in active_keys
+            and str(item.get("request_key") or name) not in parameters
+        )
+        tool = copy.deepcopy(self.tool)
+        if isinstance(tool.get("parameters"), dict):
+            tool["parameters"] = resolve_mode_parameters(tool["parameters"], mode)
+        return replace(
+            self,
+            parameters=parameters,
+            tool=tool,
+            excluded_parameter_names=self.excluded_parameter_names | excluded,
+        )
+
+    def validate_parameters(self) -> None:
+        """Check saved mode contracts without discarding a provider during load."""
+        for mode in ("text2img", "img2img"):
+            if not self.supports(mode):
+                continue
+            effective = self.for_mode(mode)
+            for name, descriptor in effective.active_parameters.items():
+                # Scheduling controls have their own bounds/clamping rules,
+                # and presets only populate the provider's real fields.
+                if descriptor.get("ui_only") or descriptor.get("request_key") in {
+                    "count",
+                    "n",
+                }:
+                    continue
+                for source in ("webui", "llm_tool"):
+                    missing = object()
+                    default = effective.parameter_default(
+                        name, source=source, fallback=missing
+                    )
+                    if default is not missing:
+                        validate_parameter_value(name, default, descriptor)
 
     @property
     def comfyui_capabilities(self) -> dict[str, Any]:
@@ -405,6 +584,8 @@ class ImageModel:
         if not self.negative_prompt:
             return ""
         policy = self.llm_negative_prompt_policy
+        if policy.get("use_model_default") is True:
+            return self.negative_prompt_default
         value = policy.get(
             "default_override", policy.get("default", self.negative_prompt_default)
         )
@@ -419,6 +600,8 @@ class ImageModel:
             policies = self.tool.get("parameters")
             policy = policies.get(name) if isinstance(policies, dict) else None
             if isinstance(policy, dict):
+                if policy.get("use_model_default") is True:
+                    return self.parameters.get(name, {}).get("default", fallback)
                 for key in ("default_override", "default"):
                     if key in policy:
                         return policy[key]
@@ -518,6 +701,11 @@ class ImageProvider:
     models_path: str = ""
     discovered_models: tuple[dict[str, Any], ...] = ()
     proxy: str = field(default="", repr=False)
+    request_templates: dict[str, str] = field(default_factory=dict)
+
+    def request_template_for_mode(self, mode: str) -> str:
+        """Use a configured mode template, falling back to the legacy template."""
+        return self.request_templates.get(mode) or self.request_template
 
     @classmethod
     def from_mapping(
@@ -541,11 +729,11 @@ class ImageProvider:
                 "max_reference_images", 1
             )
         img2img = kind != "nai_direct" and _as_bool(
-            value.get("supports_img2img"), kind == "novelai_official"
+            value.get("supports_img2img"), kind in {"novelai_official", "agnes"}
         )
         supports_negative_prompt = (
             False
-            if kind == "gemini"
+            if kind in {"gemini", "agnes"}
             else _as_bool(
                 value.get("supports_negative_prompt"),
                 kind in {"nai_direct", "novelai_official"},
@@ -648,6 +836,15 @@ class ImageProvider:
             edit_request_format=_text(value.get("edit_request_format"), 24)
             or transport_defaults["edit_request_format"],
             request_template=str(value.get("request_template") or ""),
+            request_templates={
+                mode: template
+                for mode, template in (
+                    value.get("request_templates", {}).items()
+                    if isinstance(value.get("request_templates"), dict)
+                    else ()
+                )
+                if mode in {"text2img", "img2img"} and isinstance(template, str)
+            },
             response_image_path=_text(value.get("response_image_path"), 240),
             max_concurrent_generations=max(
                 1, min(16, _as_int(value.get("max_concurrent_generations"), 2))
@@ -684,6 +881,7 @@ class ImageProvider:
             "supports_negative_prompt": self.capabilities.negative_prompt,
             "edit_request_format": self.edit_request_format,
             "request_template": self.request_template,
+            "request_templates": self.request_templates,
             "response_image_path": self.response_image_path,
             "max_concurrent_generations": self.max_concurrent_generations,
             "models_path": self.models_path,
@@ -927,7 +1125,7 @@ def positive_batch_size(value: Any) -> int | None:
 def _native_batch_fields(
     value: dict[str, Any], kind: str, discovered: dict[str, Any] | None = None
 ) -> tuple[int, str]:
-    if kind == "nai_direct":
+    if kind in {"nai_direct", "agnes"}:
         return 1, "fixed"
     configured = positive_batch_size(value.get("native_batch_size"))
     source = str(value.get("native_batch_size_source") or "")
@@ -963,7 +1161,9 @@ def _normalize_parameters(value: Any) -> dict[str, dict[str, Any]]:
         if not name or not isinstance(descriptor, dict):
             continue
         item = dict(descriptor)
-        item["type"] = _text(item.get("type"), 16) or "text"
+        item["type"] = _text(item.get("type"), 16) or (
+            "json" if isinstance(item.get("default"), (dict, list)) else "text"
+        )
         item["label"] = _text(item.get("label"), 96) or name
         item["request_key"] = _text(item.get("request_key"), 96) or name
         if (
@@ -1033,7 +1233,7 @@ def _model_from_mapping(
             comfy = value["comfyui"]
     native_size, native_source = _native_batch_fields(value, kind, discovered)
     img2img = kind != "nai_direct" and _as_bool(
-        value.get("supports_img2img"), kind == "novelai_official"
+        value.get("supports_img2img"), kind in {"novelai_official", "agnes"}
     )
     capability_source = _text(value.get("capability_source"), 32) or "manual"
     max_reference_images = max(1, min(8, _as_int(value.get("max_reference_images"), 1)))
@@ -1043,7 +1243,7 @@ def _model_from_mapping(
         )
     supports_negative_prompt = (
         False
-        if kind == "gemini"
+        if kind in {"gemini", "agnes"}
         else _as_bool(
             value.get("supports_negative_prompt"),
             kind in {"nai_direct", "novelai_official"},

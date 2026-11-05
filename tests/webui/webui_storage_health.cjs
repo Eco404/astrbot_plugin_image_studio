@@ -34,7 +34,7 @@ async function verify(browser, engine, width) {
     await frame.locator('[data-view="settings"]').click();
     await frame.locator("#storageHealthBreakdown > div").first().waitFor();
     const labels = await frame.locator("#storageHealthBreakdown span").allTextContents();
-    assert.deepEqual(labels, ["画廊原图与参考图", "预览图", "ComfyUI 缓存", "数据库", "升级备份", "其他临时文件", "配置及其他文件"]);
+    assert.deepEqual(labels, ["画廊原图与参考图", "预览图", "ComfyUI 缓存", "数据库", "日志", "升级备份", "其他临时文件", "配置及其他文件"]);
     const cacheRow = frame.locator("#storageHealthBreakdown > div").filter({ has: frame.locator("span").filter({ hasText: /^ComfyUI 缓存$/ }) });
     assert.equal(await cacheRow.count(), 1);
     assert.equal(await cacheRow.locator("strong").textContent(), width < 600 ? "7 KB" : "5 KB", "cache total must include every available category once");

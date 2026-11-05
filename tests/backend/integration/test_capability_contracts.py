@@ -45,7 +45,13 @@ def test_successful_full_contract_guidance_allows_reuse_without_repeating_select
         **({"model_refs": ["policy:paint"]} if query_type == "model" else {}),
     )
     guidance = payload["next_action"]
+    assert guidance.startswith("本次仅查询")
+    assert "未生成图片或提交任务" in guidance
     assert "生成模式、参数和提示词要求" in guidance
+    assert "用户要求生图时" in guidance
+    assert guidance.index("用户要求生图时") < guidance.index("image_studio_generate")
+    assert guidance.index("image_studio_generate") < guidance.index("当前这条用户消息")
+    assert "prompt_contract 和 parameters" in guidance
     assert "当前这条用户消息" in guidance
     assert "model_ref" in guidance and "query_modes" in guidance
     assert "修改 prompt 或 parameters 中的生成参数值不需要重新查询" in guidance
@@ -66,6 +72,9 @@ def test_partial_model_contract_guidance_distinguishes_reusable_success_from_err
     assert payload["models"][0]["input_indices"] == [0]
     assert payload["errors"][0]["input_index"] == 1
     assert "models 中的模型已成功查询" in payload["next_action"]
+    assert "本次仅查询" in payload["next_action"]
+    assert "未生成图片或提交任务" in payload["next_action"]
+    assert "用户要求生图时，从 models 中选择" in payload["next_action"]
     assert "当前这条用户消息" in payload["next_action"]
     assert "修正 model_refs 后重新查询" in payload["next_action"]
 
@@ -78,8 +87,11 @@ def test_failed_model_queries_do_not_claim_reusable_capabilities():
     )
     assert not payload["models"]
     assert payload["errors"][0]["input_index"] == 0
+    assert payload["next_action"].startswith("本次仅查询")
+    assert "未生成图片或提交任务" in payload["next_action"]
     assert "errors" in payload["next_action"] and "model_refs" in payload["next_action"]
     assert "复用" not in payload["next_action"]
+    assert "image_studio_generate" not in payload["next_action"]
 
 
 @pytest.mark.parametrize(

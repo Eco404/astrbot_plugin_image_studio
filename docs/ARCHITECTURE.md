@@ -15,16 +15,23 @@ backend/
     gallery.py                  图库浏览、收藏、删除、导出与外部状态
     imports.py                  导入预检、上传票据、提交与编辑
     preferences.py              浏览器主题与图库偏好 Cookie
+    logs.py                     日志筛选、分页详情与清空接口
   commands/
     parser.py                   无宿主依赖的指令参数解析
     handler.py                  指令编排，显式注入事件图片解析等依赖
   tools/
     capability_catalog.py       服务商/模型发现、批量选择
     capabilities.py             完整能力载荷组装
+    schemas.py                  本插件图片工具的嵌套参数定义
     image_context.py            本轮工具附图来源说明与宿主包装适配
   generation/service.py         生图校验、批次、并发、结果登记与复现
   generation/concurrency.py     服务商、模型与官方账号共享限流
   generation/comfyui_runtime.py  ComfyUI 生图、图库、会话任务与恢复协调
+  generation/preview.py          自定义 JSON 请求预览，复用校验与请求构造
+  observability/
+    store.py                    每日业务日志、脱敏、筛选、保留与清空
+    http.py                     请求和响应日志，图片与 Base64 摘要
+    integration.py              生图、页面操作与系统事件记录
   comfyui/
     catalog.py                  节点事实、解析/执行指纹及语义目录组装
     rules/node_adapters.json    控件布局、种子契约与来源依据
@@ -34,6 +41,7 @@ backend/
     errors.py / http.py         共用错误、HTTP 校验及图片响应读取
     discovery.py                模型发现与能力提取
     openai_images.py / gemini.py OpenAI / Gemini 图片协议
+    agnes.py                    Agnes 模型预设、参考图与返回格式协议
     nai_direct.py / custom_json.py NAI 第三方及自定义请求协议
     comfyui/
       client.py                 ComfyUI HTTP/WebSocket 协议
@@ -88,6 +96,8 @@ backend/
   ui/                           浏览器主题、图库偏好的传输格式
 pages/image-studio/
   app.js                       页面启动、生图与图库/详情协调
+  parameters.js                模式参数解析、默认值与选项校验
+  logs.js / logs.css           日志查询、过滤与详情显示
   components/                  通用展示、平衡布局算法与弹窗生命周期
   settings/controller.js       配置草稿、参数行为编辑、设置布局及保存流程
   settings/external-sources.js 外部来源配置
@@ -103,6 +113,7 @@ tests/
     comfyui/                   工作流解析、执行与任务恢复
     gallery/                   图库、导入与外部来源
     providers/                 Provider 协议与高级输入
+    observability/             日志脱敏、保留与业务事件记录
     storage/                   数据库、正文与存储维护
     config/                    配置、参数行为与默认值
     integration/               指令、工具及跨模块生成流程
@@ -116,6 +127,10 @@ scripts/                       验证入口和发布包构建
 ## 入口与依赖
 
 `main.py` 保留 AstrBot 的插件类、装饰器和注册签名。插件不注入系统提示词；`on_llm_request` 只复制并记录本请求的工具集合，准备阶段保留所有工具名称。独立副本避免后续调整影响全局集合或下一条消息。调用前的模型选择、入参和资产使用约定写在各工具描述中，动态状态及下一步只由相应工具结果返回。能力工具调用 `query_capabilities(settings, ...)` 获取载荷，再由入口维护本次事件和配置修订的能力查询状态；返回说明明确限定当前用户消息、已查询的 `model_ref` 及 `query_modes`。修改生成参数值不要求重新查询，新事件或插件配置修订改变后则需重新查询。搜索摘要不会授予直接生成的权限。纯载荷模块不导入插件入口或 AstrBot 事件。
+
+`backend/tools/schemas.py` 在 AstrBot 解析并注册本插件的工具后，复制其参数 schema 并补全 `references` 和 `messages` 的对象字段、枚举及数量约束；仅处理本插件刚注册的图片生成与发送工具，不替换宿主解析器或其他插件定义。服务端继续执行互斥字段、会话授权和文件校验，参考图错误返回对应 `reference_index`、`reference_field`，不能仅依赖模型遵循 schema。
+
+能力与目录结果明确说明本次查询没有生成图片或提交任务，下一步以“用户要求生图时”为条件，不把查询能力当作生成请求。`next_action` 先给当前步骤的操作，再说明能力复用；这不改写前面已经完成的生成状态，也不强制 Agent 继续生图。
 
 生图后的发送入口选择由插件入口按当前事件管理：首次成功登记并返回生成结果的 `asset_id` 后，确认本请求有 `image_studio_send_output`，再仅对本请求隐藏 `send_message_to_user` 和 `pc_send_current_media`。请求使用独立的 ToolSet，并记录通过其公开工厂方法创建的精简说明、参数说明副本；过滤同时覆盖这些副本及原始执行列表，避免 AstrBot 的 `skills_like` 模式再次展示被屏蔽工具的参数或执行它们。任务查询取得生成结果及部分成功结果走同一条件；能力查询、搜索、查看旧图、失败和 pending 不触发。状态不写入配置或数据库，后续失败不会解除已生效的本轮限制，下个事件使用新请求的正常工具列表；宿主或其他插件的全局工具定义保持原样。
 
@@ -143,7 +158,11 @@ ComfyUI 的模型说明保留管理员提示词说明，用 `prompt_contract.req
 
 Provider 调度通过显式适配函数和长期客户端组合；共用 HTTP/图片读取与专属协议分开。NovelAI Vibe 缓存、失败缓存和并发锁随客户端存活，不在每次请求重建。ComfyUI 文件组件不打开数据库、也不决定资源是否过期；任务仓储持有事务和引用决策，异步任务管理器只负责任务生命周期。
 
+`ProviderError.request_status` 根据实际失败阶段区分 `not_submitted`、`rejected` 和默认的 `unknown`。本地预检可以确认未提交；生图 HTTP 4xx（408 除外）标记明确拒绝，5xx、超时及响应/结果下载失败保守标记未知。Vibe 编码可能已经产生费用，失败仍保留未知状态。批次保留逐请求状态并归纳，执行中的 `ValueError` 不会冒充提交前校验错误；已取得的部分图片继续返回。工具入口据此返回 `validation_failed`、`upstream_rejected`、`generation_unknown`，不解析错误字符串判断状态；已有的 `asset_registration_failed` 与 `delivery_unknown` 继续独立处理。
+
 对话中的 ComfyUI 请求由入口调用 `ComfyRuntime.submit_agent()`，并通过 `image_studio_task` 接回 `inspect_agent()` 或 `list_agent()`；WebUI、指令和对话共用原任务管理器。提交与查询返回内部任务对象，入口只向模型暴露状态、进度、恢复信息和最终图片资产；最近任务列表直接使用轻量投影。`job_manager.wait(..., timeout_seconds=...)` 到期返回当前状态，调用方取消等待也不取消工作流。恢复仅调度同一持久任务，已有远端请求不会因工具超时而重复提交。
+
+`list_agent()` 的空结果只代表当前会话没有可查询的 ComfyUI 任务；返回说明不推断其他服务商是否生成过图片，也不把一次查询当成提交。等待和恢复仍必须提供已有的 `task_id`。
 
 图库通过通用删除后回调通知生成协调层核对已发布结果，回调在图库提交及释放锁后执行。任务仓储自行判断恢复依赖和共享文件引用；回调失败由统一维护重试，图库不依赖 ComfyUI Provider 实现。
 
@@ -151,9 +170,9 @@ Provider 调度通过显式适配函数和长期客户端组合；共用 HTTP/�
 
 前端保留原生 JavaScript 模块工厂与既有加载顺序。通用弹窗拥有自己的打开/关闭与退出动画状态；导入模块拥有上传队列、编辑草稿和受容量限制的快照缓存；设置模块拥有配置草稿、已保存基线和保存/重读队列。它们通过明确回调访问导航或当前选中图片，不持有整个应用状态。
 
-本轮仍加载 29 个脚本和 12 份样式。参数行为编辑及设置布局由设置模块负责；详情与设置共享平衡布局算法，各自管理观察器与调度。图片缓存和手势交接的状态归属保持不变。
+脚本与样式入口集中在 `pages/image-studio/index.html`，日志页面由独立的 `logs.js`、`logs.css` 负责。参数行为编辑及设置布局由设置模块负责；详情与设置共享平衡布局算法，各自管理观察器与调度。图片缓存和手势交接的状态归属保持不变。
 
-自有静态资源使用与插件正式版一致的 `1.4.2` 缓存标识，避免升级后旧脚本与新资源混用；第三方库保留自身版本号。
+自有静态资源使用与插件正式版一致的 `1.5.0` 缓存标识，避免升级后旧脚本与新资源混用；第三方库保留自身版本号。
 
 图库列表、详情导航和图片缓存仍由 `app.js` 协调，既有手势、模糊背景与媒体复用组件沿用原边界。此处保留紧密相关的状态以避免跨组件转交期间重置缓存或丢失手势。后续可依据实际新增功能继续提取，不以文件行数作为唯一拆分目标。
 
@@ -169,7 +188,7 @@ Provider 调度通过显式适配函数和长期客户端组合；共用 HTTP/�
 
 `StarTools.get_data_dir` 仍是运行数据目录入口，配置、数据库文件 `history.sqlite3`、任务修订和资产编号沿用原约定。本地原图与参考图统一放在 `images/assets`，预览缓存放在 `images/thumbnails`；旧 `history/assets`、`history/thumbnails` 由独立的 `database/migrations/images_layout.py` 在首次初始化时迁移。外部图库原图保留来源路径。
 
-图片布局迁移先预检冲突和符号链接，校验后通过链接或复制准备目标文件，再用单一事务更新资产、预览和 ComfyUI 已知图库路径，提交后清除已核验旧副本及空目录。迁移日志支持中断续跑，未知旧目录内容保留；日常统计兼容新旧布局。这一文件与路径转换不增加数据库修订；当前数据库为正式 v4，插件版本为 `1.4.2`。
+图片布局迁移先预检冲突和符号链接，校验后通过链接或复制准备目标文件，再用单一事务更新资产、预览和 ComfyUI 已知图库路径，提交后清除已核验旧副本及空目录。迁移日志支持中断续跑，未知旧目录内容保留；日常统计兼容新旧布局。这一文件与路径转换不增加数据库修订；当前数据库为正式 v4，插件版本为 `1.5.0`。
 
 `GenerationStore` 保留异步调用、原修改锁、缓存修订和取消保护。同步事务整体移入对应仓储，仓储共用 `GalleryContext`，不创建独立修改锁，也不通过代理访问整个 store。跨仓储调用以显式服务回调传入，数据库连接仍由原事务发起者持有。ComfyUI 任务继续使用同一图库数据库和原任务状态机，结构迁移由 `backend/database/schema.py` 集中处理。
 

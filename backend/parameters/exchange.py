@@ -10,7 +10,7 @@ from typing import Any
 
 from ..config import RuntimeSettings
 from ..metadata.parser import parse_parameter_text
-from ..models import MODEL_SCHEDULING_KEYS, parameter_flag
+from ..models import MODEL_SCHEDULING_KEYS, parameter_flag, resolve_mode_parameters
 from ..providers.novelai.catalog import model_capabilities
 from ..gallery.projection import (
     compact_comfy_request,
@@ -945,7 +945,7 @@ def resolve_parameters(
     )
     is_nai = selected["provider_kind"] == "nai_direct"
     is_official = selected["provider_kind"] == "novelai_official"
-    descriptors = selected.get("parameters") or {}
+    descriptors = resolve_mode_parameters(selected.get("parameters") or {}, mode)
     values = {
         key: copy.deepcopy(desc["default"])
         for key, desc in descriptors.items()
@@ -1161,7 +1161,7 @@ def resolve_parameters(
             descriptor.get("nullable") is True
             or ("default" in descriptor and descriptor["default"] is None)
         ):
-            pass
+            valid = True
         elif kind in {"number", "int", "integer", "float"}:
             try:
                 number = float(value)

@@ -212,8 +212,8 @@
   function selectedModel() {
     const model = generationModels().find(item => item.model_ref === state.selectedModelRef) || null;
     const snapshot = state.comfyuiModelOverride;
-    if (model && snapshot?.model_ref === model.model_ref) return { ...model, ...snapshot.model, model_ref: model.model_ref, provider_id: model.provider_id, provider_name: model.provider_name, provider_kind: model.provider_kind };
-    return model;
+    if (model && snapshot?.model_ref === model.model_ref) return window.ImageStudioParameters.modelForMode({ ...model, ...snapshot.model, model_ref: model.model_ref, provider_id: model.provider_id, provider_name: model.provider_name, provider_kind: model.provider_kind }, state.mode);
+    return window.ImageStudioParameters.modelForMode(model, state.mode);
   }
   function selectedProvider() { const model = selectedModel(); return state.providers.find((item) => item.id === (model?.provider_id || state.selectedProviderId)) || null; }
   function text(value) { return value === null || value === undefined ? "" : String(value); }
@@ -322,19 +322,28 @@
   }
 
   function showView(view) {
+    if (view === "logs" && $("logsNav").classList.contains("is-hidden")) view = "generate";
     window.ImageStudioSelect?.close();
     state.view = view;
     if (view !== "gallery") stopGalleryPreviews();
     document.querySelectorAll(".nav-item").forEach((button) => button.classList.toggle("is-active", button.dataset.view === view));
     document.querySelectorAll(".view").forEach((item) => item.classList.toggle("is-active", item.id === `${view}View`));
-    const labels = { generate: ["生图", "选择模式和模型后开始创作"], gallery: ["画廊", "搜索、筛选、复现或导出历史生成记录"], import: ["导入", "图片与生成参数"], settings: ["设置", "管理运行策略、历史、生图服务商和模型"], };
+    const labels = { generate: ["生图", "选择模式和模型后开始创作"], gallery: ["画廊", "搜索、筛选、复现或导出历史生成记录"], import: ["导入", "图片与生成参数"], settings: ["设置", "管理运行策略、历史、生图服务商和模型"], logs: ["日志", "查看接口请求、生图任务与插件操作记录"] };
     els.pageTitle.textContent = labels[view][0]; els.pageSubtitle.textContent = labels[view][1];
     refreshProviderQuota();
     library.syncFloatingBars();
     if (view === "gallery") void loadGallery();
+    if (view === "logs") void logs.load();
     if (view === "settings") { settings.layoutSettingsPanels(); void loadSettings(); void loadStorageHealth(); }
     externalSources.viewChanged();
     window.ImageStudioSelect?.refresh();
+  }
+
+  function applyLoggingSettings(value) {
+    const enabled = value?.enabled !== false;
+    $("logsNav").classList.toggle("is-hidden", !enabled);
+    logs.setEnabled(enabled);
+    if (!enabled && state.view === "logs") showView("generate");
   }
 
   function collectModelParameters() {
@@ -394,7 +403,7 @@
       return `<div class="field">${label}<select aria-label="${accessibleLabel}" data-model-parameter="${escape(name)}" data-parameter-type="select" data-request-key="${requestKey}">${options}</select></div>`;
     }
     if (type === "boolean" || type === "bool") return `<div class="toggle-row">${label}<label class="toggle-control"><input aria-label="${accessibleLabel}" data-model-parameter="${escape(name)}" data-request-key="${requestKey}" type="checkbox" ${value ? "checked" : ""} /><span aria-hidden="true"></span></label></div>`;
-    if (type === "json" || type === "object") return `<div class="field field-wide">${label}<textarea aria-label="${accessibleLabel}" data-model-parameter="${escape(name)}" data-parameter-type="json" data-request-key="${requestKey}" rows="3" spellcheck="false">${escape(typeof value === "string" ? value : JSON.stringify(value || {}, null, 2))}</textarea></div>`;
+    if (type === "json" || type === "object") return `<div class="field field-wide">${label}<textarea aria-label="${accessibleLabel}" data-model-parameter="${escape(name)}" data-parameter-type="json" data-request-key="${requestKey}" rows="3" spellcheck="false">${escape(typeof value === "string" ? value : JSON.stringify(value, null, 2))}</textarea></div>`;
     if (type === "textarea") return `<div class="field field-wide">${label}<textarea aria-label="${accessibleLabel}" data-model-parameter="${escape(name)}" data-parameter-type="text" data-request-key="${requestKey}" rows="4">${escape(value)}</textarea></div>`;
     const inputType = ["number", "int", "integer", "float"].includes(type) ? "number" : "text";
     const min = descriptor.min !== undefined ? ` min="${escape(descriptor.min)}"` : "";
@@ -465,8 +474,10 @@
     els.modelParameters.innerHTML = effectiveModelParameters(model).filter(([, descriptor]) => descriptor.webui_visible !== false && parameterAppliesToMode(descriptor)).map(([name, descriptor]) => renderModelParameter(name, descriptor)).join("") || '<div class="workspace-placeholder">该模型没有额外参数。</div>';
     els.modelParameters.querySelectorAll("[data-model-parameter]").forEach((input) => {
       if (!Object.prototype.hasOwnProperty.call(state.parameterValues, input.dataset.modelParameter)) input.dataset.unsetValue = "true";
+      if (state.parameterValues[input.dataset.modelParameter] === null) input.dataset.nullValue = "true";
       const update = () => {
         delete input.dataset.unsetValue;
+        delete input.dataset.nullValue;
         state.parameterValues[input.dataset.modelParameter] = input.type === "checkbox" ? input.checked : input.value;
         if (input.dataset.presetTarget) applyParameterPreset(input.dataset.modelParameter, input.value);
         else syncParameterPresets(input.dataset.modelParameter);
@@ -502,14 +513,21 @@
     });
   }
 
-  function parameterValuesForModel(model, values, { forReproduction = false } = {}) {
+  function parameterValuesForModel(model, values, { forReproduction = false, fromModelChange = false } = {}) {
     const source = values && typeof values === "object" ? values : {};
     const result = {}, supplied = new Set();
     effectiveModelParameters(model).forEach(([name, descriptor]) => {
       if (Object.prototype.hasOwnProperty.call(descriptor, "default")) result[name] = descriptor.default;
       if (descriptor.webui_visible === false || forReproduction && descriptor.refill_from_history === false) return;
-      if (Object.prototype.hasOwnProperty.call(source, name)) { result[name] = source[name]; supplied.add(name); }
-      else if (descriptor.request_key && Object.prototype.hasOwnProperty.call(source, descriptor.request_key)) { result[name] = source[descriptor.request_key]; supplied.add(name); }
+      const sourceKey = Object.prototype.hasOwnProperty.call(source, name) ? name : descriptor.request_key && Object.prototype.hasOwnProperty.call(source, descriptor.request_key) ? descriptor.request_key : undefined;
+      if (sourceKey === undefined) return;
+      const value = source[sourceKey];
+      // A shared field name does not imply shared options: NAI's size labels,
+      // for example, cannot replace an OpenAI model's pixel dimensions.
+      if (fromModelChange && ["select", "preset"].includes(String(descriptor.type).toLowerCase()) && Array.isArray(descriptor.choices)
+        && !(value === null && descriptor.nullable)
+        && !descriptor.choices.some(choice => String(choice && typeof choice === "object" ? choice.value : choice) === String(value))) return;
+      result[name] = value; supplied.add(name);
     });
     effectiveModelParameters(model).forEach(([name, descriptor]) => {
       if (String(descriptor.type).toLowerCase() !== "preset" || !descriptor.target) return;
@@ -532,12 +550,23 @@
   }
 
   function applyGenerationSelection(mode, modelRef, providerId = "") {
+    const previousMode = state.mode;
     const previousModel = selectedModel(); if (previousModel?.supports_negative_prompt) { state.negativePromptCarry = els.negativePrompt.value; state.hasNegativePromptCarry = true; }
     const carried = carriedParameterValues();
     state.comfyuiSnapshot = null; state.comfyuiModelOverride = null;
     state.parameterCarry = carried; state.mode = mode; state.selectedModelRef = modelRef || "";
     state.selectedProviderId = selectedModel()?.provider_id || providerId;
-    state.parameterValues = parameterValuesForModel(selectedModel(), carried);
+    if (previousMode !== mode) {
+      const nextSchema = selectedModel()?.parameters || {};
+      for (const [name, descriptor] of Object.entries(previousModel?.parameters || {})) {
+        const key = descriptor.request_key || name;
+        const next = nextSchema[name];
+        if (!next || JSON.stringify(descriptor) !== JSON.stringify(next)) {
+          delete carried[name]; delete carried[key];
+        }
+      }
+    }
+    state.parameterValues = parameterValuesForModel(selectedModel(), carried, { fromModelChange: true });
     const nextModel = selectedModel(); if (nextModel?.supports_negative_prompt) { els.negativePrompt.value = state.hasNegativePromptCarry ? state.negativePromptCarry : (nextModel.negative_prompt_default || ""); state.negativePromptCarry = els.negativePrompt.value; state.hasNegativePromptCarry = true; }
     document.querySelectorAll(".segment").forEach((button) => button.classList.toggle("is-active", button.dataset.mode === state.mode));
     renderModelChoices();
@@ -559,6 +588,8 @@
     const payload = await apiGet("studio/bootstrap");
     state.comfyuiSnapshot = null; state.comfyuiModelOverride = null;
     settings.setNovelAIModels(payload.novelai_models);
+    settings.setAgnesModels(payload.agnes_models);
+    applyLoggingSettings(payload.logging);
     providerQuotas.clear();
     state.providers = Array.isArray(payload.providers) ? payload.providers : [];
     state.models = Array.isArray(payload.models) ? payload.models : [];
@@ -618,7 +649,6 @@
     const mappedParameters = Object.fromEntries(Object.entries(collectModelParameters()).map(([name, value]) => [schema[name]?.request_key || name, value]));
     for (const [name, descriptor] of effectiveModelParameters(model)) {
       const key = descriptor.request_key || name;
-      if (!parameterAppliesToMode(descriptor)) { delete parameters[key]; delete parameters[name]; delete mappedParameters[key]; }
       if (descriptor.webui_visible === false && Object.prototype.hasOwnProperty.call(parameters, key)) delete mappedParameters[key];
     }
     const size = mappedParameters.size || "";
@@ -928,7 +958,7 @@
   }
 
   function detailReferenceMarkup(refs) {
-    return refs.length ? refs.map((item) => item.available ? item.data_url ? `<article class="detail-reference"><img src="${escape(item.data_url)}" alt="${escape(item.filename)}" data-detail-reference="${item.id}" /><div>${escape(item.filename)}<br>${formatBytes(item.size_bytes)}</div><button class="danger-button" data-reference-delete="${item.id}" type="button">删除参考图</button></article>` : `<article class="detail-reference" data-reference-load="${item.id}"><div>${escape(item.filename)}<br>参考图正在加载…</div></article>` : `<article class="detail-reference"><div>参考图已删除</div></article>`).join("") : "<span>该记录没有保留参考图</span>";
+    return refs.length ? refs.map((item) => item.available ? item.data_url ? `<article class="detail-reference"><img src="${escape(item.data_url)}" alt="${escape(item.filename)}" data-detail-reference="${item.id}" /><div>${escape(item.filename)}<br>${formatBytes(item.size_bytes)}</div><button class="danger-button" data-reference-delete="${item.id}" type="button">删除参考图</button></article>` : `<article class="detail-reference" data-reference-load="${item.id}"><div>${escape(item.filename)}<br>参考图正在加载…</div></article>` : `<article class="detail-reference"><div>参考图已删除</div></article>`).join("") : '<span class="detail-references-empty">该记录没有保留参考图</span>';
   }
 
   function watchDetailReferences(detail) {
@@ -3055,7 +3085,7 @@
   const settings = window.ImageStudioSettings({
     escape, apiGet, apiPost, showNotice, errorMessage, formatDate, formatBytes, setError, confirmAction,
     syncPageScrollLock, schemaParameterTitle, schemaParameterLabel, configuredReferenceLimit, referenceLimitForModel,
-    effectiveModelParameters, modelParameterMatches, bootstrap, closeDetail, switchView, library,
+    effectiveModelParameters, modelParameterMatches, bootstrap, closeDetail, switchView, library, applyLoggingSettings,
     getView: () => state.view, showView, confirmationOpen: () => !!activeConfirmation,
     getGallerySort: () => gallerySort,
     onGallerySortSaved: value => { gallerySort = value; invalidateBrowseCache(); state.galleryPage = 0; },
@@ -3065,6 +3095,7 @@
   const externalSources = window.ImageStudioExternalSources({ getView: () => state.view, getSettings: settings.getSettings, apiGet, apiPost, escape, formatBytes, formatDate, showNotice, errorMessage, updateSettingsDirty, invalidateBrowseCache, openModal: (...args) => library.openModal(...args) });
   const novelaiControls = window.ImageStudioNovelAI({ state, model: selectedModel, escape, schemaParameterTitle, schemaParameterLabel, rerenderReferences: renderReferences, uploadFile: async file => (await bridge()).upload("studio/reference/upload", file), openModal: (...args) => library.openModal(...args), showNotice });
   const comfyuiControls = window.ImageStudioComfyUI({ state, escape, apiGet, apiPost, bridge, showNotice, errorMessage, currentSettingsModel, renderModelEditor, updateSettingsDirty, applyDraft, prepareWorkflowSettings: prepareComfyWorkflowSettings, addWorkflowDraft: addComfyWorkflowDraft, invalidateBrowseCache, renderResult: renderGenerationResult, viewResult: viewComfyResult, openModal: (...args) => library.openModal(...args) });
+  const logs = window.ImageStudioLogs.create({ apiGet, apiPost, escape, showNotice, showConfirm: confirmAction, icons: window.ImageStudioPresentation });
 
   async function start() {
     try {
@@ -3073,6 +3104,7 @@
       settings.resetGallerySort();
     } catch { showNotice("未能读取此浏览器的画廊偏好，暂用默认显示。", "error"); }
     bindEvents();
+    logs.bind();
     try { await bootstrap(); void comfyuiControls.restore(); }
     catch (error) { const message = errorMessage(error, "页面初始化失败"); els.runtimeStatus.textContent = "页面初始化失败"; showNotice(message, "error"); }
   }

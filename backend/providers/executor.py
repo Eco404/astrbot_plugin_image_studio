@@ -7,7 +7,8 @@ from typing import Any
 import aiohttp
 
 from ..models import GeneratedImage, GenerationRequest, ImageProvider
-from . import custom_json, discovery, gemini, nai_direct, openai_images
+from ..observability.store import log_context
+from . import agnes, custom_json, discovery, gemini, nai_direct, openai_images
 from .errors import ProviderBatchError, ProviderError, ProviderPartialResponseError
 from .http import ImageResponseReader
 from .novelai.client import NovelAIClient
@@ -30,12 +31,14 @@ class ProviderExecutor:
         self._comfyui = None
 
     async def fetch_quota(self, provider: ImageProvider) -> dict[str, Any]:
-        if provider.kind == "novelai_official":
-            return await self._novelai.fetch_quota(provider)
-        return await nai_direct.fetch_quota(self.session, provider)
+        with log_context(provider_id=provider.id):
+            if provider.kind == "novelai_official":
+                return await self._novelai.fetch_quota(provider)
+            return await nai_direct.fetch_quota(self.session, provider)
 
     async def discover_models(self, provider: ImageProvider) -> list[dict[str, Any]]:
-        return await discovery.discover_models(self.session, provider)
+        with log_context(provider_id=provider.id):
+            return await discovery.discover_models(self.session, provider)
 
     async def generate(
         self,
@@ -44,10 +47,19 @@ class ProviderExecutor:
     ) -> tuple[GeneratedImage, ...]:
         """Run one provider request and normalize its returned images."""
 
+        with log_context(provider_id=provider.id, model=request.model):
+            return await self._generate(provider, request)
+
+    async def _generate(
+        self, provider: ImageProvider, request: GenerationRequest
+    ) -> tuple[GeneratedImage, ...]:
+
         if provider.kind == "openai_images":
             return await openai_images.generate(
                 self.session, self._images, provider, request
             )
+        if provider.kind == "agnes":
+            return await agnes.generate(self.session, self._images, provider, request)
         if provider.kind == "gemini":
             return await gemini.generate(self.session, self._images, provider, request)
         if provider.kind == "nai_direct":

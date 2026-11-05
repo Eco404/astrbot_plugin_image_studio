@@ -228,7 +228,7 @@ async function run(browser, engine, width) {
     await frame.locator('[data-view="gallery"]').click();
     await frame.locator(".gallery-card .gallery-info").first().click();
     await frame.locator("[data-detail-image]").click();
-    if (width <= 540) {
+    if (touch) {
       await frame.locator(".pswp--open").waitFor({ state: "visible" });
       await frame.waitForFunction(() => !document.querySelector(".pswp [title]"));
       assert.equal(await frame.locator(".pswp__button--image-studio-download").getAttribute("data-tooltip"), "下载图片", "dynamically created PhotoSwipe controls use themed hints");

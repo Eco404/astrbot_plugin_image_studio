@@ -197,9 +197,10 @@ def search_catalog(
     elif not page:
         next_action = "当前页没有结果，请根据 total 调整 offset 后重试。"
     elif query_type == "providers":
-        next_action = '设置 query_type="search"，将所选服务商的 ID 填入 provider_id，查询其模型或工作流。'
+        next_action = '需要查找模型时，设置 query_type="search"，将所选服务商的 ID 填入 provider_id，查询其模型或工作流。'
     else:
-        next_action = '设置 query_type="model"，将所选模型的 model_ref 放入 model_refs 数组，查询它在 Image Studio 中可用的生成模式、参数和提示词要求。'
+        next_action = '需要生图时，先设置 query_type="model"，将所选模型的 model_ref 放入 model_refs 数组，查询它在 Image Studio 中可用的生成模式、参数和提示词要求。'
+    next_action = "本次仅查询服务商或模型目录，未生成图片或提交任务。" + next_action
     return {
         "query_type": query_type,
         "query": query,

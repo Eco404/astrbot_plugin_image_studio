@@ -16,6 +16,7 @@ SUPPORTED_PROVIDER_KINDS = frozenset(
     {
         "openai_images",
         "gemini",
+        "agnes",
         "nai_direct",
         "novelai_official",
         "custom_json",
@@ -122,6 +123,7 @@ def default_webui_settings() -> dict[str, Any]:
         "schema_version": 2,
         "revision": 0,
         "providers": [],
+        "logging": {"enabled": True, "level": "INFO", "retention_days": 7},
         "external_sources": {},
         "history": {
             "enabled": True,
@@ -195,10 +197,33 @@ def normalize_webui_settings(value: Any) -> tuple[dict[str, Any], list[str]]:
             if model.id in model_ids:
                 errors.append(f"Provider {provider.id} 的模型 id 重复: {model.id}")
             model_ids.add(model.id)
+            try:
+                model.validate_parameters()
+            except ValueError as exc:
+                # Keep legacy providers and their editable schema visible.
+                # Settings save rejects errors; loading must not delete them.
+                errors.append(f"Provider {provider.id} 的模型 {model.id}：{exc}")
         if provider.edit_request_format not in {"multipart", "json_data_url"}:
             errors.append(f"Provider {provider.id} 的 edit_request_format 无效")
         normalized_providers.append(provider.public_dict())
     merged["providers"] = normalized_providers
+
+    logging = merged.get("logging")
+    if not isinstance(logging, dict):
+        errors.append("日志设置必须是对象")
+        logging = {}
+    level = str(logging.get("level", "INFO")).upper()
+    if level not in {"DEBUG", "INFO", "WARNING", "ERROR"}:
+        errors.append("日志等级必须为 DEBUG、INFO、WARNING 或 ERROR")
+        level = "INFO"
+    retention_days = _as_int(logging.get("retention_days"), 7)
+    if retention_days < 0:
+        errors.append("日志保留天数不能小于 0")
+    merged["logging"] = {
+        "enabled": _as_bool(logging.get("enabled"), True),
+        "level": level,
+        "retention_days": max(0, retention_days),
+    }
 
     history = merged.get("history") if isinstance(merged.get("history"), dict) else {}
     history["enabled"] = _as_bool(history.get("enabled"), True)
