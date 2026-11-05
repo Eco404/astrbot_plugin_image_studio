@@ -38,10 +38,11 @@
       return `<button class="studio-icon-button parameter-copy" data-edit-schema-policy="${escape(name)}" type="button" aria-label="编辑 ${escape(name)} 的参数行为" data-tooltip="编辑参数行为">${icon("Settings2")}</button>`;
     }
 
-    function editParameterPolicy(name, descriptor) {
+    function editParameterPolicy(name, descriptor, model) {
       const fields = [["webui_visible", "在生图面板显示"], ["record_in_history", "保存到请求记录"], ["refill_from_history", "复现时使用历史值"]];
       const scope = Array.isArray(descriptor.modes) && descriptor.modes.length === 1 ? descriptor.modes[0] : "common";
-      const body = `<label class="field">适用模式<select id="schemaPolicy-modes">${[["common", "通用"], ["text2img", "仅文生图"], ["img2img", "仅图生图"]].map(([value, label]) => `<option value="${value}"${scope === value ? " selected" : ""}>${label}</option>`).join("")}</select></label>` + fields.map(([key, label]) => `<div class="toggle-row"><label for="schemaPolicy-${key}">${label}</label><label class="toggle-control"><input id="schemaPolicy-${key}" type="checkbox" ${descriptor[key] !== false ? "checked" : ""}><span aria-hidden="true"></span></label></div>`).join("");
+      const modeField = model.supports_text2img && model.supports_img2img ? `<label class="field">适用模式<select id="schemaPolicy-modes">${[["common", "通用"], ["text2img", "仅文生图"], ["img2img", "仅图生图"]].map(([value, label]) => `<option value="${value}"${scope === value ? " selected" : ""}>${label}</option>`).join("")}</select></label>` : "";
+      const body = modeField + fields.map(([key, label]) => `<div class="toggle-row"><label for="schemaPolicy-${key}">${label}</label><label class="toggle-control"><input id="schemaPolicy-${key}" type="checkbox" ${descriptor[key] !== false ? "checked" : ""}><span aria-hidden="true"></span></label></div>`).join("");
       const syncDependencies = (changedKey) => {
         const visible = $("schemaPolicy-webui_visible");
         const recorded = $("schemaPolicy-record_in_history");
@@ -53,7 +54,8 @@
       };
       return library.openModal(`参数行为：${name}`, body, [{ label: "取消", action: () => false }, { label: "保存", primary: true, action: () => {
         syncDependencies();
-        return { ...Object.fromEntries(fields.map(([key]) => [key, $(`schemaPolicy-${key}`).checked])), modes: $("schemaPolicy-modes").value === "common" ? undefined : [$("schemaPolicy-modes").value] };
+        const modeSelect = $("schemaPolicy-modes");
+        return { ...Object.fromEntries(fields.map(([key]) => [key, $(`schemaPolicy-${key}`).checked])), modes: modeSelect ? modeSelect.value === "common" ? undefined : [modeSelect.value] : descriptor.modes };
       } }], { dismissOutside: false, onOpen: () => {
         for (const [key] of fields) $(`schemaPolicy-${key}`).addEventListener("change", () => syncDependencies(key));
         syncDependencies();
@@ -617,7 +619,7 @@
       els.modelForm.querySelectorAll("[data-edit-tool-parameter]").forEach((button) => button.addEventListener("click", () => openToolParameterDialog(button.dataset.editToolParameter)));
       els.modelForm.querySelectorAll("[data-edit-schema-policy]").forEach((button) => button.addEventListener("click", async () => {
         const name = button.dataset.editSchemaPolicy;
-        const policy = await editParameterPolicy(name, model.parameters[name]);
+        const policy = await editParameterPolicy(name, model.parameters[name], model);
         if (!policy) return;
         Object.assign(model.parameters[name], policy);
         if (!policy.modes) delete model.parameters[name].modes;
