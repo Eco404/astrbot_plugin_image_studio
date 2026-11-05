@@ -5,7 +5,7 @@ const { chromium, webkit } = require(process.env.STUDIO_PLAYWRIGHT || "playwrigh
 const base = process.env.STUDIO_TEST_URL;
 if (!base) throw new Error("Set STUDIO_TEST_URL to an isolated WebUI harness.");
 const output = fs.mkdtempSync(path.join(os.tmpdir(), "image-studio-settings-layout-"));
-const order = ["运行", "默认模型", "历史", "预览图", "外部图库", "存储健康", "主题与显示"];
+const order = ["运行", "默认模型", "历史", "预览图", "外部图库", "主题与显示", "日志", "存储健康"];
 
 async function settle(frame) {
   await frame.evaluate(async () => {
@@ -54,10 +54,10 @@ async function verify(browser, name) {
     // Equal-size cards expose the required tie rule, not simple L/R pairing.
     await frame.locator(".settings-layout").evaluate(grid => [...grid.children].forEach(card => { card.style.height = "100px"; card.style.overflow = "hidden"; }));
     await settle(frame);
-    assert.deepEqual((await geometry(frame, 2)).cards.map(card => card.column), [1, 2, 2, 1, 1, 2, 2]);
+    assert.deepEqual((await geometry(frame, 2)).cards.map(card => card.column), [1, 2, 2, 1, 1, 2, 2, 1]);
     await frame.locator(".settings-layout > section").first().evaluate(card => { card.style.height = "600px"; });
     await settle(frame);
-    assert.deepEqual((await geometry(frame, 2)).cards.map(card => card.column), [1, 2, 2, 2, 2, 2, 2]);
+    assert.deepEqual((await geometry(frame, 2)).cards.map(card => card.column), [1, 2, 2, 2, 2, 2, 2, 1]);
     await frame.locator(".settings-layout").evaluate(grid => [...grid.children].forEach(card => { card.style.removeProperty("height"); card.style.removeProperty("overflow"); }));
     await settle(frame);
     await geometry(frame, 2);
