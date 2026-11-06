@@ -146,6 +146,20 @@ def query(plugin, event=None, **kwargs):
     return json.loads(result.content[0].text)
 
 
+def test_default_query_omitted_mode_keeps_both_modes_and_legacy_empty_input():
+    plugin = plugin_fixture()
+    both = query(plugin)
+    assert {item["model_ref"]: item["query_modes"] for item in both["models"]} == {
+        "p1:alpha": ["text2img"],
+        "p1:editor": ["img2img"],
+    }
+    assert query(plugin, mode="") == both
+    for mode, ref in (("text2img", "p1:alpha"), ("img2img", "p1:editor")):
+        filtered = query(plugin, mode=mode)
+        assert [item["model_ref"] for item in filtered["models"]] == [ref]
+        assert filtered["models"][0]["query_modes"] == [mode]
+
+
 def test_model_query_returns_each_success_and_failure_in_input_order():
     plugin = plugin_fixture()
     event = ToolEvent()

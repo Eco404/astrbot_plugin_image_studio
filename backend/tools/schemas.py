@@ -24,7 +24,7 @@ def with_image_arguments(handler):
             "search",
             "all",
         ]
-        properties["mode"]["enum"] = ["", "text2img", "img2img"]
+        properties["mode"]["enum"] = ["text2img", "img2img"]
         properties["model_refs"].update(
             minItems=1, maxItems=20, items={"type": "string"}
         )
