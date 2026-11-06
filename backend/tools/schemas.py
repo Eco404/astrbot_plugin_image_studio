@@ -24,7 +24,7 @@ def with_image_arguments(handler):
             "search",
             "all",
         ]
-        properties["mode"]["enum"] = ["", "text2img", "img2img"]
+        properties["mode"]["enum"] = ["text2img", "img2img"]
         properties["model_refs"].update(
             minItems=1, maxItems=20, items={"type": "string"}
         )
@@ -55,6 +55,12 @@ def with_image_arguments(handler):
                 "additionalProperties": False,
             },
         )
+    elif handler.__name__ == "image_studio_view_asset":
+        parameters["required"] = ["asset_ids"]
+        properties["asset_ids"].update(minItems=1, maxItems=8)
+        properties["detail"]["enum"] = ["preview", "original"]
+    elif handler.__name__ == "image_studio_task":
+        properties["wait_seconds"].update(minimum=0, maximum=30)
     elif handler.__name__ == "image_studio_send_output":
         parameters["required"] = ["destination", "messages"]
         properties["destination"]["enum"] = ["session", "workspace"]

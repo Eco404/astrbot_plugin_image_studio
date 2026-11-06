@@ -2,9 +2,9 @@
 
 在 AstrBot 中生成、编辑和管理图片。既能打开 WebUI 调整参数，也能在聊天中使用指令，或让 Agent 把生图作为任务中的一步，继续改图、拼接和制作其他作品。
 
-当前正式版本为 **1.5.1**。正式安装包见 [Releases](https://github.com/Eco404/astrbot_plugin_image_studio/releases)，完整变化见 [更新记录](CHANGELOG.md)。
+当前正式版本为 **1.5.2**。正式安装包见 [Releases](https://github.com/Eco404/astrbot_plugin_image_studio/releases)，完整变化见 [更新记录](CHANGELOG.md)。
 
-1.5.1 完善 `skills_like` 两阶段工具模式的参数说明和生成后的发送入口限制，修正模型参数行为选项，并优化日志分页、手机排版和设置卡片顺序。从 1.4.x／1.5.0 升级沿用正式数据库 v4，无新增数据库结构迁移。
+1.5.2 修复能力查询工具的空枚举导致 Gemini 拒绝 LLM 请求的问题，补齐图片查看与任务等待的参数约束，并修正参考图标题误触发上传及主题滑块标题关联。从 1.4.x／1.5.0／1.5.1 升级沿用正式数据库 v4，无新增数据库结构迁移。
 
 ![Image Studio 生图工作台](docs/images/generate.png)
 

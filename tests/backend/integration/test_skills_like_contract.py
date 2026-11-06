@@ -35,6 +35,39 @@ def test_parameter_only_tools_keep_contract_across_host_provider_formats(tool_na
             )
 
 
+@pytest.mark.parametrize("parameter_only", [False, True])
+def test_tool_enums_remain_compatible_with_gemini_after_host_conversion(parameter_only):
+    tools = ToolSet(
+        [
+            llm_tools.get_func(name)
+            for name in (
+                "image_studio_get_capabilities",
+                "image_studio_generate",
+                "image_studio_task",
+                "image_studio_view_asset",
+                "image_studio_send_output",
+            )
+        ]
+    )
+    if parameter_only:
+        tools = tools.get_param_only_tool_set()
+
+    def check_enums(value):
+        if isinstance(value, dict):
+            if "enum" in value:
+                assert value["enum"]
+                assert all(isinstance(item, str) and item for item in value["enum"])
+            for child in value.values():
+                check_enums(child)
+        elif isinstance(value, list):
+            for child in value:
+                check_enums(child)
+
+    # Gemini can receive either native declarations or OpenAI-compatible tools.
+    check_enums(tools.openai_schema())
+    check_enums(tools.google_schema())
+
+
 def test_parameter_only_query_explains_selection_and_query_only_requests():
     tool = (
         llm_tools.get_full_tool_set()
@@ -78,7 +111,9 @@ def test_parameter_only_generate_keeps_reuse_scope_and_attachment_guidance():
     "arguments",
     [
         {},
-        {"query_type": "default", "mode": ""},
+        {"query_type": "default"},
+        {"query_type": "default", "mode": "text2img"},
+        {"query_type": "default", "mode": "img2img"},
         {"query_type": "model", "model_refs": ["provider:model", "missing-id"]},
         {"query_type": "model", "model_refs": ["provider:model"] * 20},
         {"query_type": "search", "limit": 50, "offset": 0},
@@ -95,6 +130,7 @@ def test_capability_schema_keeps_optional_fields_and_per_item_id_resolution(argu
     "arguments",
     [
         {"query_type": "unknown"},
+        {"mode": ""},
         {"mode": "edit"},
         {"model_refs": "provider:model"},
         {"model_refs": []},

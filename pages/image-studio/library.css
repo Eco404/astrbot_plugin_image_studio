@@ -61,6 +61,7 @@ html { scroll-padding-top: 112px; scroll-padding-bottom: calc(100px + env(safe-a
 .gallery-toolbar .search-field { flex: 2 1 240px; }
 .generation-mode-row { display: flex; align-items: center; gap: 12px; }
 .generation-mode-row > .studio-icon-button { flex: 0 0 40px; width: 40px; height: 40px; }
+#referenceFieldTitle { color: var(--muted); font-size: 12px; font-weight: 650; }
 .reference-upload-row { flex-wrap: wrap; }
 .reference-upload-row > .quiet-button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 40px; }
 .reference-upload-row [data-studio-icon] { display: grid; place-items: center; }

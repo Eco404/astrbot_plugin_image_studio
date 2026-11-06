@@ -82,7 +82,7 @@ class _ReferenceInputError(ValueError):
     PLUGIN_NAME,
     "econeco",
     "多服务商 AI 生图与图库工作台，支持 OpenAI、Gemini、Agnes AI、ComfyUI 工作流、NovelAI 官方、NAI 第三方及自定义接口。支持对话生图改图、并发批量生成、图片参数导入与工作流复现，可扫描 nai-image 插件图库及自定义目录，统一浏览和管理图片。WebUI 适配桌面与手机。",
-    "1.5.1",
+    "1.5.2",
 )
 class ImageStudioPlugin(Star):
     """Own Image Studio configuration, generation, gallery, and tool APIs."""
@@ -1066,6 +1066,7 @@ class ImageStudioPlugin(Star):
         )
         return track_image_result(event, mcp.types.CallToolResult(content=content))
 
+    @with_image_arguments
     @filter.llm_tool(name="image_studio_task")
     @observe_tool
     async def image_studio_task(
@@ -1208,6 +1209,7 @@ class ImageStudioPlugin(Star):
             is_error=status in {"failed", "unknown", "cancelled"},
         )
 
+    @with_image_arguments
     @filter.llm_tool(name="image_studio_view_asset")
     @observe_tool
     async def image_studio_view_asset(
