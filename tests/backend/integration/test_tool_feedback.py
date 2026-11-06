@@ -109,6 +109,64 @@ def test_nested_contract_survives_host_provider_schema_conversion():
         }
 
 
+@pytest.mark.parametrize("parameter_only", [False, True])
+@pytest.mark.parametrize(
+    "tool_name,accepted,rejected",
+    [
+        (
+            "image_studio_view_asset",
+            [
+                {"asset_ids": ["image-id"]},
+                {"asset_ids": ["image-id"] * 8, "detail": "preview"},
+                {"asset_ids": ["image-id"], "detail": "original"},
+            ],
+            [
+                {},
+                {"asset_ids": []},
+                {"asset_ids": ["image-id"] * 9},
+                {"asset_ids": "image-id"},
+                {"asset_ids": [1]},
+                {"asset_ids": ["image-id"], "detail": "invalid"},
+            ],
+        ),
+        (
+            "image_studio_task",
+            [
+                {},
+                {"task_id": "job-id"},
+                {"task_id": "job-id", "wait_seconds": 0},
+                {"task_id": "job-id", "wait_seconds": 0.5},
+                {"task_id": "job-id", "wait_seconds": 30},
+            ],
+            [
+                {"wait_seconds": -0.1},
+                {"wait_seconds": 30.1},
+                {"wait_seconds": "30"},
+                {"wait_seconds": True},
+                {"wait_seconds": None},
+            ],
+        ),
+    ],
+)
+def test_asset_and_task_bounds_survive_host_schema_conversion(
+    parameter_only, tool_name, accepted, rejected
+):
+    tools = ToolSet([llm_tools.get_func(tool_name)])
+    if parameter_only:
+        tools = tools.get_param_only_tool_set()
+    schemas = [
+        tools.openai_schema()[0]["function"]["parameters"],
+        tools.anthropic_schema()[0]["input_schema"],
+        tools.google_schema()["function_declarations"][0]["parameters"],
+    ]
+    for schema in schemas:
+        for arguments in accepted:
+            jsonschema.validate(arguments, schema)
+        for arguments in rejected:
+            with pytest.raises(jsonschema.ValidationError):
+                jsonschema.validate(arguments, schema)
+
+
 @pytest.mark.parametrize(
     "tasks", [[], [{"task_id": "saved-task", "status": "running"}]]
 )

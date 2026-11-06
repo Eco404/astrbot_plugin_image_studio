@@ -98,6 +98,8 @@ python scripts/verify.py --webui logs mode_defaults parameter_policy settings_ma
 
 工具 Schema 的标准 JSON Schema 校验不能代替上游接口校验。`test_skills_like_contract.py` 额外检查普通模式与 `skills_like` 参数阶段的 OpenAI／Google 工具定义，确保字符串枚举不含空值；能力查询回归核对省略模式、两种模式筛选及内部空字符串兼容行为。这些是离线检查，不代表所有 Gemini 模型或中转接口已完成在线验证。
 
+`test_tool_feedback.py` 核对图片查看与任务等待的参数边界在 OpenAI、Anthropic、Google 格式以及普通模式、`skills_like` 参数阶段中保持一致，包括资产编号必填、1～8 项限制、查看精度枚举和 0～30 秒等待范围；有效小数等待时间和省略可选参数仍可使用。
+
 1.4.2 的投递入口回归应检查：请求准备钩子仅复制工具集合，保留所有名称、不注入系统提示词；仅本轮首次成功取得已登记生成资产后，且本请求具备 `image_studio_send_output` 时，隐藏本请求的 `send_message_to_user` 和 `pc_send_current_media`。普通模式和 `skills_like` 模式的可见与原始执行集合应一致受限，其他工具及全局工具定义保持原样。需覆盖通过任务查询取得结果、部分成功、资产登记失败后重取、后续失败不解除，以及下条消息恢复正常列表。能力查询、搜索、查看旧图、失败、pending 和缺少专用发送工具时均不得触发。发送说明应限定在本工具中；session 成功按有无文字给出避免重复的指引，workspace 和不确定投递不应声称已发送。这些检查验证状态边界与返回内容，不证明模型永不重复发送，也不构成按内容去重。
 
 工具附图包装的回归入口为 `tests/backend/integration/test_agent_image_context.py`。使用隔离的宿主 runner 和假提供方，检查生成结果与已有图片查看的来源说明、同正文的重复调用、多张图片、混合其他工具及不支持图片输入的模型。须验证修改发生在下一次请求和压缩前，原消息及图片对象、`user` 角色和图片数据保持不变，旧历史与其他工具不受影响。结构不符、图片路径或调用编号不符、截断结果、取消及异常应保持原内容；还需检查重复安装、卸载、其他插件外层包装和不支持的宿主版本或签名。

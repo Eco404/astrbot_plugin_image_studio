@@ -1066,6 +1066,7 @@ class ImageStudioPlugin(Star):
         )
         return track_image_result(event, mcp.types.CallToolResult(content=content))
 
+    @with_image_arguments
     @filter.llm_tool(name="image_studio_task")
     @observe_tool
     async def image_studio_task(
@@ -1208,6 +1209,7 @@ class ImageStudioPlugin(Star):
             is_error=status in {"failed", "unknown", "cancelled"},
         )
 
+    @with_image_arguments
     @filter.llm_tool(name="image_studio_view_asset")
     @observe_tool
     async def image_studio_view_asset(

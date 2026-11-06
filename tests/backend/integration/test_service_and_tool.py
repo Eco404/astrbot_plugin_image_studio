@@ -1361,7 +1361,7 @@ def test_registered_image_tool_descriptions_contain_routing_contract() -> None:
     assert set(view_asset.parameters["properties"]) == {"asset_ids", "detail"}
     assert "1 至 8" in view_asset.parameters["properties"]["asset_ids"]["description"]
     assert "preview" in view_asset.parameters["properties"]["detail"]["description"]
-    assert "required" not in view_asset.parameters
+    assert view_asset.parameters["required"] == ["asset_ids"]
     assert (
         light_tools.get_tool("image_studio_get_capabilities").description
         == capabilities.description
